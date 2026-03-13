@@ -86,11 +86,27 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
 
 
 def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
+    if not worktree_path.exists():
+        return False
     result = subprocess.run(
         ["git", "-C", str(bare_repo), "worktree", "list"],
         capture_output=True, text=True, check=True,
     )
     return str(worktree_path) in result.stdout
+
+
+def resolve_spec_local(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, RemoteConfig]) -> BranchSpec:
+    """Find which remote has spec.branch in local refs (no fetch). Raises RuntimeError if not found."""
+    remotes_to_try = [spec.remote] + [r for r in alias_remotes if r != spec.remote]
+    for remote in remotes_to_try:
+        ref = f"refs/remotes/{remote}/{spec.branch}"
+        result = subprocess.run(
+            ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return BranchSpec(f"{remote}/{spec.branch}", spec.local_branch)
+    raise RuntimeError(f"Branch '{spec.branch}' not found in local refs")
 
 
 def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> None:
@@ -100,10 +116,20 @@ def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
             check=True,
         )
     else:
-        subprocess.run(
-            ["git", "-C", str(bare_repo), "worktree", "add", "-b", spec.local_branch, str(worktree_path), spec.base_ref],
-            check=True,
-        )
+        branch_exists = subprocess.run(
+            ["git", "-C", str(bare_repo), "rev-parse", "--verify", f"refs/heads/{spec.local_branch}"],
+            capture_output=True,
+        ).returncode == 0
+        if branch_exists:
+            subprocess.run(
+                ["git", "-C", str(bare_repo), "worktree", "add", str(worktree_path), spec.local_branch],
+                check=True,
+            )
+        else:
+            subprocess.run(
+                ["git", "-C", str(bare_repo), "worktree", "add", "-b", spec.local_branch, str(worktree_path), spec.base_ref],
+                check=True,
+            )
 
 
 def remove_worktree(bare_repo: Path, worktree_path: Path, local_branch: str | None) -> None:

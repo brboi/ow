@@ -14,6 +14,7 @@ from ow.git import (
     remove_worktree,
     rebase_worktree,
     resolve_spec,
+    resolve_spec_local,
     worktree_exists,
 )
 
@@ -124,7 +125,8 @@ def test_ensure_ref_skips_fetch_when_exists(tmp_path):
 def test_worktree_exists_true(tmp_path):
     bare_repo = tmp_path / "community.git"
     bare_repo.mkdir()
-    worktree_path = Path("/fake/workspaces/test/community")
+    worktree_path = tmp_path / "workspaces" / "test" / "community"
+    worktree_path.mkdir(parents=True)
 
     mock_result = MagicMock()
     mock_result.stdout = f"{worktree_path} abc1234 [main]\n"
@@ -136,10 +138,25 @@ def test_worktree_exists_true(tmp_path):
 def test_worktree_exists_false(tmp_path):
     bare_repo = tmp_path / "community.git"
     bare_repo.mkdir()
-    worktree_path = Path("/fake/workspaces/test/community")
+    worktree_path = tmp_path / "workspaces" / "test" / "community"
+    worktree_path.mkdir(parents=True)
 
     mock_result = MagicMock()
     mock_result.stdout = "/other/path abc1234 [main]\n"
+
+    with patch("ow.git.subprocess.run", return_value=mock_result):
+        assert worktree_exists(bare_repo, worktree_path) is False
+
+
+def test_worktree_exists_false_when_dir_missing_but_in_git_output(tmp_path):
+    """Prunable worktree: git still lists the path but directory no longer exists."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    worktree_path = tmp_path / "workspaces" / "test" / "community"
+    # worktree_path is NOT created on disk
+
+    mock_result = MagicMock()
+    mock_result.stdout = f"{worktree_path} abc1234 [main]\n"
 
     with patch("ow.git.subprocess.run", return_value=mock_result):
         assert worktree_exists(bare_repo, worktree_path) is False
@@ -164,18 +181,39 @@ def test_create_worktree_detached(tmp_path):
     )
 
 
-def test_create_worktree_attached(tmp_path):
+def test_create_worktree_attached_new_branch(tmp_path):
+    """Branch doesn't exist yet — uses -b to create it."""
     bare_repo = tmp_path / "community.git"
     bare_repo.mkdir()
     worktree_path = Path("/fake/workspaces/test/community")
     spec = BranchSpec("origin/master", "master-feature")
 
-    with patch("ow.git.subprocess.run") as mock_run:
+    branch_missing = MagicMock(returncode=1)
+
+    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock()]) as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
-    mock_run.assert_called_once_with(
+    assert mock_run.call_args_list[1] == call(
         ["git", "-C", str(bare_repo), "worktree", "add", "-b", "master-feature",
          str(worktree_path), "origin/master"],
+        check=True,
+    )
+
+
+def test_create_worktree_attached_existing_branch(tmp_path):
+    """Branch already exists (prunable worktree re-created) — omits -b."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    worktree_path = Path("/fake/workspaces/test/community")
+    spec = BranchSpec("origin/master", "master-feature")
+
+    branch_exists = MagicMock(returncode=0)
+
+    with patch("ow.git.subprocess.run", side_effect=[branch_exists, MagicMock()]) as mock_run:
+        create_worktree(bare_repo, worktree_path, spec)
+
+    assert mock_run.call_args_list[1] == call(
+        ["git", "-C", str(bare_repo), "worktree", "add", str(worktree_path), "master-feature"],
         check=True,
     )
 
@@ -440,3 +478,63 @@ def test_resolve_spec_raises_when_branch_not_found_anywhere(tmp_path):
     with patch("ow.git.subprocess.run", return_value=always_fail):
         with pytest.raises(RuntimeError, match="nonexistent"):
             resolve_spec(bare_repo, spec, remotes)
+
+
+# ---------------------------------------------------------------------------
+# resolve_spec_local
+# ---------------------------------------------------------------------------
+
+def test_resolve_spec_local_found_on_spec_remote(tmp_path):
+    """Branch already in local refs on spec.remote — returns immediately."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    spec = BranchSpec("origin/master", None)
+    remotes = {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}
+
+    rev_parse_ok = MagicMock(returncode=0)
+
+    with patch("ow.git.subprocess.run", return_value=rev_parse_ok) as mock_run:
+        result = resolve_spec_local(bare_repo, spec, remotes)
+
+    assert result.remote == "origin"
+    assert result.branch == "master"
+    assert result.local_branch is None
+    mock_run.assert_called_once_with(
+        ["git", "-C", str(bare_repo), "rev-parse", "--verify", "refs/remotes/origin/master"],
+        capture_output=True,
+    )
+
+
+def test_resolve_spec_local_found_on_fallback_remote(tmp_path):
+    """Branch not on spec.remote but found in local refs on fallback remote."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    spec = BranchSpec("origin/master-parrot", None)
+    remotes = {
+        "origin": RemoteConfig(url="git@github.com:odoo/odoo.git"),
+        "dev": RemoteConfig(url="git@github.com:odoo-dev/odoo.git"),
+    }
+
+    rev_parse_fail = MagicMock(returncode=1)
+    rev_parse_ok = MagicMock(returncode=0)
+
+    with patch("ow.git.subprocess.run", side_effect=[rev_parse_fail, rev_parse_ok]) as mock_run:
+        result = resolve_spec_local(bare_repo, spec, remotes)
+
+    assert result.remote == "dev"
+    assert result.branch == "master-parrot"
+    assert mock_run.call_count == 2
+
+
+def test_resolve_spec_local_raises_when_not_found(tmp_path):
+    """RuntimeError raised when branch not found in any local refs (no fetch attempted)."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    spec = BranchSpec("origin/nonexistent", None)
+    remotes = {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}
+
+    always_fail = MagicMock(returncode=1)
+
+    with patch("ow.git.subprocess.run", return_value=always_fail):
+        with pytest.raises(RuntimeError, match="nonexistent"):
+            resolve_spec_local(bare_repo, spec, remotes)

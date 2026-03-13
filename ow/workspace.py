@@ -24,6 +24,7 @@ from ow.git import (
     parallel_fetch,
     remove_worktree,
     resolve_spec,
+    resolve_spec_local,
     worktree_exists,
 )
 
@@ -242,6 +243,7 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
             bare_repo = bare_repos_dir / f"{alias}.git"
             worktree_path = ws_dir / alias
             if not worktree_exists(bare_repo, worktree_path):
+                subprocess.run(["git", "-C", str(bare_repo), "worktree", "prune"], check=True)
                 ws_dir.mkdir(parents=True, exist_ok=True)
                 create_worktree(bare_repo, worktree_path, resolved)
 
@@ -301,12 +303,21 @@ def cmd_status(config: Config, name: str | None = None) -> None:
         first_attached_branch: str | None = None
         pr_links: list[tuple[str, int, str]] = []
 
+        bare_repos_dir = config.root_dir / ".bare-git-repos"
+
         for alias, spec in ws.repos.items():
             worktree_path = ws_dir / alias
             if not worktree_path.exists():
+                print(f"        {alias}:      (not applied)")
                 continue
 
             alias_remotes = config.remotes.get(alias, {})
+
+            bare_repo = bare_repos_dir / f"{alias}.git"
+            try:
+                spec = resolve_spec_local(bare_repo, spec, alias_remotes)
+            except (RuntimeError, subprocess.CalledProcessError):
+                pass  # keep original spec; git error caught in the outer try/except
 
             # Helper: get org/repo for a given remote name
             def org_repo_for(remote_name: str) -> str | None:
@@ -422,6 +433,8 @@ def cmd_rebase(config: Config, name: str) -> None:
         # Sequential rebases
         for alias, resolved in resolved_specs.items():
             worktree_path = ws_dir / alias
+            if not worktree_path.exists():
+                continue
             if resolved.is_detached:
                 subprocess.run(
                     ["git", "-C", str(worktree_path), "switch", "--detach", resolved.base_ref],

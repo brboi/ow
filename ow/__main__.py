@@ -23,18 +23,27 @@ def find_root() -> Path:
         current = current.parent
 
 
+def workspace_completer(prefix, parsed_args, **kwargs):
+    try:
+        root = find_root()
+        cfg = load_config(root / "ow.toml")
+        return [ws.name for ws in cfg.workspaces if ws.name.startswith(prefix)]
+    except Exception:
+        return []
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ow", description="Odoo workspace manager")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     p_apply = subparsers.add_parser("apply", help="Apply configuration and create workspaces")
-    p_apply.add_argument("name", nargs="?", help="Workspace name (applies all if omitted)")
+    p_apply.add_argument("name", nargs="?", help="Workspace name (applies all if omitted)").completer = workspace_completer
 
     p_remove = subparsers.add_parser("remove", help="Remove a workspace")
-    p_remove.add_argument("name")
+    p_remove.add_argument("name").completer = workspace_completer
 
     p_status = subparsers.add_parser("status", help="Show workspace status")
-    p_status.add_argument("name", nargs="?", help="Workspace name (shows all if omitted)")
+    p_status.add_argument("name", nargs="?", help="Workspace name (shows all if omitted)").completer = workspace_completer
 
     p_create = subparsers.add_parser("create", help="Create a new workspace")
     p_create.add_argument("name")
@@ -42,7 +51,7 @@ def main() -> None:
                           help="e.g. community:master enterprise:master..master-feature")
 
     p_rebase = subparsers.add_parser("rebase", help="Fetch and rebase workspace branches")
-    p_rebase.add_argument("name")
+    p_rebase.add_argument("name").completer = workspace_completer
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
