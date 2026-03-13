@@ -65,7 +65,13 @@ Check how the config looks like: [ow.toml.example](./ow.toml.example).
 | `ow create <name> <community:branches_spec> ([other_repo:branches_spec]...) ` | Creates a new workspace with the given name and branches specifications. This is a shortcut for creating a new workspace without having to edit the config file and run `ow apply`. The branches specifications use the same syntax as in the config file (e.g. `community:master`, `enterprise:master-opw-123456-ngram..master`). The new workspace configuration will be automatically saved to the `ow.toml` file. |
 | `ow rebase <name>` | Rebases the workspace with the given name. This will fetch the latest changes from the remote branches and rebase the worktree branches on top of them. This is a shortcut for running `git fetch` and `git switch --detach`/`git rebase` from each of the worktree folders. |
 
-> Tab completion is available thanks to `mise` that automatically installs and registers the Python `argcomplete` module.
+### Tab completion
+
+One-time setup (fish):
+```sh
+register-python-argcomplete --shell fish ow > ~/.config/fish/completions/ow.fish
+```
+Or for bash/zsh: `activate-global-python-argcomplete` (adds a hook to your shell profile).
 
 ## Recommended Workflow
 

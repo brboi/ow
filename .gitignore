@@ -5,3 +5,7 @@ services/compose.local.yml
 workspaces/
 mise.local.toml
 ow.toml
+.ow.toml.archived-workspaces
+*.egg-info
+.pytest_cache
+__pycache__

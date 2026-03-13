@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from ow.config import BranchSpec, RemoteConfig
+
+
+def ensure_bare_repo(
+    alias: str,
+    remotes: dict[str, RemoteConfig],
+    bare_repos_dir: Path,
+) -> None:
+    bare_repo = bare_repos_dir / f"{alias}.git"
+    if not bare_repo.exists():
+        origin = remotes.get("origin")
+        if not origin:
+            raise ValueError(f"No origin remote configured for '{alias}'")
+        subprocess.run(
+            [
+                "git", "clone", "--bare", "--filter=blob:none",
+                "--single-branch",
+                origin.url, str(bare_repo),
+            ],
+            check=True,
+        )
+
+    # Configure non-origin remotes (idempotent)
+    for remote_name, remote_cfg in remotes.items():
+        if remote_name == "origin":
+            continue
+        subprocess.run(
+            ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.url", remote_cfg.url],
+            check=True,
+        )
+        if remote_cfg.pushurl:
+            subprocess.run(
+                ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.pushurl", remote_cfg.pushurl],
+                check=True,
+            )
+        if remote_cfg.fetch:
+            subprocess.run(
+                ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.fetch", remote_cfg.fetch],
+                check=True,
+            )
+
+
+def ensure_ref(bare_repo: Path, remote: str, branch: str) -> None:
+    ref = f"refs/remotes/{remote}/{branch}"
+    result = subprocess.run(
+        ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        subprocess.run(
+            ["git", "-C", str(bare_repo), "fetch", remote, f"{branch}:refs/remotes/{remote}/{branch}"],
+            check=True,
+        )
+
+
+def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, RemoteConfig]) -> BranchSpec:
+    """Find which remote actually has spec.branch; return updated BranchSpec with correct remote."""
+    remotes_to_try = [spec.remote]
+    for remote_name in alias_remotes:
+        if remote_name not in remotes_to_try:
+            remotes_to_try.append(remote_name)
+
+    for remote in remotes_to_try:
+        ref = f"refs/remotes/{remote}/{spec.branch}"
+        result = subprocess.run(
+            ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return BranchSpec(f"{remote}/{spec.branch}", spec.local_branch)
+        result = subprocess.run(
+            ["git", "-C", str(bare_repo), "fetch", remote,
+             f"{spec.branch}:refs/remotes/{remote}/{spec.branch}"],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return BranchSpec(f"{remote}/{spec.branch}", spec.local_branch)
+
+    raise RuntimeError(f"Branch '{spec.branch}' not found on any configured remote")
+
+
+def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(bare_repo), "worktree", "list"],
+        capture_output=True, text=True, check=True,
+    )
+    return str(worktree_path) in result.stdout
+
+
+def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> None:
+    if spec.is_detached:
+        subprocess.run(
+            ["git", "-C", str(bare_repo), "worktree", "add", "--detach", str(worktree_path), spec.base_ref],
+            check=True,
+        )
+    else:
+        subprocess.run(
+            ["git", "-C", str(bare_repo), "worktree", "add", "-b", spec.local_branch, str(worktree_path), spec.base_ref],
+            check=True,
+        )
+
+
+def remove_worktree(bare_repo: Path, worktree_path: Path, local_branch: str | None) -> None:
+    subprocess.run(
+        ["git", "-C", str(bare_repo), "worktree", "remove", "--force", str(worktree_path)],
+        check=True,
+    )
+    if local_branch:
+        subprocess.run(
+            ["git", "-C", str(bare_repo), "branch", "-D", local_branch],
+            check=True,
+        )
+
+
+def rebase_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> None:
+    subprocess.run(
+        ["git", "-C", str(bare_repo), "fetch", spec.remote, f"{spec.branch}:refs/remotes/{spec.remote}/{spec.branch}"],
+        check=True,
+    )
+    if spec.is_detached:
+        subprocess.run(
+            ["git", "-C", str(worktree_path), "switch", "--detach", spec.base_ref],
+            check=True,
+        )
+    else:
+        subprocess.run(
+            ["git", "-C", str(worktree_path), "rebase", spec.base_ref],
+            check=True,
+        )
+
+
+def get_rev_list_count(repo_path: Path, ref_a: str, ref_b: str) -> tuple[int, int]:
+    """Return (ahead, behind): ref_a ahead of ref_b, ref_a behind ref_b."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-list", "--left-right", "--count", f"{ref_a}...{ref_b}"],
+        capture_output=True, text=True, check=True,
+    )
+    parts = result.stdout.strip().split()
+    return int(parts[0]), int(parts[1])
+
+
+def get_worktree_head(worktree_path: Path) -> tuple[str, str]:
+    """Return (short_hash, full_hash)."""
+    result = subprocess.run(
+        ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    )
+    full_hash = result.stdout.strip()
+    return full_hash[:7], full_hash
+
+
+def get_upstream(worktree_path: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def parallel_fetch(tasks: list, max_workers: int = 2) -> None:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(task) for task in tasks]
+        for f in futures:
+            f.result()
