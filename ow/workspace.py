@@ -275,6 +275,9 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
         (zed_dir / "settings.json").write_text(make_zed_settings(ws))
         (zed_dir / "debug.json").write_text(make_zed_debug())
 
+        # 4. Trust the generated mise file
+        subprocess.run(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
+
 
 def cmd_remove(config: Config, name: str) -> None:
     workspaces = [ws for ws in config.workspaces if ws.name == name]
