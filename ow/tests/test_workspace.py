@@ -1,12 +1,12 @@
+import json
 from pathlib import Path
 
-import pytest
-
-from ow.config import BranchSpec, Config, RemoteConfig, WorkspaceConfig
+from ow.config import BranchSpec, Config, WorkspaceConfig
 from ow.workspace import (
     make_mise_toml,
     make_odools_toml,
     make_odoorc,
+    make_pyrightconfig,
     make_requirements_dev,
     make_vscode_settings,
     make_zed_settings,
@@ -148,6 +148,7 @@ def test_odools_community_only():
 
     assert "[[config]]" in result
     assert '[Odoo Workspace] test' in result
+    assert 'python_path = ".venv/bin/python"' in result
     assert 'odoo_path = "./community"' in result
     assert "./community/addons" in result
     assert "./community/odoo/addons" in result
@@ -234,6 +235,10 @@ def test_zed_settings_community_enterprise():
     assert "community/**" in result
     assert "enterprise/**" in result
     assert "[Odoo Workspace] test" in result
+    assert '"mise.toml"' in result
+    assert '"odools.toml"' in result
+    assert '"pyrightconfig.json"' in result
+    assert '"**/.venv"' in result
 
 
 def test_zed_settings_full_workspace():
@@ -243,6 +248,25 @@ def test_zed_settings_full_workspace():
     assert "community/**" in result
     assert "enterprise/**" in result
     assert "brboi-addons/**" in result
+    assert '"mise.toml"' in result
+    assert '"odools.toml"' in result
+    assert '"pyrightconfig.json"' in result
+    assert '"**/.venv"' in result
+
+
+# ---------------------------------------------------------------------------
+# make_pyrightconfig
+# ---------------------------------------------------------------------------
+
+def test_pyrightconfig():
+    result = make_pyrightconfig()
+    data = json.loads(result)
+
+    assert data["venvPath"] == "."
+    assert data["venv"] == ".venv"
+    assert data["pythonVersion"] == "3.12"
+    assert "./community" in data["extraPaths"]
+    assert data["typeCheckingMode"] == "off"
 
 
 # ---------------------------------------------------------------------------
@@ -255,4 +279,5 @@ def test_zed_debug():
     assert "Debugpy" in result
     assert "${ZED_WORKTREE_ROOT}/community" in result
     assert "odoo-bin" in result
+    assert "${ZED_WORKTREE_ROOT}/.venv/bin/python" in result
     assert "odoorc" in result

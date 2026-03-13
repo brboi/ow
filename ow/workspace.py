@@ -65,6 +65,7 @@ def make_odools_toml(ws: WorkspaceConfig) -> str:
     return f"""\
 [[config]]
 name = "[Odoo Workspace] {ws.name}"
+python_path = ".venv/bin/python"
 odoo_path = "./community"
 addons_paths = [
 {paths_str},
@@ -124,10 +125,16 @@ def make_vscode_launch() -> str:
 
 
 def make_zed_settings(ws: WorkspaceConfig) -> str:
-    inclusions = ", ".join(f'"{alias}/**"' for alias in ws.repos)
+    repo_inclusions = ", ".join(f'"{alias}/**"' for alias in ws.repos)
+    exclusions = (
+        '"**/.git", "**/.svn", "**/.hg", "**/.jj", "**/CVS", "**/.DS_Store", '
+        '"**/Thumbs.db", "**/.classpath", "**/.settings", "**/*.po", "**/*.pot", '
+        '"**/node_modules", "**/.venv"'
+    )
     return f"""\
 {{
-  "file_scan_inclusions": [{inclusions}],
+  "file_scan_inclusions": [{repo_inclusions}, "mise.toml", "odools.toml", "pyrightconfig.json"],
+  "file_scan_exclusions": [{exclusions}],
   "lsp": {{
     "odoo": {{
       "settings": {{
@@ -155,11 +162,29 @@ def make_zed_debug() -> str:
     "program": "odoo-bin",
     "justMyCode": false,
     "args": ["--config=${ZED_WORKTREE_ROOT}/odoorc", "--dev=all"],
+    "python": "${ZED_WORKTREE_ROOT}/.venv/bin/python",
     "env": {
       "PYTHONPATH": "${ZED_WORKTREE_ROOT}/community",
     },
   },
 ]
+"""
+
+
+def make_pyrightconfig() -> str:
+    return """\
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "extraPaths": ["./community"],
+  "reportArgumentType": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportPrivateLocalImportUsage": "none",
+  "typeCheckingMode": "off"
+}
 """
 
 
@@ -274,6 +299,8 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
         zed_dir.mkdir(exist_ok=True)
         (zed_dir / "settings.json").write_text(make_zed_settings(ws))
         (zed_dir / "debug.json").write_text(make_zed_debug())
+
+        (ws_dir / "pyrightconfig.json").write_text(make_pyrightconfig())
 
         # 4. Trust the generated mise file
         subprocess.run(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
