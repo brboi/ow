@@ -49,7 +49,7 @@ community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
 # name = "opw-123456" # give it a name that suits you (required)
 # repo.community = "master..master-opw-123456-ngram"
 # repo.enterprise = "origin/master"
-# odoorc.port = 8070 # you can also override any odoorc settings
+# odoorc.http_port = 8070 # you can also override any odoorc settings
 #
 # Use the double dots notation to specify the rebase source branch.
 # When a rebase source branch is specified, ow will create a local branch
@@ -71,5 +71,5 @@ community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
 # enterprise = "origin/master"
 #
 # [workspace.odoorc]
-# port = 8070
+# http_port = 8070
 #
