@@ -1,0 +1,7 @@
+.bare-git-repos/
+.claude/
+services/volumes/
+services/compose.local.yml
+workspaces/
+mise.local.toml
+ow.toml

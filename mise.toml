@@ -1,0 +1,6 @@
+[tools]
+node = { version = "latest", postinstall = "npm install -g rtlcss" }
+python = "3.12"
+
+[settings]
+experimental = true
