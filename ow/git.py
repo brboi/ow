@@ -60,12 +60,36 @@ def ensure_ref(bare_repo: Path, remote: str, branch: str) -> None:
 
 
 def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, RemoteConfig]) -> BranchSpec:
-    """Find which remote actually has spec.branch; return updated BranchSpec with correct remote."""
+    """Find which remote actually has spec.branch; return updated BranchSpec with correct remote.
+
+    If spec.local_branch already exists on a remote (i.e. already pushed), that remote
+    branch is used as base_ref so the worktree tracks the correct upstream.
+    """
     remotes_to_try = [spec.remote]
     for remote_name in alias_remotes:
         if remote_name not in remotes_to_try:
             remotes_to_try.append(remote_name)
 
+    # First: if local_branch is set, check whether it already exists on a remote.
+    # If it does, use that as base_ref so the worktree tracks its upstream.
+    if spec.local_branch is not None:
+        for remote in remotes_to_try:
+            ref = f"refs/remotes/{remote}/{spec.local_branch}"
+            result = subprocess.run(
+                ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                return BranchSpec(f"{remote}/{spec.local_branch}", spec.local_branch)
+            result = subprocess.run(
+                ["git", "-C", str(bare_repo), "fetch", remote,
+                 f"{spec.local_branch}:refs/remotes/{remote}/{spec.local_branch}"],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                return BranchSpec(f"{remote}/{spec.local_branch}", spec.local_branch)
+
+    # Fall through: find which remote has the base branch.
     for remote in remotes_to_try:
         ref = f"refs/remotes/{remote}/{spec.branch}"
         result = subprocess.run(
@@ -128,6 +152,10 @@ def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
         else:
             subprocess.run(
                 ["git", "-C", str(bare_repo), "worktree", "add", "-b", spec.local_branch, str(worktree_path), spec.base_ref],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(bare_repo), "branch", "--set-upstream-to", spec.base_ref, spec.local_branch],
                 check=True,
             )
 

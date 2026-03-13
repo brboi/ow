@@ -190,12 +190,36 @@ def test_create_worktree_attached_new_branch(tmp_path):
 
     branch_missing = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock()]) as mock_run:
+    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock()]) as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
     assert mock_run.call_args_list[1] == call(
         ["git", "-C", str(bare_repo), "worktree", "add", "-b", "master-feature",
          str(worktree_path), "origin/master"],
+        check=True,
+    )
+
+
+def test_create_worktree_attached_new_branch_sets_upstream(tmp_path):
+    """New branch creation also sets upstream tracking to spec.base_ref."""
+    bare_repo = tmp_path / "enterprise.git"
+    bare_repo.mkdir()
+    worktree_path = Path("/fake/workspaces/test/enterprise")
+    spec = BranchSpec("dev/master-parrot-ring-the-phone", "master-parrot-ring-the-phone")
+
+    branch_missing = MagicMock(returncode=1)
+
+    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock()]) as mock_run:
+        create_worktree(bare_repo, worktree_path, spec)
+
+    assert mock_run.call_args_list[1] == call(
+        ["git", "-C", str(bare_repo), "worktree", "add", "-b", "master-parrot-ring-the-phone",
+         str(worktree_path), "dev/master-parrot-ring-the-phone"],
+        check=True,
+    )
+    assert mock_run.call_args_list[2] == call(
+        ["git", "-C", str(bare_repo), "branch", "--set-upstream-to",
+         "dev/master-parrot-ring-the-phone", "master-parrot-ring-the-phone"],
         check=True,
     )
 
@@ -464,6 +488,61 @@ def test_resolve_spec_branch_found_in_existing_local_refs(tmp_path):
     assert result.remote == "dev"
     assert result.branch == "master-parrot"
     assert mock_run.call_count == 3
+
+
+def test_resolve_spec_local_branch_found_on_remote(tmp_path):
+    """local_branch already exists on a remote — use it as base_ref, skip base branch lookup."""
+    bare_repo = tmp_path / "enterprise.git"
+    bare_repo.mkdir()
+    spec = BranchSpec("origin/master-parrot", "master-parrot-ring-the-phone")
+    remotes = {
+        "origin": RemoteConfig(url="git@github.com:odoo/enterprise.git"),
+        "dev": RemoteConfig(url="git@github.com:odoo-dev/enterprise.git"),
+    }
+
+    rev_parse_fail_origin = MagicMock(returncode=1)  # origin/master-parrot-ring-the-phone: miss
+    fetch_fail_origin = MagicMock(returncode=1)       # fetch origin master-parrot-ring-the-phone: fail
+    rev_parse_ok_dev = MagicMock(returncode=0)         # dev/master-parrot-ring-the-phone: hit
+
+    with patch("ow.git.subprocess.run", side_effect=[
+        rev_parse_fail_origin,
+        fetch_fail_origin,
+        rev_parse_ok_dev,
+    ]) as mock_run:
+        result = resolve_spec(bare_repo, spec, remotes)
+
+    assert result.base_ref == "dev/master-parrot-ring-the-phone"
+    assert result.local_branch == "master-parrot-ring-the-phone"
+    assert mock_run.call_count == 3
+
+
+def test_resolve_spec_local_branch_not_on_remote_falls_back_to_base(tmp_path):
+    """local_branch not on any remote — falls through to base branch lookup as normal."""
+    bare_repo = tmp_path / "enterprise.git"
+    bare_repo.mkdir()
+    spec = BranchSpec("origin/master-parrot", "master-parrot-ring-the-phone")
+    remotes = {
+        "origin": RemoteConfig(url="git@github.com:odoo/enterprise.git"),
+        "dev": RemoteConfig(url="git@github.com:odoo-dev/enterprise.git"),
+    }
+
+    # All local_branch lookups fail
+    lp_fail_o = MagicMock(returncode=1)  # rev-parse origin/master-parrot-ring-the-phone
+    lf_fail_o = MagicMock(returncode=1)  # fetch origin master-parrot-ring-the-phone
+    lp_fail_d = MagicMock(returncode=1)  # rev-parse dev/master-parrot-ring-the-phone
+    lf_fail_d = MagicMock(returncode=1)  # fetch dev master-parrot-ring-the-phone
+    # Base branch: origin/master-parrot found locally
+    bp_ok = MagicMock(returncode=0)      # rev-parse origin/master-parrot
+
+    with patch("ow.git.subprocess.run", side_effect=[
+        lp_fail_o, lf_fail_o, lp_fail_d, lf_fail_d,
+        bp_ok,
+    ]) as mock_run:
+        result = resolve_spec(bare_repo, spec, remotes)
+
+    assert result.base_ref == "origin/master-parrot"
+    assert result.local_branch == "master-parrot-ring-the-phone"
+    assert mock_run.call_count == 5
 
 
 def test_resolve_spec_raises_when_branch_not_found_anywhere(tmp_path):
