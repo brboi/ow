@@ -181,6 +181,17 @@ def _osc8(url: str, text: str) -> str:
     return f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"
 
 
+def _c(text: str, *codes: int) -> str:
+    prefix = "".join(f"\x1b[{code}m" for code in codes)
+    return f"{prefix}{text}\x1b[0m"
+
+
+def _counts(behind: int, ahead: int) -> str:
+    b = _c(f"↓{behind}", 33) if behind > 0 else _c(f"↓{behind}", 2)
+    a = _c(f"↑{ahead}", 32) if ahead > 0 else _c(f"↑{ahead}", 2)
+    return f"{b} {a}"
+
+
 def _github_tree_url(org_repo: str, branch: str) -> str:
     return f"https://github.com/{org_repo}/tree/{branch}"
 
@@ -297,18 +308,20 @@ def cmd_status(config: Config, name: str | None = None) -> None:
 
     for ws in workspaces:
         ws_dir = config.root_dir / "workspaces" / ws.name
-        print(f"[{ws.name}]")
-        print("    branches")
+        print(_c(f"[{ws.name}]", 1, 36))
+        print("    " + _c("branches", 2))
 
         first_attached_branch: str | None = None
         pr_links: list[tuple[str, int, str]] = []
 
         bare_repos_dir = config.root_dir / ".bare-git-repos"
+        max_alias_len = max(len(a) for a in ws.repos)
 
         for alias, spec in ws.repos.items():
+            padding = " " * (max_alias_len - len(alias) + 1)
             worktree_path = ws_dir / alias
             if not worktree_path.exists():
-                print(f"        {alias}:      (not applied)")
+                print(f"        {alias}:{padding}{_c('(not applied)', 2)}")
                 continue
 
             alias_remotes = config.remotes.get(alias, {})
@@ -333,9 +346,9 @@ def cmd_status(config: Config, name: str | None = None) -> None:
                     base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
                     commit_url = _github_commit_url(base_org_repo, full_hash) if base_org_repo else None
 
-                    base_text = _link(base_url, spec.base_ref)
-                    hash_text = _link(commit_url, short_hash)
-                    status = f"{base_text} ↓{behind} ↑{ahead} (DETACHED: {hash_text})"
+                    base_text = _link(base_url, _c(spec.base_ref, 1))
+                    hash_text = _link(commit_url, _c(short_hash, 33))
+                    status = f"{base_text} {_counts(behind, ahead)} ({_c('DETACHED', 33)}: {hash_text})"
 
                 else:
                     if first_attached_branch is None:
@@ -344,43 +357,53 @@ def cmd_status(config: Config, name: str | None = None) -> None:
                     upstream = get_upstream(worktree_path)
                     if upstream:
                         ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
-                        ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, spec.base_ref)
 
                         up_parts = upstream.split("/", 1)
                         up_remote = up_parts[0] if len(up_parts) == 2 else "origin"
                         up_branch = up_parts[1] if len(up_parts) == 2 else upstream
                         up_org_repo = org_repo_for(up_remote)
                         up_url = _github_tree_url(up_org_repo, up_branch) if up_org_repo else None
-                        display_text = _link(up_url, upstream)
 
                         if up_org_repo:
                             pr_info = _get_pr_info(up_org_repo, up_branch)
                             if pr_info:
                                 pr_links.append((up_org_repo, pr_info[0], pr_info[1]))
-                    else:
-                        ahead_up, behind_up = 0, 0
-                        ahead_base, behind_base = 0, 0
-                        display_text = spec.local_branch
 
-                    base_org_repo = org_repo_for(spec.remote)
-                    base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
-                    base_text = _link(base_url, spec.base_ref)
-                    status = f"{display_text} ↓{behind_up} ↑{ahead_up} ({base_text} ↓{behind_base} ↑{ahead_base})"
+                        if upstream != spec.base_ref:
+                            # Case 1: upstream ≠ base — standard format
+                            ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, spec.base_ref)
+                            base_org_repo = org_repo_for(spec.remote)
+                            base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
+                            display_text = _link(up_url, _c(upstream, 1))
+                            base_text = _link(base_url, _c(spec.base_ref, 1))
+                            status = f"{display_text} {_counts(behind_up, ahead_up)} ({base_text} {_counts(behind_base, ahead_base)})"
+                        else:
+                            # Case 2: upstream == base — show local branch as primary
+                            upstream_text = _link(up_url, _c(upstream, 1))
+                            status = f"{_c(spec.local_branch, 1)} {_c('(local)', 2)} ({upstream_text} {_counts(behind_up, ahead_up)})"
+
+                    else:
+                        # Case 3: no upstream
+                        base_org_repo = org_repo_for(spec.remote)
+                        base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
+                        ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", spec.base_ref)
+                        base_text = _link(base_url, _c(spec.base_ref, 1))
+                        status = f"{_c(spec.local_branch, 1)} {_c('(local)', 2)} ({base_text} {_counts(behind_base, ahead_base)})"
 
             except subprocess.CalledProcessError:
-                status = "(error)"
+                status = _c("(error)", 31)
 
-            print(f"        {alias}:      {status}")
+            print(f"        {alias}:{padding}{status}")
 
-        print("    links")
+        print("    " + _c("links", 2))
         for org_repo, pr_num, pr_url in pr_links:
             pr_text = _osc8(pr_url, f"{org_repo}#{pr_num}")
-            print(f"        pr:             {pr_text}")
+            print(f"        pr:     {pr_text}")
 
         if first_attached_branch:
             runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
             runbot_text = _osc8(runbot_url, first_attached_branch)
-            print(f"        runbot:         {runbot_text}")
+            print(f"        runbot: {runbot_text}")
 
         print()
 

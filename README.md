@@ -117,40 +117,34 @@ repo.enterprise = "18.0"
 repo.iap-apps = "18.0..18.0-fantastic-service-ngram"
 ```
 
-The command `ow status` will check and give you the whole status.
+The command `ow status` will check and give you the whole status. Output is color-coded in the terminal (bold cyan headers, green/yellow counts, etc.).
 ```bash
 $ ow status
 [canary]
     branches
-        community:      dev/master-canary ↓0 ↑0 (origin/master ↓34 ↑0)
-        enterprise:     dev/master-canary ↓1 ↑1 (origin/master ↓12 ↑0)
+        community:  dev/master-canary ↓0 ↑0 (origin/master ↓34 ↑0)
+        enterprise: dev/master-canary ↓1 ↑1 (origin/master ↓12 ↑0)
     links
-        pr:             odoo/odoo#123456
-        pr:             odoo/enterprise#98765
-        runbot:         master-canary
-  
+        runbot: master-canary
+
 [canary-can-fly]
     branches
-        community:      dev/master-canary-can-fly ↓0 ↑3 (dev/master-canary ↓1 ↑0)
-        enterprise:     dev/master-canary-can-fly ↓0 ↑1 (dev/master-canary ↓3 ↑0)
+        community:  dev/master-canary-can-fly ↓0 ↑3 (dev/master-canary ↓1 ↑0)
+        enterprise: master-canary-can-fly (local) (dev/master-canary ↓0 ↑0)
     links
-        pr:             odoo-dev/odoo#1234
-        pr:             odoo-dev/enterprise#987
-        runbot:         master-canary-can-fly
+        runbot: master-canary-can-fly
 
 [fantastic-iap-service]
     branches
-        community:      origin/18.0 ↓27 ↑0 (DETACHED: a1b2c3d)
-        enterprise:     origin/18.0 ↓11 ↑0 (DETACHED: d9c8b7a)
-        iap-apps:       origin/18.0-fantastic-service-ngram ↓0 ↑1 (origin/18.0 ↓27 ↑0)
+        community: origin/18.0 ↓27 ↑0 (DETACHED: a1b2c3d)
+        enterprise: origin/18.0 ↓11 ↑0 (DETACHED: d9c8b7a)
+        iap-apps:  origin/18.0-fantastic-service-ngram ↓0 ↑1 (origin/18.0 ↓27 ↑0)
     links
-        pr:             odoo/iap-apps#3456
-        runbot:         fantastic-iap-service
+        runbot: fantastic-iap-service
 ```
 
 Note that you can CTRL+Click on those parts to open your browser:
 - the branch name e.g. `dev/master-canary` redirects to https://github.com/odoo-dev/odoo/tree/master-canary
-- the pr link e.g. `odoo/enterprise#98765` redirects to https://github.com/odoo/enterprise/pull/98765
 - the runbot link e.g. `master-canary` redirects to https://runbot.odoo.com/runbot/bundle/master-canary
 - the commit hash i.e. `a1b2c3d` redirects to https://github.com/odoo/odoo/commit/a1b2c3d82ca4e6332131c832eb2b9a2750c3279d
 
