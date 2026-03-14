@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -99,10 +101,68 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
         "ws_name": ws.name,
         "main_repo_alias": main_repo_alias,
         "repos": list(ws.repos.keys()),
-        "odoorc_options": {**config.odoorc, **ws.odoorc},
+        "vars": {**config.vars, **ws.vars},
         "addons_paths": addons_paths + main_addons_paths,
         "odools_path_items": odools_path_items + odools_main_items,
     }
+
+
+# ---------------------------------------------------------------------------
+# Cache / drift detection
+# ---------------------------------------------------------------------------
+
+def _compute_hash(path: Path) -> str:
+    h = hashlib.sha256()
+    if path.is_file():
+        h.update(path.read_bytes())
+    else:
+        for p in sorted(path.rglob("*")):
+            if p.is_file():
+                h.update(str(p.relative_to(path)).encode())
+                h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+def _load_cache(root: Path) -> dict:
+    cache_path = root / ".ow.cache"
+    if cache_path.exists():
+        return json.loads(cache_path.read_text())
+    return {}
+
+
+def _save_cache(root: Path, cache: dict) -> None:
+    (root / ".ow.cache").write_text(json.dumps(cache, indent=2) + "\n")
+
+
+def _check_source_drift(root: Path, key: str, source: Path) -> bool:
+    """Return True if the user wants to abort."""
+    cache = _load_cache(root)
+    entry = cache.get(key, {})
+    current_hash = _compute_hash(source)
+    if entry.get("hash") == current_hash:
+        return False
+
+    if not sys.stdin.isatty():
+        print(f"(ow) [warn] {source.name} has been updated.", file=sys.stderr)
+        return False
+
+    print(f"[warn] {source.name} has been updated since you last copied it.")
+    print("  [c] continue (default)")
+    print("  [s] continue and skip displaying this until next update")
+    print("  [a] abort now")
+    choice = input(" > [Csa] ").strip().lower()
+    if choice == "s":
+        cache[key] = {"hash": current_hash}
+        _save_cache(root, cache)
+    if choice == "a":
+        return True
+    return False
+
+
+def _record_hash(root: Path, key: str, source: Path) -> None:
+    cache = _load_cache(root)
+    cache[key] = {"hash": _compute_hash(source), "ignore": False}
+    _save_cache(root, cache)
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +237,11 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
     # Initialize template directory if absent
     template_dir = config.root_dir / "workspaces" / ".template"
     template_init_dir = config.root_dir / "workspaces" / ".template.init"
+    if _check_source_drift(config.root_dir, "workspaces/.template.init", template_init_dir):
+        sys.exit(1)
     if not template_dir.exists():
         shutil.copytree(template_init_dir, template_dir)
+    _record_hash(config.root_dir, "workspaces/.template.init", template_init_dir)
 
     env = Environment(
         loader=FileSystemLoader(str(template_dir)),
@@ -216,19 +279,19 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
         # 3. Render templates and copy statics
         ws_dir.mkdir(parents=True, exist_ok=True)
         context = build_template_context(ws, config, ws_dir)
+        paths = template_dir.rglob("*")
+        file_paths = filter(lambda p: p.is_file(), paths)
 
-        for tmpl_path in sorted(template_dir.rglob("*.j2")):
-            rel = tmpl_path.relative_to(template_dir)
-            out_path = ws_dir / rel.with_suffix("")
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(env.get_template(str(rel)).render(context))
-
-        for static_path in sorted(template_dir.rglob("*")):
-            if static_path.is_file() and static_path.suffix != ".j2":
-                rel = static_path.relative_to(template_dir)
+        for path in sorted(file_paths):
+            rel = path.relative_to(template_dir)
+            if path.suffix == ".j2":
+                out_path = ws_dir / rel.with_suffix("")
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(env.get_template(str(rel)).render(context))
+            else:
                 out_path = ws_dir / rel
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(static_path, out_path)
+                shutil.copy2(path, out_path)
 
         # 4. Trust the generated mise file
         subprocess.run(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
@@ -366,13 +429,18 @@ def cmd_status(config: Config, name: str | None = None) -> None:
         print()
 
 
-def cmd_create(config: Config, name: str, repo_specs: list[str]) -> None:
+def cmd_create(config: Config, name: str, specs: list[str]) -> None:
     repos = {}
-    for spec_str in repo_specs:
-        alias, spec = spec_str.split(":", 1)
-        repos[alias] = parse_branch_spec(spec)
+    ws_vars: dict[str, Any] = {}
+    for s in specs:
+        if s.startswith("vars.") and "=" in s:
+            k, v = s[len("vars."):].split("=", 1)
+            ws_vars[k] = v
+        else:
+            alias, spec = s.split(":", 1)
+            repos[alias] = parse_branch_spec(spec)
 
-    ws = WorkspaceConfig(name=name, repos=repos)
+    ws = WorkspaceConfig(name=name, repos=repos, vars=ws_vars)
     config.workspaces.append(ws)
 
     config_path = config.root_dir / "ow.toml"

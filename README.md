@@ -60,7 +60,7 @@ Check how the config looks like: [ow.toml.example](./ow.toml.example).
 | `ow --help` or `ow {command} --help` | Shows the help message for `ow` or for a specific command. |
 | `ow apply [name]` | Applies the configuration and generates the workspaces folders. If a name is provided, only the workspace with that name will be generated. |
 | `ow status [name]` | Shows the status of the workspaces. If a name is provided, only the workspace with that name will be shown. |
-| `ow create {name} {community:branches_spec} ([other_repo:branches_spec]...) ` | Creates a new workspace with the given name and branches specifications. This is a shortcut for creating a new workspace without having to edit the config file and run `ow apply`. The branches specifications use the same syntax as in the config file (e.g. `community:master`, `enterprise:master-opw-123456-ngram..master`). The new workspace configuration will be automatically saved to the `ow.toml` file. |
+| `ow create {name} {alias:spec} ... [vars.key=value ...]` | Creates a new workspace with the given name and branches specifications. This is a shortcut for creating a new workspace without having to edit the config file and run `ow apply`. The branches specifications use the same syntax as in the config file (e.g. `community:master`, `enterprise:master-opw-123456-ngram..master`). You can also pass per-workspace template variables inline (e.g. `vars.http_port=8080`). The new workspace configuration will be automatically saved to the `ow.toml` file. |
 | `ow remove {name}` | Removes the workspace with the given name. This will not delete the corresponding bare git repository, so you can generate it again later if needed. |
 | `ow rebase {name}` | Rebases the workspace with the given name. This will fetch the latest changes from the remote branches and rebase the worktree branches on top of them. This is a shortcut for running `git fetch` and `git switch --detach`/`git rebase` from each of the worktree folders. |
 
@@ -87,6 +87,7 @@ The easiest way to start a new feature is to create a new workspace with the `ow
 > If you need to work on a community feature: `ow create <workspace-name> community:master..master-opw-123456-ngram enterprise:master`
 > Or an enterprise feature: `ow create <workspace-name> community:master enterprise:master..master-opw-123456-ngram`
 > Or both: `ow create <workspace-name> community:master..master-opw-123456-ngram enterprise:master..master-opw-123456-ngram`
+> With a custom port: `ow create <workspace-name> community:master vars.http_port=8080`
 
 Once the workspace is created, you will be able to open it like this:
 ```bash

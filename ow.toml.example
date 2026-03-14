@@ -1,19 +1,14 @@
 # ow.toml - will be automatically copied from ow.toml.example
 # when you first run `ow`. You can then edit it to set your own defaults.
 
-# The [odoorc] section contains global Odoo configuration defaults
-# that will be used as template when you generate Odoo workspaces
-# through the `ow` command.
-#
-# IMPORTANT: you should not try to manage the 'addons_path' key as it
-# is automatically generated based on the workspaces you declare below.
-[odoorc]
-http_port = 8069
-db_host = "localhost"
-db_port = 5432
-db_user = "odoo"
-db_password = "odoo"
-# data_dir = "~/.odoo-cache" # you can use ~ or env vars like $HOME
+# [vars] — optional: inject variables into Jinja2 templates.
+# Use {{ vars.key | default(fallback) }} in your templates.
+# [vars]
+# http_port = 8070
+# db_host = "localhost"
+# db_port = 5432
+# db_user = "odoo"
+# db_password = "odoo"
 # admin_passwd = "Password"
 # smtp_server = "mailpit" # uncomment if you use the mailpit service
 # smtp_port = 1025 # uncomment if you use the mailpit service
@@ -43,13 +38,13 @@ community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
 # enterprise.dev.pushurl = "git@github.com:odoo-dev/enterprise.git"
 # enterprise.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
 
-# Declare your workspaces with [[workspaces]] sections:
+# Declare your workspaces with [[workspace]] sections:
 #
 # [[workspace]]
 # name = "opw-123456" # give it a name that suits you (required)
 # repo.community = "master..master-opw-123456-ngram"
 # repo.enterprise = "origin/master"
-# odoorc.http_port = 8070 # you can also override any odoorc settings
+# vars.http_port = 8080 # per-workspace override
 #
 # Use the double dots notation to specify the rebase source branch.
 # When a rebase source branch is specified, ow will create a local branch
@@ -57,7 +52,7 @@ community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
 # branch.
 # It will also make `ow rebase` command aware of the source rebase branch.
 #
-# Note that without the double dots notation the worktree will be detached
+# Note that without the double dots notation the worktree will be detached.
 # Also, specifying the remote is optional but in case of branch naming
 # conflict within multiple remotes, it is required to disambiguate.
 #
@@ -70,6 +65,6 @@ community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
 # community = "master..master-opw-123456-ngram"
 # enterprise = "origin/master"
 #
-# [workspace.odoorc]
-# http_port = 8070
+# [workspace.vars]
+# http_port = 8080
 #

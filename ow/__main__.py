@@ -10,7 +10,15 @@ from pathlib import Path
 import argcomplete
 
 from ow.config import load_config
-from ow.workspace import cmd_apply, cmd_create, cmd_rebase, cmd_remove, cmd_status
+from ow.workspace import (
+    _check_source_drift,
+    _record_hash,
+    cmd_apply,
+    cmd_create,
+    cmd_rebase,
+    cmd_remove,
+    cmd_status,
+)
 
 
 def find_root() -> Path:
@@ -47,8 +55,8 @@ def main() -> None:
 
     p_create = subparsers.add_parser("create", help="Create a new workspace")
     p_create.add_argument("name")
-    p_create.add_argument("repo_specs", nargs="+", metavar="alias:spec",
-                          help="e.g. community:master enterprise:master..master-feature")
+    p_create.add_argument("specs", nargs="+", metavar="alias:spec|vars.key=value",
+                          help="e.g. community:master vars.http_port=8080")
 
     p_rebase = subparsers.add_parser("rebase", help="Fetch and rebase workspace branches")
     p_rebase.add_argument("name").completer = workspace_completer
@@ -67,6 +75,11 @@ def main() -> None:
     if not toml_path.exists() and example_path.exists():
         shutil.copy(example_path, toml_path)
         print("Copied ow.toml.example → ow.toml. Edit it to configure your workspaces.")
+        _record_hash(root, "ow.toml.example", example_path)
+
+    if example_path.exists():
+        if _check_source_drift(root, "ow.toml.example", example_path):
+            sys.exit(1)
 
     config = load_config(root / "ow.toml")
 
@@ -77,7 +90,7 @@ def main() -> None:
     elif args.command == "status":
         cmd_status(config, args.name)
     elif args.command == "create":
-        cmd_create(config, args.name, args.repo_specs)
+        cmd_create(config, args.name, args.specs)
     elif args.command == "rebase":
         cmd_rebase(config, args.name)
 

@@ -8,6 +8,7 @@ workspaces/*
 mise.local.toml
 ow.toml
 .ow.toml.archived-workspaces
+.ow.cache
 *.egg-info
 .pytest_cache
 __pycache__

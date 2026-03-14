@@ -81,7 +81,7 @@ def test_to_spec_str_non_origin_kept():
 # ---------------------------------------------------------------------------
 
 SAMPLE_TOML = """\
-[odoorc]
+[vars]
 http_port = 8069
 db_host = "localhost"
 
@@ -95,7 +95,7 @@ community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
 name = "test-ws"
 repo.community = "master"
 repo.enterprise = "master..master-feature"
-odoorc.http_port = 8070
+vars.http_port = 8070
 
 [[workspace]]
 name = "detached-ws"
@@ -109,7 +109,7 @@ def test_load_config():
         path.write_text(SAMPLE_TOML)
         config = load_config(path)
 
-    assert config.odoorc == {"http_port": 8069, "db_host": "localhost"}
+    assert config.vars == {"http_port": 8069, "db_host": "localhost"}
     assert config.root_dir == Path(tmpdir)
 
     assert "community" in config.remotes
@@ -123,7 +123,7 @@ def test_load_config():
     assert ws.name == "test-ws"
     assert ws.repos["community"] == BranchSpec("origin/master")
     assert ws.repos["enterprise"] == BranchSpec("origin/master", "master-feature")
-    assert ws.odoorc == {"http_port": 8070}
+    assert ws.vars == {"http_port": 8070}
 
     ws2 = config.workspaces[1]
     assert ws2.name == "detached-ws"
@@ -158,14 +158,14 @@ def test_format_workspace_with_local_branch():
     assert 'repo.enterprise = "master..master-test"' in result
 
 
-def test_format_workspace_with_odoorc():
+def test_format_workspace_with_vars():
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master")},
-        odoorc={"http_port": 8070},
+        vars={"http_port": 8070},
     )
     result = format_workspace(ws)
-    assert "odoorc.http_port = 8070" in result
+    assert "vars.http_port = 8070" in result
 
 
 def test_format_workspace_non_origin_remote():

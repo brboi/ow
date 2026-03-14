@@ -58,12 +58,12 @@ class RemoteConfig:
 class WorkspaceConfig:
     name: str
     repos: dict[str, BranchSpec]
-    odoorc: dict[str, Any] = field(default_factory=dict)
+    vars: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class Config:
-    odoorc: dict[str, Any]
+    vars: dict[str, Any]
     remotes: dict[str, dict[str, RemoteConfig]]  # alias -> remote_name -> cfg
     workspaces: list[WorkspaceConfig]
     root_dir: Path
@@ -73,7 +73,7 @@ def load_config(path: Path) -> Config:
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
-    odoorc = data.get("odoorc", {})
+    vars_ = data.get("vars", {})
 
     remotes: dict[str, dict[str, RemoteConfig]] = {}
     for alias, remote_dict in data.get("remotes", {}).items():
@@ -93,11 +93,11 @@ def load_config(path: Path) -> Config:
         workspaces.append(WorkspaceConfig(
             name=ws_data["name"],
             repos=repos,
-            odoorc=ws_data.get("odoorc", {}),
+            vars=ws_data.get("vars", {}),
         ))
 
     return Config(
-        odoorc=odoorc,
+        vars=vars_,
         remotes=remotes,
         workspaces=workspaces,
         root_dir=path.parent,
@@ -108,11 +108,11 @@ def format_workspace(ws: WorkspaceConfig) -> str:
     lines = ["[[workspace]]", f'name = "{ws.name}"']
     for alias, spec in ws.repos.items():
         lines.append(f'repo.{alias} = "{spec.to_spec_str()}"')
-    for k, v in ws.odoorc.items():
+    for k, v in ws.vars.items():
         if isinstance(v, str):
-            lines.append(f'odoorc.{k} = "{v}"')
+            lines.append(f'vars.{k} = "{v}"')
         else:
-            lines.append(f'odoorc.{k} = {v}')
+            lines.append(f'vars.{k} = {v}')
     return "\n".join(lines) + "\n"
 
 
