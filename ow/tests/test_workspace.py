@@ -1,8 +1,12 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from ow.config import BranchSpec, Config, WorkspaceConfig
 from ow.workspace import (
+    find_addon_paths,
+    is_odoo_main_repo,
     make_mise_toml,
     make_odools_toml,
     make_odoorc,
@@ -29,41 +33,108 @@ def make_config(
     )
 
 
-def community_only() -> WorkspaceConfig:
+# ---------------------------------------------------------------------------
+# Filesystem fixtures helpers
+# ---------------------------------------------------------------------------
+
+def setup_odoo_main_repo(ws_dir: Path, alias: str = "community") -> Path:
+    repo = ws_dir / alias
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "odoo-bin").touch()
+    (repo / "addons" / "sale").mkdir(parents=True)
+    (repo / "addons" / "sale" / "__manifest__.py").touch()
+    (repo / "odoo" / "addons" / "base").mkdir(parents=True)
+    (repo / "odoo" / "addons" / "base" / "__manifest__.py").touch()
+    return repo
+
+
+def setup_flat_repo(ws_dir: Path, alias: str) -> Path:
+    """Repo where the root is directly an addons_path."""
+    repo = ws_dir / alias
+    (repo / "account").mkdir(parents=True)
+    (repo / "account" / "__manifest__.py").touch()
+    (repo / "sale").mkdir(parents=True)
+    (repo / "sale" / "__manifest__.py").touch()
+    return repo
+
+
+def setup_categorized_repo(ws_dir: Path, alias: str) -> Path:
+    """Repo whose immediate subdirs are each addons_paths (one level of nesting)."""
+    repo = ws_dir / alias
+    (repo / "telephony" / "phone_validation").mkdir(parents=True)
+    (repo / "telephony" / "phone_validation" / "__manifest__.py").touch()
+    (repo / "messaging" / "sms_gateway").mkdir(parents=True)
+    (repo / "messaging" / "sms_gateway" / "__manifest__.py").touch()
+    return repo
+
+
+def make_ws_config(name: str, aliases: list[str]) -> WorkspaceConfig:
     return WorkspaceConfig(
-        name="test",
-        repos={"community": BranchSpec("origin/master")},
+        name=name,
+        repos={alias: BranchSpec("origin/master") for alias in aliases},
     )
 
 
-def community_enterprise() -> WorkspaceConfig:
-    return WorkspaceConfig(
-        name="test",
-        repos={
-            "community": BranchSpec("origin/master"),
-            "enterprise": BranchSpec("origin/master", "master-test"),
-        },
-    )
+# ---------------------------------------------------------------------------
+# find_addon_paths
+# ---------------------------------------------------------------------------
+
+def test_find_addon_paths_on_file(tmp_path):
+    f = tmp_path / "somefile.txt"
+    f.touch()
+    assert find_addon_paths(f) == []
 
 
-def full_workspace() -> WorkspaceConfig:
-    return WorkspaceConfig(
-        name="test",
-        repos={
-            "community": BranchSpec("origin/master"),
-            "enterprise": BranchSpec("origin/master", "master-test"),
-            "brboi-addons": BranchSpec("origin/main"),
-        },
-    )
+def test_find_addon_paths_nonexistent(tmp_path):
+    assert find_addon_paths(tmp_path / "nonexistent") == []
+
+
+def test_find_addon_paths_empty_dir(tmp_path):
+    d = tmp_path / "empty"
+    d.mkdir()
+    assert find_addon_paths(d) == []
+
+
+def test_find_addon_paths_flat_repo(tmp_path):
+    repo = setup_flat_repo(tmp_path, "myaddon")
+    assert find_addon_paths(repo) == [repo]
+
+
+def test_find_addon_paths_categorized_repo(tmp_path):
+    repo = setup_categorized_repo(tmp_path, "myaddon")
+    result = find_addon_paths(repo)
+    assert result == sorted([repo / "messaging", repo / "telephony"])
+
+
+def test_find_addon_paths_mixed_depths(tmp_path):
+    repo = tmp_path / "repo"
+    # helpers/utils/__manifest__.py  → helpers is addons_path
+    (repo / "helpers" / "utils").mkdir(parents=True)
+    (repo / "helpers" / "utils" / "__manifest__.py").touch()
+    # categories/crm/sale_crm/__manifest__.py  → crm is addons_path
+    (repo / "categories" / "crm" / "sale_crm").mkdir(parents=True)
+    (repo / "categories" / "crm" / "sale_crm" / "__manifest__.py").touch()
+    # external/vendor/payments/stripe/__manifest__.py → payments is addons_path
+    (repo / "external" / "vendor" / "payments" / "stripe").mkdir(parents=True)
+    (repo / "external" / "vendor" / "payments" / "stripe" / "__manifest__.py").touch()
+
+    result = find_addon_paths(repo)
+    assert result == sorted([
+        repo / "categories" / "crm",
+        repo / "external" / "vendor" / "payments",
+        repo / "helpers",
+    ])
 
 
 # ---------------------------------------------------------------------------
 # make_odoorc
 # ---------------------------------------------------------------------------
 
-def test_odoorc_community_only():
-    ws = community_only()
-    config = make_config()
+def test_odoorc_community_only(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
     result = make_odoorc(ws, config)
 
     assert "[options]" in result
@@ -76,9 +147,12 @@ def test_odoorc_community_only():
     assert "dbfilter = ^test$" in result
 
 
-def test_odoorc_addons_path_enterprise_before_community():
-    ws = community_enterprise()
-    config = make_config(root_dir=Path("/root"))
+def test_odoorc_addons_path_enterprise_before_community(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_flat_repo(ws_dir, "enterprise")
+    ws = make_ws_config("test", ["community", "enterprise"])
+    config = make_config(root_dir=tmp_path)
     result = make_odoorc(ws, config)
 
     lines = result.split("\n")
@@ -90,75 +164,107 @@ def test_odoorc_addons_path_enterprise_before_community():
     assert "community/odoo/addons" in paths[2]
 
 
-def test_odoorc_full_workspace_addons_order():
-    ws = full_workspace()
-    config = make_config(root_dir=Path("/root"))
+def test_odoorc_full_workspace_addons_order(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_flat_repo(ws_dir, "enterprise")
+    setup_flat_repo(ws_dir, "brboi-addons")
+    ws = make_ws_config("test", ["community", "enterprise", "brboi-addons"])
+    config = make_config(root_dir=tmp_path)
     result = make_odoorc(ws, config)
 
     lines = result.split("\n")
     addons_line = next(l for l in lines if l.startswith("addons_path"))
     paths = addons_line.split("=", 1)[1].strip().split(",")
 
-    # enterprise and brboi-addons first, then community paths
     non_comm = [p for p in paths if "community/addons" not in p and "community/odoo/addons" not in p]
     comm = [p for p in paths if "community/addons" in p or "community/odoo/addons" in p]
     assert len(non_comm) == 2
     assert len(comm) == 2
 
 
-def test_odoorc_workspace_overrides_global():
+def test_odoorc_workspace_overrides_global(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master")},
         odoorc={"http_port": 8070},
     )
-    config = make_config()
+    config = make_config(root_dir=tmp_path)
     result = make_odoorc(ws, config)
 
     assert "http_port = 8070" in result
-    assert "http_port = 8069" not in result  # global was overridden
+    assert "http_port = 8069" not in result
 
 
-def test_odoorc_no_quotes_on_string_values():
-    ws = community_only()
-    config = make_config()
+def test_odoorc_no_quotes_on_string_values(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
     result = make_odoorc(ws, config)
 
-    # INI values must not be quoted
     assert 'db_host = "localhost"' not in result
     assert "db_host = localhost" in result
 
 
-def test_odoorc_absolute_addons_paths():
-    ws = community_enterprise()
-    config = make_config(root_dir=Path("/my/root"))
+def test_odoorc_absolute_addons_paths(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_flat_repo(ws_dir, "enterprise")
+    ws = make_ws_config("test", ["community", "enterprise"])
+    config = make_config(root_dir=tmp_path)
     result = make_odoorc(ws, config)
 
-    assert "/my/root/workspaces/test/enterprise" in result
-    assert "/my/root/workspaces/test/community/addons" in result
+    assert str(ws_dir / "enterprise") in result
+    assert str(ws_dir / "community" / "addons") in result
+
+
+def test_odoorc_categorized_repo(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_categorized_repo(ws_dir, "partner-addons")
+    ws = make_ws_config("test", ["community", "partner-addons"])
+    config = make_config(root_dir=tmp_path)
+    result = make_odoorc(ws, config)
+
+    lines = result.split("\n")
+    addons_line = next(l for l in lines if l.startswith("addons_path"))
+    paths = addons_line.split("=", 1)[1].strip().split(",")
+
+    # Both sub-paths of partner-addons should appear before community
+    assert any("partner-addons/messaging" in p or "partner-addons/telephony" in p for p in paths)
+    comm_idx = next(i for i, p in enumerate(paths) if "community/addons" in p)
+    non_comm = [p for p in paths[:comm_idx] if "partner-addons" in p]
+    assert len(non_comm) == 2
 
 
 # ---------------------------------------------------------------------------
 # make_odools_toml
 # ---------------------------------------------------------------------------
 
-def test_odools_community_only():
-    ws = community_only()
-    result = make_odools_toml(ws)
+def test_odools_community_only(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    result = make_odools_toml(ws, ws_dir)
 
     assert "[[config]]" in result
-    assert '[Odoo Workspace] test' in result
+    assert "[Odoo Workspace] test" in result
     assert 'python_path = ".venv/bin/python"' in result
     assert 'odoo_path = "./community"' in result
     assert "./community/addons" in result
     assert "./community/odoo/addons" in result
-    # No non-community repos
     assert "./enterprise" not in result
 
 
-def test_odools_community_enterprise_order():
-    ws = community_enterprise()
-    result = make_odools_toml(ws)
+def test_odools_community_enterprise_order(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_flat_repo(ws_dir, "enterprise")
+    ws = make_ws_config("test", ["community", "enterprise"])
+    result = make_odools_toml(ws, ws_dir)
 
     assert "./enterprise" in result
     ent_idx = result.index("./enterprise")
@@ -166,14 +272,34 @@ def test_odools_community_enterprise_order():
     assert ent_idx < com_idx
 
 
-def test_odools_full_workspace():
-    ws = full_workspace()
-    result = make_odools_toml(ws)
+def test_odools_full_workspace(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_flat_repo(ws_dir, "enterprise")
+    setup_flat_repo(ws_dir, "brboi-addons")
+    ws = make_ws_config("test", ["community", "enterprise", "brboi-addons"])
+    result = make_odools_toml(ws, ws_dir)
 
     assert "./enterprise" in result
     assert "./brboi-addons" in result
     assert "./community/addons" in result
     assert "./community/odoo/addons" in result
+
+
+def test_odools_categorized_repo(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_categorized_repo(ws_dir, "partner-addons")
+    ws = make_ws_config("test", ["community", "partner-addons"])
+    result = make_odools_toml(ws, ws_dir)
+
+    assert "./partner-addons/messaging" in result
+    assert "./partner-addons/telephony" in result
+    assert "./community/addons" in result
+    # categorized paths before community
+    msg_idx = result.index("./partner-addons/messaging")
+    com_idx = result.index("./community/addons")
+    assert msg_idx < com_idx
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +331,13 @@ def test_requirements_dev():
 # ---------------------------------------------------------------------------
 
 def test_vscode_settings():
-    ws = community_enterprise()
+    ws = WorkspaceConfig(
+        name="test",
+        repos={
+            "community": BranchSpec("origin/master"),
+            "enterprise": BranchSpec("origin/master", "master-test"),
+        },
+    )
     result = make_vscode_settings(ws)
 
     assert "[Odoo Workspace] test" in result
@@ -229,7 +361,13 @@ def test_vscode_launch():
 # ---------------------------------------------------------------------------
 
 def test_zed_settings_community_enterprise():
-    ws = community_enterprise()
+    ws = WorkspaceConfig(
+        name="test",
+        repos={
+            "community": BranchSpec("origin/master"),
+            "enterprise": BranchSpec("origin/master", "master-test"),
+        },
+    )
     result = make_zed_settings(ws)
 
     assert "community/**" in result
@@ -242,7 +380,14 @@ def test_zed_settings_community_enterprise():
 
 
 def test_zed_settings_full_workspace():
-    ws = full_workspace()
+    ws = WorkspaceConfig(
+        name="test",
+        repos={
+            "community": BranchSpec("origin/master"),
+            "enterprise": BranchSpec("origin/master", "master-test"),
+            "brboi-addons": BranchSpec("origin/main"),
+        },
+    )
     result = make_zed_settings(ws)
 
     assert "community/**" in result
