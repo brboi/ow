@@ -2,7 +2,9 @@
 .claude/
 services/volumes/
 services/compose.local.yml
-workspaces/
+workspaces/*
+!workspaces/.template.init
+!workspaces/.template.init/**
 mise.local.toml
 ow.toml
 .ow.toml.archived-workspaces

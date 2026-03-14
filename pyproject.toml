@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "ow"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["argcomplete", "tomli-w"]
+dependencies = ["argcomplete", "jinja2", "tomli-w"]
 
 [tool.setuptools.packages.find]
 include = ["ow*"]

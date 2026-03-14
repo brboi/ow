@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Instance With Debug",
+      "type": "debugpy",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/{{ main_repo_alias }}",
+      "program": "odoo-bin",
+      "justMyCode": false,
+      "args": [
+        "--config=${workspaceFolder}/odoorc",
+        "--dev=all",
+      ],
+      "env": {
+        "PYTHON_PATH": "${workspaceFolder}/{{ main_repo_alias }}"
+      },
+    }
+  ]
+}

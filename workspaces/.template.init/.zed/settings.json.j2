@@ -1,0 +1,11 @@
+{
+  "file_scan_inclusions": [{% for alias in repos %}"{{ alias }}/**", {% endfor %}"mise.toml", "odools.toml", "pyrightconfig.json"],
+  "file_scan_exclusions": ["**/.git", "**/.svn", "**/.hg", "**/.jj", "**/CVS", "**/.DS_Store", "**/Thumbs.db", "**/.classpath", "**/.settings", "**/*.po", "**/*.pot", "**/node_modules", "**/.venv"],
+  "lsp": {
+    "odoo": {
+      "settings": {
+        "Odoo.selectedProfile": "[Odoo Workspace] {{ ws_name }}",
+      },
+    },
+  },
+}

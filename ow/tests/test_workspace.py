@@ -2,21 +2,12 @@ import json
 from pathlib import Path
 
 import pytest
+from jinja2 import Environment, FileSystemLoader
 
 from ow.config import BranchSpec, Config, WorkspaceConfig
-from ow.workspace import (
-    find_addon_paths,
-    is_odoo_main_repo,
-    make_mise_toml,
-    make_odools_toml,
-    make_odoorc,
-    make_pyrightconfig,
-    make_requirements_dev,
-    make_vscode_settings,
-    make_zed_settings,
-    make_vscode_launch,
-    make_zed_debug,
-)
+from ow.workspace import build_template_context, find_addon_paths, is_odoo_main_repo
+
+TEMPLATE_DIR = Path(__file__).parent.parent.parent / "workspaces" / ".template.init"
 
 
 def make_config(
@@ -34,7 +25,7 @@ def make_config(
 
 
 # ---------------------------------------------------------------------------
-# Filesystem fixtures helpers
+# Filesystem fixture helpers
 # ---------------------------------------------------------------------------
 
 def setup_odoo_main_repo(ws_dir: Path, alias: str = "community") -> Path:
@@ -73,6 +64,16 @@ def make_ws_config(name: str, aliases: list[str]) -> WorkspaceConfig:
         name=name,
         repos={alias: BranchSpec("origin/master") for alias in aliases},
     )
+
+
+def render_template(name: str, context: dict) -> str:
+    env = Environment(
+        loader=FileSystemLoader(str(TEMPLATE_DIR)),
+        keep_trailing_newline=True,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    return env.get_template(name).render(context)
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +128,94 @@ def test_find_addon_paths_mixed_depths(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# make_odoorc
+# build_template_context
 # ---------------------------------------------------------------------------
 
-def test_odoorc_community_only(tmp_path):
+def test_build_template_context_community_only(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     ws = make_ws_config("test", ["community"])
     config = make_config(root_dir=tmp_path)
-    result = make_odoorc(ws, config)
+    ctx = build_template_context(ws, config, ws_dir)
+
+    assert ctx["ws_name"] == "test"
+    assert ctx["main_repo_alias"] == "community"
+    assert ctx["repos"] == ["community"]
+    assert str(ws_dir / "community" / "addons") in ctx["addons_paths"]
+    assert str(ws_dir / "community" / "odoo" / "addons") in ctx["addons_paths"]
+    assert "community/addons" in ctx["odools_path_items"]
+    assert "community/odoo/addons" in ctx["odools_path_items"]
+
+
+def test_build_template_context_addons_order(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_flat_repo(ws_dir, "enterprise")
+    ws = make_ws_config("test", ["community", "enterprise"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+
+    # enterprise before community in addons_paths
+    ent_idx = next(i for i, p in enumerate(ctx["addons_paths"]) if "enterprise" in p)
+    comm_idx = next(i for i, p in enumerate(ctx["addons_paths"]) if "community/addons" in p)
+    assert ent_idx < comm_idx
+
+    # enterprise before community in odools_path_items
+    ent_idx = next(i for i, p in enumerate(ctx["odools_path_items"]) if "enterprise" in p)
+    comm_idx = next(i for i, p in enumerate(ctx["odools_path_items"]) if "community/addons" in p)
+    assert ent_idx < comm_idx
+
+
+def test_build_template_context_odoorc_options_merge(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = WorkspaceConfig(
+        name="test",
+        repos={"community": BranchSpec("origin/master")},
+        odoorc={"http_port": 8070},
+    )
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+
+    assert ctx["odoorc_options"]["http_port"] == 8070
+    assert "db_host" in ctx["odoorc_options"]
+
+
+def test_build_template_context_full_workspace(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_flat_repo(ws_dir, "enterprise")
+    setup_flat_repo(ws_dir, "brboi-addons")
+    ws = make_ws_config("test", ["community", "enterprise", "brboi-addons"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+
+    assert ctx["repos"] == ["community", "enterprise", "brboi-addons"]
+    assert len([p for p in ctx["addons_paths"] if "community" in p]) == 2
+    assert len([p for p in ctx["addons_paths"] if "enterprise" in p or "brboi-addons" in p]) == 2
+
+
+def test_build_template_context_no_main_repo(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_flat_repo(ws_dir, "enterprise")
+    ws = make_ws_config("test", ["enterprise"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+
+    assert ctx["main_repo_alias"] is None
+
+
+# ---------------------------------------------------------------------------
+# Template rendering — odoorc
+# ---------------------------------------------------------------------------
+
+def test_render_odoorc_community_only(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("odoorc.j2", ctx)
 
     assert "[options]" in result
     assert "http_port = 8069" in result
@@ -147,43 +227,24 @@ def test_odoorc_community_only(tmp_path):
     assert "dbfilter = ^test$" in result
 
 
-def test_odoorc_addons_path_enterprise_before_community(tmp_path):
+def test_render_odoorc_enterprise_before_community(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_flat_repo(ws_dir, "enterprise")
     ws = make_ws_config("test", ["community", "enterprise"])
     config = make_config(root_dir=tmp_path)
-    result = make_odoorc(ws, config)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("odoorc.j2", ctx)
 
     lines = result.split("\n")
     addons_line = next(l for l in lines if l.startswith("addons_path"))
     paths = addons_line.split("=", 1)[1].strip().split(",")
-
     assert "enterprise" in paths[0]
     assert "community/addons" in paths[1]
     assert "community/odoo/addons" in paths[2]
 
 
-def test_odoorc_full_workspace_addons_order(tmp_path):
-    ws_dir = tmp_path / "workspaces" / "test"
-    setup_odoo_main_repo(ws_dir, "community")
-    setup_flat_repo(ws_dir, "enterprise")
-    setup_flat_repo(ws_dir, "brboi-addons")
-    ws = make_ws_config("test", ["community", "enterprise", "brboi-addons"])
-    config = make_config(root_dir=tmp_path)
-    result = make_odoorc(ws, config)
-
-    lines = result.split("\n")
-    addons_line = next(l for l in lines if l.startswith("addons_path"))
-    paths = addons_line.split("=", 1)[1].strip().split(",")
-
-    non_comm = [p for p in paths if "community/addons" not in p and "community/odoo/addons" not in p]
-    comm = [p for p in paths if "community/addons" in p or "community/odoo/addons" in p]
-    assert len(non_comm) == 2
-    assert len(comm) == 2
-
-
-def test_odoorc_workspace_overrides_global(tmp_path):
+def test_render_odoorc_workspace_overrides_global(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     ws = WorkspaceConfig(
@@ -192,63 +253,36 @@ def test_odoorc_workspace_overrides_global(tmp_path):
         odoorc={"http_port": 8070},
     )
     config = make_config(root_dir=tmp_path)
-    result = make_odoorc(ws, config)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("odoorc.j2", ctx)
 
     assert "http_port = 8070" in result
     assert "http_port = 8069" not in result
 
 
-def test_odoorc_no_quotes_on_string_values(tmp_path):
+def test_render_odoorc_no_quotes_on_string_values(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     ws = make_ws_config("test", ["community"])
     config = make_config(root_dir=tmp_path)
-    result = make_odoorc(ws, config)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("odoorc.j2", ctx)
 
     assert 'db_host = "localhost"' not in result
     assert "db_host = localhost" in result
 
 
-def test_odoorc_absolute_addons_paths(tmp_path):
-    ws_dir = tmp_path / "workspaces" / "test"
-    setup_odoo_main_repo(ws_dir, "community")
-    setup_flat_repo(ws_dir, "enterprise")
-    ws = make_ws_config("test", ["community", "enterprise"])
-    config = make_config(root_dir=tmp_path)
-    result = make_odoorc(ws, config)
-
-    assert str(ws_dir / "enterprise") in result
-    assert str(ws_dir / "community" / "addons") in result
-
-
-def test_odoorc_categorized_repo(tmp_path):
-    ws_dir = tmp_path / "workspaces" / "test"
-    setup_odoo_main_repo(ws_dir, "community")
-    setup_categorized_repo(ws_dir, "partner-addons")
-    ws = make_ws_config("test", ["community", "partner-addons"])
-    config = make_config(root_dir=tmp_path)
-    result = make_odoorc(ws, config)
-
-    lines = result.split("\n")
-    addons_line = next(l for l in lines if l.startswith("addons_path"))
-    paths = addons_line.split("=", 1)[1].strip().split(",")
-
-    # Both sub-paths of partner-addons should appear before community
-    assert any("partner-addons/messaging" in p or "partner-addons/telephony" in p for p in paths)
-    comm_idx = next(i for i, p in enumerate(paths) if "community/addons" in p)
-    non_comm = [p for p in paths[:comm_idx] if "partner-addons" in p]
-    assert len(non_comm) == 2
-
-
 # ---------------------------------------------------------------------------
-# make_odools_toml
+# Template rendering — odools.toml
 # ---------------------------------------------------------------------------
 
-def test_odools_community_only(tmp_path):
+def test_render_odools_community_only(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     ws = make_ws_config("test", ["community"])
-    result = make_odools_toml(ws, ws_dir)
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("odools.toml.j2", ctx)
 
     assert "[[config]]" in result
     assert "[Odoo Workspace] test" in result
@@ -259,12 +293,14 @@ def test_odools_community_only(tmp_path):
     assert "./enterprise" not in result
 
 
-def test_odools_community_enterprise_order(tmp_path):
+def test_render_odools_enterprise_before_community(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_flat_repo(ws_dir, "enterprise")
     ws = make_ws_config("test", ["community", "enterprise"])
-    result = make_odools_toml(ws, ws_dir)
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("odools.toml.j2", ctx)
 
     assert "./enterprise" in result
     ent_idx = result.index("./enterprise")
@@ -272,42 +308,34 @@ def test_odools_community_enterprise_order(tmp_path):
     assert ent_idx < com_idx
 
 
-def test_odools_full_workspace(tmp_path):
-    ws_dir = tmp_path / "workspaces" / "test"
-    setup_odoo_main_repo(ws_dir, "community")
-    setup_flat_repo(ws_dir, "enterprise")
-    setup_flat_repo(ws_dir, "brboi-addons")
-    ws = make_ws_config("test", ["community", "enterprise", "brboi-addons"])
-    result = make_odools_toml(ws, ws_dir)
-
-    assert "./enterprise" in result
-    assert "./brboi-addons" in result
-    assert "./community/addons" in result
-    assert "./community/odoo/addons" in result
-
-
-def test_odools_categorized_repo(tmp_path):
+def test_render_odools_categorized_repo(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_categorized_repo(ws_dir, "partner-addons")
     ws = make_ws_config("test", ["community", "partner-addons"])
-    result = make_odools_toml(ws, ws_dir)
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("odools.toml.j2", ctx)
 
     assert "./partner-addons/messaging" in result
     assert "./partner-addons/telephony" in result
     assert "./community/addons" in result
-    # categorized paths before community
     msg_idx = result.index("./partner-addons/messaging")
     com_idx = result.index("./community/addons")
     assert msg_idx < com_idx
 
 
 # ---------------------------------------------------------------------------
-# make_mise_toml
+# Template rendering — mise.toml
 # ---------------------------------------------------------------------------
 
-def test_mise_toml_structure():
-    result = make_mise_toml()
+def test_render_mise_toml(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("mise.toml.j2", ctx)
 
     assert "[tools]" in result
     assert "python" in result
@@ -315,96 +343,20 @@ def test_mise_toml_structure():
     assert "community/requirements.txt" in result
     assert "[env]" in result
     assert ".venv" in result
+    assert "{{config_root}}/community" in result
 
 
 # ---------------------------------------------------------------------------
-# make_requirements_dev
+# Template rendering — pyrightconfig.json
 # ---------------------------------------------------------------------------
 
-def test_requirements_dev():
-    result = make_requirements_dev()
-    assert "inotify" in result
-
-
-# ---------------------------------------------------------------------------
-# make_vscode_settings
-# ---------------------------------------------------------------------------
-
-def test_vscode_settings():
-    ws = WorkspaceConfig(
-        name="test",
-        repos={
-            "community": BranchSpec("origin/master"),
-            "enterprise": BranchSpec("origin/master", "master-test"),
-        },
-    )
-    result = make_vscode_settings(ws)
-
-    assert "[Odoo Workspace] test" in result
-
-
-# ---------------------------------------------------------------------------
-# make_vscode_launch
-# ---------------------------------------------------------------------------
-
-def test_vscode_launch():
-    result = make_vscode_launch()
-
-    assert "debugpy" in result
-    assert "${workspaceFolder}/community" in result
-    assert "odoo-bin" in result
-    assert "odoorc" in result
-
-
-# ---------------------------------------------------------------------------
-# make_zed_settings
-# ---------------------------------------------------------------------------
-
-def test_zed_settings_community_enterprise():
-    ws = WorkspaceConfig(
-        name="test",
-        repos={
-            "community": BranchSpec("origin/master"),
-            "enterprise": BranchSpec("origin/master", "master-test"),
-        },
-    )
-    result = make_zed_settings(ws)
-
-    assert "community/**" in result
-    assert "enterprise/**" in result
-    assert "[Odoo Workspace] test" in result
-    assert '"mise.toml"' in result
-    assert '"odools.toml"' in result
-    assert '"pyrightconfig.json"' in result
-    assert '"**/.venv"' in result
-
-
-def test_zed_settings_full_workspace():
-    ws = WorkspaceConfig(
-        name="test",
-        repos={
-            "community": BranchSpec("origin/master"),
-            "enterprise": BranchSpec("origin/master", "master-test"),
-            "brboi-addons": BranchSpec("origin/main"),
-        },
-    )
-    result = make_zed_settings(ws)
-
-    assert "community/**" in result
-    assert "enterprise/**" in result
-    assert "brboi-addons/**" in result
-    assert '"mise.toml"' in result
-    assert '"odools.toml"' in result
-    assert '"pyrightconfig.json"' in result
-    assert '"**/.venv"' in result
-
-
-# ---------------------------------------------------------------------------
-# make_pyrightconfig
-# ---------------------------------------------------------------------------
-
-def test_pyrightconfig():
-    result = make_pyrightconfig()
+def test_render_pyrightconfig(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("pyrightconfig.json.j2", ctx)
     data = json.loads(result)
 
     assert data["venvPath"] == "."
@@ -415,11 +367,78 @@ def test_pyrightconfig():
 
 
 # ---------------------------------------------------------------------------
-# make_zed_debug
+# Template rendering — .vscode
 # ---------------------------------------------------------------------------
 
-def test_zed_debug():
-    result = make_zed_debug()
+def test_render_vscode_settings(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template(".vscode/settings.json.j2", ctx)
+
+    assert "[Odoo Workspace] test" in result
+
+
+def test_render_vscode_launch(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template(".vscode/launch.json.j2", ctx)
+
+    assert "debugpy" in result
+    assert "${workspaceFolder}/community" in result
+    assert "odoo-bin" in result
+    assert "odoorc" in result
+
+
+# ---------------------------------------------------------------------------
+# Template rendering — .zed
+# ---------------------------------------------------------------------------
+
+def test_render_zed_settings(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_flat_repo(ws_dir, "enterprise")
+    ws = make_ws_config("test", ["community", "enterprise"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template(".zed/settings.json.j2", ctx)
+
+    assert "community/**" in result
+    assert "enterprise/**" in result
+    assert "[Odoo Workspace] test" in result
+    assert '"mise.toml"' in result
+    assert '"odools.toml"' in result
+    assert '"pyrightconfig.json"' in result
+    assert '"**/.venv"' in result
+
+
+def test_render_zed_settings_full_workspace(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    setup_flat_repo(ws_dir, "enterprise")
+    setup_flat_repo(ws_dir, "brboi-addons")
+    ws = make_ws_config("test", ["community", "enterprise", "brboi-addons"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template(".zed/settings.json.j2", ctx)
+
+    assert "community/**" in result
+    assert "enterprise/**" in result
+    assert "brboi-addons/**" in result
+
+
+def test_render_zed_debug(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template(".zed/debug.json.j2", ctx)
 
     assert "Debugpy" in result
     assert "${ZED_WORKTREE_ROOT}/community" in result

@@ -1,0 +1,9 @@
+[[config]]
+name = "[Odoo Workspace] {{ ws_name }}"
+python_path = ".venv/bin/python"
+odoo_path = "./{{ main_repo_alias }}"
+addons_paths = [
+{% for item in odools_path_items %}
+    "./{{ item }}",
+{% endfor %}
+]

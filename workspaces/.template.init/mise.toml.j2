@@ -1,0 +1,9 @@
+[tools]
+python = "3.12"
+
+[hooks]
+postinstall = "pip install -r {{ main_repo_alias }}/requirements.txt -r requirements-dev.txt"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+_.path = ["{% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}"]
