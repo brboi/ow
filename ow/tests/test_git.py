@@ -5,9 +5,14 @@ import pytest
 
 from ow.config import BranchSpec, RemoteConfig
 from ow.git import (
+    _set_branch_upstream,
+    attach_worktree,
     create_worktree,
+    detach_worktree,
     ensure_bare_repo,
     ensure_ref,
+    get_remote_ref_for_branch,
+    get_remote_url,
     get_rev_list_count,
     get_upstream,
     get_worktree_head,
@@ -16,6 +21,7 @@ from ow.git import (
     resolve_spec,
     resolve_spec_local,
     worktree_exists,
+    worktree_is_detached,
 )
 
 
@@ -190,7 +196,7 @@ def test_create_worktree_attached_new_branch(tmp_path):
 
     branch_missing = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock()]) as mock_run:
+    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
     assert mock_run.call_args_list[1] == call(
@@ -201,7 +207,7 @@ def test_create_worktree_attached_new_branch(tmp_path):
 
 
 def test_create_worktree_attached_new_branch_sets_upstream(tmp_path):
-    """New branch creation also sets upstream tracking to spec.base_ref."""
+    """New branch creation also sets upstream tracking via two git config calls."""
     bare_repo = tmp_path / "enterprise.git"
     bare_repo.mkdir()
     worktree_path = Path("/fake/workspaces/test/enterprise")
@@ -209,7 +215,7 @@ def test_create_worktree_attached_new_branch_sets_upstream(tmp_path):
 
     branch_missing = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock()]) as mock_run:
+    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
     assert mock_run.call_args_list[1] == call(
@@ -218,14 +224,19 @@ def test_create_worktree_attached_new_branch_sets_upstream(tmp_path):
         check=True,
     )
     assert mock_run.call_args_list[2] == call(
-        ["git", "-C", str(bare_repo), "branch", "--set-upstream-to",
-         "dev/master-parrot-ring-the-phone", "master-parrot-ring-the-phone"],
+        ["git", "-C", str(bare_repo), "config",
+         "branch.master-parrot-ring-the-phone.remote", "dev"],
+        check=True,
+    )
+    assert mock_run.call_args_list[3] == call(
+        ["git", "-C", str(bare_repo), "config",
+         "branch.master-parrot-ring-the-phone.merge", "refs/heads/master-parrot-ring-the-phone"],
         check=True,
     )
 
 
 def test_create_worktree_attached_existing_branch(tmp_path):
-    """Branch already exists (prunable worktree re-created) — omits -b."""
+    """Branch already exists (prunable worktree re-created) — omits -b, still sets upstream."""
     bare_repo = tmp_path / "community.git"
     bare_repo.mkdir()
     worktree_path = Path("/fake/workspaces/test/community")
@@ -233,11 +244,20 @@ def test_create_worktree_attached_existing_branch(tmp_path):
 
     branch_exists = MagicMock(returncode=0)
 
-    with patch("ow.git.subprocess.run", side_effect=[branch_exists, MagicMock()]) as mock_run:
+    with patch("ow.git.subprocess.run", side_effect=[branch_exists, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
+    assert mock_run.call_count == 4
     assert mock_run.call_args_list[1] == call(
         ["git", "-C", str(bare_repo), "worktree", "add", str(worktree_path), "master-feature"],
+        check=True,
+    )
+    assert mock_run.call_args_list[2] == call(
+        ["git", "-C", str(bare_repo), "config", "branch.master-feature.remote", "origin"],
+        check=True,
+    )
+    assert mock_run.call_args_list[3] == call(
+        ["git", "-C", str(bare_repo), "config", "branch.master-feature.merge", "refs/heads/master"],
         check=True,
     )
 
@@ -491,7 +511,7 @@ def test_resolve_spec_branch_found_in_existing_local_refs(tmp_path):
 
 
 def test_resolve_spec_local_branch_found_on_remote(tmp_path):
-    """local_branch already exists on a remote — use it as base_ref, skip base branch lookup."""
+    """local_branch already exists on a remote — use it as base_ref, then ensure base branch ref."""
     bare_repo = tmp_path / "enterprise.git"
     bare_repo.mkdir()
     spec = BranchSpec("origin/master-parrot", "master-parrot-ring-the-phone")
@@ -503,17 +523,19 @@ def test_resolve_spec_local_branch_found_on_remote(tmp_path):
     rev_parse_fail_origin = MagicMock(returncode=1)  # origin/master-parrot-ring-the-phone: miss
     fetch_fail_origin = MagicMock(returncode=1)       # fetch origin master-parrot-ring-the-phone: fail
     rev_parse_ok_dev = MagicMock(returncode=0)         # dev/master-parrot-ring-the-phone: hit
+    rev_parse_ok_base = MagicMock(returncode=0)        # refs/remotes/origin/master-parrot: already present
 
     with patch("ow.git.subprocess.run", side_effect=[
         rev_parse_fail_origin,
         fetch_fail_origin,
         rev_parse_ok_dev,
+        rev_parse_ok_base,  # _ensure_base_ref_non_fatal: base ref already present
     ]) as mock_run:
         result = resolve_spec(bare_repo, spec, remotes)
 
     assert result.base_ref == "dev/master-parrot-ring-the-phone"
     assert result.local_branch == "master-parrot-ring-the-phone"
-    assert mock_run.call_count == 3
+    assert mock_run.call_count == 4
 
 
 def test_resolve_spec_local_branch_not_on_remote_falls_back_to_base(tmp_path):
@@ -617,3 +639,375 @@ def test_resolve_spec_local_raises_when_not_found(tmp_path):
     with patch("ow.git.subprocess.run", return_value=always_fail):
         with pytest.raises(RuntimeError, match="nonexistent"):
             resolve_spec_local(bare_repo, spec, remotes)
+
+
+# ---------------------------------------------------------------------------
+# _set_branch_upstream
+# ---------------------------------------------------------------------------
+
+def test_set_branch_upstream(tmp_path):
+    """Writes branch.X.remote and branch.X.merge config keys."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+
+    with patch("ow.git.subprocess.run") as mock_run:
+        _set_branch_upstream(bare_repo, "master-feature", "origin", "master")
+
+    assert mock_run.call_count == 2
+    assert mock_run.call_args_list[0] == call(
+        ["git", "-C", str(bare_repo), "config", "branch.master-feature.remote", "origin"],
+        check=True,
+    )
+    assert mock_run.call_args_list[1] == call(
+        ["git", "-C", str(bare_repo), "config", "branch.master-feature.merge", "refs/heads/master"],
+        check=True,
+    )
+
+
+def test_set_branch_upstream_non_origin(tmp_path):
+    """remote arg is forwarded correctly for non-origin remotes."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+
+    with patch("ow.git.subprocess.run") as mock_run:
+        _set_branch_upstream(bare_repo, "master-parrot-ring-the-phone", "dev", "master-parrot-ring-the-phone")
+
+    assert mock_run.call_args_list[0] == call(
+        ["git", "-C", str(bare_repo), "config",
+         "branch.master-parrot-ring-the-phone.remote", "dev"],
+        check=True,
+    )
+    assert mock_run.call_args_list[1] == call(
+        ["git", "-C", str(bare_repo), "config",
+         "branch.master-parrot-ring-the-phone.merge", "refs/heads/master-parrot-ring-the-phone"],
+        check=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# worktree_is_detached
+# ---------------------------------------------------------------------------
+
+def test_worktree_is_detached_returns_true(tmp_path):
+    """Returns True when symbolic-ref exits non-zero (HEAD is detached)."""
+    worktree_path = tmp_path / "workspaces" / "test" / "community"
+    worktree_path.mkdir(parents=True)
+
+    mock_result = MagicMock(returncode=1)
+
+    with patch("ow.git.subprocess.run", return_value=mock_result):
+        assert worktree_is_detached(worktree_path) is True
+
+
+def test_worktree_is_detached_returns_false(tmp_path):
+    """Returns False when symbolic-ref exits zero (HEAD is on a branch)."""
+    worktree_path = tmp_path / "workspaces" / "test" / "community"
+    worktree_path.mkdir(parents=True)
+
+    mock_result = MagicMock(returncode=0)
+
+    with patch("ow.git.subprocess.run", return_value=mock_result):
+        assert worktree_is_detached(worktree_path) is False
+
+
+# ---------------------------------------------------------------------------
+# attach_worktree
+# ---------------------------------------------------------------------------
+
+def test_attach_worktree_creates_new_branch(tmp_path):
+    """When local branch doesn't exist: switch -c, then set upstream."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    worktree_path = Path("/fake/workspaces/test/community")
+    spec = BranchSpec("origin/master", "master-feature")
+
+    branch_missing = MagicMock(returncode=1)
+
+    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
+        attach_worktree(bare_repo, worktree_path, spec)
+
+    assert mock_run.call_count == 4
+    assert mock_run.call_args_list[1] == call(
+        ["git", "-C", str(worktree_path), "switch", "-c", "master-feature"],
+        check=True,
+    )
+    assert mock_run.call_args_list[2] == call(
+        ["git", "-C", str(bare_repo), "config", "branch.master-feature.remote", "origin"],
+        check=True,
+    )
+    assert mock_run.call_args_list[3] == call(
+        ["git", "-C", str(bare_repo), "config", "branch.master-feature.merge", "refs/heads/master"],
+        check=True,
+    )
+
+
+def test_attach_worktree_existing_branch(tmp_path):
+    """When local branch exists: switch (no -c), then set upstream."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    worktree_path = Path("/fake/workspaces/test/community")
+    spec = BranchSpec("origin/master", "master-feature")
+
+    branch_exists = MagicMock(returncode=0)
+
+    with patch("ow.git.subprocess.run", side_effect=[branch_exists, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
+        attach_worktree(bare_repo, worktree_path, spec)
+
+    assert mock_run.call_count == 4
+    assert mock_run.call_args_list[1] == call(
+        ["git", "-C", str(worktree_path), "switch", "master-feature"],
+        check=True,
+    )
+    assert mock_run.call_args_list[2] == call(
+        ["git", "-C", str(bare_repo), "config", "branch.master-feature.remote", "origin"],
+        check=True,
+    )
+    assert mock_run.call_args_list[3] == call(
+        ["git", "-C", str(bare_repo), "config", "branch.master-feature.merge", "refs/heads/master"],
+        check=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# detach_worktree
+# ---------------------------------------------------------------------------
+
+def test_detach_worktree(tmp_path):
+    """Switches worktree to detached HEAD at base_ref."""
+    worktree_path = Path("/fake/workspaces/test/community")
+
+    with patch("ow.git.subprocess.run") as mock_run:
+        detach_worktree(worktree_path, "origin/master")
+
+    mock_run.assert_called_once_with(
+        ["git", "-C", str(worktree_path), "switch", "--detach", "origin/master"],
+        check=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# resolve_spec Fix 1 — base ref fetch on early-return path
+# ---------------------------------------------------------------------------
+
+def test_resolve_spec_local_branch_found_fetches_base_ref_when_missing(tmp_path):
+    """Early-return path: base ref not in local store — rev-parse miss + fetch issued."""
+    bare_repo = tmp_path / "enterprise.git"
+    bare_repo.mkdir()
+    spec = BranchSpec("origin/18.0", "18.0-my-feature")
+    remotes = {"origin": RemoteConfig(url="git@github.com:odoo/enterprise.git")}
+
+    rev_parse_ok_local = MagicMock(returncode=0)   # origin/18.0-my-feature already fetched
+    rev_parse_miss_base = MagicMock(returncode=1)  # refs/remotes/origin/18.0: missing
+    fetch_base_ok = MagicMock(returncode=0)         # fetch origin 18.0: success
+
+    with patch("ow.git.subprocess.run", side_effect=[
+        rev_parse_ok_local,
+        rev_parse_miss_base,
+        fetch_base_ok,
+    ]) as mock_run:
+        result = resolve_spec(bare_repo, spec, remotes)
+
+    assert result.base_ref == "origin/18.0-my-feature"
+    assert result.local_branch == "18.0-my-feature"
+    assert mock_run.call_count == 3
+    assert mock_run.call_args_list[1] == call(
+        ["git", "-C", str(bare_repo), "rev-parse", "--verify", "refs/remotes/origin/18.0"],
+        capture_output=True,
+    )
+    assert mock_run.call_args_list[2] == call(
+        ["git", "-C", str(bare_repo), "fetch", "origin", "18.0:refs/remotes/origin/18.0"],
+        capture_output=True,
+    )
+
+
+def test_resolve_spec_local_branch_found_skips_base_ref_fetch_when_present(tmp_path):
+    """Early-return path: base ref already in local store — no fetch issued."""
+    bare_repo = tmp_path / "enterprise.git"
+    bare_repo.mkdir()
+    spec = BranchSpec("origin/18.0", "18.0-my-feature")
+    remotes = {"origin": RemoteConfig(url="git@github.com:odoo/enterprise.git")}
+
+    rev_parse_ok_local = MagicMock(returncode=0)  # origin/18.0-my-feature already fetched
+    rev_parse_ok_base = MagicMock(returncode=0)   # refs/remotes/origin/18.0: already present
+
+    with patch("ow.git.subprocess.run", side_effect=[
+        rev_parse_ok_local,
+        rev_parse_ok_base,
+    ]) as mock_run:
+        result = resolve_spec(bare_repo, spec, remotes)
+
+    assert result.base_ref == "origin/18.0-my-feature"
+    assert result.local_branch == "18.0-my-feature"
+    assert mock_run.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# get_remote_ref_for_branch
+# ---------------------------------------------------------------------------
+
+def test_get_remote_ref_for_branch_found_on_first_remote(tmp_path):
+    """Returns '{remote}/{branch}' when the ref exists on the first configured remote."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    alias_remotes = {
+        "iap-apps": RemoteConfig(url="git@github.com:odoo-ps/ps-tech-iap-apps.git"),
+        "origin": RemoteConfig(url="git@github.com:odoo/odoo.git"),
+    }
+
+    rev_parse_ok = MagicMock(returncode=0)
+
+    with patch("ow.git.subprocess.run", return_value=rev_parse_ok) as mock_run:
+        result = get_remote_ref_for_branch(
+            bare_repo, "18.0-add-voip-telnyx-service-basm", alias_remotes
+        )
+
+    assert result == "iap-apps/18.0-add-voip-telnyx-service-basm"
+    assert mock_run.call_count == 1
+    mock_run.assert_called_once_with(
+        ["git", "-C", str(bare_repo), "rev-parse", "--verify",
+         "refs/remotes/iap-apps/18.0-add-voip-telnyx-service-basm"],
+        capture_output=True,
+    )
+
+
+def test_get_remote_ref_for_branch_found_on_second_remote(tmp_path):
+    """Skips first remote (miss) and returns match on second."""
+    bare_repo = tmp_path / "enterprise.git"
+    bare_repo.mkdir()
+    alias_remotes = {
+        "origin": RemoteConfig(url="git@github.com:odoo/enterprise.git"),
+        "dev": RemoteConfig(url="git@github.com:odoo-dev/enterprise.git"),
+    }
+
+    miss = MagicMock(returncode=1)
+    hit = MagicMock(returncode=0)
+
+    with patch("ow.git.subprocess.run", side_effect=[miss, hit]) as mock_run:
+        result = get_remote_ref_for_branch(bare_repo, "master-parrot", alias_remotes)
+
+    assert result == "dev/master-parrot"
+    assert mock_run.call_count == 2
+
+
+def test_get_remote_ref_for_branch_excludes_base_ref(tmp_path):
+    """exclude_ref skips the candidate even if the ref exists."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    alias_remotes = {
+        "origin": RemoteConfig(url="git@github.com:odoo/odoo.git"),
+        "iap-apps": RemoteConfig(url="git@github.com:odoo-ps/ps-tech-iap-apps.git"),
+    }
+
+    # origin/18.0 would match but is excluded; iap-apps/18.0 doesn't exist
+    hit_origin = MagicMock(returncode=0)
+    miss_iap = MagicMock(returncode=1)
+
+    with patch("ow.git.subprocess.run", side_effect=[miss_iap]) as mock_run:
+        result = get_remote_ref_for_branch(
+            bare_repo, "18.0", alias_remotes, exclude_ref="origin/18.0"
+        )
+
+    # origin/18.0 skipped entirely; iap-apps/18.0 not found
+    assert result is None
+    assert mock_run.call_count == 1  # only iap-apps checked (origin/18.0 excluded)
+
+
+def test_get_remote_ref_for_branch_returns_none_when_not_found(tmp_path):
+    """Returns None when no configured remote has the branch."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    alias_remotes = {
+        "origin": RemoteConfig(url="git@github.com:odoo/odoo.git"),
+        "dev": RemoteConfig(url="git@github.com:odoo-dev/odoo.git"),
+    }
+
+    always_miss = MagicMock(returncode=1)
+
+    with patch("ow.git.subprocess.run", return_value=always_miss):
+        result = get_remote_ref_for_branch(bare_repo, "18.0-nonexistent", alias_remotes)
+
+    assert result is None
+
+
+def test_get_remote_ref_for_branch_prefers_non_base_remote(tmp_path):
+    """With base_remote set, fork remote is checked before base remote.
+
+    Scenario: origin/master-parrot exists (fetched as base for another workspace)
+    AND dev/master-parrot exists (mirrored on dev). Should return dev/ first,
+    and the caller falls back to same-repo PR search if fork PR not found.
+    """
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    alias_remotes = {
+        "origin": RemoteConfig(url="git@github.com:odoo/odoo.git"),
+        "dev": RemoteConfig(url="git@github.com:odoo-dev/odoo.git"),
+    }
+
+    # dev is checked first (non-base), hits immediately
+    hit_dev = MagicMock(returncode=0)
+
+    with patch("ow.git.subprocess.run", side_effect=[hit_dev]) as mock_run:
+        result = get_remote_ref_for_branch(
+            bare_repo, "master-parrot", alias_remotes,
+            exclude_ref="origin/master", base_remote="origin",
+        )
+
+    assert result == "dev/master-parrot"
+    assert mock_run.call_count == 1
+    mock_run.assert_called_once_with(
+        ["git", "-C", str(bare_repo), "rev-parse", "--verify",
+         "refs/remotes/dev/master-parrot"],
+        capture_output=True,
+    )
+
+
+def test_get_remote_ref_for_branch_falls_back_to_base_remote(tmp_path):
+    """Falls back to base remote if no fork remote has the branch."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    alias_remotes = {
+        "origin": RemoteConfig(url="git@github.com:odoo/iap-apps.git"),
+    }
+
+    hit_origin = MagicMock(returncode=0)
+
+    with patch("ow.git.subprocess.run", side_effect=[hit_origin]) as mock_run:
+        result = get_remote_ref_for_branch(
+            bare_repo, "18.0-my-feature", alias_remotes,
+            exclude_ref="origin/18.0", base_remote="origin",
+        )
+
+    assert result == "origin/18.0-my-feature"
+    assert mock_run.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# get_remote_url
+# ---------------------------------------------------------------------------
+
+def test_get_remote_url_returns_url(tmp_path):
+    """Returns the URL when git remote get-url succeeds."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+
+    mock_result = MagicMock(returncode=0)
+    mock_result.stdout = "git@github.com:odoo-dev/odoo.git\n"
+
+    with patch("ow.git.subprocess.run", return_value=mock_result):
+        result = get_remote_url(bare_repo, "dev")
+
+    assert result == "git@github.com:odoo-dev/odoo.git"
+
+
+def test_get_remote_url_returns_none_when_remote_missing(tmp_path):
+    """Returns None when the remote is not configured."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+
+    mock_result = MagicMock(returncode=128)
+    mock_result.stdout = ""
+
+    with patch("ow.git.subprocess.run", return_value=mock_result):
+        result = get_remote_url(bare_repo, "nonexistent")
+
+    assert result is None

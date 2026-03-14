@@ -125,6 +125,8 @@ $ ow status
         community:  dev/master-canary ↓0 ↑0 (origin/master ↓34 ↑0)
         enterprise: dev/master-canary ↓1 ↑1 (origin/master ↓12 ↑0)
     links
+        pr:     odoo/odoo#12345
+        pr:     odoo/enterprise#1234
         runbot: master-canary
 
 [canary-can-fly]
@@ -132,6 +134,7 @@ $ ow status
         community:  dev/master-canary-can-fly ↓0 ↑3 (dev/master-canary ↓1 ↑0)
         enterprise: master-canary-can-fly (local) (dev/master-canary ↓0 ↑0)
     links
+        pr:     odoo/odoo#12345
         runbot: master-canary-can-fly
 
 [fantastic-iap-service]
@@ -140,6 +143,7 @@ $ ow status
         enterprise: origin/18.0 ↓11 ↑0 (DETACHED: d9c8b7a)
         iap-apps:  origin/18.0-fantastic-service-ngram ↓0 ↑1 (origin/18.0 ↓27 ↑0)
     links
+        pr:     odoo/iap-apps#123
         runbot: fantastic-iap-service
 ```
 

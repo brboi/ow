@@ -20,8 +20,13 @@ from ow.config import (
     update_config_workspaces,
 )
 from ow.git import (
+    _set_branch_upstream,
+    attach_worktree,
     create_worktree,
+    detach_worktree,
     ensure_bare_repo,
+    get_remote_ref_for_branch,
+    get_remote_url,
     get_rev_list_count,
     get_upstream,
     get_worktree_head,
@@ -30,6 +35,7 @@ from ow.git import (
     resolve_spec,
     resolve_spec_local,
     worktree_exists,
+    worktree_is_detached,
 )
 
 
@@ -275,6 +281,15 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
                 subprocess.run(["git", "-C", str(bare_repo), "worktree", "prune"], check=True)
                 ws_dir.mkdir(parents=True, exist_ok=True)
                 create_worktree(bare_repo, worktree_path, resolved)
+            else:
+                currently_detached = worktree_is_detached(worktree_path)
+                if currently_detached and not resolved.is_detached:
+                    attach_worktree(bare_repo, worktree_path, resolved)
+                elif not currently_detached and resolved.is_detached:
+                    detach_worktree(worktree_path, resolved.base_ref)
+                elif not resolved.is_detached:
+                    # Already on the right branch — ensure upstream config is current
+                    _set_branch_upstream(bare_repo, resolved.local_branch, resolved.remote, resolved.branch)
 
         # 3. Render templates and copy statics
         ws_dir.mkdir(parents=True, exist_ok=True)
@@ -356,7 +371,10 @@ def cmd_status(config: Config, name: str | None = None) -> None:
             # Helper: get org/repo for a given remote name
             def org_repo_for(remote_name: str) -> str | None:
                 rc = alias_remotes.get(remote_name)
-                return _parse_github_org_repo(rc.url) if rc else None
+                if rc:
+                    return _parse_github_org_repo(rc.url)
+                url = get_remote_url(bare_repo, remote_name)
+                return _parse_github_org_repo(url) if url else None
 
             try:
                 if spec.is_detached:
@@ -375,56 +393,105 @@ def cmd_status(config: Config, name: str | None = None) -> None:
                     if first_attached_branch is None:
                         first_attached_branch = spec.local_branch
 
-                    upstream = get_upstream(worktree_path)
-                    if upstream:
-                        ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
-
-                        up_parts = upstream.split("/", 1)
-                        up_remote = up_parts[0] if len(up_parts) == 2 else "origin"
-                        up_branch = up_parts[1] if len(up_parts) == 2 else upstream
+                    remote_ref = get_remote_ref_for_branch(
+                        bare_repo, spec.local_branch, alias_remotes,
+                        exclude_ref=spec.base_ref, base_remote=spec.remote,
+                    )
+                    if remote_ref:
+                        # Branch found on a configured remote — Case 1 display + PR detection
+                        ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", remote_ref)
+                        up_parts = remote_ref.split("/", 1)
+                        up_remote = up_parts[0]
+                        up_branch = up_parts[1]
                         up_org_repo = org_repo_for(up_remote)
                         up_url = _github_tree_url(up_org_repo, up_branch) if up_org_repo else None
 
-                        if up_org_repo:
+                        if up_remote != spec.remote:
+                            base_org_repo = org_repo_for(spec.remote)
+                            fork_user = up_org_repo.split("/")[0] if up_org_repo else None
+                            head_filter = f"{fork_user}:{up_branch}" if fork_user else up_branch
+                            if base_org_repo:
+                                pr_info = _get_pr_info(base_org_repo, head_filter)
+                                if not pr_info:
+                                    # Branch may be mirrored to fork but PR is on base repo directly
+                                    pr_info = _get_pr_info(base_org_repo, up_branch)
+                                if pr_info:
+                                    pr_links.append((base_org_repo, pr_info[0], pr_info[1]))
+                        elif up_org_repo:
                             pr_info = _get_pr_info(up_org_repo, up_branch)
                             if pr_info:
                                 pr_links.append((up_org_repo, pr_info[0], pr_info[1]))
 
-                        if upstream != spec.base_ref:
-                            # Case 1: upstream ≠ base — standard format
-                            ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, spec.base_ref)
-                            base_org_repo = org_repo_for(spec.remote)
-                            base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
-                            display_text = _link(up_url, _c(upstream, 1))
-                            base_text = _link(base_url, _c(spec.base_ref, 1))
-                            status = f"{display_text} {_counts(behind_up, ahead_up)} ({base_text} {_counts(behind_base, ahead_base)})"
-                        else:
-                            # Case 2: upstream == base — show local branch as primary
-                            upstream_text = _link(up_url, _c(upstream, 1))
-                            status = f"{_c(spec.local_branch, 1)} {_c('(local)', 2)} ({upstream_text} {_counts(behind_up, ahead_up)})"
-
-                    else:
-                        # Case 3: no upstream
+                        ahead_base, behind_base = get_rev_list_count(worktree_path, remote_ref, spec.base_ref)
                         base_org_repo = org_repo_for(spec.remote)
                         base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
-                        ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", spec.base_ref)
+                        display_text = _link(up_url, _c(remote_ref, 1))
                         base_text = _link(base_url, _c(spec.base_ref, 1))
-                        status = f"{_c(spec.local_branch, 1)} {_c('(local)', 2)} ({base_text} {_counts(behind_base, ahead_base)})"
+                        status = f"{display_text} {_counts(behind_up, ahead_up)} ({base_text} {_counts(behind_base, ahead_base)})"
+                    else:
+                        upstream = get_upstream(worktree_path)
+                        if upstream:
+                            ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
+
+                            up_parts = upstream.split("/", 1)
+                            up_remote = up_parts[0] if len(up_parts) == 2 else "origin"
+                            up_branch = up_parts[1] if len(up_parts) == 2 else upstream
+                            up_org_repo = org_repo_for(up_remote)
+                            up_url = _github_tree_url(up_org_repo, up_branch) if up_org_repo else None
+
+                            if up_remote != spec.remote:
+                                # Branch is on a fork — PR lives in the base (origin) repo
+                                base_org_repo = org_repo_for(spec.remote)
+                                fork_user = up_org_repo.split("/")[0] if up_org_repo else None
+                                head_filter = f"{fork_user}:{up_branch}" if fork_user else up_branch
+                                if base_org_repo:
+                                    pr_info = _get_pr_info(base_org_repo, head_filter)
+                                    if not pr_info:
+                                        # Branch may be mirrored to fork but PR is on base repo directly
+                                        pr_info = _get_pr_info(base_org_repo, up_branch)
+                                    if pr_info:
+                                        pr_links.append((base_org_repo, pr_info[0], pr_info[1]))
+                            elif up_org_repo:
+                                pr_info = _get_pr_info(up_org_repo, up_branch)
+                                if pr_info:
+                                    pr_links.append((up_org_repo, pr_info[0], pr_info[1]))
+
+                            if upstream != spec.base_ref:
+                                # Case 1: upstream ≠ base — standard format
+                                ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, spec.base_ref)
+                                base_org_repo = org_repo_for(spec.remote)
+                                base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
+                                display_text = _link(up_url, _c(upstream, 1))
+                                base_text = _link(base_url, _c(spec.base_ref, 1))
+                                status = f"{display_text} {_counts(behind_up, ahead_up)} ({base_text} {_counts(behind_base, ahead_base)})"
+                            else:
+                                # Case 2: upstream == base — show local branch as primary
+                                upstream_text = _link(up_url, _c(upstream, 1))
+                                status = f"{_c(spec.local_branch, 1)} {_c('(local)', 2)} ({upstream_text} {_counts(behind_up, ahead_up)})"
+
+                        else:
+                            # Case 3: no upstream
+                            base_org_repo = org_repo_for(spec.remote)
+                            base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
+                            ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", spec.base_ref)
+                            base_text = _link(base_url, _c(spec.base_ref, 1))
+                            status = f"{_c(spec.local_branch, 1)} {_c('(local)', 2)} ({base_text} {_counts(behind_base, ahead_base)})"
 
             except subprocess.CalledProcessError:
                 status = _c("(error)", 31)
 
             print(f"        {alias}:{padding}{status}")
 
-        print("    " + _c("links", 2))
-        for org_repo, pr_num, pr_url in pr_links:
-            pr_text = _osc8(pr_url, f"{org_repo}#{pr_num}")
-            print(f"        pr:     {pr_text}")
+        if pr_links or first_attached_branch:
+            print("    " + _c("links", 2))
+            for org_repo, pr_num, pr_url in pr_links:
+                pr_text = _osc8(pr_url, f"{org_repo}#{pr_num}")
+                print(f"        pr:     {pr_text}")
 
-        if first_attached_branch:
-            runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
-            runbot_text = _osc8(runbot_url, first_attached_branch)
-            print(f"        runbot: {runbot_text}")
+            if first_attached_branch:
+                runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
+                runbot_text = _osc8(runbot_url, first_attached_branch)
+                print(f"        runbot: {runbot_text}")
 
         print()
 
