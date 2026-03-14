@@ -1,4 +1,5 @@
 import tempfile
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -6,9 +7,12 @@ import pytest
 from ow.config import (
     BranchSpec,
     WorkspaceConfig,
+    _split_workspace_blocks,
+    archive_workspace,
     format_workspace,
     load_config,
     parse_branch_spec,
+    update_config_workspaces,
 )
 
 
@@ -175,3 +179,70 @@ def test_format_workspace_non_origin_remote():
     )
     result = format_workspace(ws)
     assert 'repo.community = "dev/master-phoenix..fix"' in result
+
+
+# ---------------------------------------------------------------------------
+# _split_workspace_blocks
+# ---------------------------------------------------------------------------
+
+def test_split_workspace_blocks_no_workspace():
+    preamble, blocks = _split_workspace_blocks("[vars]\nhttp_port = 8069\n")
+    assert preamble == "[vars]\nhttp_port = 8069\n"
+    assert blocks == []
+
+
+def test_split_workspace_blocks_two():
+    text = '[vars]\n\n[[workspace]]\nname = "a"\n\n[[workspace]]\nname = "b"\n'
+    preamble, blocks = _split_workspace_blocks(text)
+    assert preamble == "[vars]\n\n"
+    assert len(blocks) == 2
+    assert '[[workspace]]' in blocks[0] and '"a"' in blocks[0]
+    assert '[[workspace]]' in blocks[1] and '"b"' in blocks[1]
+
+
+# ---------------------------------------------------------------------------
+# update_config_workspaces / archive_workspace round-trip
+# ---------------------------------------------------------------------------
+
+def test_update_config_workspaces_preserves_syntax(tmp_path):
+    """Removing a workspace must not alter the TOML text of remaining ones."""
+    toml = textwrap.dedent("""\
+        [vars]
+
+        [[workspace]]
+        name = "keep"
+        repo.community = "master"
+        vars.config.http_port = 8067
+
+        [[workspace]]
+        name = "remove-me"
+        repo.community = "18.0"
+    """)
+    path = tmp_path / "ow.toml"
+    path.write_text(toml)
+    config = load_config(path)
+    remaining = [ws for ws in config.workspaces if ws.name != "remove-me"]
+    update_config_workspaces(path, remaining)
+    result = path.read_text()
+    assert "keep" in result
+    assert "remove-me" not in result
+    assert "vars.config.http_port = 8067" in result
+
+
+def test_archive_workspace_preserves_syntax(tmp_path):
+    toml = textwrap.dedent("""\
+        [[workspace]]
+        name = "archived"
+
+        [workspace.repo]
+        community = "master"
+        vars.config.http_port = 8067
+    """)
+    config_path = tmp_path / "ow.toml"
+    config_path.write_text(toml)
+    config = load_config(config_path)
+    ws = config.workspaces[0]
+    archive_workspace(config_path, ws)
+    archive = (tmp_path / ".ow.toml.archived-workspaces").read_text()
+    assert "[workspace.repo]" in archive
+    assert "vars.config.http_port = 8067" in archive

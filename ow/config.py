@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +60,7 @@ class WorkspaceConfig:
     name: str
     repos: dict[str, BranchSpec]
     vars: dict[str, Any] = field(default_factory=dict)
+    _source_text: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -69,9 +71,17 @@ class Config:
     root_dir: Path
 
 
+def _split_workspace_blocks(text: str) -> tuple[str, list[str]]:
+    parts = re.split(r'(?=^\[\[workspace\]\])', text, flags=re.MULTILINE)
+    return parts[0], parts[1:]
+
+
 def load_config(path: Path) -> Config:
+    text = path.read_text()
     with open(path, "rb") as f:
         data = tomllib.load(f)
+
+    _, raw_blocks = _split_workspace_blocks(text)
 
     vars_ = data.get("vars", {})
 
@@ -86,7 +96,7 @@ def load_config(path: Path) -> Config:
             )
 
     workspaces = []
-    for ws_data in data.get("workspace", []):
+    for i, ws_data in enumerate(data.get("workspace", [])):
         repos = {}
         for alias, spec_str in ws_data.get("repo", {}).items():
             repos[alias] = parse_branch_spec(spec_str)
@@ -94,6 +104,7 @@ def load_config(path: Path) -> Config:
             name=ws_data["name"],
             repos=repos,
             vars=ws_data.get("vars", {}),
+            _source_text=raw_blocks[i] if i < len(raw_blocks) else None,
         ))
 
     return Config(
@@ -119,21 +130,15 @@ def format_workspace(ws: WorkspaceConfig) -> str:
 def update_config_workspaces(path: Path, workspaces: list[WorkspaceConfig]) -> None:
     """Rewrite workspace sections, preserving the preamble."""
     text = path.read_text()
-    lines = text.splitlines(keepends=True)
-
-    split_idx = None
-    for i, line in enumerate(lines):
-        if line.strip() == "[[workspace]]":
-            split_idx = i
-            break
-
-    preamble = "".join(lines[:split_idx]) if split_idx is not None else text
-    ws_text = "\n".join(format_workspace(ws) for ws in workspaces)
-    path.write_text(preamble + ws_text)
+    preamble, _ = _split_workspace_blocks(text)
+    parts = [ws._source_text if ws._source_text is not None else format_workspace(ws)
+             for ws in workspaces]
+    path.write_text(preamble + "".join(parts))
 
 
 def archive_workspace(config_path: Path, ws: WorkspaceConfig) -> None:
     """Append workspace entry to the archived workspaces file."""
+    raw = ws._source_text or format_workspace(ws)
     archive_path = config_path.parent / ".ow.toml.archived-workspaces"
     with open(archive_path, "a") as f:
-        f.write(format_workspace(ws))
+        f.write(raw)
