@@ -15,14 +15,100 @@ from ow.git import (
     get_remote_url,
     get_rev_list_count,
     get_upstream,
+    get_worktree_branch,
     get_worktree_head,
+    ordered_remotes,
     remove_worktree,
-    rebase_worktree,
     resolve_spec,
     resolve_spec_local,
+    run_cmd,
     worktree_exists,
     worktree_is_detached,
 )
+
+
+# ---------------------------------------------------------------------------
+# run_cmd
+# ---------------------------------------------------------------------------
+
+def test_run_cmd_prints_to_stderr(capsys):
+    with patch("ow.git.subprocess.run") as mock_run:
+        run_cmd(["git", "status"], check=True)
+
+    captured = capsys.readouterr()
+    assert "$ git status" in captured.err
+    mock_run.assert_called_once_with(["git", "status"], check=True)
+
+
+def test_run_cmd_quiet_no_stderr(capsys):
+    with patch("ow.git.subprocess.run") as mock_run:
+        run_cmd(["git", "config", "foo", "bar"], quiet=True, check=True)
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    mock_run.assert_called_once_with(["git", "config", "foo", "bar"], check=True)
+
+
+def test_run_cmd_returns_completed_process():
+    mock_result = MagicMock(returncode=0)
+    with patch("ow.git.subprocess.run", return_value=mock_result):
+        result = run_cmd(["git", "status"], quiet=True)
+    assert result.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# ordered_remotes
+# ---------------------------------------------------------------------------
+
+def test_ordered_remotes_origin_first():
+    remotes = {
+        "dev": RemoteConfig(url="dev-url"),
+        "origin": RemoteConfig(url="origin-url"),
+        "abc": RemoteConfig(url="abc-url"),
+    }
+    assert ordered_remotes(remotes) == ["origin", "abc", "dev"]
+
+
+def test_ordered_remotes_no_origin():
+    remotes = {
+        "dev": RemoteConfig(url="dev-url"),
+        "abc": RemoteConfig(url="abc-url"),
+    }
+    assert ordered_remotes(remotes) == ["abc", "dev"]
+
+
+def test_ordered_remotes_only_origin():
+    remotes = {"origin": RemoteConfig(url="origin-url")}
+    assert ordered_remotes(remotes) == ["origin"]
+
+
+def test_ordered_remotes_empty():
+    assert ordered_remotes({}) == []
+
+
+# ---------------------------------------------------------------------------
+# get_worktree_branch
+# ---------------------------------------------------------------------------
+
+def test_get_worktree_branch_returns_name():
+    mock_result = MagicMock(returncode=0)
+    mock_result.stdout = "master-feature\n"
+    with patch("ow.git.subprocess.run", return_value=mock_result):
+        assert get_worktree_branch(Path("/fake")) == "master-feature"
+
+
+def test_get_worktree_branch_returns_none_when_detached():
+    mock_result = MagicMock(returncode=0)
+    mock_result.stdout = "HEAD\n"
+    with patch("ow.git.subprocess.run", return_value=mock_result):
+        assert get_worktree_branch(Path("/fake")) is None
+
+
+def test_get_worktree_branch_returns_none_on_error():
+    mock_result = MagicMock(returncode=128)
+    mock_result.stdout = ""
+    with patch("ow.git.subprocess.run", return_value=mock_result):
+        assert get_worktree_branch(Path("/fake")) is None
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +176,28 @@ def test_ensure_bare_repo_configures_extra_remotes(tmp_path):
         ["git", "-C", str(bare_repo), "config", "remote.dev.fetch", "+refs/heads/*:refs/remotes/dev/*"],
         check=True,
     )
+
+
+def test_ensure_bare_repo_ordered_remotes(tmp_path):
+    """Non-origin remotes are configured in alphabetical order."""
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repo = bare_repos_dir / "community.git"
+    bare_repo.mkdir(parents=True)
+
+    remotes = {
+        "origin": RemoteConfig(url="origin-url"),
+        "zebra": RemoteConfig(url="zebra-url"),
+        "alpha": RemoteConfig(url="alpha-url"),
+    }
+
+    with patch("ow.git.subprocess.run") as mock_run:
+        ensure_bare_repo("community", remotes, bare_repos_dir)
+
+    calls = mock_run.call_args_list
+    assert len(calls) == 2
+    # alpha before zebra
+    assert "remote.alpha.url" in calls[0].args[0][-2]
+    assert "remote.zebra.url" in calls[1].args[0][-2]
 
 
 # ---------------------------------------------------------------------------
@@ -294,72 +402,6 @@ def test_remove_worktree_attached(tmp_path):
     )
     assert calls[1] == call(
         ["git", "-C", str(bare_repo), "branch", "-D", "master-feature"],
-        check=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# rebase_worktree
-# ---------------------------------------------------------------------------
-
-def test_rebase_worktree_detached(tmp_path):
-    bare_repo = tmp_path / "community.git"
-    bare_repo.mkdir()
-    worktree_path = Path("/fake/workspaces/test/community")
-    spec = BranchSpec("origin/master", None)
-
-    with patch("ow.git.subprocess.run") as mock_run:
-        rebase_worktree(bare_repo, worktree_path, spec)
-
-    calls = mock_run.call_args_list
-    assert len(calls) == 2
-    assert calls[0] == call(
-        ["git", "-C", str(bare_repo), "fetch", "origin", "master:refs/remotes/origin/master"],
-        check=True,
-    )
-    assert calls[1] == call(
-        ["git", "-C", str(worktree_path), "switch", "--detach", "origin/master"],
-        check=True,
-    )
-
-
-def test_rebase_worktree_attached(tmp_path):
-    bare_repo = tmp_path / "community.git"
-    bare_repo.mkdir()
-    worktree_path = Path("/fake/workspaces/test/community")
-    spec = BranchSpec("origin/master", "master-feature")
-
-    with patch("ow.git.subprocess.run") as mock_run:
-        rebase_worktree(bare_repo, worktree_path, spec)
-
-    calls = mock_run.call_args_list
-    assert len(calls) == 2
-    assert calls[0] == call(
-        ["git", "-C", str(bare_repo), "fetch", "origin", "master:refs/remotes/origin/master"],
-        check=True,
-    )
-    assert calls[1] == call(
-        ["git", "-C", str(worktree_path), "rebase", "origin/master"],
-        check=True,
-    )
-
-
-def test_rebase_worktree_non_origin(tmp_path):
-    bare_repo = tmp_path / "community.git"
-    bare_repo.mkdir()
-    worktree_path = Path("/fake/workspaces/test/community")
-    spec = BranchSpec("dev/master-phoenix", "fix")
-
-    with patch("ow.git.subprocess.run") as mock_run:
-        rebase_worktree(bare_repo, worktree_path, spec)
-
-    calls = mock_run.call_args_list
-    assert calls[0] == call(
-        ["git", "-C", str(bare_repo), "fetch", "dev", "master-phoenix:refs/remotes/dev/master-phoenix"],
-        check=True,
-    )
-    assert calls[1] == call(
-        ["git", "-C", str(worktree_path), "rebase", "dev/master-phoenix"],
         check=True,
     )
 
@@ -846,7 +888,7 @@ def test_resolve_spec_local_branch_found_skips_base_ref_fetch_when_present(tmp_p
 # ---------------------------------------------------------------------------
 
 def test_get_remote_ref_for_branch_found_on_first_remote(tmp_path):
-    """Returns '{remote}/{branch}' when the ref exists on the first configured remote."""
+    """With ordered_remotes, origin is checked first."""
     bare_repo = tmp_path / "community.git"
     bare_repo.mkdir()
     alias_remotes = {
@@ -861,11 +903,11 @@ def test_get_remote_ref_for_branch_found_on_first_remote(tmp_path):
             bare_repo, "18.0-add-voip-telnyx-service-basm", alias_remotes
         )
 
-    assert result == "iap-apps/18.0-add-voip-telnyx-service-basm"
+    assert result == "origin/18.0-add-voip-telnyx-service-basm"
     assert mock_run.call_count == 1
     mock_run.assert_called_once_with(
         ["git", "-C", str(bare_repo), "rev-parse", "--verify",
-         "refs/remotes/iap-apps/18.0-add-voip-telnyx-service-basm"],
+         "refs/remotes/origin/18.0-add-voip-telnyx-service-basm"],
         capture_output=True,
     )
 
@@ -898,8 +940,6 @@ def test_get_remote_ref_for_branch_excludes_base_ref(tmp_path):
         "iap-apps": RemoteConfig(url="git@github.com:odoo-ps/ps-tech-iap-apps.git"),
     }
 
-    # origin/18.0 would match but is excluded; iap-apps/18.0 doesn't exist
-    hit_origin = MagicMock(returncode=0)
     miss_iap = MagicMock(returncode=1)
 
     with patch("ow.git.subprocess.run", side_effect=[miss_iap]) as mock_run:
@@ -907,9 +947,9 @@ def test_get_remote_ref_for_branch_excludes_base_ref(tmp_path):
             bare_repo, "18.0", alias_remotes, exclude_ref="origin/18.0"
         )
 
-    # origin/18.0 skipped entirely; iap-apps/18.0 not found
+    # origin/18.0 skipped (excluded); iap-apps/18.0 not found
     assert result is None
-    assert mock_run.call_count == 1  # only iap-apps checked (origin/18.0 excluded)
+    assert mock_run.call_count == 1
 
 
 def test_get_remote_ref_for_branch_returns_none_when_not_found(tmp_path):
@@ -930,12 +970,7 @@ def test_get_remote_ref_for_branch_returns_none_when_not_found(tmp_path):
 
 
 def test_get_remote_ref_for_branch_prefers_non_base_remote(tmp_path):
-    """With base_remote set, fork remote is checked before base remote.
-
-    Scenario: origin/master-parrot exists (fetched as base for another workspace)
-    AND dev/master-parrot exists (mirrored on dev). Should return dev/ first,
-    and the caller falls back to same-repo PR search if fork PR not found.
-    """
+    """With base_remote set, fork remote is checked before base remote."""
     bare_repo = tmp_path / "community.git"
     bare_repo.mkdir()
     alias_remotes = {

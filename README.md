@@ -156,20 +156,28 @@ Note that you can CTRL+Click on those parts to open your browser:
 
 Since all worktrees share the same bare repository, you can fetch and rebase from any of the worktrees. For example, if you want to rebase your feature branch on top of the latest `master`, you can simply run `git fetch origin master` and `git rebase origin/master` from any of the worktrees. But if one of your workspace folder points to a detached worktree, you also have to `git switch --detach origin/master` from that folder location.
 
-The easiest way to do this is to use the `ow rebase <workspace-name>` command that will do all the necessary git commands for you in the correct order. This is a shortcut for running `git fetch` and `git switch --detach`/`git rebase` from each of the worktree folders. Here is what it will do:
+The easiest way to do this is to use the `ow rebase <workspace-name>` command that will do all the necessary git commands for you in the correct order. All git commands executed are printed to stderr for visibility (prefixed with `$`).
+
+Before running, `ow rebase` checks that the worktree state matches the config (drift detection). If a worktree is on a different branch than expected, it will abort and ask you to run `ow apply` first.
+
+Here is what it will do for each repo:
 
 ```bash
 # For a DETACHED head, i.e. with `community:master` branch spec:
-git fetch origin master
-git switch --detach origin/master
+    $ git fetch origin master
+    $ git switch --detach origin/master
 # For an ATTACHED head, i.e. with `enterprise:master..anything` branch spec:
-git fetch origin master
-git rebase origin/master
-# The remote is always `origin` unless you have specified
-# another one: i.e. `community:dev/master-phoenix..master-phoenix-improvement`
-git fetch dev master-phoenix
-git rebase dev/master-phoenix
+# If the work branch has been pushed to a remote, rebase onto it first (two-step):
+    $ git fetch origin master
+    $ git fetch dev anything  # fetch the pushed work branch
+    $ git rebase dev/anything # step 1: incorporate remote changes to work branch
+    $ git rebase origin/master # step 2: rebase onto the base branch
+# If the work branch has NOT been pushed, only the base branch rebase:
+    $ git fetch origin master
+    $ git rebase origin/master
 ```
+
+If a rebase fails due to conflicts, `ow` will report the conflict with instructions to continue or abort, and move on to the next repo.
 
 ### Push Your Work
 

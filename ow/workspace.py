@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,11 +30,13 @@ from ow.git import (
     get_remote_url,
     get_rev_list_count,
     get_upstream,
+    get_worktree_branch,
     get_worktree_head,
     parallel_fetch,
     remove_worktree,
     resolve_spec,
     resolve_spec_local,
+    run_cmd,
     worktree_exists,
     worktree_is_detached,
 )
@@ -172,6 +175,57 @@ def _record_hash(root: Path, key: str, source: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Worktree drift detection
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DriftResult:
+    alias: str
+    spec: BranchSpec
+    actual_branch: str | None  # None = detached
+
+    @property
+    def is_drifted(self) -> bool:
+        if self.spec.is_detached:
+            return self.actual_branch is not None
+        return self.actual_branch != self.spec.local_branch
+
+    @property
+    def message(self) -> str:
+        if self.spec.is_detached:
+            expected = f"detached at {self.spec.base_ref}"
+        else:
+            expected = f"branch {self.spec.local_branch}"
+        if self.actual_branch is None:
+            actual = "detached HEAD"
+        else:
+            actual = f"branch {self.actual_branch}"
+        return f"{self.alias}: expected {expected}, found {actual}"
+
+
+def check_drift(worktree_path: Path, spec: BranchSpec, alias: str) -> DriftResult:
+    actual_branch = get_worktree_branch(worktree_path)
+    return DriftResult(alias=alias, spec=spec, actual_branch=actual_branch)
+
+
+def assert_no_drift(ws: WorkspaceConfig, ws_dir: Path) -> None:
+    drifted = []
+    for alias, spec in ws.repos.items():
+        worktree_path = ws_dir / alias
+        if not worktree_path.exists():
+            continue
+        result = check_drift(worktree_path, spec, alias)
+        if result.is_drifted:
+            drifted.append(result)
+    if drifted:
+        print("Drift detected — config does not match worktree state:", file=sys.stderr)
+        for d in drifted:
+            print(f"  {d.message}", file=sys.stderr)
+        print("Run 'ow apply' to reconcile.", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Status helpers
 # ---------------------------------------------------------------------------
 
@@ -278,7 +332,7 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
             bare_repo = bare_repos_dir / f"{alias}.git"
             worktree_path = ws_dir / alias
             if not worktree_exists(bare_repo, worktree_path):
-                subprocess.run(["git", "-C", str(bare_repo), "worktree", "prune"], check=True)
+                run_cmd(["git", "-C", str(bare_repo), "worktree", "prune"], check=True)
                 ws_dir.mkdir(parents=True, exist_ok=True)
                 create_worktree(bare_repo, worktree_path, resolved)
             else:
@@ -309,7 +363,7 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
                 shutil.copy2(path, out_path)
 
         # 4. Trust the generated mise file
-        subprocess.run(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
+        run_cmd(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
 
 
 def cmd_remove(config: Config, name: str) -> None:
@@ -321,6 +375,8 @@ def cmd_remove(config: Config, name: str) -> None:
     ws = workspaces[0]
     bare_repos_dir = config.root_dir / ".bare-git-repos"
     ws_dir = config.root_dir / "workspaces" / name
+
+    assert_no_drift(ws, ws_dir)
 
     for alias, spec in ws.repos.items():
         bare_repo = bare_repos_dir / f"{alias}.git"
@@ -344,13 +400,51 @@ def cmd_status(config: Config, name: str | None = None) -> None:
 
     for ws in workspaces:
         ws_dir = config.root_dir / "workspaces" / ws.name
+        bare_repos_dir = config.root_dir / ".bare-git-repos"
+
+        # 1. Drift check
+        assert_no_drift(ws, ws_dir)
+
+        # 2. Parallel fetch (silent)
+        def make_status_fetch_task(alias, spec):
+            def task():
+                alias_remotes = config.remotes.get(alias, {})
+                bare_repo = bare_repos_dir / f"{alias}.git"
+                worktree_path = ws_dir / alias
+                if not worktree_path.exists():
+                    return
+                # Fetch track branch
+                try:
+                    resolved = resolve_spec_local(bare_repo, spec, alias_remotes)
+                    subprocess.run(
+                        ["git", "-C", str(bare_repo), "fetch", resolved.remote,
+                         f"{resolved.branch}:refs/remotes/{resolved.remote}/{resolved.branch}"],
+                        capture_output=True,
+                    )
+                except (RuntimeError, subprocess.CalledProcessError):
+                    pass
+                # If attached: fetch upstream too
+                if not spec.is_detached:
+                    upstream = get_upstream(worktree_path)
+                    if upstream:
+                        parts = upstream.split("/", 1)
+                        if len(parts) == 2:
+                            subprocess.run(
+                                ["git", "-C", str(bare_repo), "fetch",
+                                 parts[0], f"{parts[1]}:refs/remotes/{upstream}"],
+                                capture_output=True,
+                            )
+            return task
+
+        fetch_tasks = [make_status_fetch_task(alias, spec) for alias, spec in ws.repos.items()]
+        parallel_fetch(fetch_tasks, max_workers=2)
+
+        # 3. Display
         print(_c(f"[{ws.name}]", 1, 36))
         print("    " + _c("branches", 2))
 
         first_attached_branch: str | None = None
         pr_links: list[tuple[str, int, str]] = []
-
-        bare_repos_dir = config.root_dir / ".bare-git-repos"
         max_alias_len = max(len(a) for a in ws.repos)
 
         for alias, spec in ws.repos.items():
@@ -517,6 +611,15 @@ def cmd_create(config: Config, name: str, specs: list[str]) -> None:
     cmd_apply(config, name=name)
 
 
+def _report_conflict(alias: str, worktree_path: Path, onto_ref: str) -> None:
+    print(f"\n  {_c('CONFLICT', 31)} in {_c(alias, 1)} rebasing onto {onto_ref}", file=sys.stderr)
+    print("    resolve conflicts, then:", file=sys.stderr)
+    print(f"      cd {worktree_path}", file=sys.stderr)
+    print("      git rebase --continue", file=sys.stderr)
+    print("    or abort:", file=sys.stderr)
+    print("      git rebase --abort\n", file=sys.stderr)
+
+
 def cmd_rebase(config: Config, name: str) -> None:
     bare_repos_dir = config.root_dir / ".bare-git-repos"
     workspaces = [ws for ws in config.workspaces if ws.name == name]
@@ -527,37 +630,78 @@ def cmd_rebase(config: Config, name: str) -> None:
     for ws in workspaces:
         ws_dir = config.root_dir / "workspaces" / ws.name
 
-        # Parallel: resolve remote and fetch latest
-        resolved_specs: dict[str, BranchSpec] = {}
+        # 1. Drift check
+        assert_no_drift(ws, ws_dir)
+
+        # 2. Parallel: resolve + fetch track branch (and upstream if applicable)
+        resolved_tracks: dict[str, str] = {}
+        resolved_upstreams: dict[str, str] = {}
 
         def make_fetch_task(alias, spec):
             def task():
                 alias_remotes = config.remotes.get(alias, {})
                 bare_repo = bare_repos_dir / f"{alias}.git"
-                resolved = resolve_spec(bare_repo, spec, alias_remotes)
-                resolved_specs[alias] = resolved
-                subprocess.run(
-                    ["git", "-C", str(bare_repo), "fetch", resolved.remote,
-                     f"{resolved.branch}:refs/remotes/{resolved.remote}/{resolved.branch}"],
+                # Resolve the track (base) branch — force detached so resolve_spec
+                # finds the base branch, not the pushed work branch
+                track_spec = BranchSpec(spec.base_ref)
+                resolved_track = resolve_spec(bare_repo, track_spec, alias_remotes)
+                # Fetch latest
+                run_cmd(
+                    ["git", "-C", str(bare_repo), "fetch", resolved_track.remote,
+                     f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"],
                     check=True,
                 )
+                resolved_tracks[alias] = resolved_track.base_ref
+                # If attached: resolve the full spec to find the pushed work branch
+                if not spec.is_detached:
+                    resolved_full = resolve_spec(bare_repo, spec, alias_remotes)
+                    if resolved_full.base_ref != resolved_track.base_ref:
+                        # Work branch found on a remote — fetch latest as upstream
+                        run_cmd(
+                            ["git", "-C", str(bare_repo), "fetch", resolved_full.remote,
+                             f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}"],
+                            check=True,
+                        )
+                        resolved_upstreams[alias] = resolved_full.base_ref
             return task
 
         fetch_tasks = [make_fetch_task(alias, spec) for alias, spec in ws.repos.items()]
         parallel_fetch(fetch_tasks, max_workers=2)
 
-        # Sequential rebases
-        for alias, resolved in resolved_specs.items():
+        # 3. Sequential rebases
+        failed = []
+        for alias, spec in ws.repos.items():
             worktree_path = ws_dir / alias
             if not worktree_path.exists():
                 continue
-            if resolved.is_detached:
-                subprocess.run(
-                    ["git", "-C", str(worktree_path), "switch", "--detach", resolved.base_ref],
+
+            track_ref = resolved_tracks[alias]
+
+            if spec.is_detached:
+                run_cmd(
+                    ["git", "-C", str(worktree_path), "switch", "--detach", track_ref],
                     check=True,
                 )
             else:
-                subprocess.run(
-                    ["git", "-C", str(worktree_path), "rebase", resolved.base_ref],
-                    check=True,
+                upstream = resolved_upstreams.get(alias)
+
+                # Step 1: rebase onto upstream (pushed work branch on remote)
+                if upstream:
+                    result = run_cmd(
+                        ["git", "-C", str(worktree_path), "rebase", upstream],
+                    )
+                    if result.returncode != 0:
+                        _report_conflict(alias, worktree_path, upstream)
+                        failed.append(alias)
+                        continue
+
+                # Step 2: rebase onto track branch
+                result = run_cmd(
+                    ["git", "-C", str(worktree_path), "rebase", track_ref],
                 )
+                if result.returncode != 0:
+                    _report_conflict(alias, worktree_path, track_ref)
+                    failed.append(alias)
+
+        if failed:
+            sys.exit(1)
