@@ -312,6 +312,7 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
 
     for ws in workspaces:
         ws_dir = config.root_dir / "workspaces" / ws.name
+        is_new = not ws_dir.exists()
 
         # 1. Ensure bare repos + refs (parallel, max 2)
         resolved_specs: dict[str, BranchSpec] = {}
@@ -362,8 +363,11 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, out_path)
 
-        # 4. Trust the generated mise file
-        run_cmd(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
+        # 4. Trust the generated mise file (only for new workspaces)
+        if is_new:
+            run_cmd(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
+            print(f"\nWorkspace '{ws.name}' created. To install dependencies:")
+            print(f"    cd workspaces/{ws.name} && mise install")
 
 
 def cmd_remove(config: Config, name: str) -> None:

@@ -1,125 +1,181 @@
-# ow - Odoo Workspaces
+# ow — Odoo Workspaces
 
-Manage your Odoo development workspaces using [Git worktrees](https://git-scm.com/docs/git-worktree) and [mise](https://mise.jdx.dev/).
+CLI tool that turns a single `ow.toml` into ready-to-code Odoo workspaces using git worktrees.
 
-Odoo Workspaces will generate workspaces folders that you can open in VSCode and Zed.
+## Overview
 
-## Pre-requisites
+Here is what `ow` does for you:
 
-You need to have properly configured the following tools:
+- **Workspace generation** — each workspace is a folder with git worktrees and IDE configs, ready to open in VSCode or Zed
+- **Declarative config** — define remotes, workspaces, and template variables in a single `ow.toml`
+- **Branch spec syntax** — concise `base..feature` notation to control detached vs attached worktrees
+- **Shared bare repos** — all workspaces share the same `.bare-git-repos/`, so fetching once updates refs for all
+- **Jinja2 template system** — generates `mise.toml`, `odoorc`, `odools.toml`, `pyrightconfig.json`, and IDE configs from customizable templates
+- **Per-workspace variables** — global `[vars]` with per-workspace overrides for ports, DB credentials, etc.
+- **Smart rebase** — two-step rebase (upstream then base), with conflict reporting and instructions
+- **Rich status** — behind/ahead counts, clickable branch links, PR detection via `gh`, runbot links
+- **Drift detection** — SHA256 tracking on `ow.toml.example` and template sources; worktree branch drift check before destructive operations
+- **Workspace independence** — generated workspaces are valid git directories that work standalone
+- **Optional services** — Docker Compose stack with PostgreSQL, pgweb, and mailpit for local development
+- **Clean removal** — archives workspace config, removes worktrees and branches, preserves bare repos
+- **Tab completion** — fish, bash, zsh via `argcomplete`
+- **Full transparency** — every git command executed is printed to stderr (prefixed with `$`)
 
-- SSH: to access Odoo S.A. repositories (private repos require Odoo employee access)
-- mise: will be used in the generated workspaces to manage Python dependencies and virtual environments
-- Docker or Podman (optional but recommended): useful to run services like postgres, pgweb, mailpit
+## Prerequisites
 
-## Repo Structure
+- **[mise](https://mise.jdx.dev/)** — manages Python, virtualenvs, and dependencies in generated workspaces
+- **Odoo system dependencies** — see [Odoo source install docs](https://www.odoo.com/documentation/master/administration/on_premise/source.html#dependencies) (includes wkhtmltopdf, PostgreSQL client libs, etc.)
+- **SSH** — configured for access to Odoo S.A. repositories (private repos require Odoo employee access - but you can still use `ow` with the [public repo](https://github.com/odoo/odoo))
+- **Docker or Podman** (optional) — to run services like postgres, pgweb, mailpit (see `services/`)
 
-Here is the main structure:
-```
-.
-├── .bare-git-repos/    # internal folder to store the bare git repositories
-├── ow/                 # the main ow codebase
-├── services/           # optional services containers (postgres, pgweb, mailpit...)
-├── workspaces/         # generated workspaces folders
-├── ow.toml.example     # example configuration file for ow
-└── README.md           # this file
-```
-
-Workspace folders once generated will look like this:
-```
-.
-└── workspaces/
-    ├── opw-123456/         # this is your workspace name
-    │   ├── .git            # git worktree file pointing to the corresponding bare git repository
-    │   ├── .vscode/        # VSCode configuration: `settings.json`, `launch.json`
-    │   ├── .zed/           # Zed configuration: `settings.json`, `debug.json`
-    │   ├── community/      # the community codebase (git worktree)
-    │   ├── enterprise/     # optional - the enterprise codebase (git worktree)
-    │   ├── ngram-addons/   # optional - any other git worktree you want to add (e.g. ngram-addons)
-    │   ├── mise.toml       # mise configuration (python dependencies, virtual env...)
-    │   └── odools.toml     # (OdooLS)[https://github.com/odoo/odoo-ls] configuration
-    └── other-workspace/    # this is another workspace with all the same structure as the previous one
-```
-
-
-## Usage
-
-### Getting Started
+## Quick Start
 
 ```sh
-$ cp ow.toml.example ow.toml # then configure ow.toml with your preferences
-$ ow apply # apply the whole configuration and generate the workspaces folders
+cp ow.toml.example ow.toml  # then edit to your liking
+ow apply                     # generate all workspaces
+cd workspaces/<name> && mise install   # install Python, create venv, install pip deps
 ```
 
-Check how the config looks like: [ow.toml.example](./ow.toml.example).
+See [ow.toml.example](./ow.toml.example) for the full config reference.
 
-### Commands
+## Configuration (`ow.toml`)
+
+### Remotes
+
+Define git remotes per repo alias. `origin` is required; additional remotes are optional:
+
+```toml
+[remotes]
+community.origin.url = "git@github.com:odoo/odoo.git"
+community.dev.url = "git@github.com:odoo-dev/odoo.git"
+community.dev.pushurl = "git@github.com:odoo-dev/odoo.git"
+community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
+
+enterprise.origin.url = "git@github.com:odoo/enterprise.git"
+enterprise.dev.url = "git@github.com:odoo-dev/enterprise.git"
+```
+
+Each remote supports `url`, `pushurl` (optional), and `fetch` (optional refspec).
+
+### Variables
+
+Global variables are defined in `[vars]` and available in all templates via `{{ vars.key }}`:
+
+```toml
+[vars]
+http_port = 8070
+db_host = "localhost"
+db_port = 5432
+db_user = "odoo"
+db_password = "odoo"
+```
+
+Per-workspace overrides take precedence:
+
+```toml
+[[workspace]]
+name = "my-feature"
+repo.community = "master..master-my-feature"
+vars.http_port = 8080  # overrides the global value for this workspace
+```
+
+Templates use `{{ vars.key | default(fallback) }}` so undefined variables get safe defaults.
+
+### Workspaces
+
+Each workspace is a `[[workspace]]` section with a name, repo specs, and optional variable overrides:
+
+```toml
+[[workspace]]
+name = "opw-123456"
+repo.community = "master..master-opw-123456-ngram"
+repo.enterprise = "master"
+vars.http_port = 8080
+```
+
+Equivalent long form (TOML syntax):
+
+```toml
+[[workspace]]
+name = "opw-123456"
+
+[workspace.repo]
+community = "master..master-opw-123456-ngram"
+enterprise = "master"
+
+[workspace.vars]
+http_port = 8080
+```
+
+### Branch Spec Syntax
+
+The repo spec string controls how the worktree is created:
+
+| Spec | Parsed as | Worktree mode |
+|------|-----------|---------------|
+| `master` | `origin/master` | **Detached** HEAD at `origin/master` |
+| `origin/master` | `origin/master` | **Detached** HEAD at `origin/master` |
+| `dev/master-phoenix` | `dev/master-phoenix` | **Detached** HEAD at `dev/master-phoenix` |
+| `master..master-feature` | base=`origin/master`, branch=`master-feature` | **Attached** local branch `master-feature` tracking `origin/master` |
+| `dev/master-phoenix..fix` | base=`dev/master-phoenix`, branch=`fix` | **Attached** local branch `fix` tracking `dev/master-phoenix` |
+
+**Key rule:** without `..`, the worktree is detached (read-only tracking). With `..`, a local branch is created and attached — this is what you want for feature development.
+
+Specifying the remote (`dev/branch`) is optional but required if the branch name exists on multiple remotes.
+
+## Commands
 
 | Command | Description |
 |---------|-------------|
-| `ow --help` or `ow {command} --help` | Shows the help message for `ow` or for a specific command. |
-| `ow apply [name]` | Applies the configuration and generates the workspaces folders. If a name is provided, only the workspace with that name will be generated. |
-| `ow status [name]` | Shows the status of the workspaces. If a name is provided, only the workspace with that name will be shown. |
-| `ow create {name} {alias:spec} ... [vars.key=value ...]` | Creates a new workspace with the given name and branches specifications. This is a shortcut for creating a new workspace without having to edit the config file and run `ow apply`. The branches specifications use the same syntax as in the config file (e.g. `community:master`, `enterprise:master-opw-123456-ngram..master`). You can also pass per-workspace template variables inline (e.g. `vars.http_port=8080`). The new workspace configuration will be automatically saved to the `ow.toml` file. |
-| `ow remove {name}` | Removes the workspace with the given name. This will not delete the corresponding bare git repository, so you can generate it again later if needed. |
-| `ow rebase {name}` | Rebases the workspace with the given name. This will fetch the latest changes from the remote branches and rebase the worktree branches on top of them. This is a shortcut for running `git fetch` and `git switch --detach`/`git rebase` from each of the worktree folders. |
+| `ow apply [name]` | Create/update workspaces from config |
+| `ow create name alias:spec ... [vars.key=value ...]` | Create a workspace from CLI (saves to `ow.toml`) |
+| `ow status [name] [--all]` | Show branch status, behind/ahead counts, PR links |
+| `ow rebase [name]` | Fetch and rebase all repos in a workspace |
+| `ow remove name` | Remove workspace, archive config, preserve bare repos |
 
-### Tab Completion
+When `name` is omitted for `status` and `rebase`, `ow` reads the `OW_WORKSPACE` environment variable (set automatically by `mise` when you `cd` into a workspace). If neither is available, `status` shows all workspaces while `rebase` exits with an error.
 
-One-time setup (fish):
+### `ow apply`
+
+Creates or updates workspaces defined in `ow.toml`. For each workspace:
+
+1. Ensures bare repos exist and fetches required refs (parallel, max 2 workers)
+2. Creates worktrees (or reconciles existing ones — detached ↔ attached transitions)
+3. Renders Jinja2 templates and copies static files into the workspace
+4. For new workspaces: trusts `mise.toml` and prints a reminder to run `mise install`
+
+Checks for drift on `ow.toml.example` and `.template.init/` before proceeding. If sources have changed since you last acknowledged them, you'll be prompted to continue, skip, or abort.
+
 ```sh
-register-python-argcomplete --shell fish ow > ~/.config/fish/completions/ow.fish
-```
-Or for bash/zsh: `activate-global-python-argcomplete` (adds a hook to your shell profile).
-
-## Recommended Workflow
-
-### Key Rules & Constraints
-- **One Branch, One Worktree:** Git prevents checking out the same local branch in two different folders. Use different local branch names (e.g., `master-a`, `master-b`) or **Detached HEAD** for running the same version in multiple workspaces.
-- Each branch lives in its own directory — ban `git checkout` to switch context!
-- All worktrees share the same bare repo, so fetching from one updates refs for all.
-- Git worktrees cannot share the same branch, so you will want to use detached worktrees for the main branches (i.e. `master`, `19.0`, `saas-19.2`...) and create only your feature branches. This is why `ow` uses detached worktrees by default and only attaches a branch to the worktree when you have specified a feature branch using the double dots syntax in the config file.
-- Git worktrees are not meant to be used as long-term branches, but rather as temporary contexts for development. Once a feature is merged, the corresponding workspace can be removed and the branch could also be deleted from the bare repository. Use `ow remove <workspace-name>` to remove the workspace folder. The branch will also be deleted.
-
-### Workspace Creation
-
-The easiest way to start a new feature is to create a new workspace with the `ow create` command and specify the branch you want to work on using the double dots syntax in the config file. For example, if you want to start a new feature on top of `master`, you can run:
-> If you need to work on a community feature: `ow create <workspace-name> community:master..master-opw-123456-ngram enterprise:master`
-> Or an enterprise feature: `ow create <workspace-name> community:master enterprise:master..master-opw-123456-ngram`
-> Or both: `ow create <workspace-name> community:master..master-opw-123456-ngram enterprise:master..master-opw-123456-ngram`
-> With a custom port: `ow create <workspace-name> community:master vars.http_port=8080`
-
-Once the workspace is created, you will be able to open it like this:
-```bash
-$ code workspaces/<workspace-name>
-# or if you are using Zed
-$ zeditor workspaces/<workspace-name>
+ow apply             # all workspaces
+ow apply my-feature  # single workspace
 ```
 
-### Workspace Status Check
+### `ow create`
 
-If you have the following workspace config:
-```toml
-[[workspace]]
-name = "canary"
-repo.community = "master..master-canary"
-repo.enterprise = "master..master-canary"
+Shortcut for adding a workspace without editing `ow.toml` manually. Appends the config and runs `ow apply`:
 
-[[workspace]]
-name = "canary-can-fly"
-repo.community = "master-canary..master-canary-can-fly"
-repo.enterprise = "master-canary..master-canary-can-fly"
+```sh
+# Community feature on master
+ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master
 
-[[workspace]]
-name = "fantastic-iap-service"
-repo.community = "18.0"
-repo.enterprise = "18.0"
-repo.iap-apps = "18.0..18.0-fantastic-service-ngram"
+# Enterprise feature
+ow create opw-123456 community:master enterprise:master..master-opw-123456-ngram
+
+# Both + custom port
+ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master..master-opw-123456-ngram vars.http_port=8080
+
+# Third-party repo
+ow create my-addon community:master ngram-addons:main..main-my-addon
 ```
 
-The command `ow status` will check and give you the whole status. Output is color-coded in the terminal (bold cyan headers, green/yellow counts, etc.).
-```bash
-$ ow status
+### `ow status`
+
+Fetches latest refs and displays branch status with color-coded behind/ahead counts. Use `--all` to show all workspaces even when `OW_WORKSPACE` is set.
+
+Output example:
+
+```
 [canary]
     branches
         community:  dev/master-canary ↓0 ↑0 (origin/master ↓34 ↑0)
@@ -129,65 +185,231 @@ $ ow status
         pr:     odoo/enterprise#1234
         runbot: master-canary
 
-[canary-can-fly]
-    branches
-        community:  dev/master-canary-can-fly ↓0 ↑3 (dev/master-canary ↓1 ↑0)
-        enterprise: master-canary-can-fly (local) (dev/master-canary ↓0 ↑0)
-    links
-        pr:     odoo/odoo#12345
-        runbot: master-canary-can-fly
-
 [fantastic-iap-service]
     branches
-        community: origin/18.0 ↓27 ↑0 (DETACHED: a1b2c3d)
+        community:  origin/18.0 ↓27 ↑0 (DETACHED: a1b2c3d)
         enterprise: origin/18.0 ↓11 ↑0 (DETACHED: d9c8b7a)
-        iap-apps:  origin/18.0-fantastic-service-ngram ↓0 ↑1 (origin/18.0 ↓27 ↑0)
+        iap-apps:   origin/18.0-fantastic-service-ngram ↓0 ↑1 (origin/18.0 ↓27 ↑0)
     links
         pr:     odoo/iap-apps#123
         runbot: fantastic-iap-service
 ```
 
-Note that you can CTRL+Click on those parts to open your browser:
-- the branch name e.g. `dev/master-canary` redirects to https://github.com/odoo-dev/odoo/tree/master-canary
-- the runbot link e.g. `master-canary` redirects to https://runbot.odoo.com/runbot/bundle/master-canary
-- the commit hash i.e. `a1b2c3d` redirects to https://github.com/odoo/odoo/commit/a1b2c3d82ca4e6332131c832eb2b9a2750c3279d
-
-### Rebase Your Work
-
-Since all worktrees share the same bare repository, you can fetch and rebase from any of the worktrees. For example, if you want to rebase your feature branch on top of the latest `master`, you can simply run `git fetch origin master` and `git rebase origin/master` from any of the worktrees. But if one of your workspace folder points to a detached worktree, you also have to `git switch --detach origin/master` from that folder location.
-
-The easiest way to do this is to use the `ow rebase <workspace-name>` command that will do all the necessary git commands for you in the correct order. All git commands executed are printed to stderr for visibility (prefixed with `$`).
-
-Before running, `ow rebase` checks that the worktree state matches the config (drift detection). If a worktree is on a different branch than expected, it will abort and ask you to run `ow apply` first.
-
-Here is what it will do for each repo:
-
-```bash
-# For a DETACHED head, i.e. with `community:master` branch spec:
-    $ git fetch origin master
-    $ git switch --detach origin/master
-# For an ATTACHED head, i.e. with `enterprise:master..anything` branch spec:
-# If the work branch has been pushed to a remote, rebase onto it first (two-step):
-    $ git fetch origin master
-    $ git fetch dev anything  # fetch the pushed work branch
-    $ git rebase dev/anything # step 1: incorporate remote changes to work branch
-    $ git rebase origin/master # step 2: rebase onto the base branch
-# If the work branch has NOT been pushed, only the base branch rebase:
-    $ git fetch origin master
-    $ git rebase origin/master
+```sh
+ow status opw-123456  # explicit workspace
+ow status             # current workspace (via OW_WORKSPACE) or all
+ow status --all       # all workspaces regardless of OW_WORKSPACE
 ```
 
-If a rebase fails due to conflicts, `ow` will report the conflict with instructions to continue or abort, and move on to the next repo.
+Clickable elements (Ctrl+Click in terminal):
+- Branch names link to the GitHub tree (e.g. `dev/master-canary` → `github.com/odoo-dev/odoo/tree/master-canary`)
+- Commit hashes link to the GitHub commit
+- PR numbers link to the pull request
+- Runbot links go to `runbot.odoo.com/runbot/bundle/<branch>`
 
-### Push Your Work
+> (!) PR detection uses the `gh` CLI — install it for PR links to appear:
+> ```bash
+> $ mise -E local use github-cli  # add github-cli as a dependency within mise.local.toml file
+> $ gh auth login # do not forget to login
+> ```
 
-From each of your workspace attached worktree folders, you can create an upstream branch like this:
-```bash
-git push -u <remote> HEAD
+Runs `assert_no_drift` before displaying. If worktree state doesn't match config, it aborts with instructions to run `ow apply`.
+
+### `ow rebase`
+
+Fetches and rebases all repos in a workspace. The strategy applied by `ow` depends on the worktree mode:
+
+For **Detached worktree** (e.g. `community:master`), `ow` does something similar to:
+```sh
+git fetch origin master
+git switch --detach origin/master
 ```
 
-`ow` does not provide a shortcut command for this since you usually want to have more control over the branch name and the remote name.
+For **Attached worktree with pushed branch** (e.g. `enterprise:master..master-feature`, where `master-feature` exists on a remote), `ow` does something similar to:
+```sh
+git fetch origin master
+git fetch dev master-feature          # fetch the pushed work branch
+git rebase dev/master-feature         # step 1: incorporate remote changes
+git rebase origin/master              # step 2: rebase onto base branch
+```
 
-### Remove Your Work When It Is Done
+For **Attached worktree, local only** (branch not yet pushed), `ow` does something similar to:
+```sh
+git fetch origin master
+git rebase origin/master
+```
 
-Once your feature is merged, you can remove the workspace folder using the `ow remove <workspace-name>` command. This will not delete the corresponding bare git repository, only worktree and branch references.
+If a rebase hits conflicts, `ow` reports the conflicting repo with instructions to `git rebase --continue` or `git rebase --abort`, then moves on to the next repo.
+
+Workspace name can be omitted when running from inside a workspace (via `OW_WORKSPACE`):
+
+```sh
+ow rebase              # rebase current workspace
+ow rebase opw-123456   # explicit workspace
+```
+
+Runs `assert_no_drift` before starting.
+
+### `ow remove`
+
+Removes a workspace directory and its worktree/branch references. The bare repo is preserved so you can recreate the workspace later.
+
+The workspace config is archived to `.ow.toml.archived-workspaces` (append-only) and removed from `ow.toml`.
+
+Runs `assert_no_drift` before removing.
+
+## Template System
+
+Templates live in `workspaces/.template.init/` (git-tracked originals) and `workspaces/.template/` (your working copy). On first `ow apply`, `.template.init/` is copied to `.template/`. You edit `.template/` to customize.
+
+### Generated files
+
+| Template | Output | Purpose |
+|----------|--------|---------|
+| `mise.toml.j2` | `mise.toml` | Python version, venv, pip dependencies |
+| `odoorc.j2` | `odoorc` | Odoo server config (ports, DB, addons path) |
+| `odools.toml.j2` | `odools.toml` | [OdooLS](https://github.com/odoo/odoo-ls) config |
+| `pyrightconfig.json.j2` | `pyrightconfig.json` | Pyright type checker config |
+| `.vscode/settings.json.j2` | `.vscode/settings.json` | VSCode settings |
+| `.vscode/launch.json.j2` | `.vscode/launch.json` | VSCode debug config |
+| `.zed/settings.json.j2` | `.zed/settings.json` | Zed settings |
+| `.zed/debug.json.j2` | `.zed/debug.json` | Zed debug config |
+| `requirements-dev.txt` | `requirements-dev.txt` | Copied as-is (static file) |
+
+### Jinja2 context
+
+Variables available in all templates:
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `ws_name` | `str` | Workspace name |
+| `main_repo_alias` | `str` | Alias of the repo containing `odoo-bin` (usually `community`) |
+| `repos` | `list[str]` | List of repo aliases |
+| `vars` | `dict` | Merged global + per-workspace variables |
+| `addons_paths` | `list[str]` | Absolute paths to all addons directories |
+| `odools_path_items` | `list[str]` | Relative paths for OdooLS config |
+
+### Customizing templates
+
+On first `ow apply`, `.template.init/` is copied to `.template/` — after that, only `.template/` is used for rendering. Edit files there; they won't be overwritten.
+
+If `.template.init/` changes upstream (e.g. after a `git pull`), `ow` detects the drift via SHA256 hashes stored in `.ow.cache` and prompts you to continue, skip (acknowledge), or abort.
+
+## Services
+
+Optional containerized services for local development:
+
+    docker compose -f services/compose.yml up -d
+
+| Service | Port | Description |
+|---------|------|-------------|
+| postgres | 5432 | PostgreSQL 17 with pgvector |
+| pgweb | 8081 | Web-based PostgreSQL browser |
+| mailpit | 8025 / 1025 | Email testing (web UI / SMTP) |
+
+Configure your workspaces to use them via `[vars]`:
+
+    [vars]
+    db_host = "localhost"
+    db_port = 5432
+    smtp_server = "localhost"
+    smtp_port = 1025
+
+## Workflow
+
+```sh
+# 1. Create a workspace
+ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master
+
+# 2. Install dependencies
+cd workspaces/opw-123456 && mise install
+
+# 3. Open in your IDE
+code workspaces/opw-123456        # VSCode
+zeditor workspaces/opw-123456    # Zed
+
+# 4. Develop — the workspace has everything: venv, odoorc, debug configs
+
+# 5. Push your work
+cd workspaces/opw-123456/community
+git push -u dev HEAD
+
+# 6. Check status (from inside the workspace, no name needed)
+ow status
+
+# 7. Rebase on latest upstream
+ow rebase
+
+# 8. Clean up when done
+ow remove opw-123456
+```
+
+## Workspace Independence & Drift
+
+Once created, a workspace is a regular directory with standard git worktrees. You can `cd` into it, run git commands, switch branches — it works without `ow`.
+
+However, if the worktree state diverges from `ow.toml` (e.g. you manually switch branches), `ow` considers this **drift**. Commands like `rebase`, `remove`, and `status` run `assert_no_drift` and will abort if the actual branch doesn't match the configured spec.
+
+**Golden rule:** one local branch = one worktree. Git enforces this — you can't check out the same branch in two worktrees. Use detached mode (no `..`) when you just need a read-only copy of a version.
+
+To reconcile after manual changes, update `ow.toml` to match reality, then run `ow apply`.
+
+## File Reference
+
+| Path | Description |
+|------|-------------|
+| `ow.toml` | Active configuration (remotes, variables, workspaces) |
+| `ow.toml.example` | Config template, drift-checked against your `ow.toml` |
+| `.ow.cache` | SHA256 hashes for drift detection (auto-managed, tracks `ow.toml.example` and `.template.init/`) |
+| `.ow.toml.archived-workspaces` | Removed workspace configs (append-only log) |
+| `.bare-git-repos/` | Shared bare git repositories |
+| `workspaces/.template.init/` | Original templates (git-tracked) |
+| `workspaces/.template/` | Working copy of templates (your customizations go here) |
+| `workspaces/<name>/` | Generated workspace directories |
+| `services/` | Optional Docker/Podman service containers |
+
+## Tab Completion
+
+Fish (one-time setup):
+```sh
+register-python-argcomplete --shell fish ow > ~/.config/fish/completions/ow.fish
+```
+
+Bash/Zsh:
+```sh
+activate-global-python-argcomplete
+```
+
+## Project Structure
+
+```
+.
+├── ow/                         # ow source code
+│   ├── __main__.py             # CLI entry point (argparse)
+│   ├── config.py               # TOML parsing, BranchSpec, data classes
+│   ├── git.py                  # git operations (worktrees, fetch, rebase)
+│   └── workspace.py            # commands, templates, drift detection
+├── workspaces/
+│   ├── .template.init/         # original Jinja2 templates (git-tracked)
+│   │   ├── mise.toml.j2
+│   │   ├── odoorc.j2
+│   │   ├── odools.toml.j2
+│   │   ├── pyrightconfig.json.j2
+│   │   ├── requirements-dev.txt
+│   │   ├── .vscode/            # VSCode templates
+│   │   └── .zed/               # Zed templates
+│   ├── .template/              # working copy (not tracked)
+│   └── <name>/                 # generated workspaces
+├── .bare-git-repos/            # shared bare repositories
+├── services/                   # docker compose services
+├── ow.toml.example             # config template
+└── ow.toml                     # your active config (not tracked)
+```
+
+## Disclaimer
+
+This is a small personal project built with the help of [Claude](https://claude.ai). It scratches a very specific itch — managing multiple Odoo worktrees side by side — and comes with no warranty. Use at your own risk, and expect rough edges.
+
+## Want to contribute?
+
+Contributions are welcome! If something is broken, confusing, or missing — open an issue. If you have a fix or improvement in mind, PRs are appreciated. No formal process, just keep it simple.

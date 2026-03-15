@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -40,6 +41,20 @@ def workspace_completer(prefix, parsed_args, **kwargs):
         return []
 
 
+def resolve_workspace_name(name: str | None, allow_all: bool = False) -> str | None:
+    """Return workspace name, or None meaning 'all'.
+    Raises SystemExit if name is required but missing."""
+    if name:
+        return name
+    env_name = os.environ.get("OW_WORKSPACE")
+    if env_name:
+        return env_name
+    if allow_all:
+        return None
+    print("Error: workspace name required (or run from inside a workspace with mise activated)", file=sys.stderr)
+    sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ow", description="Odoo workspace manager")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -52,6 +67,8 @@ def main() -> None:
 
     p_status = subparsers.add_parser("status", help="Show workspace status")
     p_status.add_argument("name", nargs="?", help="Workspace name (shows all if omitted)").completer = workspace_completer
+    p_status.add_argument("--all", action="store_true", dest="all_workspaces",
+                          help="Show all workspaces (overrides OW_WORKSPACE)")
 
     p_create = subparsers.add_parser("create", help="Create a new workspace")
     p_create.add_argument("name")
@@ -59,7 +76,7 @@ def main() -> None:
                           help="e.g. community:master vars.http_port=8080")
 
     p_rebase = subparsers.add_parser("rebase", help="Fetch and rebase workspace branches")
-    p_rebase.add_argument("name").completer = workspace_completer
+    p_rebase.add_argument("name", nargs="?").completer = workspace_completer
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
@@ -88,11 +105,13 @@ def main() -> None:
     elif args.command == "remove":
         cmd_remove(config, args.name)
     elif args.command == "status":
-        cmd_status(config, args.name)
+        name = None if getattr(args, "all_workspaces", False) else resolve_workspace_name(args.name, allow_all=True)
+        cmd_status(config, name)
     elif args.command == "create":
         cmd_create(config, args.name, args.specs)
     elif args.command == "rebase":
-        cmd_rebase(config, args.name)
+        name = resolve_workspace_name(args.name)
+        cmd_rebase(config, name)
 
 
 if __name__ == "__main__":
