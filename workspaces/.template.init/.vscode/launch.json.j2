@@ -12,7 +12,9 @@
         "--config=${workspaceFolder}/odoorc",
         "--dev=all",
       ],
+      "pythonArgs": ["-Xfrozen_modules=off"],
       "env": {
+        "PYDEVD_DISABLE_FILE_VALIDATION": "1",
         "PYTHON_PATH": "${workspaceFolder}/{{ main_repo_alias }}"
       },
     }
