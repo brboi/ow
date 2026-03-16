@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import subprocess
@@ -45,6 +44,7 @@ from ow.git import (
 # ---------------------------------------------------------------------------
 # File generators
 # ---------------------------------------------------------------------------
+
 
 def is_odoo_main_repo(repo_dir: Path) -> bool:
     """Detect if a repo is the main Odoo source (community)."""
@@ -117,66 +117,9 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
 
 
 # ---------------------------------------------------------------------------
-# Cache / drift detection
-# ---------------------------------------------------------------------------
-
-def _compute_hash(path: Path) -> str:
-    h = hashlib.sha256()
-    if path.is_file():
-        h.update(path.read_bytes())
-    else:
-        for p in sorted(path.rglob("*")):
-            if p.is_file():
-                h.update(str(p.relative_to(path)).encode())
-                h.update(p.read_bytes())
-    return h.hexdigest()
-
-
-def _load_cache(root: Path) -> dict:
-    cache_path = root / ".ow.cache"
-    if cache_path.exists():
-        return json.loads(cache_path.read_text())
-    return {}
-
-
-def _save_cache(root: Path, cache: dict) -> None:
-    (root / ".ow.cache").write_text(json.dumps(cache, indent=2) + "\n")
-
-
-def _check_source_drift(root: Path, key: str, source: Path) -> bool:
-    """Return True if the user wants to abort."""
-    cache = _load_cache(root)
-    entry = cache.get(key, {})
-    current_hash = _compute_hash(source)
-    if entry.get("hash") == current_hash:
-        return False
-
-    if not sys.stdin.isatty():
-        print(f"(ow) [warn] {source.name} has been updated.", file=sys.stderr)
-        return False
-
-    print(f"[warn] {source.name} has been updated since you last copied it.")
-    print("  [c] continue (default)")
-    print("  [s] continue and skip displaying this until next update")
-    print("  [a] abort now")
-    choice = input(" > [Csa] ").strip().lower()
-    if choice == "s":
-        cache[key] = {"hash": current_hash}
-        _save_cache(root, cache)
-    if choice == "a":
-        return True
-    return False
-
-
-def _record_hash(root: Path, key: str, source: Path) -> None:
-    cache = _load_cache(root)
-    cache[key] = {"hash": _compute_hash(source), "ignore": False}
-    _save_cache(root, cache)
-
-
-# ---------------------------------------------------------------------------
 # Worktree drift detection
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class DriftResult:
@@ -229,9 +172,10 @@ def assert_no_drift(ws: WorkspaceConfig, ws_dir: Path) -> None:
 # Status helpers
 # ---------------------------------------------------------------------------
 
+
 def _parse_github_org_repo(url: str) -> str | None:
     if url.startswith("git@github.com:"):
-        path = url[len("git@github.com:"):]
+        path = url[len("git@github.com:") :]
         return path.removesuffix(".git")
     if "github.com/" in url:
         path = url.split("github.com/", 1)[1]
@@ -265,9 +209,22 @@ def _github_commit_url(org_repo: str, full_hash: str) -> str:
 def _get_pr_info(org_repo: str, branch: str) -> tuple[int, str] | None:
     try:
         result = subprocess.run(
-            ["gh", "pr", "list", "--repo", org_repo, "--head", branch,
-             "--json", "number,url", "--limit", "1"],
-            capture_output=True, text=True, timeout=15,
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                org_repo,
+                "--head",
+                branch,
+                "--json",
+                "number,url",
+                "--limit",
+                "1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if result.returncode != 0:
             return None
@@ -288,20 +245,15 @@ def _link(url: str | None, text: str) -> str:
 # Commands
 # ---------------------------------------------------------------------------
 
+
 def cmd_apply(config: Config, name: str | None = None) -> None:
     bare_repos_dir = config.root_dir / ".bare-git-repos"
     workspaces = config.workspaces
     if name:
         workspaces = [ws for ws in workspaces if ws.name == name]
 
-    # Initialize template directory if absent
+    # Template directory
     template_dir = config.root_dir / "workspaces" / ".template"
-    template_init_dir = config.root_dir / "workspaces" / ".template.init"
-    if _check_source_drift(config.root_dir, "workspaces/.template.init", template_init_dir):
-        sys.exit(1)
-    if not template_dir.exists():
-        shutil.copytree(template_init_dir, template_dir)
-    _record_hash(config.root_dir, "workspaces/.template.init", template_init_dir)
 
     env = Environment(
         loader=FileSystemLoader(str(template_dir)),
@@ -323,6 +275,7 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
                 bare_repo = bare_repos_dir / f"{alias}.git"
                 ensure_bare_repo(alias, alias_remotes, bare_repos_dir)
                 resolved_specs[alias] = resolve_spec(bare_repo, spec, alias_remotes)
+
             return task
 
         tasks = [make_setup_task(alias, spec) for alias, spec in ws.repos.items()]
@@ -344,7 +297,12 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
                     detach_worktree(worktree_path, resolved.base_ref)
                 elif not resolved.is_detached:
                     # Already on the right branch — ensure upstream config is current
-                    _set_branch_upstream(bare_repo, resolved.local_branch, resolved.remote, resolved.branch)
+                    _set_branch_upstream(
+                        bare_repo,
+                        resolved.local_branch,
+                        resolved.remote,
+                        resolved.branch,
+                    )
 
         # 3. Render templates and copy statics
         ws_dir.mkdir(parents=True, exist_ok=True)
@@ -363,7 +321,34 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, out_path)
 
-        # 4. Trust the generated mise file (only for new workspaces)
+        # 4. Apply overrides from .template.overrides/
+        overrides_dir = config.root_dir / "workspaces" / ".template.overrides"
+        if overrides_dir.exists():
+            env_overrides = Environment(
+                loader=FileSystemLoader(str(overrides_dir)),
+                keep_trailing_newline=True,
+                trim_blocks=True,
+                lstrip_blocks=True,
+            )
+            override_paths = overrides_dir.rglob("*")
+            override_files = filter(
+                lambda p: p.is_file() and p.name != ".gitkeep", override_paths
+            )
+
+            for path in sorted(override_files):
+                rel = path.relative_to(overrides_dir)
+                if path.suffix == ".j2":
+                    out_path = ws_dir / rel.with_suffix("")
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(
+                        env_overrides.get_template(str(rel)).render(context)
+                    )
+                else:
+                    out_path = ws_dir / rel
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, out_path)
+
+        # 5. Trust the generated mise file (only for new workspaces)
         if is_new:
             run_cmd(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
             print(f"\nWorkspace '{ws.name}' created. To install dependencies:")
@@ -421,8 +406,14 @@ def cmd_status(config: Config, name: str | None = None) -> None:
                 try:
                     resolved = resolve_spec_local(bare_repo, spec, alias_remotes)
                     subprocess.run(
-                        ["git", "-C", str(bare_repo), "fetch", resolved.remote,
-                         f"{resolved.branch}:refs/remotes/{resolved.remote}/{resolved.branch}"],
+                        [
+                            "git",
+                            "-C",
+                            str(bare_repo),
+                            "fetch",
+                            resolved.remote,
+                            f"{resolved.branch}:refs/remotes/{resolved.remote}/{resolved.branch}",
+                        ],
                         capture_output=True,
                     )
                 except (RuntimeError, subprocess.CalledProcessError):
@@ -434,13 +425,22 @@ def cmd_status(config: Config, name: str | None = None) -> None:
                         parts = upstream.split("/", 1)
                         if len(parts) == 2:
                             subprocess.run(
-                                ["git", "-C", str(bare_repo), "fetch",
-                                 parts[0], f"{parts[1]}:refs/remotes/{upstream}"],
+                                [
+                                    "git",
+                                    "-C",
+                                    str(bare_repo),
+                                    "fetch",
+                                    parts[0],
+                                    f"{parts[1]}:refs/remotes/{upstream}",
+                                ],
                                 capture_output=True,
                             )
+
             return task
 
-        fetch_tasks = [make_status_fetch_task(alias, spec) for alias, spec in ws.repos.items()]
+        fetch_tasks = [
+            make_status_fetch_task(alias, spec) for alias, spec in ws.repos.items()
+        ]
         parallel_fetch(fetch_tasks, max_workers=2)
 
         # 3. Display
@@ -476,12 +476,22 @@ def cmd_status(config: Config, name: str | None = None) -> None:
 
             try:
                 if spec.is_detached:
-                    ahead, behind = get_rev_list_count(worktree_path, "HEAD", spec.base_ref)
+                    ahead, behind = get_rev_list_count(
+                        worktree_path, "HEAD", spec.base_ref
+                    )
                     short_hash, full_hash = get_worktree_head(worktree_path)
 
                     base_org_repo = org_repo_for(spec.remote)
-                    base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
-                    commit_url = _github_commit_url(base_org_repo, full_hash) if base_org_repo else None
+                    base_url = (
+                        _github_tree_url(base_org_repo, spec.branch)
+                        if base_org_repo
+                        else None
+                    )
+                    commit_url = (
+                        _github_commit_url(base_org_repo, full_hash)
+                        if base_org_repo
+                        else None
+                    )
 
                     base_text = _link(base_url, _c(spec.base_ref, 1))
                     hash_text = _link(commit_url, _c(short_hash, 33))
@@ -492,73 +502,116 @@ def cmd_status(config: Config, name: str | None = None) -> None:
                         first_attached_branch = spec.local_branch
 
                     remote_ref = get_remote_ref_for_branch(
-                        bare_repo, spec.local_branch, alias_remotes,
-                        exclude_ref=spec.base_ref, base_remote=spec.remote,
+                        bare_repo,
+                        spec.local_branch,
+                        alias_remotes,
+                        exclude_ref=spec.base_ref,
+                        base_remote=spec.remote,
                     )
                     if remote_ref:
                         # Branch found on a configured remote — Case 1 display + PR detection
-                        ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", remote_ref)
+                        ahead_up, behind_up = get_rev_list_count(
+                            worktree_path, "HEAD", remote_ref
+                        )
                         up_parts = remote_ref.split("/", 1)
                         up_remote = up_parts[0]
                         up_branch = up_parts[1]
                         up_org_repo = org_repo_for(up_remote)
-                        up_url = _github_tree_url(up_org_repo, up_branch) if up_org_repo else None
+                        up_url = (
+                            _github_tree_url(up_org_repo, up_branch)
+                            if up_org_repo
+                            else None
+                        )
 
                         if up_remote != spec.remote:
                             base_org_repo = org_repo_for(spec.remote)
-                            fork_user = up_org_repo.split("/")[0] if up_org_repo else None
-                            head_filter = f"{fork_user}:{up_branch}" if fork_user else up_branch
+                            fork_user = (
+                                up_org_repo.split("/")[0] if up_org_repo else None
+                            )
+                            head_filter = (
+                                f"{fork_user}:{up_branch}" if fork_user else up_branch
+                            )
                             if base_org_repo:
                                 pr_info = _get_pr_info(base_org_repo, head_filter)
                                 if not pr_info:
                                     # Branch may be mirrored to fork but PR is on base repo directly
                                     pr_info = _get_pr_info(base_org_repo, up_branch)
                                 if pr_info:
-                                    pr_links.append((base_org_repo, pr_info[0], pr_info[1]))
+                                    pr_links.append(
+                                        (base_org_repo, pr_info[0], pr_info[1])
+                                    )
                         elif up_org_repo:
                             pr_info = _get_pr_info(up_org_repo, up_branch)
                             if pr_info:
                                 pr_links.append((up_org_repo, pr_info[0], pr_info[1]))
 
-                        ahead_base, behind_base = get_rev_list_count(worktree_path, remote_ref, spec.base_ref)
+                        ahead_base, behind_base = get_rev_list_count(
+                            worktree_path, remote_ref, spec.base_ref
+                        )
                         base_org_repo = org_repo_for(spec.remote)
-                        base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
+                        base_url = (
+                            _github_tree_url(base_org_repo, spec.branch)
+                            if base_org_repo
+                            else None
+                        )
                         display_text = _link(up_url, _c(remote_ref, 1))
                         base_text = _link(base_url, _c(spec.base_ref, 1))
                         status = f"{display_text} {_counts(behind_up, ahead_up)} ({base_text} {_counts(behind_base, ahead_base)})"
                     else:
                         upstream = get_upstream(worktree_path)
                         if upstream:
-                            ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
+                            ahead_up, behind_up = get_rev_list_count(
+                                worktree_path, "HEAD", upstream
+                            )
 
                             up_parts = upstream.split("/", 1)
                             up_remote = up_parts[0] if len(up_parts) == 2 else "origin"
                             up_branch = up_parts[1] if len(up_parts) == 2 else upstream
                             up_org_repo = org_repo_for(up_remote)
-                            up_url = _github_tree_url(up_org_repo, up_branch) if up_org_repo else None
+                            up_url = (
+                                _github_tree_url(up_org_repo, up_branch)
+                                if up_org_repo
+                                else None
+                            )
 
                             if up_remote != spec.remote:
                                 # Branch is on a fork — PR lives in the base (origin) repo
                                 base_org_repo = org_repo_for(spec.remote)
-                                fork_user = up_org_repo.split("/")[0] if up_org_repo else None
-                                head_filter = f"{fork_user}:{up_branch}" if fork_user else up_branch
+                                fork_user = (
+                                    up_org_repo.split("/")[0] if up_org_repo else None
+                                )
+                                head_filter = (
+                                    f"{fork_user}:{up_branch}"
+                                    if fork_user
+                                    else up_branch
+                                )
                                 if base_org_repo:
                                     pr_info = _get_pr_info(base_org_repo, head_filter)
                                     if not pr_info:
                                         # Branch may be mirrored to fork but PR is on base repo directly
                                         pr_info = _get_pr_info(base_org_repo, up_branch)
                                     if pr_info:
-                                        pr_links.append((base_org_repo, pr_info[0], pr_info[1]))
+                                        pr_links.append(
+                                            (base_org_repo, pr_info[0], pr_info[1])
+                                        )
                             elif up_org_repo:
                                 pr_info = _get_pr_info(up_org_repo, up_branch)
                                 if pr_info:
-                                    pr_links.append((up_org_repo, pr_info[0], pr_info[1]))
+                                    pr_links.append(
+                                        (up_org_repo, pr_info[0], pr_info[1])
+                                    )
 
                             if upstream != spec.base_ref:
                                 # Case 1: upstream ≠ base — standard format
-                                ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, spec.base_ref)
+                                ahead_base, behind_base = get_rev_list_count(
+                                    worktree_path, upstream, spec.base_ref
+                                )
                                 base_org_repo = org_repo_for(spec.remote)
-                                base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
+                                base_url = (
+                                    _github_tree_url(base_org_repo, spec.branch)
+                                    if base_org_repo
+                                    else None
+                                )
                                 display_text = _link(up_url, _c(upstream, 1))
                                 base_text = _link(base_url, _c(spec.base_ref, 1))
                                 status = f"{display_text} {_counts(behind_up, ahead_up)} ({base_text} {_counts(behind_base, ahead_base)})"
@@ -570,8 +623,14 @@ def cmd_status(config: Config, name: str | None = None) -> None:
                         else:
                             # Case 3: no upstream
                             base_org_repo = org_repo_for(spec.remote)
-                            base_url = _github_tree_url(base_org_repo, spec.branch) if base_org_repo else None
-                            ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", spec.base_ref)
+                            base_url = (
+                                _github_tree_url(base_org_repo, spec.branch)
+                                if base_org_repo
+                                else None
+                            )
+                            ahead_base, behind_base = get_rev_list_count(
+                                worktree_path, "HEAD", spec.base_ref
+                            )
                             base_text = _link(base_url, _c(spec.base_ref, 1))
                             status = f"{_c(spec.local_branch, 1)} {_c('(local)', 2)} ({base_text} {_counts(behind_base, ahead_base)})"
 
@@ -587,7 +646,9 @@ def cmd_status(config: Config, name: str | None = None) -> None:
                 print(f"        pr:     {pr_text}")
 
             if first_attached_branch:
-                runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
+                runbot_url = (
+                    f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
+                )
                 runbot_text = _osc8(runbot_url, first_attached_branch)
                 print(f"        runbot: {runbot_text}")
 
@@ -599,7 +660,7 @@ def cmd_create(config: Config, name: str, specs: list[str]) -> None:
     ws_vars: dict[str, Any] = {}
     for s in specs:
         if s.startswith("vars.") and "=" in s:
-            k, v = s[len("vars."):].split("=", 1)
+            k, v = s[len("vars.") :].split("=", 1)
             ws_vars[k] = v
         else:
             alias, spec = s.split(":", 1)
@@ -616,7 +677,10 @@ def cmd_create(config: Config, name: str, specs: list[str]) -> None:
 
 
 def _report_conflict(alias: str, worktree_path: Path, onto_ref: str) -> None:
-    print(f"\n  {_c('CONFLICT', 31)} in {_c(alias, 1)} rebasing onto {onto_ref}", file=sys.stderr)
+    print(
+        f"\n  {_c('CONFLICT', 31)} in {_c(alias, 1)} rebasing onto {onto_ref}",
+        file=sys.stderr,
+    )
     print("    resolve conflicts, then:", file=sys.stderr)
     print(f"      cd {worktree_path}", file=sys.stderr)
     print("      git rebase --continue", file=sys.stderr)
@@ -651,8 +715,14 @@ def cmd_rebase(config: Config, name: str) -> None:
                 resolved_track = resolve_spec(bare_repo, track_spec, alias_remotes)
                 # Fetch latest
                 run_cmd(
-                    ["git", "-C", str(bare_repo), "fetch", resolved_track.remote,
-                     f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"],
+                    [
+                        "git",
+                        "-C",
+                        str(bare_repo),
+                        "fetch",
+                        resolved_track.remote,
+                        f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}",
+                    ],
                     check=True,
                 )
                 resolved_tracks[alias] = resolved_track.base_ref
@@ -662,11 +732,18 @@ def cmd_rebase(config: Config, name: str) -> None:
                     if resolved_full.base_ref != resolved_track.base_ref:
                         # Work branch found on a remote — fetch latest as upstream
                         run_cmd(
-                            ["git", "-C", str(bare_repo), "fetch", resolved_full.remote,
-                             f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}"],
+                            [
+                                "git",
+                                "-C",
+                                str(bare_repo),
+                                "fetch",
+                                resolved_full.remote,
+                                f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}",
+                            ],
                             check=True,
                         )
                         resolved_upstreams[alias] = resolved_full.base_ref
+
             return task
 
         fetch_tasks = [make_fetch_task(alias, spec) for alias, spec in ws.repos.items()]

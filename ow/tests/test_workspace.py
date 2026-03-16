@@ -8,11 +8,6 @@ from jinja2 import Environment, FileSystemLoader
 from ow.config import BranchSpec, Config, WorkspaceConfig
 from ow.workspace import (
     DriftResult,
-    _check_source_drift,
-    _compute_hash,
-    _load_cache,
-    _record_hash,
-    _save_cache,
     assert_no_drift,
     build_template_context,
     check_drift,
@@ -20,7 +15,7 @@ from ow.workspace import (
     find_addon_paths,
 )
 
-TEMPLATE_DIR = Path(__file__).parent.parent.parent / "workspaces" / ".template.init"
+TEMPLATE_DIR = Path(__file__).parent.parent.parent / "workspaces" / ".template"
 
 
 def make_config(
@@ -30,7 +25,9 @@ def make_config(
     remotes=None,
 ) -> Config:
     return Config(
-        vars=vars if vars is not None else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
+        vars=vars
+        if vars is not None
+        else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
         remotes=remotes or {},
         workspaces=workspaces or [],
         root_dir=root_dir or Path("/root"),
@@ -40,6 +37,7 @@ def make_config(
 # ---------------------------------------------------------------------------
 # Filesystem fixture helpers
 # ---------------------------------------------------------------------------
+
 
 def setup_odoo_main_repo(ws_dir: Path, alias: str = "community") -> Path:
     repo = ws_dir / alias
@@ -93,6 +91,7 @@ def render_template(name: str, context: dict) -> str:
 # find_addon_paths
 # ---------------------------------------------------------------------------
 
+
 def test_find_addon_paths_on_file(tmp_path):
     f = tmp_path / "somefile.txt"
     f.touch()
@@ -133,16 +132,19 @@ def test_find_addon_paths_mixed_depths(tmp_path):
     (repo / "external" / "vendor" / "payments" / "stripe" / "__manifest__.py").touch()
 
     result = find_addon_paths(repo)
-    assert result == sorted([
-        repo / "categories" / "crm",
-        repo / "external" / "vendor" / "payments",
-        repo / "helpers",
-    ])
+    assert result == sorted(
+        [
+            repo / "categories" / "crm",
+            repo / "external" / "vendor" / "payments",
+            repo / "helpers",
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
 # build_template_context
 # ---------------------------------------------------------------------------
+
 
 def test_build_template_context_community_only(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
@@ -170,12 +172,18 @@ def test_build_template_context_addons_order(tmp_path):
 
     # enterprise before community in addons_paths
     ent_idx = next(i for i, p in enumerate(ctx["addons_paths"]) if "enterprise" in p)
-    comm_idx = next(i for i, p in enumerate(ctx["addons_paths"]) if "community/addons" in p)
+    comm_idx = next(
+        i for i, p in enumerate(ctx["addons_paths"]) if "community/addons" in p
+    )
     assert ent_idx < comm_idx
 
     # enterprise before community in odools_path_items
-    ent_idx = next(i for i, p in enumerate(ctx["odools_path_items"]) if "enterprise" in p)
-    comm_idx = next(i for i, p in enumerate(ctx["odools_path_items"]) if "community/addons" in p)
+    ent_idx = next(
+        i for i, p in enumerate(ctx["odools_path_items"]) if "enterprise" in p
+    )
+    comm_idx = next(
+        i for i, p in enumerate(ctx["odools_path_items"]) if "community/addons" in p
+    )
     assert ent_idx < comm_idx
 
 
@@ -205,7 +213,12 @@ def test_build_template_context_full_workspace(tmp_path):
 
     assert ctx["repos"] == ["community", "enterprise", "brboi-addons"]
     assert len([p for p in ctx["addons_paths"] if "community" in p]) == 2
-    assert len([p for p in ctx["addons_paths"] if "enterprise" in p or "brboi-addons" in p]) == 2
+    assert (
+        len(
+            [p for p in ctx["addons_paths"] if "enterprise" in p or "brboi-addons" in p]
+        )
+        == 2
+    )
 
 
 def test_build_template_context_no_main_repo(tmp_path):
@@ -221,6 +234,7 @@ def test_build_template_context_no_main_repo(tmp_path):
 # ---------------------------------------------------------------------------
 # Template rendering — odoorc
 # ---------------------------------------------------------------------------
+
 
 def test_render_odoorc_community_only(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
@@ -288,6 +302,7 @@ def test_render_odoorc_no_quotes_on_string_values(tmp_path):
 # Template rendering — odools.toml
 # ---------------------------------------------------------------------------
 
+
 def test_render_odools_community_only(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
@@ -341,6 +356,7 @@ def test_render_odools_categorized_repo(tmp_path):
 # Template rendering — mise.toml
 # ---------------------------------------------------------------------------
 
+
 def test_render_mise_toml(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
@@ -362,6 +378,7 @@ def test_render_mise_toml(tmp_path):
 # Template rendering — pyrightconfig.json
 # ---------------------------------------------------------------------------
 
+
 def test_render_pyrightconfig(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
@@ -381,6 +398,7 @@ def test_render_pyrightconfig(tmp_path):
 # ---------------------------------------------------------------------------
 # Template rendering — .vscode
 # ---------------------------------------------------------------------------
+
 
 def test_render_vscode_settings(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
@@ -410,6 +428,7 @@ def test_render_vscode_launch(tmp_path):
 # ---------------------------------------------------------------------------
 # Template rendering — .zed
 # ---------------------------------------------------------------------------
+
 
 def test_render_zed_settings(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
@@ -460,130 +479,15 @@ def test_render_zed_debug(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Hash / cache / drift
-# ---------------------------------------------------------------------------
-
-def test_compute_hash_file(tmp_path):
-    f = tmp_path / "test.txt"
-    f.write_bytes(b"hello")
-    h1 = _compute_hash(f)
-    assert len(h1) == 64  # sha256 hex
-    f.write_bytes(b"world")
-    h2 = _compute_hash(f)
-    assert h1 != h2
-
-
-def test_compute_hash_dir_stable(tmp_path):
-    d = tmp_path / "dir"
-    d.mkdir()
-    (d / "a.txt").write_bytes(b"aaa")
-    (d / "b.txt").write_bytes(b"bbb")
-    h1 = _compute_hash(d)
-    h2 = _compute_hash(d)
-    assert h1 == h2
-
-
-def test_compute_hash_dir_changes_on_content(tmp_path):
-    d = tmp_path / "dir"
-    d.mkdir()
-    (d / "a.txt").write_bytes(b"aaa")
-    h1 = _compute_hash(d)
-    (d / "a.txt").write_bytes(b"bbb")
-    h2 = _compute_hash(d)
-    assert h1 != h2
-
-
-def test_load_save_cache(tmp_path):
-    assert _load_cache(tmp_path) == {}
-    _save_cache(tmp_path, {"key": {"hash": "abc", "ignore": False}})
-    cache = _load_cache(tmp_path)
-    assert cache["key"]["hash"] == "abc"
-
-
-def test_record_hash(tmp_path):
-    f = tmp_path / "example.txt"
-    f.write_bytes(b"content")
-    _record_hash(tmp_path, "example.txt", f)
-    cache = _load_cache(tmp_path)
-    assert cache["example.txt"]["hash"] == _compute_hash(f)
-    assert cache["example.txt"]["ignore"] is False
-
-
-def test_check_source_drift_no_cache(tmp_path):
-    f = tmp_path / "example.txt"
-    f.write_bytes(b"content")
-    # Non-TTY: should print warning but not abort
-    with patch("sys.stdin") as mock_stdin:
-        mock_stdin.isatty.return_value = False
-        result = _check_source_drift(tmp_path, "example.txt", f)
-    assert result is False
-
-
-def test_check_source_drift_no_drift(tmp_path):
-    f = tmp_path / "example.txt"
-    f.write_bytes(b"content")
-    _record_hash(tmp_path, "example.txt", f)
-    # Same content: no drift
-    result = _check_source_drift(tmp_path, "example.txt", f)
-    assert result is False
-
-
-def test_check_source_drift_ignore(tmp_path):
-    f = tmp_path / "example.txt"
-    f.write_bytes(b"v1")
-    _save_cache(tmp_path, {"example.txt": {"hash": "old", "ignore": True}})
-    # ignore=True: never drift
-    result = _check_source_drift(tmp_path, "example.txt", f)
-    assert result is False
-
-
-def test_check_source_drift_abort(tmp_path):
-    f = tmp_path / "example.txt"
-    f.write_bytes(b"v2")
-    _save_cache(tmp_path, {"example.txt": {"hash": "old_hash", "ignore": False}})
-    with patch("sys.stdin") as mock_stdin:
-        mock_stdin.isatty.return_value = True
-        with patch("builtins.input", return_value="a"):
-            result = _check_source_drift(tmp_path, "example.txt", f)
-    assert result is True
-
-
-def test_check_source_drift_skip(tmp_path):
-    f = tmp_path / "example.txt"
-    f.write_bytes(b"v2")
-    _save_cache(tmp_path, {"example.txt": {"hash": "old_hash", "ignore": False}})
-    with patch("sys.stdin") as mock_stdin:
-        mock_stdin.isatty.return_value = True
-        with patch("builtins.input", return_value="s"):
-            result = _check_source_drift(tmp_path, "example.txt", f)
-    assert result is False
-    cache = _load_cache(tmp_path)
-    assert cache["example.txt"]["hash"] == _compute_hash(f)
-
-
-def test_check_source_drift_continue_no_save(tmp_path):
-    f = tmp_path / "example.txt"
-    f.write_bytes(b"v2")
-    _save_cache(tmp_path, {"example.txt": {"hash": "old_hash"}})
-    with patch("sys.stdin") as mock_stdin:
-        mock_stdin.isatty.return_value = True
-        with patch("builtins.input", return_value="c"):
-            result = _check_source_drift(tmp_path, "example.txt", f)
-    assert result is False
-    # [c] does not update the cache — will warn again next time
-    cache = _load_cache(tmp_path)
-    assert cache["example.txt"]["hash"] == "old_hash"
-
-
-# ---------------------------------------------------------------------------
 # cmd_create — vars parsing
 # ---------------------------------------------------------------------------
+
 
 def test_cmd_create_vars_parsing(tmp_path):
     # Set up a minimal ow.toml and template dir so cmd_create doesn't fail on I/O
     (tmp_path / "ow.toml").write_text("[vars]\n")
-    template_init = tmp_path / "workspaces" / ".template.init"
-    template_init.mkdir(parents=True)
+    template = tmp_path / "workspaces" / ".template"
+    template.mkdir(parents=True)
     config = make_config(root_dir=tmp_path, vars={}, workspaces=[])
 
     captured_ws = []
@@ -593,7 +497,11 @@ def test_cmd_create_vars_parsing(tmp_path):
         pass
 
     with patch("ow.workspace.cmd_apply", fake_apply):
-        cmd_create(config, "my-ws", ["community:master", "vars.http_port=8080", "vars.db_user=myuser"])
+        cmd_create(
+            config,
+            "my-ws",
+            ["community:master", "vars.http_port=8080", "vars.db_user=myuser"],
+        )
 
     ws = config.workspaces[0]
     assert ws.name == "my-ws"
@@ -605,38 +513,59 @@ def test_cmd_create_vars_parsing(tmp_path):
 # DriftResult
 # ---------------------------------------------------------------------------
 
+
 def test_drift_result_detached_config_detached_worktree():
     """Config says detached, worktree is detached — no drift."""
-    dr = DriftResult(alias="community", spec=BranchSpec("origin/master"), actual_branch=None)
+    dr = DriftResult(
+        alias="community", spec=BranchSpec("origin/master"), actual_branch=None
+    )
     assert dr.is_drifted is False
 
 
 def test_drift_result_detached_config_worktree_on_branch():
     """Config says detached, worktree is on a branch — drift."""
-    dr = DriftResult(alias="community", spec=BranchSpec("origin/master"), actual_branch="some-branch")
+    dr = DriftResult(
+        alias="community", spec=BranchSpec("origin/master"), actual_branch="some-branch"
+    )
     assert dr.is_drifted is True
 
 
 def test_drift_result_attached_config_correct_branch():
     """Config says branch X, worktree is on branch X — no drift."""
-    dr = DriftResult(alias="community", spec=BranchSpec("origin/master", "my-feature"), actual_branch="my-feature")
+    dr = DriftResult(
+        alias="community",
+        spec=BranchSpec("origin/master", "my-feature"),
+        actual_branch="my-feature",
+    )
     assert dr.is_drifted is False
 
 
 def test_drift_result_attached_config_worktree_detached():
     """Config says branch X, worktree is detached — drift."""
-    dr = DriftResult(alias="community", spec=BranchSpec("origin/master", "my-feature"), actual_branch=None)
+    dr = DriftResult(
+        alias="community",
+        spec=BranchSpec("origin/master", "my-feature"),
+        actual_branch=None,
+    )
     assert dr.is_drifted is True
 
 
 def test_drift_result_attached_config_wrong_branch():
     """Config says branch X, worktree is on branch Y — drift."""
-    dr = DriftResult(alias="community", spec=BranchSpec("origin/master", "my-feature"), actual_branch="other-branch")
+    dr = DriftResult(
+        alias="community",
+        spec=BranchSpec("origin/master", "my-feature"),
+        actual_branch="other-branch",
+    )
     assert dr.is_drifted is True
 
 
 def test_drift_result_message_detached_drift():
-    dr = DriftResult(alias="community", spec=BranchSpec("origin/master"), actual_branch="rogue-branch")
+    dr = DriftResult(
+        alias="community",
+        spec=BranchSpec("origin/master"),
+        actual_branch="rogue-branch",
+    )
     msg = dr.message
     assert "community" in msg
     assert "detached" in msg
@@ -644,7 +573,11 @@ def test_drift_result_message_detached_drift():
 
 
 def test_drift_result_message_attached_drift():
-    dr = DriftResult(alias="enterprise", spec=BranchSpec("origin/master", "my-feature"), actual_branch=None)
+    dr = DriftResult(
+        alias="enterprise",
+        spec=BranchSpec("origin/master", "my-feature"),
+        actual_branch=None,
+    )
     msg = dr.message
     assert "enterprise" in msg
     assert "my-feature" in msg
@@ -654,6 +587,7 @@ def test_drift_result_message_attached_drift():
 # ---------------------------------------------------------------------------
 # check_drift
 # ---------------------------------------------------------------------------
+
 
 def test_check_drift_uses_get_worktree_branch(tmp_path):
     worktree_path = tmp_path / "community"
@@ -682,6 +616,7 @@ def test_check_drift_detects_wrong_branch(tmp_path):
 # ---------------------------------------------------------------------------
 # assert_no_drift
 # ---------------------------------------------------------------------------
+
 
 def test_assert_no_drift_passes_when_aligned(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"

@@ -1,0 +1,8 @@
+Local template overrides
+Files placed here will override templates from ../.template/
+when generating workspaces with 'ow apply'.
+Example: to customize odoorc for all your workspaces:
+  cp workspaces/.template/odoorc.j2 workspaces/.template.overrides/odoorc.j2
+  # then edit workspaces/.template.overrides/odoorc.j2 to your liking
+This directory is gitignored - use it for personal customizations
+that you don't want to track in the ow repository.

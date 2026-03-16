@@ -6,6 +6,7 @@ CLI tool that turns a single `ow.toml` into ready-to-code Odoo workspaces using 
 
 Here is what `ow` does for you:
 
+- **Git Optimized Commands** — Odoo repositories are huge, but `ow` will clone the repos in less than 5 minutes!
 - **Workspace generation** — each workspace is a folder with git worktrees and IDE configs, ready to open in VSCode or Zed
 - **Declarative config** — define remotes, workspaces, and template variables in a single `ow.toml`
 - **Branch spec syntax** — concise `base..feature` notation to control detached vs attached worktrees
@@ -14,12 +15,10 @@ Here is what `ow` does for you:
 - **Per-workspace variables** — global `[vars]` with per-workspace overrides for ports, DB credentials, etc.
 - **Smart rebase** — two-step rebase (upstream then base), with conflict reporting and instructions
 - **Rich status** — behind/ahead counts, clickable branch links, PR detection via `gh`, runbot links
-- **Drift detection** — SHA256 tracking on `ow.toml.example` and template sources; worktree branch drift check before destructive operations
-- **Workspace independence** — generated workspaces are valid git directories that work standalone
 - **Optional services** — Docker Compose stack with PostgreSQL, pgweb, and mailpit for local development
 - **Clean removal** — archives workspace config, removes worktrees and branches, preserves bare repos
 - **Tab completion** — fish, bash, zsh via `argcomplete`
-- **Full transparency** — every git command executed is printed to stderr (prefixed with `$`)
+- **Full transparency** — git command that changes your trees are printed to your terminal before execution
 
 ## Prerequisites
 
@@ -31,12 +30,25 @@ Here is what `ow` does for you:
 ## Quick Start
 
 ```sh
-cp ow.toml.example ow.toml  # then edit to your liking
-ow apply                     # generate all workspaces
-cd workspaces/<name> && mise install   # install Python, create venv, install pip deps
+# ow will create ow.toml on first run if not found. It will only contain
+# the Odoo repository aliased as 'community'. Create a new workspace with:
+ow create my_work community:master      # will add the workspace in ow.toml
+ow apply my_work                        # will generate the workspace folder in workspaces/my_work
+cd workspaces/my_work && mise install   # install Python, create venv, install pip deps
+code workpaces/my_work                  # open it in your favorite IDE and enjoy
 ```
 
-See [ow.toml.example](./ow.toml.example) for the full config reference.
+## File Reference
+
+| Path | Description |
+|------|-------------|
+| `ow.toml` | Active configuration (remotes, variables, workspaces) — created with defaults on first run |
+| `.ow.toml.archived-workspaces` | Removed workspace configs (append-only log) |
+| `.bare-git-repos/` | Shared bare git repositories |
+| `workspaces/.template/` | Jinja2 templates (git-tracked) |
+| `workspaces/.template.overrides/` | Local template overrides (gitignored) |
+| `workspaces/<name>/` | Generated workspace directories |
+| `services/` | Optional Docker/Podman service containers |
 
 ## Configuration (`ow.toml`)
 
@@ -123,6 +135,98 @@ The repo spec string controls how the worktree is created:
 
 Specifying the remote (`dev/branch`) is optional but required if the branch name exists on multiple remotes.
 
+## Configuration Example
+
+Here's a complete example configuration:
+
+```toml
+[remotes]
+community.origin.url = "git@github.com:odoo/odoo.git"
+community.dev.url = "git@github.com:odoo-dev/odoo.git"
+community.dev.pushurl = "git@github.com:odoo-dev/odoo.git"
+community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
+
+enterprise.origin.url = "git@github.com:odoo/enterprise.git"
+enterprise.dev.url = "git@github.com:odoo-dev/enterprise.git"
+
+[vars]
+http_port = 8070
+db_host = "localhost"
+db_port = 5432
+db_user = "odoo"
+db_password = "odoo"
+admin_passwd = "Password"
+smtp_server = "mailpit"
+smtp_port = 1025
+
+[[workspace]]
+name = "opw-123456"
+repo.community = "master..master-opw-123456-ngram"
+repo.enterprise = "origin/master"
+vars.http_port = 8080
+```
+
+## Tab Completion
+
+Fish (one-time setup):
+```sh
+register-python-argcomplete --shell fish ow > ~/.config/fish/completions/ow.fish
+```
+
+Bash/Zsh:
+```sh
+activate-global-python-argcomplete
+```
+
+## Services
+
+Optional containerized services for local development:
+
+    docker compose -f services/compose.yml up -d
+
+| Service | Port | Description |
+|---------|------|-------------|
+| postgres | 5432 | PostgreSQL 17 with pgvector |
+| pgweb | 8081 | Web-based PostgreSQL browser |
+| mailpit | 8025 / 1025 | Email testing (web UI / SMTP) |
+
+Configure your workspaces to use them via `[vars]`:
+
+    [vars]
+    db_host = "localhost"
+    db_port = 5432
+    smtp_server = "localhost"
+    smtp_port = 1025
+
+## Workflow
+
+```sh
+# 1. Create a workspace
+ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master
+
+# 2. Install dependencies
+cd workspaces/opw-123456 && mise install
+
+# 3. Open in your IDE
+code workspaces/opw-123456        # VSCode
+zeditor workspaces/opw-123456    # Zed
+
+# 4. Develop — the workspace has everything: venv, odoorc, debug configs
+
+# 5. Push your work
+cd workspaces/opw-123456/community
+git push -u dev HEAD
+
+# 6. Check status (from inside the workspace, no name needed)
+ow status
+
+# 7. Rebase on latest upstream
+ow rebase
+
+# 8. Clean up when done
+ow remove opw-123456
+```
+
 ## Commands
 
 | Command | Description |
@@ -142,9 +246,8 @@ Creates or updates workspaces defined in `ow.toml`. For each workspace:
 1. Ensures bare repos exist and fetches required refs (parallel, max 2 workers)
 2. Creates worktrees (or reconciles existing ones — detached ↔ attached transitions)
 3. Renders Jinja2 templates and copies static files into the workspace
-4. For new workspaces: trusts `mise.toml` and prints a reminder to run `mise install`
-
-Checks for drift on `ow.toml.example` and `.template.init/` before proceeding. If sources have changed since you last acknowledged them, you'll be prompted to continue, skip, or abort.
+4. Applies local overrides from `.template.overrides/` if present
+5. For new workspaces: trusts `mise.toml` and prints a reminder to run `mise install`
 
 ```sh
 ow apply             # all workspaces
@@ -213,8 +316,6 @@ Clickable elements (Ctrl+Click in terminal):
 > $ gh auth login # do not forget to login
 > ```
 
-Runs `assert_no_drift` before displaying. If worktree state doesn't match config, it aborts with instructions to run `ow apply`.
-
 ### `ow rebase`
 
 Fetches and rebases all repos in a workspace. The strategy applied by `ow` depends on the worktree mode:
@@ -248,19 +349,25 @@ ow rebase              # rebase current workspace
 ow rebase opw-123456   # explicit workspace
 ```
 
-Runs `assert_no_drift` before starting.
-
 ### `ow remove`
 
 Removes a workspace directory and its worktree/branch references. The bare repo is preserved so you can recreate the workspace later.
 
 The workspace config is archived to `.ow.toml.archived-workspaces` (append-only) and removed from `ow.toml`.
 
-Runs `assert_no_drift` before removing.
+## Workspace Independence & Drift
+
+Once created, a workspace is a regular directory with standard git worktrees. You can `cd` into it, run git commands, switch branches — it works without `ow`.
+
+However, if the worktree state diverges from `ow.toml` (e.g. you manually switch branches), `ow` considers this **drift**. Commands like `rebase`, `remove`, and `status` run `assert_no_drift` and will abort if the actual branch doesn't match the configured spec.
+
+**Golden rule:** one local branch = one worktree. Git enforces this — you can't check out the same branch in two worktrees. Use detached mode (no `..`) when you just need a read-only copy of a version.
+
+To reconcile after manual changes, update `ow.toml` to match reality, then run `ow apply`.
 
 ## Template System
 
-Templates live in `workspaces/.template.init/` (git-tracked originals) and `workspaces/.template/` (your working copy). On first `ow apply`, `.template.init/` is copied to `.template/`. You edit `.template/` to customize.
+Templates live in `workspaces/.template/` (git-tracked). You can override templates for your local setup by placing files in `workspaces/.template.overrides/` (gitignored). When `ow apply` runs, it first applies templates from `.template/`, then applies any overrides from `.template.overrides/` (which will overwrite files with the same path).
 
 ### Generated files
 
@@ -291,120 +398,15 @@ Variables available in all templates:
 
 ### Customizing templates
 
-On first `ow apply`, `.template.init/` is copied to `.template/` — after that, only `.template/` is used for rendering. Edit files there; they won't be overwritten.
-
-If `.template.init/` changes upstream (e.g. after a `git pull`), `ow` detects the drift via SHA256 hashes stored in `.ow.cache` and prompts you to continue, skip (acknowledge), or abort.
-
-## Services
-
-Optional containerized services for local development:
-
-    docker compose -f services/compose.yml up -d
-
-| Service | Port | Description |
-|---------|------|-------------|
-| postgres | 5432 | PostgreSQL 17 with pgvector |
-| pgweb | 8081 | Web-based PostgreSQL browser |
-| mailpit | 8025 / 1025 | Email testing (web UI / SMTP) |
-
-Configure your workspaces to use them via `[vars]`:
-
-    [vars]
-    db_host = "localhost"
-    db_port = 5432
-    smtp_server = "localhost"
-    smtp_port = 1025
-
-## Workflow
+To customize templates for your local setup, copy them to `.template.overrides/` and edit them there:
 
 ```sh
-# 1. Create a workspace
-ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master
-
-# 2. Install dependencies
-cd workspaces/opw-123456 && mise install
-
-# 3. Open in your IDE
-code workspaces/opw-123456        # VSCode
-zeditor workspaces/opw-123456    # Zed
-
-# 4. Develop — the workspace has everything: venv, odoorc, debug configs
-
-# 5. Push your work
-cd workspaces/opw-123456/community
-git push -u dev HEAD
-
-# 6. Check status (from inside the workspace, no name needed)
-ow status
-
-# 7. Rebase on latest upstream
-ow rebase
-
-# 8. Clean up when done
-ow remove opw-123456
+# Example: customize odoorc for all workspaces
+cp workspaces/.template/odoorc.j2 workspaces/.template.overrides/odoorc.j2
+# Edit the file to your liking
 ```
 
-## Workspace Independence & Drift
-
-Once created, a workspace is a regular directory with standard git worktrees. You can `cd` into it, run git commands, switch branches — it works without `ow`.
-
-However, if the worktree state diverges from `ow.toml` (e.g. you manually switch branches), `ow` considers this **drift**. Commands like `rebase`, `remove`, and `status` run `assert_no_drift` and will abort if the actual branch doesn't match the configured spec.
-
-**Golden rule:** one local branch = one worktree. Git enforces this — you can't check out the same branch in two worktrees. Use detached mode (no `..`) when you just need a read-only copy of a version.
-
-To reconcile after manual changes, update `ow.toml` to match reality, then run `ow apply`.
-
-## File Reference
-
-| Path | Description |
-|------|-------------|
-| `ow.toml` | Active configuration (remotes, variables, workspaces) |
-| `ow.toml.example` | Config template, drift-checked against your `ow.toml` |
-| `.ow.cache` | SHA256 hashes for drift detection (auto-managed, tracks `ow.toml.example` and `.template.init/`) |
-| `.ow.toml.archived-workspaces` | Removed workspace configs (append-only log) |
-| `.bare-git-repos/` | Shared bare git repositories |
-| `workspaces/.template.init/` | Original templates (git-tracked) |
-| `workspaces/.template/` | Working copy of templates (your customizations go here) |
-| `workspaces/<name>/` | Generated workspace directories |
-| `services/` | Optional Docker/Podman service containers |
-
-## Tab Completion
-
-Fish (one-time setup):
-```sh
-register-python-argcomplete --shell fish ow > ~/.config/fish/completions/ow.fish
-```
-
-Bash/Zsh:
-```sh
-activate-global-python-argcomplete
-```
-
-## Project Structure
-
-```
-.
-├── ow/                         # ow source code
-│   ├── __main__.py             # CLI entry point (argparse)
-│   ├── config.py               # TOML parsing, BranchSpec, data classes
-│   ├── git.py                  # git operations (worktrees, fetch, rebase)
-│   └── workspace.py            # commands, templates, drift detection
-├── workspaces/
-│   ├── .template.init/         # original Jinja2 templates (git-tracked)
-│   │   ├── mise.toml.j2
-│   │   ├── odoorc.j2
-│   │   ├── odools.toml.j2
-│   │   ├── pyrightconfig.json.j2
-│   │   ├── requirements-dev.txt
-│   │   ├── .vscode/            # VSCode templates
-│   │   └── .zed/               # Zed templates
-│   ├── .template/              # working copy (not tracked)
-│   └── <name>/                 # generated workspaces
-├── .bare-git-repos/            # shared bare repositories
-├── services/                   # docker compose services
-├── ow.toml.example             # config template
-└── ow.toml                     # your active config (not tracked)
-```
+Overrides are applied after base templates, so files in `.template.overrides/` will overwrite files with the same path from `.template/`. This directory is gitignored — use it for personal customizations you don't want to track in the ow repository.
 
 ## Disclaimer
 

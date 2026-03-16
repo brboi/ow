@@ -3,12 +3,12 @@
 services/volumes/
 services/compose.local.yml
 workspaces/*
-!workspaces/.template.init
-!workspaces/.template.init/**
+!workspaces/.template
+!workspaces/.template/**
 mise.local.toml
 ow.toml
 .ow.toml.archived-workspaces
-.ow.cache
+workspaces/.template.overrides
 *.egg-info
 .pytest_cache
 __pycache__

@@ -12,8 +12,6 @@ import argcomplete
 
 from ow.config import load_config
 from ow.workspace import (
-    _check_source_drift,
-    _record_hash,
     cmd_apply,
     cmd_create,
     cmd_rebase,
@@ -28,7 +26,9 @@ def find_root() -> Path:
         if (current / "ow.toml").exists() or (current / "ow.toml.example").exists():
             return current
         if current.parent == current:
-            raise FileNotFoundError("ow.toml not found in current directory or any parent")
+            raise FileNotFoundError(
+                "ow.toml not found in current directory or any parent"
+            )
         current = current.parent
 
 
@@ -51,7 +51,10 @@ def resolve_workspace_name(name: str | None, allow_all: bool = False) -> str | N
         return env_name
     if allow_all:
         return None
-    print("Error: workspace name required (or run from inside a workspace with mise activated)", file=sys.stderr)
+    print(
+        "Error: workspace name required (or run from inside a workspace with mise activated)",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
@@ -59,23 +62,39 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="ow", description="Odoo workspace manager")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    p_apply = subparsers.add_parser("apply", help="Apply configuration and create workspaces")
-    p_apply.add_argument("name", nargs="?", help="Workspace name (applies all if omitted)").completer = workspace_completer
+    p_apply = subparsers.add_parser(
+        "apply", help="Apply configuration and create workspaces"
+    )
+    p_apply.add_argument(
+        "name", nargs="?", help="Workspace name (applies all if omitted)"
+    ).completer = workspace_completer
 
     p_remove = subparsers.add_parser("remove", help="Remove a workspace")
     p_remove.add_argument("name").completer = workspace_completer
 
     p_status = subparsers.add_parser("status", help="Show workspace status")
-    p_status.add_argument("name", nargs="?", help="Workspace name (shows all if omitted)").completer = workspace_completer
-    p_status.add_argument("--all", action="store_true", dest="all_workspaces",
-                          help="Show all workspaces (overrides OW_WORKSPACE)")
+    p_status.add_argument(
+        "name", nargs="?", help="Workspace name (shows all if omitted)"
+    ).completer = workspace_completer
+    p_status.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_workspaces",
+        help="Show all workspaces (overrides OW_WORKSPACE)",
+    )
 
     p_create = subparsers.add_parser("create", help="Create a new workspace")
     p_create.add_argument("name")
-    p_create.add_argument("specs", nargs="+", metavar="alias:spec|vars.key=value",
-                          help="e.g. community:master vars.http_port=8080")
+    p_create.add_argument(
+        "specs",
+        nargs="+",
+        metavar="alias:spec|vars.key=value",
+        help="e.g. community:master vars.http_port=8080",
+    )
 
-    p_rebase = subparsers.add_parser("rebase", help="Fetch and rebase workspace branches")
+    p_rebase = subparsers.add_parser(
+        "rebase", help="Fetch and rebase workspace branches"
+    )
     p_rebase.add_argument("name", nargs="?").completer = workspace_completer
 
     argcomplete.autocomplete(parser)
@@ -88,24 +107,30 @@ def main() -> None:
         sys.exit(1)
 
     toml_path = root / "ow.toml"
-    example_path = root / "ow.toml.example"
-    if not toml_path.exists() and example_path.exists():
-        shutil.copy(example_path, toml_path)
-        print("Copied ow.toml.example → ow.toml. Edit it to configure your workspaces.")
-        _record_hash(root, "ow.toml.example", example_path)
+    if not toml_path.exists():
+        minimal_config = """\
+[remotes]
+community.origin.url = "git@github.com:odoo/odoo.git"
 
-    if example_path.exists():
-        if _check_source_drift(root, "ow.toml.example", example_path):
-            sys.exit(1)
+[[workspace]]
+name = "master"
+repo.community = "master"
+"""
+        toml_path.write_text(minimal_config)
+        print("Created ow.toml with default configuration. Edit it to suit your needs.")
 
-    config = load_config(root / "ow.toml")
+    config = load_config(toml_path)
 
     if args.command == "apply":
         cmd_apply(config, args.name)
     elif args.command == "remove":
         cmd_remove(config, args.name)
     elif args.command == "status":
-        name = None if getattr(args, "all_workspaces", False) else resolve_workspace_name(args.name, allow_all=True)
+        name = (
+            None
+            if getattr(args, "all_workspaces", False)
+            else resolve_workspace_name(args.name, allow_all=True)
+        )
         cmd_status(config, name)
     elif args.command == "create":
         cmd_create(config, args.name, args.specs)

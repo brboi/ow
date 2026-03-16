@@ -29,7 +29,7 @@ ow/
 
 ## Template system
 
-Workspace files are generated from `workspaces/.template/` (user-editable copy of `workspaces/.template.init/`). Templates are Jinja2 (`.j2` extension); static files are copied as-is.
+Workspace files are generated from `workspaces/.template/` (git-tracked). Templates are Jinja2 (`.j2` extension); static files are copied as-is. Local overrides can be placed in `workspaces/.template.overrides/` (gitignored), which will overwrite files from `.template/` with the same path.
 
 Template context keys:
 - `ws_name` — workspace name
@@ -39,23 +39,11 @@ Template context keys:
 - `repos` — list of repo aliases
 - `main_repo_alias` — alias of the Odoo core repo (has `odoo-bin`), or `None`
 
-## Cache / drift detection
-
-`workspace.py` maintains `.ow.cache` (JSON, gitignored) to track hashes of shipped files:
-
-- `workspaces/.template.init/` — checked in `cmd_apply` before copying to `.template/`
-- `ow.toml.example` — checked in `__main__.py` at every invocation
-
-If the hash has changed since last record:
-- Non-TTY: warning printed to stderr, continues
-- TTY: interactive prompt — `[c]` continue (warns again next time), `[s]` skip until next update (saves hash), `[a]` abort
-
-Cache helpers: `_compute_hash`, `_load_cache`, `_save_cache`, `_check_source_drift`, `_record_hash`.
-
 ## Conventions
 
 - Bare repos live in `.bare-git-repos/<alias>.git`.
 - Workspace dirs are `workspaces/<name>/`, with subdirs matching repo aliases.
 - `community` is always the Odoo core repo; its addons are at `community/addons` and `community/odoo/addons`.
 - All other repo aliases are treated as plain addons dirs (mounted at their alias name).
-- `ow.toml` is user-local (gitignored). Removed workspaces are archived to `.ow.toml.archived-workspaces` (also gitignored). `.ow.cache` is also gitignored.
+- `ow.toml` is user-local (gitignored). Removed workspaces are archived to `.ow.toml.archived-workspaces` (also gitignored).
+- `workspaces/.template/` contains git-tracked templates; `workspaces/.template.overrides/` contains local overrides (gitignored).
