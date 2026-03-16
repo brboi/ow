@@ -2,7 +2,7 @@
 python = "3.12"
 
 [hooks]
-postinstall = "pip install -r {{ main_repo_alias }}/requirements.txt -r requirements-dev.txt"
+postinstall = "pip install -r {% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}/requirements.txt -r {% raw %}{{config_root}}{% endraw %}/requirements-dev.txt"
 
 [env]
 OW_WORKSPACE = "{{ ws_name }}"

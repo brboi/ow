@@ -6,4 +6,4 @@ python = "3.12"
 experimental = true # in order to use [hooks]
 
 [hooks]
-postinstall = "pip install -e . -q"
+postinstall = "pip install -e {{config_root}} -q"
