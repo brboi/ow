@@ -6,5 +6,9 @@ postinstall = "pip install -r {{ main_repo_alias }}/requirements.txt -r requirem
 
 [env]
 OW_WORKSPACE = "{{ ws_name }}"
+ODOO_RC = "{% raw %}{{config_root}}{% endraw %}/odoorc"
 _.python.venv = { path = ".venv", create = true }
 _.path = ["{% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}"]
+
+[shell_alias]
+osh = "odoo-bin shell --no-http -c $ODOO_RC"
