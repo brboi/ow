@@ -43,7 +43,6 @@ Template context keys:
 
 - Bare repos live in `.bare-git-repos/<alias>.git`.
 - Workspace dirs are `workspaces/<name>/`, with subdirs matching repo aliases.
-- `community` is always the Odoo core repo; its addons are at `community/addons` and `community/odoo/addons`.
-- All other repo aliases are treated as plain addons dirs (mounted at their alias name).
+- `community` is always the Odoo core repo; its addons are at `community/addons` and `community/odoo/addons`. Note that `community` is the default proposed alias for the main `odoo/odoo` repository, but it can be changed. There is `is_odoo_main_repo` that is made to discover which repo is the main.
 - `ow.toml` is user-local (gitignored). Removed workspaces are archived to `.ow.toml.archived-workspaces` (also gitignored).
 - `workspaces/.template/` contains git-tracked templates; `workspaces/.template.overrides/` contains local overrides (gitignored).
