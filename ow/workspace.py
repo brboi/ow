@@ -151,7 +151,26 @@ def check_drift(worktree_path: Path, spec: BranchSpec, alias: str) -> DriftResul
     return DriftResult(alias=alias, spec=spec, actual_branch=actual_branch)
 
 
-def assert_no_drift(ws: WorkspaceConfig, ws_dir: Path) -> None:
+def warn_if_drifted(ws: WorkspaceConfig | None, ws_dir: Path) -> None:
+    """Display warnings for drift or missing config; never exit."""
+    # Find actual repos in workspace
+    actual_repos = {}
+    for child in ws_dir.iterdir():
+        if child.is_dir() and (child / ".git").exists():
+            actual_repos[child.name] = get_worktree_branch(child)
+
+    if ws is None:
+        # No config in ow.toml - warn about deduced state
+        print(f"Warning: workspace '{ws_dir.name}' not in ow.toml", file=sys.stderr)
+        print("  Actual state:", file=sys.stderr)
+        for alias, branch in sorted(actual_repos.items()):
+            if branch:
+                print(f"    {alias}: branch {branch}", file=sys.stderr)
+            else:
+                print(f"    {alias}: detached HEAD", file=sys.stderr)
+        return
+
+    # Check for drift
     drifted = []
     for alias, spec in ws.repos.items():
         worktree_path = ws_dir / alias
@@ -160,12 +179,11 @@ def assert_no_drift(ws: WorkspaceConfig, ws_dir: Path) -> None:
         result = check_drift(worktree_path, spec, alias)
         if result.is_drifted:
             drifted.append(result)
+
     if drifted:
-        print("Drift detected — config does not match worktree state:", file=sys.stderr)
+        print("Warning: drift detected between ow.toml and worktree state:", file=sys.stderr)
         for d in drifted:
             print(f"  {d.message}", file=sys.stderr)
-        print("Run 'ow apply' to reconcile.", file=sys.stderr)
-        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +257,31 @@ def _get_pr_info(org_repo: str, branch: str) -> tuple[int, str] | None:
 
 def _link(url: str | None, text: str) -> str:
     return _osc8(url, text) if url else text
+
+
+def _deduce_workspace_state(ws_dir: Path, config: Config) -> WorkspaceConfig:
+    """Deduce workspace state from actual worktrees for workspaces not in ow.toml."""
+    repos = {}
+    for child in ws_dir.iterdir():
+        if not child.is_dir() or not (child / ".git").exists():
+            continue
+        alias = child.name
+        branch = get_worktree_branch(child)
+        upstream = get_upstream(child)
+
+        if upstream:
+            # Use upstream as base_ref, create local branch spec
+            remote, remote_branch = upstream.split("/", 1)
+            base_ref = upstream
+            local_branch = branch if branch else remote_branch
+        else:
+            # No upstream - cannot determine base_ref, use detached state
+            base_ref = "HEAD"  # Placeholder, will show as error in status
+            local_branch = branch  # May be None if detached
+
+        repos[alias] = BranchSpec(base_ref, local_branch)
+
+    return WorkspaceConfig(name=ws_dir.name, repos=repos)
 
 
 # ---------------------------------------------------------------------------
@@ -357,42 +400,61 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
 
 def cmd_remove(config: Config, name: str) -> None:
     workspaces = [ws for ws in config.workspaces if ws.name == name]
-    if not workspaces:
-        print(f"No workspace named '{name}'", file=sys.stderr)
-        sys.exit(1)
-
-    ws = workspaces[0]
     bare_repos_dir = config.root_dir / ".bare-git-repos"
     ws_dir = config.root_dir / "workspaces" / name
 
-    assert_no_drift(ws, ws_dir)
+    if not workspaces:
+        if not ws_dir.exists():
+            print(f"No workspace named '{name}'", file=sys.stderr)
+            sys.exit(1)
+        # Workspace exists but not in ow.toml - remove anyway
+        warn_if_drifted(None, ws_dir)
+        ws = None  # No config, so no need to update ow.toml
+    else:
+        ws = workspaces[0]
+        warn_if_drifted(ws, ws_dir)
 
-    for alias, spec in ws.repos.items():
-        bare_repo = bare_repos_dir / f"{alias}.git"
-        worktree_path = ws_dir / alias
-        if worktree_path.exists():
-            remove_worktree(bare_repo, worktree_path, spec.local_branch)
-
+    # Remove all worktrees in ws_dir
     if ws_dir.exists():
+        for child in ws_dir.iterdir():
+            if child.is_dir() and (child / ".git").exists():
+                alias = child.name
+                bare_repo = bare_repos_dir / f"{alias}.git"
+                branch = get_worktree_branch(child) if ws else None
+                spec = ws.repos.get(alias) if ws else None
+                local_branch = spec.local_branch if spec else branch
+                remove_worktree(bare_repo, child, local_branch)
         shutil.rmtree(ws_dir)
 
-    config_path = config.root_dir / "ow.toml"
-    archive_workspace(config_path, ws)
-    remaining = [w for w in config.workspaces if w.name != name]
-    update_config_workspaces(config_path, remaining)
+    # Update ow.toml only if workspace was in config
+    if ws:
+        config_path = config.root_dir / "ow.toml"
+        archive_workspace(config_path, ws)
+        remaining = [w for w in config.workspaces if w.name != name]
+        update_config_workspaces(config_path, remaining)
 
 
 def cmd_status(config: Config, name: str | None = None) -> None:
     workspaces = config.workspaces
     if name:
         workspaces = [ws for ws in workspaces if ws.name == name]
+        if not workspaces:
+            # Workspace not in ow.toml - check if it exists
+            ws_dir = config.root_dir / "workspaces" / name
+            if ws_dir.exists():
+                ws = _deduce_workspace_state(ws_dir, config)
+                warn_if_drifted(None, ws_dir)
+                workspaces = [ws]
+            else:
+                print(f"No workspace named '{name}'", file=sys.stderr)
+                sys.exit(1)
 
     for ws in workspaces:
         ws_dir = config.root_dir / "workspaces" / ws.name
         bare_repos_dir = config.root_dir / ".bare-git-repos"
 
-        # 1. Drift check
-        assert_no_drift(ws, ws_dir)
+        # 1. Drift warning (no longer blocks)
+        warn_if_drifted(ws, ws_dir)
 
         # 2. Parallel fetch (silent)
         def make_status_fetch_task(alias, spec):
@@ -692,14 +754,21 @@ def cmd_rebase(config: Config, name: str) -> None:
     bare_repos_dir = config.root_dir / ".bare-git-repos"
     workspaces = [ws for ws in config.workspaces if ws.name == name]
     if not workspaces:
-        print(f"No workspace named '{name}'", file=sys.stderr)
-        sys.exit(1)
+        # Workspace not in ow.toml - check if it exists
+        ws_dir = config.root_dir / "workspaces" / name
+        if ws_dir.exists():
+            ws = _deduce_workspace_state(ws_dir, config)
+            warn_if_drifted(None, ws_dir)
+            workspaces = [ws]
+        else:
+            print(f"No workspace named '{name}'", file=sys.stderr)
+            sys.exit(1)
 
     for ws in workspaces:
         ws_dir = config.root_dir / "workspaces" / ws.name
 
-        # 1. Drift check
-        assert_no_drift(ws, ws_dir)
+        # 1. Drift warning (no longer blocks)
+        warn_if_drifted(ws, ws_dir)
 
         # 2. Parallel: resolve + fetch track branch (and upstream if applicable)
         resolved_tracks: dict[str, str] = {}
