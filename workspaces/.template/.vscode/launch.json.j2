@@ -8,12 +8,27 @@
       "cwd": "${workspaceFolder}/{{ main_repo_alias }}",
       "program": "odoo-bin",
       "justMyCode": false,
-      "args": [
-        "--config=${workspaceFolder}/odoorc",
-        "--dev=all",
-      ],
+      "args": ["--dev=all"],
+      "python": "${workspaceFolder}/.venv/bin/python",
       "pythonArgs": ["-Xfrozen_modules=off"],
       "env": {
+        "ODOO_RC": "${workspaceFolder}/odoorc",
+        "PYDEVD_DISABLE_FILE_VALIDATION": "1",
+        "PYTHON_PATH": "${workspaceFolder}/{{ main_repo_alias }}"
+      },
+    },
+    {
+      "name": "Debug Tests With Tags: {{ vars.test_tags | default('CHANGE_ME_OR_USE_vars.test_tags') }}",
+      "type": "debugpy",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/{{ main_repo_alias }}",
+      "program": "odoo-bin",
+      "justMyCode": false,
+      "args": ["--test-tags={{ vars.test_tags | default('CHANGE_ME_OR_USE_vars.test_tags') }}"],
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "pythonArgs": ["-Xfrozen_modules=off"],
+      "env": {
+        "ODOO_RC": "${workspaceFolder}/odoorc",
         "PYDEVD_DISABLE_FILE_VALIDATION": "1",
         "PYTHON_PATH": "${workspaceFolder}/{{ main_repo_alias }}"
       },
