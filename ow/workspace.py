@@ -286,7 +286,7 @@ def _deduce_workspace_state(ws_dir: Path, config: Config) -> WorkspaceConfig:
 
         repos[alias] = BranchSpec(base_ref, local_branch)
 
-    return WorkspaceConfig(name=ws_dir.name, repos=repos)
+    return WorkspaceConfig(name=ws_dir.name, repos=repos, templates=[])
 
 
 # ---------------------------------------------------------------------------
@@ -300,15 +300,7 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
     if name:
         workspaces = [ws for ws in workspaces if ws.name == name]
 
-    # Template directory
-    template_dir = config.root_dir / "workspaces" / ".template"
-
-    env = Environment(
-        loader=FileSystemLoader(str(template_dir)),
-        keep_trailing_newline=True,
-        trim_blocks=True,
-        lstrip_blocks=True,
-    )
+    templates_root = config.root_dir / "templates"
 
     for ws in workspaces:
         ws_dir = config.root_dir / "workspaces" / ws.name
@@ -344,7 +336,6 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
                 elif not currently_detached and resolved.is_detached:
                     detach_worktree(worktree_path, resolved.base_ref)
                 elif not resolved.is_detached:
-                    # Already on the right branch — ensure upstream config is current
                     _set_branch_upstream(
                         bare_repo,
                         resolved.local_branch,
@@ -352,51 +343,38 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
                         resolved.branch,
                     )
 
-        # 3. Render templates and copy statics
+        # 3. Apply templates in order (later templates override earlier ones)
         ws_dir.mkdir(parents=True, exist_ok=True)
         context = build_template_context(ws, config, ws_dir)
-        paths = template_dir.rglob("*")
-        file_paths = filter(lambda p: p.is_file(), paths)
 
-        for path in sorted(file_paths):
-            rel = path.relative_to(template_dir)
-            if path.suffix == ".j2":
-                out_path = ws_dir / rel.with_suffix("")
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(env.get_template(str(rel)).render(context))
-            else:
-                out_path = ws_dir / rel
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, out_path)
+        for template_name in ws.templates:
+            template_dir = templates_root / template_name
+            if not template_dir.exists():
+                print(f"Error: template '{template_name}' not found at {template_dir}", file=sys.stderr)
+                sys.exit(1)
 
-        # 4. Apply overrides from .template.overrides/
-        overrides_dir = config.root_dir / "workspaces" / ".template.overrides"
-        if overrides_dir.exists():
-            env_overrides = Environment(
-                loader=FileSystemLoader(str(overrides_dir)),
+            env = Environment(
+                loader=FileSystemLoader(str(template_dir)),
                 keep_trailing_newline=True,
                 trim_blocks=True,
                 lstrip_blocks=True,
             )
-            override_paths = overrides_dir.rglob("*")
-            override_files = filter(
-                lambda p: p.is_file() and p.name != ".gitkeep", override_paths
-            )
 
-            for path in sorted(override_files):
-                rel = path.relative_to(overrides_dir)
+            paths = template_dir.rglob("*")
+            file_paths = [p for p in paths if p.is_file()]
+
+            for path in sorted(file_paths):
+                rel = path.relative_to(template_dir)
                 if path.suffix == ".j2":
                     out_path = ws_dir / rel.with_suffix("")
                     out_path.parent.mkdir(parents=True, exist_ok=True)
-                    out_path.write_text(
-                        env_overrides.get_template(str(rel)).render(context)
-                    )
+                    out_path.write_text(env.get_template(str(rel)).render(context))
                 else:
                     out_path = ws_dir / rel
                     out_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(path, out_path)
 
-        # 5. Trust the generated mise file (only for new workspaces)
+        # 4. Trust the generated mise file (only for new workspaces)
         if is_new:
             run_cmd(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
             print(f"\nWorkspace '{ws.name}' created. To install dependencies:")
@@ -725,15 +703,22 @@ def cmd_status(config: Config, name: str | None = None) -> None:
 def cmd_create(config: Config, name: str, specs: list[str]) -> None:
     repos = {}
     ws_vars: dict[str, Any] = {}
+    templates: list[str] = []
     for s in specs:
         if s.startswith("vars.") and "=" in s:
             k, v = s[len("vars.") :].split("=", 1)
             ws_vars[k] = v
+        elif s.startswith("templates="):
+            templates = s[len("templates=") :].split(",")
         else:
             alias, spec = s.split(":", 1)
             repos[alias] = parse_branch_spec(spec)
 
-    ws = WorkspaceConfig(name=name, repos=repos, vars=ws_vars)
+    if not templates:
+        print("Error: templates must be specified, e.g. templates=common,vscode", file=sys.stderr)
+        sys.exit(1)
+
+    ws = WorkspaceConfig(name=name, repos=repos, templates=templates, vars=ws_vars)
     config.workspaces.append(ws)
 
     config_path = config.root_dir / "ow.toml"

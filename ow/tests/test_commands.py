@@ -34,6 +34,7 @@ def test_cmd_status_drift_warns(tmp_path, capsys):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
@@ -64,6 +65,7 @@ def test_cmd_status_fetches_before_display(tmp_path):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master")},
+        templates=["common"],
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
@@ -84,13 +86,8 @@ def test_cmd_status_fetches_before_display(tmp_path):
     ):
         cmd_status(config, "test")
 
-    # At least one fetch should have been called
     assert any("fetch" in c for c in fetch_calls)
 
-
-# ---------------------------------------------------------------------------
-# cmd_rebase
-# ---------------------------------------------------------------------------
 
 def test_cmd_rebase_drift_warns(tmp_path, capsys):
     """cmd_rebase warns when drift is detected but continues."""
@@ -102,6 +99,7 @@ def test_cmd_rebase_drift_warns(tmp_path, capsys):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
@@ -131,6 +129,7 @@ def test_cmd_rebase_detached_switches(tmp_path):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master")},
+        templates=["common"],
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
@@ -163,6 +162,7 @@ def test_cmd_rebase_two_step_rebase(tmp_path):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
@@ -204,6 +204,7 @@ def test_cmd_rebase_conflict_reports_and_continues(tmp_path, capsys):
             "community": BranchSpec("origin/master", "my-feature"),
             "enterprise": BranchSpec("origin/master", "my-feature"),
         },
+        templates=["common"],
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
@@ -244,6 +245,7 @@ def test_cmd_rebase_no_upstream_when_not_pushed(tmp_path):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
@@ -277,12 +279,13 @@ def test_cmd_remove_drift_warns(tmp_path, capsys):
     """cmd_remove warns when drift is detected but continues."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
-    (tmp_path / "ow.toml").write_text('[[workspace]]\nname = "test"\nrepo.community = "master..my-feature"\n')
+    (tmp_path / "ow.toml").write_text('[[workspace]]\nname = "test"\ntemplates = ["common"]\nrepo.community = "master..my-feature"\n')
     bare_repos_dir = tmp_path / ".bare-git-repos"
     (bare_repos_dir / "community.git").mkdir(parents=True)
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
@@ -302,12 +305,13 @@ def test_cmd_remove_succeeds_when_aligned(tmp_path):
     community_dir = ws_dir / "community"
     community_dir.mkdir(parents=True)
     (community_dir / ".git").write_text("gitdir: ../../.bare-git-repos/community.git/worktrees/community")
-    (tmp_path / "ow.toml").write_text('[[workspace]]\nname = "test"\nrepo.community = "master"\n')
+    (tmp_path / "ow.toml").write_text('[[workspace]]\nname = "test"\ntemplates = ["common"]\nrepo.community = "master"\n')
     bare_repos_dir = tmp_path / ".bare-git-repos"
     (bare_repos_dir / "community.git").mkdir(parents=True)
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master")},
+        templates=["common"],
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 

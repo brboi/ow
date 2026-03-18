@@ -45,8 +45,8 @@ code workpaces/my_work                  # open it in your favorite IDE and enjoy
 | `ow.toml` | Active configuration (remotes, variables, workspaces) — created with defaults on first run |
 | `.ow.toml.archived-workspaces` | Removed workspace configs (append-only log) |
 | `.bare-git-repos/` | Shared bare git repositories |
-| `workspaces/.template/` | Jinja2 templates (git-tracked) |
-| `workspaces/.template.overrides/` | Local template overrides (gitignored) |
+| `templates/` | Template bundles (git-tracked subdirs: `common/`, `vscode/`, `zed/`) |
+| `templates/<name>/` | Individual template bundle, applied in order to workspaces |
 | `workspaces/<name>/` | Generated workspace directories |
 | `services/` | Optional Docker/Podman service containers |
 
@@ -95,11 +95,12 @@ Templates use `{{ vars.key | default(fallback) }}` so undefined variables get sa
 
 ### Workspaces
 
-Each workspace is a `[[workspace]]` section with a name, repo specs, and optional variable overrides:
+Each workspace is a `[[workspace]]` section with a name, templates, repo specs, and optional variable overrides:
 
 ```toml
 [[workspace]]
 name = "opw-123456"
+templates = ["common", "vscode"]
 repo.community = "master..master-opw-123456-ngram"
 repo.enterprise = "master"
 vars.http_port = 8080
@@ -110,6 +111,7 @@ Equivalent long form (TOML syntax):
 ```toml
 [[workspace]]
 name = "opw-123456"
+templates = ["common", "vscode"]
 
 [workspace.repo]
 community = "master..master-opw-123456-ngram"
@@ -118,6 +120,8 @@ enterprise = "master"
 [workspace.vars]
 http_port = 8080
 ```
+
+The `templates` field is required and specifies which template bundles to apply, in order. Later templates override files from earlier ones.
 
 ### Branch Spec Syntax
 
@@ -161,6 +165,7 @@ smtp_port = 1025
 
 [[workspace]]
 name = "opw-123456"
+templates = ["common", "vscode"]
 repo.community = "master..master-opw-123456-ngram"
 repo.enterprise = "origin/master"
 vars.http_port = 8080
@@ -201,8 +206,8 @@ Configure your workspaces to use them via `[vars]`:
 ## Workflow
 
 ```sh
-# 1. Create a workspace
-ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master
+# 1. Create a workspace (templates are required)
+ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master templates=common,vscode
 
 # 2. Install dependencies
 cd workspaces/opw-123456 && mise install
@@ -232,7 +237,7 @@ ow remove opw-123456
 | Command | Description |
 |---------|-------------|
 | `ow apply [name]` | Create/update workspaces from config |
-| `ow create name alias:spec ... [vars.key=value ...]` | Create a workspace from CLI (saves to `ow.toml`) |
+| `ow create name alias:spec ... templates=t1,t2,... [vars.key=value ...]` | Create a workspace from CLI (saves to `ow.toml`) |
 | `ow status [name] [--all]` | Show branch status, behind/ahead counts, PR links |
 | `ow rebase [name]` | Fetch and rebase all repos in a workspace |
 | `ow remove name` | Remove workspace, archive config, preserve bare repos |
@@ -245,9 +250,8 @@ Creates or updates workspaces defined in `ow.toml`. For each workspace:
 
 1. Ensures bare repos exist and fetches required refs (parallel, max 2 workers)
 2. Creates worktrees (or reconciles existing ones — detached ↔ attached transitions)
-3. Renders Jinja2 templates and copies static files into the workspace
-4. Applies local overrides from `.template.overrides/` if present
-5. For new workspaces: trusts `mise.toml` and prints a reminder to run `mise install`
+3. Applies templates in order (later templates override earlier ones)
+4. For new workspaces: trusts `mise.toml` and prints a reminder to run `mise install`
 
 ```sh
 ow apply             # all workspaces
@@ -259,14 +263,14 @@ ow apply my-feature  # single workspace
 Shortcut for adding a workspace without editing `ow.toml` manually. Appends the config and runs `ow apply`:
 
 ```sh
-# Community feature on master
-ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master
+# Community feature on master with VSCode
+ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master templates=common,vscode
 
-# Enterprise feature
-ow create opw-123456 community:master enterprise:master..master-opw-123456-ngram
+# Enterprise feature with Zed
+ow create opw-123456 community:master enterprise:master..master-opw-123456-ngram templates=common,zed
 
 # Both + custom port
-ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master..master-opw-123456-ngram vars.http_port=8080
+ow create opw-123456 community:master..master-opw-123456-ngram enterprise:master..master-opw-123456-ngram templates=common,vscode vars.http_port=8080
 
 # Third-party repo
 ow create my-addon community:master ngram-addons:main..main-my-addon
@@ -381,21 +385,63 @@ To reconcile after manual changes, update `ow.toml` to match reality, then run `
 
 ## Template System
 
-Templates live in `workspaces/.template/` (git-tracked). You can override templates for your local setup by placing files in `workspaces/.template.overrides/` (gitignored). When `ow apply` runs, it first applies templates from `.template/`, then applies any overrides from `.template.overrides/` (which will overwrite files with the same path).
+Templates live in `templates/` at the project root. Each subdirectory is a template bundle that can be applied to workspaces. Bundled templates are git-tracked:
 
-### Generated files
+```
+templates/
+├── common/           # Core files: mise.toml, odoorc, odools.toml, pyrightconfig.json
+├── vscode/.vscode/   # VSCode settings and debug config
+└── zed/.zed/         # Zed settings and debug config
+```
 
+Workspaces declare which templates to apply via the `templates` field. Templates are applied in order — later templates can override files from earlier ones:
+
+```toml
+[[workspace]]
+name = "my-feature"
+templates = ["common", "vscode"]  # common first, then vscode overrides
+```
+
+### Creating custom templates
+
+Create a new directory under `templates/` with your files:
+
+```sh
+mkdir -p templates/my-setup
+cp templates/common/odoorc.j2 templates/my-setup/
+# Edit templates/my-setup/odoorc.j2 to your liking
+```
+
+Then use it in your workspace:
+
+```toml
+[[workspace]]
+name = "my-feature"
+templates = ["common", "my-setup"]
+```
+
+### Generated files by bundle
+
+**common/**:
 | Template | Output | Purpose |
 |----------|--------|---------|
 | `mise.toml.j2` | `mise.toml` | Python version, venv, pip dependencies |
 | `odoorc.j2` | `odoorc` | Odoo server config (ports, DB, addons path) |
 | `odools.toml.j2` | `odools.toml` | [OdooLS](https://github.com/odoo/odoo-ls) config |
 | `pyrightconfig.json.j2` | `pyrightconfig.json` | Pyright type checker config |
-| `.vscode/settings.json.j2` | `.vscode/settings.json` | VSCode settings |
-| `.vscode/launch.json.j2` | `.vscode/launch.json` | VSCode debug config |
-| `.zed/settings.json.j2` | `.zed/settings.json` | Zed settings |
-| `.zed/debug.json.j2` | `.zed/debug.json` | Zed debug config |
 | `requirements-dev.txt` | `requirements-dev.txt` | Copied as-is (static file) |
+
+**vscode/.vscode/**:
+| Template | Output | Purpose |
+|----------|--------|---------|
+| `settings.json.j2` | `.vscode/settings.json` | VSCode settings |
+| `launch.json.j2` | `.vscode/launch.json` | VSCode debug config |
+
+**zed/.zed/**:
+| Template | Output | Purpose |
+|----------|--------|---------|
+| `settings.json.j2` | `.zed/settings.json` | Zed settings |
+| `debug.json.j2` | `.zed/debug.json` | Zed debug config |
 
 ### Jinja2 context
 
@@ -409,18 +455,6 @@ Variables available in all templates:
 | `vars` | `dict` | Merged global + per-workspace variables |
 | `addons_paths` | `list[str]` | Absolute paths to all addons directories |
 | `odools_path_items` | `list[str]` | Relative paths for OdooLS config |
-
-### Customizing templates
-
-To customize templates for your local setup, copy them to `.template.overrides/` and edit them there:
-
-```sh
-# Example: customize odoorc for all workspaces
-cp workspaces/.template/odoorc.j2 workspaces/.template.overrides/odoorc.j2
-# Edit the file to your liking
-```
-
-Overrides are applied after base templates, so files in `.template.overrides/` will overwrite files with the same path from `.template/`. This directory is gitignored — use it for personal customizations you don't want to track in the ow repository.
 
 ## Disclaimer
 
