@@ -374,6 +374,36 @@ def git_merge_base_fork_point(worktree: Path, upstream: str, branch: str) -> str
     return result.stdout.strip() or None
 
 
+def git_rev_list(repo: Path, commit_range: str, *, reverse: bool = False) -> list[str]:
+    """Return list of commit hashes in range. Empty list if range is invalid."""
+    args = ["rev-list"]
+    if reverse:
+        args.append("--reverse")
+    args.append(commit_range)
+    result = git(repo, *args, quiet=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    return [h for h in result.stdout.strip().split("\n") if h]
+
+
+def git_log_oneline(repo: Path, commit: str) -> str:
+    """Return one-line log for a commit: 'hash message'."""
+    result = git(repo, "log", "-1", "--format=%h %s", commit, quiet=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        return commit[:7]
+    return result.stdout.strip()
+
+
+def git_cherry_pick(worktree: Path, commit: str) -> subprocess.CompletedProcess:
+    """Cherry-pick a commit. Returns CompletedProcess for caller to check."""
+    return git(worktree, "cherry-pick", commit)
+
+
+def git_reset_hard(worktree: Path, ref: str) -> None:
+    """Reset worktree to ref with --hard."""
+    git(worktree, "reset", "--hard", ref, check=True)
+
+
 def parallel_fetch(tasks: list, max_workers: int = 2) -> None:
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(task) for task in tasks]

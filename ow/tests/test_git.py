@@ -18,9 +18,13 @@ from ow.git import (
     get_worktree_branch,
     get_worktree_head,
     git,
+    git_cherry_pick,
     git_fetch,
+    git_log_oneline,
     git_merge_base_fork_point,
     git_rebase,
+    git_reset_hard,
+    git_rev_list,
     git_switch,
     ordered_remotes,
     remove_worktree,
@@ -1237,3 +1241,127 @@ def test_git_merge_base_fork_point_returns_none_on_empty_output(tmp_path):
         result = git_merge_base_fork_point(worktree, "origin/master", "feature")
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# git_rev_list
+# ---------------------------------------------------------------------------
+
+
+def test_git_rev_list_returns_commits(tmp_path):
+    """Returns list of commit hashes."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    mock_result = MagicMock(returncode=0)
+    mock_result.stdout = "abc123\ndef456\nghi789\n"
+
+    with patch("ow.git.git", return_value=mock_result) as mock_git:
+        result = git_rev_list(repo, "abc123..HEAD")
+
+    mock_git.assert_called_once_with(
+        repo, "rev-list", "abc123..HEAD", quiet=True, capture_output=True, text=True
+    )
+    assert result == ["abc123", "def456", "ghi789"]
+
+
+def test_git_rev_list_reverse(tmp_path):
+    """Returns commits in reverse order when requested."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    mock_result = MagicMock(returncode=0)
+    mock_result.stdout = "ghi789\ndef456\nabc123\n"
+
+    with patch("ow.git.git", return_value=mock_result) as mock_git:
+        result = git_rev_list(repo, "abc123..HEAD", reverse=True)
+
+    mock_git.assert_called_once_with(
+        repo, "rev-list", "--reverse", "abc123..HEAD", quiet=True, capture_output=True, text=True
+    )
+    assert result == ["ghi789", "def456", "abc123"]
+
+
+def test_git_rev_list_empty_on_error(tmp_path):
+    """Returns empty list on error."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    mock_result = MagicMock(returncode=128)
+    mock_result.stdout = ""
+
+    with patch("ow.git.git", return_value=mock_result):
+        result = git_rev_list(repo, "invalid..range")
+
+    assert result == []
+
+
+# ---------------------------------------------------------------------------
+# git_log_oneline
+# ---------------------------------------------------------------------------
+
+
+def test_git_log_oneline_returns_message(tmp_path):
+    """Returns one-line log for a commit."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    mock_result = MagicMock(returncode=0)
+    mock_result.stdout = "abc123 fix: something\n"
+
+    with patch("ow.git.git", return_value=mock_result) as mock_git:
+        result = git_log_oneline(repo, "abc123")
+
+    mock_git.assert_called_once_with(
+        repo, "log", "-1", "--format=%h %s", "abc123", quiet=True, capture_output=True, text=True
+    )
+    assert result == "abc123 fix: something"
+
+
+def test_git_log_oneline_returns_short_hash_on_error(tmp_path):
+    """Returns short hash on error."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    mock_result = MagicMock(returncode=128)
+    mock_result.stdout = ""
+
+    with patch("ow.git.git", return_value=mock_result):
+        result = git_log_oneline(repo, "abc123def456789")
+
+    assert result == "abc123d"
+
+
+# ---------------------------------------------------------------------------
+# git_cherry_pick
+# ---------------------------------------------------------------------------
+
+
+def test_git_cherry_pick(tmp_path):
+    """Cherry-picks a commit."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    mock_result = MagicMock(returncode=0)
+
+    with patch("ow.git.git", return_value=mock_result) as mock_git:
+        result = git_cherry_pick(worktree, "abc123")
+
+    mock_git.assert_called_once_with(worktree, "cherry-pick", "abc123")
+    assert result.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# git_reset_hard
+# ---------------------------------------------------------------------------
+
+
+def test_git_reset_hard(tmp_path):
+    """Resets worktree hard to ref."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    with patch("ow.git.git") as mock_git:
+        git_reset_hard(worktree, "origin/master")
+
+    mock_git.assert_called_once_with(worktree, "reset", "--hard", "origin/master", check=True)
