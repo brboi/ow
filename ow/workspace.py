@@ -31,6 +31,11 @@ from ow.git import (
     get_upstream,
     get_worktree_branch,
     get_worktree_head,
+    git,
+    git_fetch,
+    git_merge_base_fork_point,
+    git_rebase,
+    git_switch,
     parallel_fetch,
     remove_worktree,
     resolve_spec,
@@ -750,11 +755,84 @@ def _report_conflict(alias: str, worktree_path: Path, onto_ref: str) -> None:
     print("      git rebase --abort\n", file=sys.stderr)
 
 
+@dataclass
+class RebasePlan:
+    alias: str
+    track_ref: str
+    upstream: str | None
+    is_detached: bool
+    local_commits: int
+    unpushed_commits: int
+    upstream_rewritten: bool
+    has_conflicts: bool
+
+
+def _analyze_repo_for_rebase(
+    worktree: Path, track_ref: str, upstream: str | None, alias: str, is_detached: bool
+) -> RebasePlan:
+    rebase_merge = worktree / ".git" / "rebase-merge"
+    has_conflicts = rebase_merge.exists()
+
+    local_commits, _ = get_rev_list_count(worktree, "HEAD", upstream or track_ref)
+
+    if upstream:
+        unpushed_commits, _ = get_rev_list_count(worktree, "HEAD", upstream)
+        branch = get_worktree_branch(worktree)
+        fork_point = (
+            git_merge_base_fork_point(worktree, upstream, branch)
+            if branch
+            else None
+        )
+        upstream_rewritten = fork_point is None and unpushed_commits > 0
+    else:
+        unpushed_commits = 0
+        upstream_rewritten = False
+
+    return RebasePlan(
+        alias=alias,
+        track_ref=track_ref,
+        upstream=upstream,
+        is_detached=is_detached,
+        local_commits=local_commits,
+        unpushed_commits=unpushed_commits,
+        upstream_rewritten=upstream_rewritten,
+        has_conflicts=has_conflicts,
+    )
+
+
+def _display_rebase_summary(plans: list[RebasePlan]) -> None:
+    for p in plans:
+        parts = [p.track_ref]
+        if p.upstream:
+            parts.append(f"← {p.upstream}")
+        parts.append(f"({p.local_commits} commits)")
+
+        markers = []
+        if p.upstream_rewritten:
+            markers.append(_c("rewritten", 33))
+        if p.unpushed_commits > 0 and p.upstream:
+            markers.append(_c(f"{p.unpushed_commits} unpushed", 33))
+        if p.has_conflicts:
+            markers.append(_c("in progress", 31))
+        if markers:
+            parts.append("[" + ", ".join(markers) + "]")
+
+        print(f"  {p.alias}: {' → '.join(parts)}")
+
+
+def _do_rebase(worktree: Path, upstream: str | None, track_ref: str) -> bool:
+    if upstream:
+        result = git_rebase(worktree, upstream)
+        if result.returncode != 0:
+            return False
+    result = git_rebase(worktree, track_ref)
+    return result.returncode == 0
+
+
 def cmd_rebase(config: Config, name: str) -> None:
     bare_repos_dir = config.root_dir / ".bare-git-repos"
     workspaces = [ws for ws in config.workspaces if ws.name == name]
     if not workspaces:
-        # Workspace not in ow.toml - check if it exists
         ws_dir = config.root_dir / "workspaces" / name
         if ws_dir.exists():
             ws = _deduce_workspace_state(ws_dir, config)
@@ -767,10 +845,8 @@ def cmd_rebase(config: Config, name: str) -> None:
     for ws in workspaces:
         ws_dir = config.root_dir / "workspaces" / ws.name
 
-        # 1. Drift warning (no longer blocks)
         warn_if_drifted(ws, ws_dir)
 
-        # 2. Parallel: resolve + fetch track branch (and upstream if applicable)
         resolved_tracks: dict[str, str] = {}
         resolved_upstreams: dict[str, str] = {}
 
@@ -778,37 +854,23 @@ def cmd_rebase(config: Config, name: str) -> None:
             def task():
                 alias_remotes = config.remotes.get(alias, {})
                 bare_repo = bare_repos_dir / f"{alias}.git"
-                # Resolve the track (base) branch — force detached so resolve_spec
-                # finds the base branch, not the pushed work branch
                 track_spec = BranchSpec(spec.base_ref)
                 resolved_track = resolve_spec(bare_repo, track_spec, alias_remotes)
-                # Fetch latest
-                run_cmd(
-                    [
-                        "git",
-                        "-C",
-                        str(bare_repo),
-                        "fetch",
-                        resolved_track.remote,
-                        f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}",
-                    ],
+                git_fetch(
+                    bare_repo,
+                    resolved_track.remote,
+                    f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}",
                     check=True,
                 )
                 resolved_tracks[alias] = resolved_track.base_ref
-                # If attached: resolve the full spec to find the pushed work branch
                 if not spec.is_detached:
                     resolved_full = resolve_spec(bare_repo, spec, alias_remotes)
                     if resolved_full.base_ref != resolved_track.base_ref:
-                        # Work branch found on a remote — fetch latest as upstream
-                        run_cmd(
-                            [
-                                "git",
-                                "-C",
-                                str(bare_repo),
-                                "fetch",
-                                resolved_full.remote,
-                                f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}",
-                            ],
+                        git_fetch(
+                            bare_repo,
+                            resolved_full.remote,
+                            f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}",
+                            force=True,
                             check=True,
                         )
                         resolved_upstreams[alias] = resolved_full.base_ref
@@ -818,40 +880,59 @@ def cmd_rebase(config: Config, name: str) -> None:
         fetch_tasks = [make_fetch_task(alias, spec) for alias, spec in ws.repos.items()]
         parallel_fetch(fetch_tasks, max_workers=2)
 
-        # 3. Sequential rebases
-        failed = []
+        plans: list[RebasePlan] = []
         for alias, spec in ws.repos.items():
-            worktree_path = ws_dir / alias
-            if not worktree_path.exists():
+            worktree = ws_dir / alias
+            if not worktree.exists():
+                continue
+            track_ref = resolved_tracks[alias]
+            upstream = resolved_upstreams.get(alias)
+            plans.append(_analyze_repo_for_rebase(worktree, track_ref, upstream, alias, spec.is_detached))
+
+        if not plans:
+            continue
+
+        print(_c(f"[{ws.name}]", 1, 36))
+        _display_rebase_summary(plans)
+
+        has_warnings = any(
+            p.upstream_rewritten or (p.unpushed_commits > 0 and p.upstream)
+            for p in plans
+        )
+        if has_warnings:
+            print(
+                f"\n  {_c('Warning:', 33)} conflicts likely due to rewritten upstream or unpushed commits",
+                file=sys.stderr,
+            )
+
+        try:
+            response = input("\nProceed with rebase? [Y/n] ")
+        except EOFError:
+            response = ""
+
+        if response.lower() == "n":
+            print("Aborted.")
+            return
+
+        failed = []
+        for plan in plans:
+            worktree = ws_dir / plan.alias
+
+            if plan.has_conflicts:
+                print(
+                    f"  Skipping {plan.alias}: rebase already in progress",
+                    file=sys.stderr,
+                )
                 continue
 
-            track_ref = resolved_tracks[alias]
-
-            if spec.is_detached:
-                run_cmd(
-                    ["git", "-C", str(worktree_path), "switch", "--detach", track_ref],
-                    check=True,
-                )
+            if plan.is_detached:
+                git_switch(worktree, plan.track_ref, detach=True, check=True)
             else:
-                upstream = resolved_upstreams.get(alias)
-
-                # Step 1: rebase onto upstream (pushed work branch on remote)
-                if upstream:
-                    result = run_cmd(
-                        ["git", "-C", str(worktree_path), "rebase", upstream],
+                if not _do_rebase(worktree, plan.upstream, plan.track_ref):
+                    _report_conflict(
+                        plan.alias, worktree, plan.upstream or plan.track_ref
                     )
-                    if result.returncode != 0:
-                        _report_conflict(alias, worktree_path, upstream)
-                        failed.append(alias)
-                        continue
-
-                # Step 2: rebase onto track branch
-                result = run_cmd(
-                    ["git", "-C", str(worktree_path), "rebase", track_ref],
-                )
-                if result.returncode != 0:
-                    _report_conflict(alias, worktree_path, track_ref)
-                    failed.append(alias)
+                    failed.append(plan.alias)
 
         if failed:
             sys.exit(1)

@@ -177,11 +177,11 @@ def _set_branch_upstream(bare_repo: Path, local_branch: str, remote: str, remote
     """
     run_cmd(
         ["git", "-C", str(bare_repo), "config", f"branch.{local_branch}.remote", remote],
-        quiet=True, check=True,
+        check=True,
     )
     run_cmd(
         ["git", "-C", str(bare_repo), "config", f"branch.{local_branch}.merge", f"refs/heads/{remote_branch}"],
-        quiet=True, check=True,
+        check=True,
     )
 
 
@@ -333,6 +333,45 @@ def get_remote_url(bare_repo: Path, remote: str) -> str | None:
         capture_output=True, text=True,
     )
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def git(repo: Path, *args, quiet: bool = False, **kwargs) -> subprocess.CompletedProcess:
+    """Central git wrapper with automatic -C."""
+    return run_cmd(["git", "-C", str(repo)] + list(args), quiet=quiet, **kwargs)
+
+
+def git_fetch(repo: Path, remote: str, refspec: str, *, force: bool = False, **kwargs) -> None:
+    """Fetch with optional force (+refspec)."""
+    ref = f"+{refspec}" if force else refspec
+    git(repo, "fetch", remote, ref, **kwargs)
+
+
+def git_switch(worktree: Path, ref: str, *, detach: bool = False, create: bool = False, **kwargs) -> None:
+    """Unified switch with detach/create options."""
+    args = ["switch"]
+    if detach:
+        args.extend(["--detach", ref])
+    elif create:
+        args.extend(["-c", ref])
+    else:
+        args.append(ref)
+    git(worktree, *args, **kwargs)
+
+
+def git_rebase(worktree: Path, onto: str, **kwargs) -> subprocess.CompletedProcess:
+    """Rebase onto ref. Returns CompletedProcess for caller to check."""
+    return git(worktree, "rebase", onto, **kwargs)
+
+
+def git_merge_base_fork_point(worktree: Path, upstream: str, branch: str) -> str | None:
+    """Find fork-point between branch and upstream. None if upstream was rewritten."""
+    result = git(
+        worktree, "merge-base", "--fork-point", upstream, branch,
+        quiet=True, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
 
 
 def parallel_fetch(tasks: list, max_workers: int = 2) -> None:
