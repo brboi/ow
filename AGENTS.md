@@ -35,7 +35,14 @@ ow/
 
 ## Template system
 
-Workspace files are generated from `workspaces/.template/` (git-tracked). Templates are Jinja2 (`.j2` extension); static files are copied as-is. Local overrides can be placed in `workspaces/.template.overrides/` (gitignored), which will overwrite files from `.template/` with the same path.
+Workspace files are generated from `templates/` at the project root. Each subdirectory is a template bundle. Workspaces declare templates via the `templates` field (required, non-empty array). Templates are applied in order — later templates can override files from earlier ones.
+
+Bundled templates (git-tracked):
+- `templates/common/` — core files: mise.toml, odoorc, odools.toml, pyrightconfig.json, requirements-dev.txt
+- `templates/vscode/.vscode/` — VSCode settings and debug config
+- `templates/zed/.zed/` — Zed settings and debug config
+
+Templates are Jinja2 (`.j2` extension); static files are copied as-is.
 
 Template context keys:
 - `ws_name` — workspace name
@@ -51,4 +58,4 @@ Template context keys:
 - Workspace dirs are `workspaces/<name>/`, with subdirs matching repo aliases.
 - `community` is always the Odoo core repo; its addons are at `community/addons` and `community/odoo/addons`. Note that `community` is the default proposed alias for the main `odoo/odoo` repository, but it can be changed. There is `is_odoo_main_repo` that is made to discover which repo is the main.
 - `ow.toml` is user-local (gitignored). Removed workspaces are archived to `.ow.toml.archived-workspaces` (also gitignored).
-- `workspaces/.template/` contains git-tracked templates; `workspaces/.template.overrides/` contains local overrides (gitignored).
+- `templates/` contains git-tracked template bundles; subdirectories like `common/`, `vscode/`, `zed/` are whitelisted in `.gitignore`.

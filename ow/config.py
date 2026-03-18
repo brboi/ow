@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -59,6 +60,7 @@ class RemoteConfig:
 class WorkspaceConfig:
     name: str
     repos: dict[str, BranchSpec]
+    templates: list[str]
     vars: dict[str, Any] = field(default_factory=dict)
     _source_text: str | None = field(default=None, repr=False, compare=False)
 
@@ -100,9 +102,15 @@ def load_config(path: Path) -> Config:
         repos = {}
         for alias, spec_str in ws_data.get("repo", {}).items():
             repos[alias] = parse_branch_spec(spec_str)
+        templates = ws_data.get("templates")
+        if templates is None:
+            raise ValueError(f"Workspace '{ws_data.get('name', '<unknown>')}' missing required 'templates' field")
+        if not isinstance(templates, list) or not templates:
+            raise ValueError(f"Workspace '{ws_data.get('name', '<unknown>')}' 'templates' must be a non-empty list")
         workspaces.append(WorkspaceConfig(
             name=ws_data["name"],
             repos=repos,
+            templates=templates,
             vars=ws_data.get("vars", {}),
             _source_text=raw_blocks[i] if i < len(raw_blocks) else None,
         ))
@@ -116,7 +124,7 @@ def load_config(path: Path) -> Config:
 
 
 def format_workspace(ws: WorkspaceConfig) -> str:
-    lines = ["[[workspace]]", f'name = "{ws.name}"']
+    lines = ["[[workspace]]", f'name = "{ws.name}"', f'templates = {json.dumps(ws.templates)}']
     for alias, spec in ws.repos.items():
         lines.append(f'repo.{alias} = "{spec.to_spec_str()}"')
     for k, v in ws.vars.items():

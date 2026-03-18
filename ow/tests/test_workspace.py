@@ -15,7 +15,9 @@ from ow.workspace import (
     warn_if_drifted,
 )
 
-TEMPLATE_DIR = Path(__file__).parent.parent.parent / "workspaces" / ".template"
+TEMPLATE_DIR = Path(__file__).parent.parent.parent / "templates" / "common"
+VSCODE_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "templates" / "vscode"
+ZED_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "templates" / "zed"
 
 
 def make_config(
@@ -34,11 +36,6 @@ def make_config(
     )
 
 
-# ---------------------------------------------------------------------------
-# Filesystem fixture helpers
-# ---------------------------------------------------------------------------
-
-
 def setup_odoo_main_repo(ws_dir: Path, alias: str = "community") -> Path:
     repo = ws_dir / alias
     repo.mkdir(parents=True, exist_ok=True)
@@ -51,7 +48,6 @@ def setup_odoo_main_repo(ws_dir: Path, alias: str = "community") -> Path:
 
 
 def setup_flat_repo(ws_dir: Path, alias: str) -> Path:
-    """Repo where the root is directly an addons_path."""
     repo = ws_dir / alias
     (repo / "account").mkdir(parents=True)
     (repo / "account" / "__manifest__.py").touch()
@@ -61,7 +57,6 @@ def setup_flat_repo(ws_dir: Path, alias: str) -> Path:
 
 
 def setup_categorized_repo(ws_dir: Path, alias: str) -> Path:
-    """Repo whose immediate subdirs are each addons_paths (one level of nesting)."""
     repo = ws_dir / alias
     (repo / "telephony" / "phone_validation").mkdir(parents=True)
     (repo / "telephony" / "phone_validation" / "__manifest__.py").touch()
@@ -70,16 +65,17 @@ def setup_categorized_repo(ws_dir: Path, alias: str) -> Path:
     return repo
 
 
-def make_ws_config(name: str, aliases: list[str]) -> WorkspaceConfig:
+def make_ws_config(name: str, aliases: list[str], templates: list[str] | None = None) -> WorkspaceConfig:
     return WorkspaceConfig(
         name=name,
         repos={alias: BranchSpec("origin/master") for alias in aliases},
+        templates=templates or ["common"],
     )
 
 
-def render_template(name: str, context: dict) -> str:
+def render_template(name: str, context: dict, template_dir: Path = TEMPLATE_DIR) -> str:
     env = Environment(
-        loader=FileSystemLoader(str(TEMPLATE_DIR)),
+        loader=FileSystemLoader(str(template_dir)),
         keep_trailing_newline=True,
         trim_blocks=True,
         lstrip_blocks=True,
@@ -193,6 +189,7 @@ def test_build_template_context_vars_merge(tmp_path):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master")},
+        templates=["common"],
         vars={"http_port": 8070},
     )
     config = make_config(root_dir=tmp_path)
@@ -276,6 +273,7 @@ def test_render_odoorc_workspace_overrides_global(tmp_path):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master")},
+        templates=["common"],
         vars={"http_port": 8070},
     )
     config = make_config(root_dir=tmp_path)
@@ -406,7 +404,7 @@ def test_render_vscode_settings(tmp_path):
     ws = make_ws_config("test", ["community"])
     config = make_config(root_dir=tmp_path)
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template(".vscode/settings.json.j2", ctx)
+    result = render_template(".vscode/settings.json.j2", ctx, VSCODE_TEMPLATE_DIR)
 
     assert "[Odoo Workspace] test" in result
 
@@ -417,17 +415,12 @@ def test_render_vscode_launch(tmp_path):
     ws = make_ws_config("test", ["community"])
     config = make_config(root_dir=tmp_path)
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template(".vscode/launch.json.j2", ctx)
+    result = render_template(".vscode/launch.json.j2", ctx, VSCODE_TEMPLATE_DIR)
 
     assert "debugpy" in result
     assert "${workspaceFolder}/community" in result
     assert "odoo-bin" in result
     assert "odoorc" in result
-
-
-# ---------------------------------------------------------------------------
-# Template rendering — .zed
-# ---------------------------------------------------------------------------
 
 
 def test_render_zed_settings(tmp_path):
@@ -437,7 +430,7 @@ def test_render_zed_settings(tmp_path):
     ws = make_ws_config("test", ["community", "enterprise"])
     config = make_config(root_dir=tmp_path)
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template(".zed/settings.json.j2", ctx)
+    result = render_template(".zed/settings.json.j2", ctx, ZED_TEMPLATE_DIR)
 
     assert "community/**" in result
     assert "enterprise/**" in result
@@ -456,7 +449,7 @@ def test_render_zed_settings_full_workspace(tmp_path):
     ws = make_ws_config("test", ["community", "enterprise", "brboi-addons"])
     config = make_config(root_dir=tmp_path)
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template(".zed/settings.json.j2", ctx)
+    result = render_template(".zed/settings.json.j2", ctx, ZED_TEMPLATE_DIR)
 
     assert "community/**" in result
     assert "enterprise/**" in result
@@ -469,7 +462,7 @@ def test_render_zed_debug(tmp_path):
     ws = make_ws_config("test", ["community"])
     config = make_config(root_dir=tmp_path)
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template(".zed/debug.json.j2", ctx)
+    result = render_template(".zed/debug.json.j2", ctx, ZED_TEMPLATE_DIR)
 
     assert "Debugpy" in result
     assert "${ZED_WORKTREE_ROOT}/community" in result
@@ -484,14 +477,10 @@ def test_render_zed_debug(tmp_path):
 
 
 def test_cmd_create_vars_parsing(tmp_path):
-    # Set up a minimal ow.toml and template dir so cmd_create doesn't fail on I/O
     (tmp_path / "ow.toml").write_text("[vars]\n")
-    template = tmp_path / "workspaces" / ".template"
-    template.mkdir(parents=True)
+    templates_dir = tmp_path / "templates" / "common"
+    templates_dir.mkdir(parents=True)
     config = make_config(root_dir=tmp_path, vars={}, workspaces=[])
-
-    captured_ws = []
-    original_cmd_apply = __import__("ow.workspace", fromlist=["cmd_apply"]).cmd_apply
 
     def fake_apply(cfg, name=None):
         pass
@@ -500,13 +489,30 @@ def test_cmd_create_vars_parsing(tmp_path):
         cmd_create(
             config,
             "my-ws",
-            ["community:master", "vars.http_port=8080", "vars.db_user=myuser"],
+            ["community:master", "vars.http_port=8080", "vars.db_user=myuser", "templates=common,vscode"],
         )
 
     ws = config.workspaces[0]
     assert ws.name == "my-ws"
     assert "community" in ws.repos
     assert ws.vars == {"http_port": "8080", "db_user": "myuser"}
+    assert ws.templates == ["common", "vscode"]
+
+
+def test_cmd_create_missing_templates(tmp_path, capsys):
+    (tmp_path / "ow.toml").write_text("[vars]\n")
+    config = make_config(root_dir=tmp_path, vars={}, workspaces=[])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_create(
+            config,
+            "my-ws",
+            ["community:master"],
+        )
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "templates must be specified" in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +630,7 @@ def test_warn_if_drifted_passes_when_aligned(tmp_path, capsys):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
     )
 
     with patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
@@ -639,6 +646,7 @@ def test_warn_if_drifted_warns_on_drift(tmp_path, capsys):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
     )
 
     with patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"):
@@ -654,6 +662,7 @@ def test_warn_if_drifted_skips_unapplied_repos(tmp_path, capsys):
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
     )
 
     warn_if_drifted(ws, ws_dir)

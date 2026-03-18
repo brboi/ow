@@ -97,12 +97,14 @@ community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
 
 [[workspace]]
 name = "test-ws"
+templates = ["common", "vscode"]
 repo.community = "master"
 repo.enterprise = "master..master-feature"
 vars.http_port = 8070
 
 [[workspace]]
 name = "detached-ws"
+templates = ["common"]
 repo.community = "18.0"
 """
 
@@ -132,6 +134,34 @@ def test_load_config():
     ws2 = config.workspaces[1]
     assert ws2.name == "detached-ws"
     assert ws2.repos["community"].is_detached
+    assert ws2.templates == ["common"]
+
+
+def test_load_config_missing_templates():
+    toml = textwrap.dedent("""\
+        [[workspace]]
+        name = "test-ws"
+        repo.community = "master"
+    """)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "ow.toml"
+        path.write_text(toml)
+        with pytest.raises(ValueError, match="missing required 'templates'"):
+            load_config(path)
+
+
+def test_load_config_empty_templates():
+    toml = textwrap.dedent("""\
+        [[workspace]]
+        name = "test-ws"
+        templates = []
+        repo.community = "master"
+    """)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "ow.toml"
+        path.write_text(toml)
+        with pytest.raises(ValueError, match="must be a non-empty list"):
+            load_config(path)
 
 
 # ---------------------------------------------------------------------------
@@ -142,11 +172,13 @@ def test_format_workspace_simple():
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master")},
+        templates=["common"],
     )
     result = format_workspace(ws)
     assert "[[workspace]]" in result
     assert 'name = "test"' in result
     assert 'repo.community = "master"' in result
+    assert 'templates = ["common"]' in result
 
 
 def test_format_workspace_with_local_branch():
@@ -156,6 +188,7 @@ def test_format_workspace_with_local_branch():
             "community": BranchSpec("origin/master"),
             "enterprise": BranchSpec("origin/master", "master-test"),
         },
+        templates=["common", "vscode"],
     )
     result = format_workspace(ws)
     assert 'repo.community = "master"' in result
@@ -166,6 +199,7 @@ def test_format_workspace_with_vars():
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master")},
+        templates=["common"],
         vars={"http_port": 8070},
     )
     result = format_workspace(ws)
@@ -176,6 +210,7 @@ def test_format_workspace_non_origin_remote():
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("dev/master-phoenix", "fix")},
+        templates=["common"],
     )
     result = format_workspace(ws)
     assert 'repo.community = "dev/master-phoenix..fix"' in result
@@ -211,11 +246,13 @@ def test_update_config_workspaces_preserves_syntax(tmp_path):
 
         [[workspace]]
         name = "keep"
+        templates = ["common"]
         repo.community = "master"
         vars.config.http_port = 8067
 
         [[workspace]]
         name = "remove-me"
+        templates = ["common"]
         repo.community = "18.0"
     """)
     path = tmp_path / "ow.toml"
@@ -233,6 +270,7 @@ def test_archive_workspace_preserves_syntax(tmp_path):
     toml = textwrap.dedent("""\
         [[workspace]]
         name = "archived"
+        templates = ["common"]
 
         [workspace.repo]
         community = "master"
