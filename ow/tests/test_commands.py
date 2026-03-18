@@ -24,19 +24,34 @@ def make_config(
 # cmd_status
 # ---------------------------------------------------------------------------
 
-def test_cmd_status_drift_exits(tmp_path):
-    """cmd_status aborts when drift is detected."""
+def test_cmd_status_drift_warns(tmp_path, capsys):
+    """cmd_status warns when drift is detected but continues."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
+    bare_repos_dir = tmp_path / ".bare-git-repos"
+    bare_repo = bare_repos_dir / "community.git"
+    bare_repo.mkdir(parents=True)
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
-    with patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"):
-        with pytest.raises(SystemExit):
-            cmd_status(config, "test")
+    def track_subprocess_run(args, **kwargs):
+        mock = MagicMock(returncode=0)
+        mock.stdout = "0\t0\n"
+        return mock
+
+    with (
+        patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"),
+        patch("ow.workspace.resolve_spec_local", return_value=BranchSpec("origin/master")),
+        patch("ow.workspace.subprocess.run", side_effect=track_subprocess_run),
+        patch("ow.git.subprocess.run", side_effect=track_subprocess_run),
+    ):
+        cmd_status(config, "test")
+
+    captured = capsys.readouterr()
+    assert "Warning" in captured.err
 
 
 def test_cmd_status_fetches_before_display(tmp_path):
@@ -77,19 +92,33 @@ def test_cmd_status_fetches_before_display(tmp_path):
 # cmd_rebase
 # ---------------------------------------------------------------------------
 
-def test_cmd_rebase_drift_exits(tmp_path):
-    """cmd_rebase aborts when drift is detected."""
+def test_cmd_rebase_drift_warns(tmp_path, capsys):
+    """cmd_rebase warns when drift is detected but continues."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
+    bare_repos_dir = tmp_path / ".bare-git-repos"
+    bare_repo = bare_repos_dir / "community.git"
+    bare_repo.mkdir(parents=True)
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
-    with patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"):
-        with pytest.raises(SystemExit):
-            cmd_rebase(config, "test")
+    def track_run(args, **kwargs):
+        return MagicMock(returncode=0)
+
+    with (
+        patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"),
+        patch("ow.workspace.resolve_spec", return_value=BranchSpec("origin/master")),
+        patch("ow.git.subprocess.run", side_effect=track_run),
+        patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("builtins.input", return_value=""),
+    ):
+        cmd_rebase(config, "test")
+
+    captured = capsys.readouterr()
+    assert "Warning" in captured.err
 
 
 def test_cmd_rebase_detached_switches(tmp_path):
@@ -113,11 +142,11 @@ def test_cmd_rebase_detached_switches(tmp_path):
         return MagicMock(returncode=0)
 
     with (
-        patch("ow.workspace.get_worktree_branch", return_value=None),  # detached = aligned
-        # Detached: only one resolve_spec call (track_spec)
+        patch("ow.workspace.get_worktree_branch", return_value=None),
         patch("ow.workspace.resolve_spec", return_value=BranchSpec("origin/master")),
         patch("ow.git.subprocess.run", side_effect=track_run),
         patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("builtins.input", return_value=""),
     ):
         cmd_rebase(config, "test")
 
@@ -144,11 +173,9 @@ def test_cmd_rebase_two_step_rebase(tmp_path):
             rebase_targets.append(args[-1])
         return MagicMock(returncode=0)
 
-    # resolve_spec called twice: track_spec (detached) then full spec (attached)
     def mock_resolve(bare_repo, spec, remotes):
         if spec.is_detached:
             return BranchSpec("origin/master")
-        # Full spec: work branch found on dev
         return BranchSpec("dev/my-feature", "my-feature")
 
     with (
@@ -156,10 +183,10 @@ def test_cmd_rebase_two_step_rebase(tmp_path):
         patch("ow.workspace.resolve_spec", side_effect=mock_resolve),
         patch("ow.git.subprocess.run", side_effect=track_run),
         patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("builtins.input", return_value=""),
     ):
         cmd_rebase(config, "test")
 
-    # Step 1: rebase onto upstream (pushed work branch), Step 2: rebase onto track ref
     assert rebase_targets == ["dev/my-feature", "origin/master"]
 
 
@@ -186,11 +213,9 @@ def test_cmd_rebase_conflict_reports_and_continues(tmp_path, capsys):
         if "rebase" in args:
             call_count["rebase"] += 1
             if call_count["rebase"] == 1:
-                # First rebase (community) fails
                 return MagicMock(returncode=1)
         return MagicMock(returncode=0)
 
-    # No upstream (work branch not pushed) — only track branch rebase
     def mock_resolve(bare_repo, spec, remotes):
         return BranchSpec("origin/master", spec.local_branch)
 
@@ -199,13 +224,13 @@ def test_cmd_rebase_conflict_reports_and_continues(tmp_path, capsys):
         patch("ow.workspace.resolve_spec", side_effect=mock_resolve),
         patch("ow.git.subprocess.run", side_effect=track_run),
         patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("builtins.input", return_value=""),
     ):
         with pytest.raises(SystemExit):
             cmd_rebase(config, "test")
 
     captured = capsys.readouterr()
     assert "CONFLICT" in captured.err
-    # Enterprise rebase was still attempted (rebase count > 1)
     assert call_count["rebase"] >= 2
 
 
@@ -214,7 +239,8 @@ def test_cmd_rebase_no_upstream_when_not_pushed(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     bare_repos_dir = tmp_path / ".bare-git-repos"
-    (bare_repos_dir / "community.git").mkdir(parents=True)
+    bare_repo = bare_repos_dir / "community.git"
+    bare_repo.mkdir(parents=True)
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
@@ -228,7 +254,6 @@ def test_cmd_rebase_no_upstream_when_not_pushed(tmp_path):
             rebase_targets.append(args[-1])
         return MagicMock(returncode=0)
 
-    # resolve_spec returns same base_ref for both calls → no upstream
     def mock_resolve(bare_repo, spec, remotes):
         return BranchSpec("origin/master", spec.local_branch)
 
@@ -237,10 +262,10 @@ def test_cmd_rebase_no_upstream_when_not_pushed(tmp_path):
         patch("ow.workspace.resolve_spec", side_effect=mock_resolve),
         patch("ow.git.subprocess.run", side_effect=track_run),
         patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("builtins.input", return_value=""),
     ):
         cmd_rebase(config, "test")
 
-    # Only one rebase (onto track_ref), no upstream step
     assert rebase_targets == ["origin/master"]
 
 
@@ -248,26 +273,35 @@ def test_cmd_rebase_no_upstream_when_not_pushed(tmp_path):
 # cmd_remove
 # ---------------------------------------------------------------------------
 
-def test_cmd_remove_drift_exits(tmp_path):
-    """cmd_remove aborts when drift is detected."""
+def test_cmd_remove_drift_warns(tmp_path, capsys):
+    """cmd_remove warns when drift is detected but continues."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     (tmp_path / "ow.toml").write_text('[[workspace]]\nname = "test"\nrepo.community = "master..my-feature"\n')
+    bare_repos_dir = tmp_path / ".bare-git-repos"
+    (bare_repos_dir / "community.git").mkdir(parents=True)
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
     )
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
-    with patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"):
-        with pytest.raises(SystemExit):
-            cmd_remove(config, "test")
+    with (
+        patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"),
+        patch("ow.workspace.remove_worktree"),
+    ):
+        cmd_remove(config, "test")
+
+    captured = capsys.readouterr()
+    assert "Warning" in captured.err
 
 
 def test_cmd_remove_succeeds_when_aligned(tmp_path):
     """cmd_remove proceeds when no drift."""
     ws_dir = tmp_path / "workspaces" / "test"
-    (ws_dir / "community").mkdir(parents=True)
+    community_dir = ws_dir / "community"
+    community_dir.mkdir(parents=True)
+    (community_dir / ".git").write_text("gitdir: ../../.bare-git-repos/community.git/worktrees/community")
     (tmp_path / "ow.toml").write_text('[[workspace]]\nname = "test"\nrepo.community = "master"\n')
     bare_repos_dir = tmp_path / ".bare-git-repos"
     (bare_repos_dir / "community.git").mkdir(parents=True)
@@ -278,7 +312,7 @@ def test_cmd_remove_succeeds_when_aligned(tmp_path):
     config = make_config(workspaces=[ws], root_dir=tmp_path)
 
     with (
-        patch("ow.workspace.get_worktree_branch", return_value=None),  # detached = aligned
+        patch("ow.workspace.get_worktree_branch", return_value=None),
         patch("ow.workspace.remove_worktree") as mock_remove,
     ):
         cmd_remove(config, "test")

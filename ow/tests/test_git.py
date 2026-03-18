@@ -17,6 +17,11 @@ from ow.git import (
     get_upstream,
     get_worktree_branch,
     get_worktree_head,
+    git,
+    git_fetch,
+    git_merge_base_fork_point,
+    git_rebase,
+    git_switch,
     ordered_remotes,
     remove_worktree,
     resolve_spec,
@@ -1044,5 +1049,191 @@ def test_get_remote_url_returns_none_when_remote_missing(tmp_path):
 
     with patch("ow.git.subprocess.run", return_value=mock_result):
         result = get_remote_url(bare_repo, "nonexistent")
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# git
+# ---------------------------------------------------------------------------
+
+
+def test_git_adds_c_flag(tmp_path):
+    """git() automatically adds -C flag with repo path."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with patch("ow.git.run_cmd") as mock_run:
+        git(repo, "status", check=True)
+
+    mock_run.assert_called_once_with(
+        ["git", "-C", str(repo), "status"], quiet=False, check=True
+    )
+
+
+def test_git_passes_quiet_flag(tmp_path):
+    """git() passes quiet flag to run_cmd."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with patch("ow.git.run_cmd") as mock_run:
+        git(repo, "status", quiet=True, check=True)
+
+    mock_run.assert_called_once_with(
+        ["git", "-C", str(repo), "status"], quiet=True, check=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# git_fetch
+# ---------------------------------------------------------------------------
+
+
+def test_git_fetch_basic(tmp_path):
+    """git_fetch builds correct fetch command."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with patch("ow.git.git") as mock_git:
+        git_fetch(repo, "origin", "master:refs/remotes/origin/master", check=True)
+
+    mock_git.assert_called_once_with(
+        repo, "fetch", "origin", "master:refs/remotes/origin/master", check=True
+    )
+
+
+def test_git_fetch_force(tmp_path):
+    """git_fetch with force=True prepends + to refspec."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with patch("ow.git.git") as mock_git:
+        git_fetch(
+            repo,
+            "origin",
+            "master:refs/remotes/origin/master",
+            force=True,
+            check=True,
+        )
+
+    mock_git.assert_called_once_with(
+        repo, "fetch", "origin", "+master:refs/remotes/origin/master", check=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# git_switch
+# ---------------------------------------------------------------------------
+
+
+def test_git_switch_basic(tmp_path):
+    """git_switch switches to a branch."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    with patch("ow.git.git") as mock_git:
+        git_switch(worktree, "master", check=True)
+
+    mock_git.assert_called_once_with(worktree, "switch", "master", check=True)
+
+
+def test_git_switch_detach(tmp_path):
+    """git_switch with detach=True adds --detach flag."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    with patch("ow.git.git") as mock_git:
+        git_switch(worktree, "origin/master", detach=True, check=True)
+
+    mock_git.assert_called_once_with(
+        worktree, "switch", "--detach", "origin/master", check=True
+    )
+
+
+def test_git_switch_create(tmp_path):
+    """git_switch with create=True adds -c flag."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    with patch("ow.git.git") as mock_git:
+        git_switch(worktree, "new-branch", create=True, check=True)
+
+    mock_git.assert_called_once_with(
+        worktree, "switch", "-c", "new-branch", check=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# git_rebase
+# ---------------------------------------------------------------------------
+
+
+def test_git_rebase_returns_completed_process(tmp_path):
+    """git_rebase returns CompletedProcess for caller to check."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    mock_result = MagicMock(returncode=0)
+
+    with patch("ow.git.git", return_value=mock_result) as mock_git:
+        result = git_rebase(worktree, "origin/master")
+
+    mock_git.assert_called_once_with(worktree, "rebase", "origin/master")
+    assert result.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# git_merge_base_fork_point
+# ---------------------------------------------------------------------------
+
+
+def test_git_merge_base_fork_point_returns_hash(tmp_path):
+    """Returns the fork-point hash when found."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    mock_result = MagicMock(returncode=0)
+    mock_result.stdout = "abc123def456\n"
+
+    with patch("ow.git.git", return_value=mock_result) as mock_git:
+        result = git_merge_base_fork_point(worktree, "origin/master", "feature")
+
+    mock_git.assert_called_once_with(
+        worktree,
+        "merge-base",
+        "--fork-point",
+        "origin/master",
+        "feature",
+        quiet=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result == "abc123def456"
+
+
+def test_git_merge_base_fork_point_returns_none_on_failure(tmp_path):
+    """Returns None when fork-point cannot be found (upstream rewritten)."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    mock_result = MagicMock(returncode=1)
+    mock_result.stdout = ""
+
+    with patch("ow.git.git", return_value=mock_result):
+        result = git_merge_base_fork_point(worktree, "origin/master", "feature")
+
+    assert result is None
+
+
+def test_git_merge_base_fork_point_returns_none_on_empty_output(tmp_path):
+    """Returns None when output is empty."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    mock_result = MagicMock(returncode=0)
+    mock_result.stdout = "\n"
+
+    with patch("ow.git.git", return_value=mock_result):
+        result = git_merge_base_fork_point(worktree, "origin/master", "feature")
 
     assert result is None

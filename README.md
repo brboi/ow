@@ -318,7 +318,21 @@ Clickable elements (Ctrl+Click in terminal):
 
 ### `ow rebase`
 
-Fetches and rebases all repos in a workspace. The strategy applied by `ow` depends on the worktree mode:
+Fetches and rebases all repos in a workspace. Before executing, `ow` displays a summary of the rebase situation for each repo:
+
+```
+[workspace-name]
+  community: origin/master ← dev/my-feature (3 commits) [rewritten, 2 unpushed]
+  enterprise: origin/master (0 commits)
+```
+
+The markers indicate potential issues:
+- `rewritten` — the upstream branch was force-pushed (detected via `git merge-base --fork-point`)
+- `N unpushed` — local commits not yet pushed to the upstream
+
+After displaying the summary, `ow` asks for confirmation before proceeding. This gives you a chance to abort if the situation looks risky (e.g., rewritten upstream with unpushed commits means conflicts are likely).
+
+The strategy applied by `ow` depends on the worktree mode:
 
 For **Detached worktree** (e.g. `community:master`), `ow` does something similar to:
 ```sh
@@ -359,7 +373,7 @@ The workspace config is archived to `.ow.toml.archived-workspaces` (append-only)
 
 Once created, a workspace is a regular directory with standard git worktrees. You can `cd` into it, run git commands, switch branches — it works without `ow`.
 
-However, if the worktree state diverges from `ow.toml` (e.g. you manually switch branches), `ow` considers this **drift**. Commands like `rebase`, `remove`, and `status` run `assert_no_drift` and will abort if the actual branch doesn't match the configured spec.
+However, if the worktree state diverges from `ow.toml` (e.g. you manually switch branches), `ow` considers this **drift**. Commands like `rebase`, `remove`, and `status` will warn you when drift is detected, but will proceed anyway. This allows you to use `ow` even when you've made manual changes to the worktrees.
 
 **Golden rule:** one local branch = one worktree. Git enforces this — you can't check out the same branch in two worktrees. Use detached mode (no `..`) when you just need a read-only copy of a version.
 

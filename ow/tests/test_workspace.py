@@ -8,11 +8,11 @@ from jinja2 import Environment, FileSystemLoader
 from ow.config import BranchSpec, Config, WorkspaceConfig
 from ow.workspace import (
     DriftResult,
-    assert_no_drift,
     build_template_context,
     check_drift,
     cmd_create,
     find_addon_paths,
+    warn_if_drifted,
 )
 
 TEMPLATE_DIR = Path(__file__).parent.parent.parent / "workspaces" / ".template"
@@ -614,11 +614,11 @@ def test_check_drift_detects_wrong_branch(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# assert_no_drift
+# warn_if_drifted
 # ---------------------------------------------------------------------------
 
 
-def test_assert_no_drift_passes_when_aligned(tmp_path):
+def test_warn_if_drifted_passes_when_aligned(tmp_path, capsys):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     ws = WorkspaceConfig(
@@ -627,11 +627,13 @@ def test_assert_no_drift_passes_when_aligned(tmp_path):
     )
 
     with patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
-        # Should not raise
-        assert_no_drift(ws, ws_dir)
+        warn_if_drifted(ws, ws_dir)
+
+    captured = capsys.readouterr()
+    assert "Warning" not in captured.err
 
 
-def test_assert_no_drift_exits_on_drift(tmp_path):
+def test_warn_if_drifted_warns_on_drift(tmp_path, capsys):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     ws = WorkspaceConfig(
@@ -640,18 +642,21 @@ def test_assert_no_drift_exits_on_drift(tmp_path):
     )
 
     with patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"):
-        with pytest.raises(SystemExit):
-            assert_no_drift(ws, ws_dir)
+        warn_if_drifted(ws, ws_dir)
+
+    captured = capsys.readouterr()
+    assert "Warning" in captured.err
 
 
-def test_assert_no_drift_skips_unapplied_repos(tmp_path):
+def test_warn_if_drifted_skips_unapplied_repos(tmp_path, capsys):
     ws_dir = tmp_path / "workspaces" / "test"
     ws_dir.mkdir(parents=True)
-    # No community directory — not applied
     ws = WorkspaceConfig(
         name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
     )
 
-    # Should not raise (skips non-existent worktrees)
-    assert_no_drift(ws, ws_dir)
+    warn_if_drifted(ws, ws_dir)
+
+    captured = capsys.readouterr()
+    assert "Warning" not in captured.err
