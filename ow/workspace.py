@@ -32,9 +32,13 @@ from ow.git import (
     get_worktree_branch,
     get_worktree_head,
     git,
+    git_cherry_pick,
     git_fetch,
+    git_log_oneline,
     git_merge_base_fork_point,
     git_rebase,
+    git_reset_hard,
+    git_rev_list,
     git_switch,
     parallel_fetch,
     remove_worktree,
@@ -748,6 +752,8 @@ class RebasePlan:
     is_detached: bool
     local_commits: int
     unpushed_commits: int
+    fork_point: str | None
+    commits_to_reapply: list[str]
     upstream_rewritten: bool
     has_conflicts: bool
 
@@ -760,18 +766,19 @@ def _analyze_repo_for_rebase(
 
     local_commits, _ = get_rev_list_count(worktree, "HEAD", upstream or track_ref)
 
+    fork_point = None
+    commits_to_reapply: list[str] = []
+    upstream_rewritten = False
+    unpushed_commits = 0
+
     if upstream:
         unpushed_commits, _ = get_rev_list_count(worktree, "HEAD", upstream)
         branch = get_worktree_branch(worktree)
-        fork_point = (
-            git_merge_base_fork_point(worktree, upstream, branch)
-            if branch
-            else None
-        )
+        if branch:
+            fork_point = git_merge_base_fork_point(worktree, upstream, branch)
+        if fork_point:
+            commits_to_reapply = git_rev_list(worktree, f"{fork_point}..HEAD", reverse=True)
         upstream_rewritten = fork_point is None and unpushed_commits > 0
-    else:
-        unpushed_commits = 0
-        upstream_rewritten = False
 
     return RebasePlan(
         alias=alias,
@@ -780,6 +787,8 @@ def _analyze_repo_for_rebase(
         is_detached=is_detached,
         local_commits=local_commits,
         unpushed_commits=unpushed_commits,
+        fork_point=fork_point,
+        commits_to_reapply=commits_to_reapply,
         upstream_rewritten=upstream_rewritten,
         has_conflicts=has_conflicts,
     )
@@ -794,8 +803,11 @@ def _display_rebase_summary(plans: list[RebasePlan]) -> None:
 
         markers = []
         if p.upstream_rewritten:
-            markers.append(_c("rewritten", 33))
-        if p.unpushed_commits > 0 and p.upstream:
+            if p.fork_point:
+                markers.append(_c("rewritten, recoverable", 33))
+            else:
+                markers.append(_c("rewritten, no fork-point", 31))
+        elif p.unpushed_commits > 0 and p.upstream:
             markers.append(_c(f"{p.unpushed_commits} unpushed", 33))
         if p.has_conflicts:
             markers.append(_c("in progress", 31))
@@ -803,6 +815,23 @@ def _display_rebase_summary(plans: list[RebasePlan]) -> None:
             parts.append("[" + ", ".join(markers) + "]")
 
         print(f"  {p.alias}: {' → '.join(parts)}")
+
+
+def _recover_with_cherry_pick(worktree: Path, upstream: str, commits: list[str]) -> str | None:
+    """Reset hard to upstream and cherry-pick commits.
+    
+    Returns None on success, or the failing commit hash on conflict.
+    """
+    git_reset_hard(worktree, upstream)
+    
+    for i, commit in enumerate(commits, 1):
+        msg = git_log_oneline(worktree, commit)
+        print(f"    Cherry-picking {i}/{len(commits)}: {msg}")
+        result = git_cherry_pick(worktree, commit)
+        if result.returncode != 0:
+            return commit
+    
+    return None
 
 
 def _do_rebase(worktree: Path, upstream: str | None, track_ref: str) -> bool:
@@ -880,18 +909,42 @@ def cmd_rebase(config: Config, name: str) -> None:
         print(_c(f"[{ws.name}]", 1, 36))
         _display_rebase_summary(plans)
 
+        has_rewritten_no_fork = any(
+            p.upstream_rewritten and p.fork_point is None
+            for p in plans
+        )
+        if has_rewritten_no_fork:
+            error_label = _c("Error:", 31)
+            print(f"\n  {error_label} Cannot recover some repos - fork-point not found.", file=sys.stderr)
+            print("  Manual recovery required:", file=sys.stderr)
+            for p in plans:
+                if p.upstream_rewritten and p.fork_point is None:
+                    print(f"    {p.alias}:", file=sys.stderr)
+                    print("      git reflog HEAD | head -20  # find previous state", file=sys.stderr)
+                    print("      git cherry-pick <commit>...  # manually reapply", file=sys.stderr)
+            print()
+
+        has_recoverable = any(
+            p.upstream_rewritten and p.fork_point is not None
+            for p in plans
+        )
+        if has_recoverable:
+            recovery_label = _c("Recovery:", 33)
+            print(f"\n  {recovery_label} reset --hard + cherry-pick for rewritten upstreams", file=sys.stderr)
+            for p in plans:
+                if p.upstream_rewritten and p.fork_point:
+                    print(f"    {p.alias}: {len(p.commits_to_reapply)} commits to reapply", file=sys.stderr)
+
         has_warnings = any(
-            p.upstream_rewritten or (p.unpushed_commits > 0 and p.upstream)
+            p.unpushed_commits > 0 and p.upstream and not p.upstream_rewritten
             for p in plans
         )
         if has_warnings:
-            print(
-                f"\n  {_c('Warning:', 33)} conflicts likely due to rewritten upstream or unpushed commits",
-                file=sys.stderr,
-            )
+            warning_label = _c("Warning:", 33)
+            print(f"\n  {warning_label} unpushed commits may cause conflicts", file=sys.stderr)
 
         try:
-            response = input("\nProceed with rebase? [Y/n] ")
+            response = input("\nProceed? [Y/n] ")
         except EOFError:
             response = ""
 
@@ -910,14 +963,43 @@ def cmd_rebase(config: Config, name: str) -> None:
                 )
                 continue
 
+            if plan.upstream_rewritten and plan.fork_point is None:
+                print(
+                    f"  Skipping {plan.alias}: no fork-point, manual recovery required",
+                    file=sys.stderr,
+                )
+                continue
+
+            print(f"  {plan.alias}:")
+
             if plan.is_detached:
                 git_switch(worktree, plan.track_ref, detach=True, check=True)
+                print("    Done (detached).")
+            elif plan.upstream_rewritten and plan.fork_point and plan.upstream:
+                failed_commit = _recover_with_cherry_pick(
+                    worktree, plan.upstream, plan.commits_to_reapply
+                )
+                if failed_commit:
+                    print(
+                        f"\n    {_c('CONFLICT', 31)} cherry-picking {failed_commit}",
+                        file=sys.stderr,
+                    )
+                    print("    resolve conflicts, then:", file=sys.stderr)
+                    print(f"      cd {worktree}", file=sys.stderr)
+                    print("      git cherry-pick --continue", file=sys.stderr)
+                    print("    or abort:", file=sys.stderr)
+                    print("      git cherry-pick --abort\n", file=sys.stderr)
+                    failed.append(plan.alias)
+                else:
+                    print("    Done (recovered).")
             else:
                 if not _do_rebase(worktree, plan.upstream, plan.track_ref):
                     _report_conflict(
                         plan.alias, worktree, plan.upstream or plan.track_ref
                     )
                     failed.append(plan.alias)
+                else:
+                    print("    Done.")
 
         if failed:
             sys.exit(1)

@@ -326,15 +326,33 @@ Fetches and rebases all repos in a workspace. Before executing, `ow` displays a 
 
 ```
 [workspace-name]
-  community: origin/master ← dev/my-feature (3 commits) [rewritten, 2 unpushed]
+  community: origin/master ← dev/my-feature (3 commits) [rewritten, recoverable]
   enterprise: origin/master (0 commits)
 ```
 
 The markers indicate potential issues:
-- `rewritten` — the upstream branch was force-pushed (detected via `git merge-base --fork-point`)
+- `rewritten, recoverable` — the upstream branch was force-pushed but `ow` can recover via reset + cherry-pick
+- `rewritten, no fork-point` — the upstream was force-pushed and `ow` cannot recover automatically (manual intervention required)
 - `N unpushed` — local commits not yet pushed to the upstream
 
-After displaying the summary, `ow` asks for confirmation before proceeding. This gives you a chance to abort if the situation looks risky (e.g., rewritten upstream with unpushed commits means conflicts are likely).
+#### Recovery Strategy for Rewritten Upstreams
+
+When an upstream branch has been force-pushed, `ow` detects this using `git merge-base --fork-point`:
+
+1. **Fork-point found**: `ow` offers a recovery strategy:
+   - `git reset --hard <upstream>` — reset to the new upstream state
+   - `git cherry-pick` each local commit in sequence
+
+2. **Fork-point not found**: `ow` skips the repo and provides manual recovery instructions:
+   ```
+   Error: Cannot recover some repos - fork-point not found.
+   Manual recovery required:
+     community:
+       git reflog HEAD | head -20  # find previous state
+       git cherry-pick <commit>...  # manually reapply
+   ```
+
+After displaying the summary, `ow` asks for confirmation before proceeding. This gives you a chance to abort if the situation looks risky.
 
 The strategy applied by `ow` depends on the worktree mode:
 
@@ -358,7 +376,7 @@ git fetch origin master
 git rebase origin/master
 ```
 
-If a rebase hits conflicts, `ow` reports the conflicting repo with instructions to `git rebase --continue` or `git rebase --abort`, then moves on to the next repo.
+If a rebase or cherry-pick hits conflicts, `ow` reports the conflicting repo with instructions to continue or abort, then moves on to the next repo.
 
 Workspace name can be omitted when running from inside a workspace (via `OW_WORKSPACE`):
 

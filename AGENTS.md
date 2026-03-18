@@ -26,12 +26,17 @@ ow/
   - `git_switch(worktree, ref, *, detach=False, create=False)` — unified switch with detach/create options.
   - `git_rebase(worktree, onto)` — rebase onto ref, returns CompletedProcess for caller to check.
   - `git_merge_base_fork_point(worktree, upstream, branch)` — find fork-point between branch and upstream; returns None if upstream was rewritten.
+  - `git_rev_list(repo, commit_range, *, reverse=False)` — return list of commit hashes in range.
+  - `git_log_oneline(repo, commit)` — return one-line log for a commit: 'hash message'.
+  - `git_cherry_pick(worktree, commit)` — cherry-pick a commit, returns CompletedProcess.
+  - `git_reset_hard(worktree, ref)` — reset worktree to ref with --hard.
   - `ordered_remotes(alias_remotes)` returns remote names with `origin` first, then alphabetical. Used in `resolve_spec`, `resolve_spec_local`, `get_remote_ref_for_branch`, `ensure_bare_repo`.
   - `get_worktree_branch(worktree_path)` returns the current branch name or `None` if detached (uses `rev-parse --abbrev-ref HEAD`).
 - **`ow/workspace.py`** — file generators + command functions (`cmd_*`). Commands call git helpers then render Jinja2 templates. Also owns cache/drift helpers and worktree drift detection (see below).
   - `DriftResult` / `check_drift` / `warn_if_drifted` — detect when worktree branch state doesn't match config (e.g. config says detached but worktree is on a branch). `cmd_status`, `cmd_rebase`, `cmd_remove` call `warn_if_drifted` to display warnings but proceed anyway; `cmd_apply` does NOT (it is the reconciliation command).
-  - `RebasePlan` / `_analyze_repo_for_rebase` — analyze the rebase situation for a single repo: track ref, upstream, local commits, unpushed commits, whether upstream was rewritten.
-  - `cmd_rebase` does a two-step rebase for attached repos: first onto the pushed work branch (upstream), then onto the base/track branch. Before executing, displays a summary and asks for confirmation. Uses `git_merge_base_fork_point` to detect rewritten upstreams. If the work branch hasn't been pushed, only the track branch rebase runs. Conflicts are reported with continue/abort instructions and the command moves on to the next repo.
+  - `RebasePlan` / `_analyze_repo_for_rebase` — analyze the rebase situation for a single repo: track ref, upstream, fork_point, commits_to_reapply, local commits, unpushed commits, whether upstream was rewritten.
+  - `_recover_with_cherry_pick(worktree, upstream, commits)` — reset hard to upstream and cherry-pick commits sequentially. Returns None on success, or the failing commit hash on conflict.
+  - `cmd_rebase` handles three cases: (1) detached worktree → switch to track ref, (2) upstream rewritten with fork-point → recovery via reset + cherry-pick, (3) upstream rewritten without fork-point → skip with manual recovery instructions, (4) normal rebase → two-step rebase onto upstream then track ref. Displays summary and asks for confirmation before proceeding.
 
 ## Template system
 
