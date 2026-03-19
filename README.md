@@ -203,6 +203,76 @@ Configure your workspaces to use them via `[vars]`:
     smtp_server = "localhost"
     smtp_port = 1025
 
+## Sandboxing AI Coding Assistants
+
+`ow` includes sandbox scripts for running AI coding assistants (Opencode, Claude Code) with filesystem isolation using [bubblewrap](https://github.com/containers/bubblewrap). This restricts the assistant's access to only the workspace directory and essential system paths.
+
+### Prerequisites
+
+Install bubblewrap with your package manager:
+
+```sh
+# Debian/Ubuntu
+sudo apt install bubblewrap
+
+# Fedora
+sudo dnf install bubblewrap
+
+# Arch
+sudo pacman -S bubblewrap
+```
+
+### Usage from Workspaces
+
+Add `bwrap` to your workspace templates:
+
+```toml
+[[workspace]]
+name = "my-feature"
+templates = ["common", "vscode", "bwrap"]  # Add bwrap
+```
+
+Run `ow apply` to generate the sandbox scripts in the workspace directory. The scripts are automatically added to PATH via `mise`:
+
+```sh
+cd workspaces/my-feature
+bwrap-opencode        # Launch Opencode sandboxed
+bwrap-claude          # Launch Claude Code sandboxed
+```
+
+### Usage from ow Root
+
+To work on `ow` itself, use the scripts at the project root:
+
+```sh
+cd /path/to/ow
+./bwrap-opencode    # Launch Opencode sandboxed in ow directory
+./bwrap-claude      # Launch Claude Code sandboxed in ow directory
+```
+
+### Adding Extra Directories
+
+Use `--add-dir` to grant access to additional directories:
+
+```sh
+bwrap-opencode --add-dir ~/src/my-addon
+```
+
+### What's Mounted
+
+**Read-write:**
+- Workspace directory (or ow root)
+- AI tool config/cache directories
+- Odoo filestore (if present)
+- PostgreSQL socket (if present)
+
+**Read-only:**
+- System binaries (`/usr`, `/bin`, `/sbin`, `/lib`)
+- TLS certificates, hosts, passwd
+- Chrome/Chromium (for browser automation)
+
+**Network access** is preserved for outbound connections. The sandbox uses namespace isolation (IPC, UTS, cgroup, PID) while sharing the network namespace.
+
 ## Workflow
 
 ```sh

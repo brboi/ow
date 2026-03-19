@@ -8,7 +8,7 @@ postinstall = "python -m ensurepip --default-pip && pip install -r {% raw %}{{co
 OW_WORKSPACE = "{{ ws_name }}"
 ODOO_RC = "{% raw %}{{config_root}}{% endraw %}/odoorc"
 _.python.venv = { path = ".venv", create = true }
-_.path = ["{% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}"]
+_.path = ["{% raw %}{{config_root}}{% endraw %}", "{% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}"]
 
 [shell_alias]
 osh = "odoo-bin shell --no-http -c $ODOO_RC"
