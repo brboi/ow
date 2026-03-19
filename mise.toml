@@ -3,7 +3,10 @@ node = { version = "latest", postinstall = "npm install -g rtlcss" }
 python = "3.12"
 
 [settings]
-experimental = true # in order to use [hooks]
+experimental = true
+
+[env]
+_.path = ["{{config_root}}"]
 
 [hooks]
 postinstall = "pip install -e {{config_root}} -q"

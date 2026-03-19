@@ -7,12 +7,18 @@ ow/
 ├── config.py            # Config dataclasses, TOML loading/writing
 ├── git.py               # All git operations via subprocess
 ├── workspace.py         # File generators + command implementations + drift detection
-└── tests/
-    ├── __init__.py
-    ├── test_config.py   # parse_branch_spec, load_config, format_workspace
-    ├── test_git.py      # git functions (subprocess mocked)
-    ├── test_workspace.py # file generators, template rendering, cache/drift, DriftResult
-    └── test_commands.py # cmd_status, cmd_rebase, cmd_remove integration tests
+├── tests/
+│   ├── __init__.py
+│   ├── test_config.py   # parse_branch_spec, load_config, format_workspace
+│   ├── test_git.py      # git functions (subprocess mocked)
+│   ├── test_workspace.py # file generators, template rendering, cache/drift, DriftResult
+│   └── test_commands.py # cmd_status, cmd_rebase, cmd_remove integration tests
+├── bwrap-opencode       # Opencode sandbox wrapper (for developing on ow)
+├── bwrap-claude         # Claude Code sandbox wrapper (for developing on ow)
+└── templates/
+    ├── bwrap/           # Sandbox scripts template for workspaces
+    │   ├── bwrap-opencode.j2
+    │   └── bwrap-claude.j2
 ```
 
 ## Key abstractions
@@ -46,6 +52,7 @@ Bundled templates (git-tracked):
 - `templates/common/` — core files: mise.toml, odoorc, odools.toml, pyrightconfig.json, requirements-dev.txt
 - `templates/vscode/.vscode/` — VSCode settings and debug config
 - `templates/zed/.zed/` — Zed settings and debug config
+- `templates/bwrap/` — sandbox scripts for AI coding assistants (bwrap-opencode, bwrap-claude)
 
 Templates are Jinja2 (`.j2` extension); static files are copied as-is.
 
