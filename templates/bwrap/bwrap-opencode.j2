@@ -125,7 +125,7 @@ BWRAP=(
   --bind-try "$HOME/.local/share/Odoo" "$HOME/.local/share/Odoo"
   --bind-try /var/run/postgresql /var/run/postgresql
   --ro-bind /etc/passwd /etc/passwd
-  --ro-bind /etc/alternatives /etc/alternatives
+  --ro-bind-try /etc/alternatives /etc/alternatives
   --ro-bind-try /opt/google/chrome /opt/google/chrome
   --ro-bind-try /snap/bin /snap/bin
   --ro-bind-try /snap/chromium /snap/chromium
