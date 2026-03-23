@@ -89,7 +89,7 @@ for d in "${OPENCODE_DIRS[@]}"; do
   mkdir -p "$d"
 done
 
-OW_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OW_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 ALLOW_DIRS=("$OW_ROOT")
 OPENCODE_ARGS=()

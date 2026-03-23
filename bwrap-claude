@@ -103,7 +103,7 @@ for f in "${CLAUDE_FILES[@]}"; do
   [[ -e "$f" ]] || touch "$f"
 done
 
-OW_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OW_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 ALLOW_DIRS=("$OW_ROOT")
 CLAUDE_ARGS=()

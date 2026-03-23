@@ -373,6 +373,7 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
                     out_path = ws_dir / rel.with_suffix("")
                     out_path.parent.mkdir(parents=True, exist_ok=True)
                     out_path.write_text(env.get_template(str(rel)).render(context))
+                    out_path.chmod(path.stat().st_mode)
                 else:
                     out_path = ws_dir / rel
                     out_path.parent.mkdir(parents=True, exist_ok=True)
