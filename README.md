@@ -2,6 +2,8 @@
 
 CLI tool that turns a single `ow.toml` into ready-to-code Odoo workspaces using git worktrees.
 
+[![ow: Streamline Your Odoo Development Workflow](https://repoclip.io/api/badge/7f89fa43-7287-404e-876d-21ae291b6d72)](https://repoclip.io/v/7f89fa43-7287-404e-876d-21ae291b6d72)
+
 ## Overview
 
 Here is what `ow` does for you:
