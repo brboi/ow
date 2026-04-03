@@ -479,54 +479,54 @@ def cmd_status(config: Config, name: str | None = None) -> None:
         # 1. Drift warning (no longer blocks)
         warn_if_drifted(ws, ws_dir)
 
-        # 2. Parallel fetch (silent)
-        def make_status_fetch_task(alias, spec):
-            def task():
+        # 2. Fetch (sequential, with spinner feedback)
+        for alias, spec in ws.repos.items():
+            worktree_path = ws_dir / alias
+            if not worktree_path.exists():
+                continue
+
+            _print_spinner(f"Checking {alias}", _spinner())
+
+            # Fetch track branch
+            try:
                 alias_remotes = config.remotes.get(alias, {})
                 bare_repo = bare_repos_dir / f"{alias}.git"
-                worktree_path = ws_dir / alias
-                if not worktree_path.exists():
-                    return
-                # Fetch track branch
-                try:
-                    resolved = resolve_spec_local(bare_repo, spec, alias_remotes)
-                    subprocess.run(
-                        [
-                            "git",
-                            "-C",
-                            str(bare_repo),
-                            "fetch",
-                            resolved.remote,
-                            f"{resolved.branch}:refs/remotes/{resolved.remote}/{resolved.branch}",
-                        ],
-                        capture_output=True,
-                    )
-                except (RuntimeError, subprocess.CalledProcessError):
-                    pass
-                # If attached: fetch upstream too
-                if not spec.is_detached:
-                    upstream = get_upstream(worktree_path)
-                    if upstream:
-                        parts = upstream.split("/", 1)
-                        if len(parts) == 2:
-                            subprocess.run(
-                                [
-                                    "git",
-                                    "-C",
-                                    str(bare_repo),
-                                    "fetch",
-                                    parts[0],
-                                    f"{parts[1]}:refs/remotes/{upstream}",
-                                ],
-                                capture_output=True,
-                            )
+                resolved = resolve_spec_local(bare_repo, spec, alias_remotes)
+                refspec = f"{resolved.branch}:refs/remotes/{resolved.remote}/{resolved.branch}"
+                _print_spinner(f"Checking {alias}", _spinner())
+                result = subprocess.run(
+                    ["git", "-C", str(bare_repo), "fetch", resolved.remote, refspec],
+                    capture_output=True,
+                )
+                if result.returncode != 0:
+                    err = result.stderr.decode().strip() if result.stderr else "unknown"
+                    _clear_spinner_line(f"Checking {alias}")
+                    _print_git_result(alias, "fetch", [resolved.remote, refspec], False, err)
+                else:
+                    _clear_spinner_line(f"Checking {alias}")
+                    _print_git_result(alias, "fetch", [resolved.remote, refspec], True)
+            except (RuntimeError, subprocess.CalledProcessError) as e:
+                _clear_spinner_line(f"Checking {alias}")
+                _print_git_result(alias, "fetch", ["?"], False, str(e))
 
-            return task
-
-        fetch_tasks = [
-            make_status_fetch_task(alias, spec) for alias, spec in ws.repos.items()
-        ]
-        parallel_fetch(fetch_tasks, max_workers=2)
+            # If attached: fetch upstream too
+            if not spec.is_detached:
+                upstream = get_upstream(worktree_path)
+                if upstream:
+                    parts = upstream.split("/", 1)
+                    if len(parts) == 2:
+                        _print_spinner(f"Checking {alias}", _spinner())
+                        result = subprocess.run(
+                            ["git", "-C", str(bare_repo), "fetch", parts[0], f"{parts[1]}:refs/remotes/{upstream}"],
+                            capture_output=True,
+                        )
+                        if result.returncode != 0:
+                            err = result.stderr.decode().strip() if result.stderr else "unknown"
+                            _clear_spinner_line(f"Checking {alias}")
+                            _print_git_result(alias, "fetch", [parts[0], f"{parts[1]}:refs/remotes/{upstream}"], False, err)
+                        else:
+                            _clear_spinner_line(f"Checking {alias}")
+                            _print_git_result(alias, "fetch", [parts[0], f"{parts[1]}:refs/remotes/{upstream}"], True)
 
         # 3. Display
         print(_c(f"[{ws.name}]", 1, 36))
