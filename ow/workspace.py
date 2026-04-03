@@ -218,6 +218,42 @@ def _c(text: str, *codes: int) -> str:
     return f"{prefix}{text}\x1b[0m"
 
 
+_spinner_chars = ['|', '/', '-', '\\']
+_spinner_idx = 0
+
+def _spinner() -> str:
+    global _spinner_idx
+    c = _spinner_chars[_spinner_idx]
+    _spinner_idx = (_spinner_idx + 1) % len(_spinner_chars)
+    return c
+
+
+def _format_git_cmd(alias: str, cmd: str, args: list[str]) -> str:
+    return f"  [{alias}.git] {cmd} {' '.join(args)}"
+
+
+def _print_spinner(prefix: str, spinner: str) -> None:
+    line = f"{prefix}  {spinner}  "
+    sys.stdout.write(f"\r{line}")
+    sys.stdout.flush()
+
+
+def _clear_spinner_line(prefix: str) -> None:
+    line_len = len(prefix) + 4
+    sys.stdout.write(f"\r{' ' * line_len}\r")
+    sys.stdout.flush()
+
+
+def _print_git_result(alias: str, cmd: str, args: list[str], ok: bool, error: str | None = None) -> None:
+    line = _format_git_cmd(alias, cmd, args)
+    if ok:
+        print(f"{line}  ✓")
+    else:
+        print(f"{line}  ✗", file=sys.stderr)
+        if error:
+            print(f"  Error: {error}", file=sys.stderr)
+
+
 def _counts(behind: int, ahead: int) -> str:
     b = _c(f"↓{behind}", 33) if behind > 0 else _c(f"↓{behind}", 2)
     a = _c(f"↑{ahead}", 32) if ahead > 0 else _c(f"↑{ahead}", 2)
