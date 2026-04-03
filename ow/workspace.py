@@ -345,20 +345,25 @@ def cmd_apply(config: Config, name: str | None = None) -> None:
         ws_dir = config.root_dir / "workspaces" / ws.name
         is_new = not ws_dir.exists()
 
-        # 1. Ensure bare repos + refs (parallel, max 2)
+        # 1. Ensure bare repos + refs (sequential, with spinner)
         resolved_specs: dict[str, BranchSpec] = {}
 
-        def make_setup_task(alias, spec):
-            def task():
-                alias_remotes = config.remotes.get(alias, {})
-                bare_repo = bare_repos_dir / f"{alias}.git"
+        for alias, spec in ws.repos.items():
+            _print_spinner(f"Setting up {alias}", _spinner())
+
+            alias_remotes = config.remotes.get(alias, {})
+            bare_repo = bare_repos_dir / f"{alias}.git"
+
+            try:
                 ensure_bare_repo(alias, alias_remotes, bare_repos_dir)
-                resolved_specs[alias] = resolve_spec(bare_repo, spec, alias_remotes)
-
-            return task
-
-        tasks = [make_setup_task(alias, spec) for alias, spec in ws.repos.items()]
-        parallel_fetch(tasks, max_workers=2)
+                resolved = resolve_spec(bare_repo, spec, alias_remotes)
+                resolved_specs[alias] = resolved
+                _clear_spinner_line(f"Setting up {alias}")
+                _print_git_result(alias, "setup", [], True)
+            except Exception as e:
+                _clear_spinner_line(f"Setting up {alias}")
+                _print_git_result(alias, "setup", [], False, str(e))
+                resolved_specs[alias] = spec  # fallback
 
         # 2. Create worktrees if they don't exist
         for alias, resolved in resolved_specs.items():
