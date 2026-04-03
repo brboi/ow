@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ow.config import BranchSpec, RemoteConfig
@@ -403,8 +402,4 @@ def git_reset_hard(worktree: Path, ref: str) -> None:
     git(worktree, "reset", "--hard", ref, check=True)
 
 
-def parallel_fetch(tasks: list, max_workers: int = 2) -> None:
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(task) for task in tasks]
-        for f in futures:
-            f.result()
+
