@@ -905,35 +905,52 @@ def cmd_rebase(config: Config, name: str) -> None:
         resolved_tracks: dict[str, str] = {}
         resolved_upstreams: dict[str, str] = {}
 
-        def make_fetch_task(alias, spec):
-            def task():
-                alias_remotes = config.remotes.get(alias, {})
-                bare_repo = bare_repos_dir / f"{alias}.git"
-                track_spec = BranchSpec(spec.base_ref)
+        for alias, spec in ws.repos.items():
+            _print_spinner(f"Preparing {alias}", _spinner())
+
+            alias_remotes = config.remotes.get(alias, {})
+            bare_repo = bare_repos_dir / f"{alias}.git"
+            track_spec = BranchSpec(spec.base_ref)
+
+            try:
                 resolved_track = resolve_spec(bare_repo, track_spec, alias_remotes)
-                git_fetch(
-                    bare_repo,
-                    resolved_track.remote,
-                    f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}",
-                    check=True,
+                refspec = f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"
+                _print_spinner(f"Preparing {alias}", _spinner())
+                result = subprocess.run(
+                    ["git", "-C", str(bare_repo), "fetch", resolved_track.remote, refspec],
+                    capture_output=True,
                 )
-                resolved_tracks[alias] = resolved_track.base_ref
+                if result.returncode != 0:
+                    err = result.stderr.decode().strip() if result.stderr else "unknown"
+                    _clear_spinner_line(f"Preparing {alias}")
+                    _print_git_result(alias, "fetch", [resolved_track.remote, refspec], False, err)
+                    resolved_tracks[alias] = resolved_track.base_ref
+                else:
+                    _clear_spinner_line(f"Preparing {alias}")
+                    _print_git_result(alias, "fetch", [resolved_track.remote, refspec], True)
+                    resolved_tracks[alias] = resolved_track.base_ref
+
                 if not spec.is_detached:
                     resolved_full = resolve_spec(bare_repo, spec, alias_remotes)
                     if resolved_full.base_ref != resolved_track.base_ref:
-                        git_fetch(
-                            bare_repo,
-                            resolved_full.remote,
-                            f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}",
-                            force=True,
-                            check=True,
+                        _print_spinner(f"Preparing {alias}", _spinner())
+                        full_refspec = f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}"
+                        result = subprocess.run(
+                            ["git", "-C", str(bare_repo), "fetch", "-f", resolved_full.remote, full_refspec],
+                            capture_output=True,
                         )
+                        if result.returncode != 0:
+                            err = result.stderr.decode().strip() if result.stderr else "unknown"
+                            _clear_spinner_line(f"Preparing {alias}")
+                            _print_git_result(alias, "fetch", [resolved_full.remote, full_refspec], False, err)
+                        else:
+                            _clear_spinner_line(f"Preparing {alias}")
+                            _print_git_result(alias, "fetch", [resolved_full.remote, full_refspec], True)
                         resolved_upstreams[alias] = resolved_full.base_ref
-
-            return task
-
-        fetch_tasks = [make_fetch_task(alias, spec) for alias, spec in ws.repos.items()]
-        parallel_fetch(fetch_tasks, max_workers=2)
+            except Exception as e:
+                _clear_spinner_line(f"Preparing {alias}")
+                _print_git_result(alias, "fetch", ["?"], False, str(e))
+                resolved_tracks[alias] = spec.base_ref
 
         plans: list[RebasePlan] = []
         for alias, spec in ws.repos.items():
