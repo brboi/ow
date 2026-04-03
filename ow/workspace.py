@@ -31,9 +31,7 @@ from ow.git import (
     get_upstream,
     get_worktree_branch,
     get_worktree_head,
-    git,
     git_cherry_pick,
-    git_fetch,
     git_log_oneline,
     git_merge_base_fork_point,
     git_rebase,
@@ -860,18 +858,18 @@ def _display_rebase_summary(plans: list[RebasePlan]) -> None:
 
 def _recover_with_cherry_pick(worktree: Path, upstream: str, commits: list[str]) -> str | None:
     """Reset hard to upstream and cherry-pick commits.
-    
+
     Returns None on success, or the failing commit hash on conflict.
     """
     git_reset_hard(worktree, upstream)
-    
+
     for i, commit in enumerate(commits, 1):
         msg = git_log_oneline(worktree, commit)
         print(f"    Cherry-picking {i}/{len(commits)}: {msg}")
         result = git_cherry_pick(worktree, commit)
         if result.returncode != 0:
             return commit
-    
+
     return None
 
 

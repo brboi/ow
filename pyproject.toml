@@ -1,15 +1,18 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ow"
-version = "0.1.0"
+dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = ["argcomplete", "jinja2", "tomli-w"]
 
 [tool.setuptools.packages.find]
 include = ["ow*"]
+
+[tool.setuptools_scm]
+write_to = "ow/_version.py"
 
 [project.scripts]
 ow = "ow.__main__:main"

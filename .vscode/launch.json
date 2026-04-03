@@ -1,0 +1,65 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug OW: apply",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ow",
+      "args": ["apply"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug OW: status",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ow",
+      "args": ["status"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug OW: rebase",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ow",
+      "args": ["rebase"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug OW: create",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ow",
+      "args": ["create", "test-ws", "community:master", "templates=common"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug OW: remove",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ow",
+      "args": ["remove", "test-ws"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug Tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-v", "ow/tests/"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

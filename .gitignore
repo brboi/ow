@@ -19,3 +19,4 @@ docs/superpowers/
 *.egg-info
 .pytest_cache
 __pycache__
+ow/_version.py
