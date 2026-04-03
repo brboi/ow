@@ -11,7 +11,7 @@
     "cwd": "${ZED_WORKTREE_ROOT}/{{ main_repo_alias }}",
     "program": "odoo-bin",
     "justMyCode": false,
-    "args": ["--dev=all", "--with-demo"],
+    "args": {{ vars.debug_args | default(["--dev=all", "--with-demo"]) | tojson }},
     "python": "${ZED_WORKTREE_ROOT}/.venv/bin/python",
     "pythonArgs": ["-Xfrozen_modules=off"],
     "env": {
@@ -21,14 +21,14 @@
     },
   },
   {
-    "label": "Debug Tests With Tags: {{ vars.test_tags | default('CHANGE_ME_OR_USE_vars.test_tags') }}",
+    "label": "Debug Tests ({{ ws_name }})",
     "adapter": "Debugpy",
     "request": "launch",
     "console": "integratedTerminal",
     "cwd": "${ZED_WORKTREE_ROOT}/{{ main_repo_alias }}",
     "program": "odoo-bin",
     "justMyCode": false,
-    "args": ["--test-tags={{ vars.test_tags | default('CHANGE_ME_OR_USE_vars.test_tags') }}"],
+    "args": {{ vars.debug_test_args | default(["--test-tags=" ~ ws_name]) | tojson }},
     "python": "${ZED_WORKTREE_ROOT}/.venv/bin/python",
     "pythonArgs": ["-Xfrozen_modules=off"],
     "env": {

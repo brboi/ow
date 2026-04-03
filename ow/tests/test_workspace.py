@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -423,6 +424,49 @@ def test_render_vscode_launch(tmp_path):
     assert "odoorc" in result
 
 
+def test_render_vscode_launch_default_args(tmp_path):
+    """Default debug_args includes --dev=all and --with-demo."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template(".vscode/launch.json.j2", ctx, VSCODE_TEMPLATE_DIR)
+    parsed = json.loads(result)
+
+    run_config = parsed["configurations"][0]
+    assert run_config["args"] == ["--dev=all", "--with-demo"]
+
+    test_config = parsed["configurations"][1]
+    assert test_config["args"] == ["--test-tags=test"]
+    assert test_config["name"] == "Debug Tests (test)"
+
+
+def test_render_vscode_launch_custom_args(tmp_path):
+    """Custom debug_args and debug_test_args override defaults."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = WorkspaceConfig(
+        name="test",
+        repos={"community": BranchSpec("origin/18.0")},
+        templates=["common", "vscode"],
+        vars={
+            "debug_args": ["--dev=all"],
+            "debug_test_args": ["--test-tags=/phone_service"],
+        },
+    )
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template(".vscode/launch.json.j2", ctx, VSCODE_TEMPLATE_DIR)
+    parsed = json.loads(result)
+
+    run_config = parsed["configurations"][0]
+    assert run_config["args"] == ["--dev=all"]
+
+    test_config = parsed["configurations"][1]
+    assert test_config["args"] == ["--test-tags=/phone_service"]
+
+
 def test_render_zed_settings(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
@@ -469,6 +513,53 @@ def test_render_zed_debug(tmp_path):
     assert "odoo-bin" in result
     assert "${ZED_WORKTREE_ROOT}/.venv/bin/python" in result
     assert "odoorc" in result
+
+
+def test_render_zed_debug_default_args(tmp_path):
+    """Default debug_args includes --dev=all and --with-demo."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config("test", ["community"])
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template(".zed/debug.json.j2", ctx, ZED_TEMPLATE_DIR)
+    lines = [l for l in result.splitlines() if not l.strip().startswith("//")]
+    clean = re.sub(r',(\s*[}\]])', r'\1', "\n".join(lines))
+    parsed = json.loads(clean)
+
+    run_config = parsed[0]
+    assert run_config["args"] == ["--dev=all", "--with-demo"]
+
+    test_config = parsed[1]
+    assert test_config["args"] == ["--test-tags=test"]
+    assert test_config["label"] == "Debug Tests (test)"
+
+
+def test_render_zed_debug_custom_args(tmp_path):
+    """Custom debug_args and debug_test_args override defaults."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = WorkspaceConfig(
+        name="test",
+        repos={"community": BranchSpec("origin/18.0")},
+        templates=["common", "zed"],
+        vars={
+            "debug_args": ["--dev=all"],
+            "debug_test_args": ["--test-tags=/voip_pbx"],
+        },
+    )
+    config = make_config(root_dir=tmp_path)
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template(".zed/debug.json.j2", ctx, ZED_TEMPLATE_DIR)
+    lines = [l for l in result.splitlines() if not l.strip().startswith("//")]
+    clean = re.sub(r',(\s*[}\]])', r'\1', "\n".join(lines))
+    parsed = json.loads(clean)
+
+    run_config = parsed[0]
+    assert run_config["args"] == ["--dev=all"]
+
+    test_config = parsed[1]
+    assert test_config["args"] == ["--test-tags=/voip_pbx"]
 
 
 # ---------------------------------------------------------------------------
