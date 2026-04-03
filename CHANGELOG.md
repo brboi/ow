@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Debug configuration for OW itself (`.vscode/launch.json`) — allows debugging `ow` CLI commands
+- Automatic versioning via `setuptools-scm` based on Git tags
+- `ow --version` flag to display current version
+
 ## 2026-04-03
 
 ### Changed

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -18,6 +17,11 @@ from ow.workspace import (
     cmd_remove,
     cmd_status,
 )
+
+try:
+    from ow._version import version as __version__
+except ImportError:
+    __version__ = "dev"
 
 
 def find_root() -> Path:
@@ -60,6 +64,9 @@ def resolve_workspace_name(name: str | None, allow_all: bool = False) -> str | N
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ow", description="Odoo workspace manager")
+    parser.add_argument(
+        "-v", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     p_apply = subparsers.add_parser(
