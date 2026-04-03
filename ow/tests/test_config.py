@@ -216,6 +216,17 @@ def test_format_workspace_non_origin_remote():
     assert 'repo.community = "dev/master-phoenix..fix"' in result
 
 
+def test_format_workspace_with_list_vars():
+    ws = WorkspaceConfig(
+        name="test",
+        repos={"community": BranchSpec("origin/master")},
+        templates=["common"],
+        vars={"debug_args": ["--dev=all", "--with-demo"]},
+    )
+    result = format_workspace(ws)
+    assert 'vars.debug_args = ["--dev=all", "--with-demo"]' in result
+
+
 # ---------------------------------------------------------------------------
 # _split_workspace_blocks
 # ---------------------------------------------------------------------------

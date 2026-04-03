@@ -130,6 +130,8 @@ def format_workspace(ws: WorkspaceConfig) -> str:
     for k, v in ws.vars.items():
         if isinstance(v, str):
             lines.append(f'vars.{k} = "{v}"')
+        elif isinstance(v, list):
+            lines.append(f'vars.{k} = {json.dumps(v)}')
         else:
             lines.append(f'vars.{k} = {v}')
     return "\n".join(lines) + "\n"
