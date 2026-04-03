@@ -545,6 +545,8 @@ Variables available in all templates:
 | `vars` | `dict` | Merged global + per-workspace variables |
 | `addons_paths` | `list[str]` | Absolute paths to all addons directories |
 | `odools_path_items` | `list[str]` | Relative paths for OdooLS config |
+| `vars.debug_args` | `list[str]` | CLI args for Run Instance debug config (default: `["--dev=all", "--with-demo"]`) |
+| `vars.debug_test_args` | `list[str]` | CLI args for Debug Tests config (default: `["--test-tags=<ws_name>"]`) |
 
 ## Disclaimer
 
