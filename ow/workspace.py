@@ -40,7 +40,6 @@ from ow.git import (
     git_reset_hard,
     git_rev_list,
     git_switch,
-    parallel_fetch,
     remove_worktree,
     resolve_spec,
     resolve_spec_local,
