@@ -1,6 +1,12 @@
 # Changelog
 
-## 20260403_1139
+## 2026-04-03
+
+### Changed
+
+- Removed `parallel_fetch` — fetches now run sequentially with spinner feedback
+- Improved git command output format: `[<alias>.git] <cmd> <args>`
+- Errors are now always reported, never silently ignored
 
 ### Breaking Changes
 
