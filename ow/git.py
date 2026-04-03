@@ -43,13 +43,12 @@ def ensure_bare_repo(
 
     # Configure non-origin remotes (idempotent)
     for remote_name in ordered_remotes(remotes):
-        if remote_name == "origin":
-            continue
         remote_cfg = remotes[remote_name]
-        run_cmd(
-            ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.url", remote_cfg.url],
-            quiet=True, check=True,
-        )
+        if remote_name != "origin":
+            run_cmd(
+                ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.url", remote_cfg.url],
+                quiet=True, check=True,
+            )
         if remote_cfg.pushurl:
             run_cmd(
                 ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.pushurl", remote_cfg.pushurl],

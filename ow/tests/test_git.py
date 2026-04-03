@@ -187,6 +187,37 @@ def test_ensure_bare_repo_configures_extra_remotes(tmp_path):
     )
 
 
+def test_ensure_bare_repo_configures_origin_pushurl_and_fetch(tmp_path):
+    """Origin url is set by git clone, but pushurl and fetch must still be configured."""
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repo = bare_repos_dir / "community.git"
+    bare_repo.mkdir(parents=True)
+
+    remotes = {
+        "origin": RemoteConfig(
+            url="git@github.com:odoo/odoo.git",
+            pushurl="git@github.com:my-fork/odoo.git",
+            fetch="+refs/heads/*:refs/remotes/origin/*",
+        ),
+    }
+
+    with patch("ow.git.subprocess.run") as mock_run:
+        ensure_bare_repo("community", remotes, bare_repos_dir)
+
+    calls = mock_run.call_args_list
+    # url should NOT be set (already done by git clone --bare)
+    assert not any("remote.origin.url" in str(c) for c in calls)
+    # pushurl and fetch SHOULD be set
+    assert calls[0] == call(
+        ["git", "-C", str(bare_repo), "config", "remote.origin.pushurl", "git@github.com:my-fork/odoo.git"],
+        check=True,
+    )
+    assert calls[1] == call(
+        ["git", "-C", str(bare_repo), "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        check=True,
+    )
+
+
 def test_ensure_bare_repo_ordered_remotes(tmp_path):
     """Non-origin remotes are configured in alphabetical order."""
     bare_repos_dir = tmp_path / "bare-repos"
