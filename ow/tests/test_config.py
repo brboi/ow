@@ -7,12 +7,10 @@ import pytest
 from ow.config import (
     BranchSpec,
     WorkspaceConfig,
-    _split_workspace_blocks,
-    archive_workspace,
-    format_workspace,
     load_config,
+    load_workspace_config,
     parse_branch_spec,
-    update_config_workspaces,
+    write_workspace_config,
 )
 
 
@@ -94,18 +92,6 @@ community.origin.url = "git@github.com:odoo/odoo.git"
 community.dev.url = "git@github.com:odoo-dev/odoo.git"
 community.dev.pushurl = "git@github.com:odoo-dev/odoo.git"
 community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
-
-[[workspace]]
-name = "test-ws"
-templates = ["common", "vscode"]
-repo.community = "master"
-repo.enterprise = "master..master-feature"
-vars.http_port = 8070
-
-[[workspace]]
-name = "detached-ws"
-templates = ["common"]
-repo.community = "18.0"
 """
 
 
@@ -123,175 +109,171 @@ def test_load_config():
     assert config.remotes["community"]["dev"].pushurl == "git@github.com:odoo-dev/odoo.git"
     assert config.remotes["community"]["dev"].fetch == "+refs/heads/*:refs/remotes/dev/*"
 
-    assert len(config.workspaces) == 2
 
-    ws = config.workspaces[0]
-    assert ws.name == "test-ws"
-    assert ws.repos["community"] == BranchSpec("origin/master")
-    assert ws.repos["enterprise"] == BranchSpec("origin/master", "master-feature")
-    assert ws.vars == {"http_port": 8070}
-
-    ws2 = config.workspaces[1]
-    assert ws2.name == "detached-ws"
-    assert ws2.repos["community"].is_detached
-    assert ws2.templates == ["common"]
-
-
-def test_load_config_missing_templates():
+def test_load_config_vars_empty():
     toml = textwrap.dedent("""\
-        [[workspace]]
-        name = "test-ws"
-        repo.community = "master"
+        [remotes]
+        community.origin.url = "git@github.com:odoo/odoo.git"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "ow.toml"
         path.write_text(toml)
+        config = load_config(path)
+
+    assert config.vars == {}
+
+
+# ---------------------------------------------------------------------------
+# load_workspace_config
+# ---------------------------------------------------------------------------
+
+SAMPLE_WS_CONFIG = """\
+templates = ["common", "vscode"]
+
+[repos]
+community = "master..master-parrot"
+enterprise = "master..master-parrot"
+
+[vars]
+http_port = 8067
+"""
+
+
+def test_load_workspace_config():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(SAMPLE_WS_CONFIG)
+        ws = load_workspace_config(config_path)
+
+    assert ws.templates == ["common", "vscode"]
+    assert ws.repos["community"] == BranchSpec("origin/master", "master-parrot")
+    assert ws.repos["enterprise"] == BranchSpec("origin/master", "master-parrot")
+    assert ws.vars == {"http_port": 8067}
+
+
+def test_load_workspace_config_no_vars():
+    toml = textwrap.dedent("""\
+        templates = ["common"]
+
+        [repos]
+        community = "master"
+    """)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(toml)
+        ws = load_workspace_config(config_path)
+
+    assert ws.vars == {}
+
+
+def test_load_workspace_config_missing_templates():
+    toml = textwrap.dedent("""\
+        [repos]
+        community = "master"
+    """)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(toml)
         with pytest.raises(ValueError, match="missing required 'templates'"):
-            load_config(path)
+            load_workspace_config(config_path)
 
 
-def test_load_config_empty_templates():
+def test_load_workspace_config_empty_templates():
+    """Empty templates list is allowed — workspace with no template files."""
     toml = textwrap.dedent("""\
-        [[workspace]]
-        name = "test-ws"
         templates = []
-        repo.community = "master"
+
+        [repos]
+        community = "master"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
-        path = Path(tmpdir) / "ow.toml"
-        path.write_text(toml)
-        with pytest.raises(ValueError, match="must be a non-empty list"):
-            load_config(path)
+        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(toml)
+        ws = load_workspace_config(config_path)
+        assert ws.templates == []
+
+
+def test_load_workspace_config_templates_not_list():
+    toml = textwrap.dedent("""\
+        templates = "common"
+
+        [repos]
+        community = "master"
+    """)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(toml)
+        with pytest.raises(ValueError, match="must be a list"):
+            load_workspace_config(config_path)
 
 
 # ---------------------------------------------------------------------------
-# format_workspace
+# write_workspace_config
 # ---------------------------------------------------------------------------
 
-def test_format_workspace_simple():
+def test_write_workspace_config_round_trip():
     ws = WorkspaceConfig(
-        name="test",
-        repos={"community": BranchSpec("origin/master")},
-        templates=["common"],
-    )
-    result = format_workspace(ws)
-    assert "[[workspace]]" in result
-    assert 'name = "test"' in result
-    assert 'repo.community = "master"' in result
-    assert 'templates = ["common"]' in result
-
-
-def test_format_workspace_with_local_branch():
-    ws = WorkspaceConfig(
-        name="test",
         repos={
-            "community": BranchSpec("origin/master"),
-            "enterprise": BranchSpec("origin/master", "master-test"),
+            "community": BranchSpec("origin/master", "master-parrot"),
+            "enterprise": BranchSpec("origin/master", "master-parrot"),
         },
         templates=["common", "vscode"],
+        vars={"http_port": 8067},
     )
-    result = format_workspace(ws)
-    assert 'repo.community = "master"' in result
-    assert 'repo.enterprise = "master..master-test"' in result
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / ".ow" / "config"
+        write_workspace_config(config_path, ws)
+        ws2 = load_workspace_config(config_path)
+
+    assert ws2.templates == ws.templates
+    assert ws2.repos == ws.repos
+    assert ws2.vars == ws.vars
 
 
-def test_format_workspace_with_vars():
+def test_write_workspace_config_no_vars():
     ws = WorkspaceConfig(
-        name="test",
         repos={"community": BranchSpec("origin/master")},
         templates=["common"],
-        vars={"http_port": 8070},
     )
-    result = format_workspace(ws)
-    assert "vars.http_port = 8070" in result
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / ".ow" / "config"
+        write_workspace_config(config_path, ws)
+        content = config_path.read_text()
+        ws2 = load_workspace_config(config_path)
+
+    assert ws2.templates == ws.templates
+    assert ws2.repos == ws.repos
+    assert ws2.vars == {}
+    assert "vars" not in content
 
 
-def test_format_workspace_non_origin_remote():
+def test_write_workspace_config_detached():
     ws = WorkspaceConfig(
-        name="test",
+        repos={"community": BranchSpec("origin/18.0")},
+        templates=["common"],
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / ".ow" / "config"
+        write_workspace_config(config_path, ws)
+        ws2 = load_workspace_config(config_path)
+
+    assert ws2.repos["community"].is_detached
+    assert ws2.repos["community"].base_ref == "origin/18.0"
+
+
+def test_write_workspace_config_non_origin_remote():
+    ws = WorkspaceConfig(
         repos={"community": BranchSpec("dev/master-phoenix", "fix")},
         templates=["common"],
     )
-    result = format_workspace(ws)
-    assert 'repo.community = "dev/master-phoenix..fix"' in result
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / ".ow" / "config"
+        write_workspace_config(config_path, ws)
+        ws2 = load_workspace_config(config_path)
 
-
-def test_format_workspace_with_list_vars():
-    ws = WorkspaceConfig(
-        name="test",
-        repos={"community": BranchSpec("origin/master")},
-        templates=["common"],
-        vars={"debug_args": ["--dev=all", "--with-demo"]},
-    )
-    result = format_workspace(ws)
-    assert 'vars.debug_args = ["--dev=all", "--with-demo"]' in result
-
-
-# ---------------------------------------------------------------------------
-# _split_workspace_blocks
-# ---------------------------------------------------------------------------
-
-def test_split_workspace_blocks_no_workspace():
-    preamble, blocks = _split_workspace_blocks("[vars]\nhttp_port = 8069\n")
-    assert preamble == "[vars]\nhttp_port = 8069\n"
-    assert blocks == []
-
-
-def test_split_workspace_blocks_two():
-    text = '[vars]\n\n[[workspace]]\nname = "a"\n\n[[workspace]]\nname = "b"\n'
-    preamble, blocks = _split_workspace_blocks(text)
-    assert preamble == "[vars]\n\n"
-    assert len(blocks) == 2
-    assert '[[workspace]]' in blocks[0] and '"a"' in blocks[0]
-    assert '[[workspace]]' in blocks[1] and '"b"' in blocks[1]
-
-
-# ---------------------------------------------------------------------------
-# update_config_workspaces / archive_workspace round-trip
-# ---------------------------------------------------------------------------
-
-def test_update_config_workspaces_preserves_syntax(tmp_path):
-    """Removing a workspace must not alter the TOML text of remaining ones."""
-    toml = textwrap.dedent("""\
-        [vars]
-
-        [[workspace]]
-        name = "keep"
-        templates = ["common"]
-        repo.community = "master"
-        vars.config.http_port = 8067
-
-        [[workspace]]
-        name = "remove-me"
-        templates = ["common"]
-        repo.community = "18.0"
-    """)
-    path = tmp_path / "ow.toml"
-    path.write_text(toml)
-    config = load_config(path)
-    remaining = [ws for ws in config.workspaces if ws.name != "remove-me"]
-    update_config_workspaces(path, remaining)
-    result = path.read_text()
-    assert "keep" in result
-    assert "remove-me" not in result
-    assert "vars.config.http_port = 8067" in result
-
-
-def test_archive_workspace_preserves_syntax(tmp_path):
-    toml = textwrap.dedent("""\
-        [[workspace]]
-        name = "archived"
-        templates = ["common"]
-
-        [workspace.repo]
-        community = "master"
-        vars.config.http_port = 8067
-    """)
-    config_path = tmp_path / "ow.toml"
-    config_path.write_text(toml)
-    config = load_config(config_path)
-    ws = config.workspaces[0]
-    archive_workspace(config_path, ws)
-    archive = (tmp_path / ".ow.toml.archived-workspaces").read_text()
-    assert "[workspace.repo]" in archive
-    assert "vars.config.http_port = 8067" in archive
+    assert ws2.repos["community"] == BranchSpec("dev/master-phoenix", "fix")

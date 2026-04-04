@@ -6,12 +6,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from jinja2 import Environment, FileSystemLoader
 
-from ow.config import BranchSpec, Config, WorkspaceConfig
+from ow.config import BranchSpec, WorkspaceConfig, write_workspace_config
 from ow.workspace import (
     DriftResult,
+    Spinner,
     build_template_context,
     check_drift,
-    cmd_create,
     find_addon_paths,
     warn_if_drifted,
 )
@@ -19,22 +19,6 @@ from ow.workspace import (
 TEMPLATE_DIR = Path(__file__).parent.parent.parent / "templates" / "common"
 VSCODE_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "templates" / "vscode"
 ZED_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "templates" / "zed"
-
-
-def make_config(
-    workspaces=None,
-    root_dir=None,
-    vars=None,
-    remotes=None,
-) -> Config:
-    return Config(
-        vars=vars
-        if vars is not None
-        else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
-        remotes=remotes or {},
-        workspaces=workspaces or [],
-        root_dir=root_dir or Path("/root"),
-    )
 
 
 def setup_odoo_main_repo(ws_dir: Path, alias: str = "community") -> Path:
@@ -66,9 +50,8 @@ def setup_categorized_repo(ws_dir: Path, alias: str) -> Path:
     return repo
 
 
-def make_ws_config(name: str, aliases: list[str], templates: list[str] | None = None) -> WorkspaceConfig:
+def make_ws_config(aliases: list[str], templates: list[str] | None = None) -> WorkspaceConfig:
     return WorkspaceConfig(
-        name=name,
         repos={alias: BranchSpec("origin/master") for alias in aliases},
         templates=templates or ["common"],
     )
@@ -143,11 +126,10 @@ def test_find_addon_paths_mixed_depths(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_build_template_context_community_only(tmp_path):
+def test_build_template_context_community_only(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
 
     assert ctx["ws_name"] == "test"
@@ -159,12 +141,11 @@ def test_build_template_context_community_only(tmp_path):
     assert "community/odoo/addons" in ctx["odools_path_items"]
 
 
-def test_build_template_context_addons_order(tmp_path):
+def test_build_template_context_addons_order(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_flat_repo(ws_dir, "enterprise")
-    ws = make_ws_config("test", ["community", "enterprise"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community", "enterprise"])
     ctx = build_template_context(ws, config, ws_dir)
 
     # enterprise before community in addons_paths
@@ -184,29 +165,26 @@ def test_build_template_context_addons_order(tmp_path):
     assert ent_idx < comm_idx
 
 
-def test_build_template_context_vars_merge(tmp_path):
+def test_build_template_context_vars_merge(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     ws = WorkspaceConfig(
-        name="test",
         repos={"community": BranchSpec("origin/master")},
         templates=["common"],
         vars={"http_port": 8070},
     )
-    config = make_config(root_dir=tmp_path)
     ctx = build_template_context(ws, config, ws_dir)
 
     assert ctx["vars"]["http_port"] == 8070
     assert "db_host" in ctx["vars"]
 
 
-def test_build_template_context_full_workspace(tmp_path):
+def test_build_template_context_full_workspace(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_flat_repo(ws_dir, "enterprise")
     setup_flat_repo(ws_dir, "brboi-addons")
-    ws = make_ws_config("test", ["community", "enterprise", "brboi-addons"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community", "enterprise", "brboi-addons"])
     ctx = build_template_context(ws, config, ws_dir)
 
     assert ctx["repos"] == ["community", "enterprise", "brboi-addons"]
@@ -219,11 +197,10 @@ def test_build_template_context_full_workspace(tmp_path):
     )
 
 
-def test_build_template_context_no_main_repo(tmp_path):
+def test_build_template_context_no_main_repo(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_flat_repo(ws_dir, "enterprise")
-    ws = make_ws_config("test", ["enterprise"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["enterprise"])
     ctx = build_template_context(ws, config, ws_dir)
 
     assert ctx["main_repo_alias"] is None
@@ -234,11 +211,10 @@ def test_build_template_context_no_main_repo(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_render_odoorc_community_only(tmp_path):
+def test_render_odoorc_community_only(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template("odoorc.j2", ctx)
 
@@ -251,12 +227,11 @@ def test_render_odoorc_community_only(tmp_path):
     assert "dbfilter = ^test$" in result
 
 
-def test_render_odoorc_enterprise_before_community(tmp_path):
+def test_render_odoorc_enterprise_before_community(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_flat_repo(ws_dir, "enterprise")
-    ws = make_ws_config("test", ["community", "enterprise"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community", "enterprise"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template("odoorc.j2", ctx)
 
@@ -268,16 +243,14 @@ def test_render_odoorc_enterprise_before_community(tmp_path):
     assert "community/odoo/addons" in paths[2]
 
 
-def test_render_odoorc_workspace_overrides_global(tmp_path):
+def test_render_odoorc_workspace_overrides_global(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     ws = WorkspaceConfig(
-        name="test",
         repos={"community": BranchSpec("origin/master")},
         templates=["common"],
         vars={"http_port": 8070},
     )
-    config = make_config(root_dir=tmp_path)
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template("odoorc.j2", ctx)
 
@@ -285,11 +258,10 @@ def test_render_odoorc_workspace_overrides_global(tmp_path):
     assert "http_port = 8069" not in result
 
 
-def test_render_odoorc_no_quotes_on_string_values(tmp_path):
+def test_render_odoorc_no_quotes_on_string_values(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template("odoorc.j2", ctx)
 
@@ -302,11 +274,10 @@ def test_render_odoorc_no_quotes_on_string_values(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_render_odools_community_only(tmp_path):
+def test_render_odools_community_only(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template("odools.toml.j2", ctx)
 
@@ -319,12 +290,11 @@ def test_render_odools_community_only(tmp_path):
     assert "./enterprise" not in result
 
 
-def test_render_odools_enterprise_before_community(tmp_path):
+def test_render_odools_enterprise_before_community(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_flat_repo(ws_dir, "enterprise")
-    ws = make_ws_config("test", ["community", "enterprise"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community", "enterprise"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template("odools.toml.j2", ctx)
 
@@ -334,12 +304,11 @@ def test_render_odools_enterprise_before_community(tmp_path):
     assert ent_idx < com_idx
 
 
-def test_render_odools_categorized_repo(tmp_path):
+def test_render_odools_categorized_repo(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_categorized_repo(ws_dir, "partner-addons")
-    ws = make_ws_config("test", ["community", "partner-addons"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community", "partner-addons"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template("odools.toml.j2", ctx)
 
@@ -356,11 +325,10 @@ def test_render_odools_categorized_repo(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_render_mise_toml(tmp_path):
+def test_render_mise_toml(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template("mise.toml.j2", ctx)
 
@@ -378,11 +346,10 @@ def test_render_mise_toml(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_render_pyrightconfig(tmp_path):
+def test_render_pyrightconfig(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template("pyrightconfig.json.j2", ctx)
     data = json.loads(result)
@@ -399,22 +366,20 @@ def test_render_pyrightconfig(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_render_vscode_settings(tmp_path):
+def test_render_vscode_settings(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template(".vscode/settings.json.j2", ctx, VSCODE_TEMPLATE_DIR)
 
     assert "[Odoo Workspace] test" in result
 
 
-def test_render_vscode_launch(tmp_path):
+def test_render_vscode_launch(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template(".vscode/launch.json.j2", ctx, VSCODE_TEMPLATE_DIR)
 
@@ -424,12 +389,11 @@ def test_render_vscode_launch(tmp_path):
     assert "odoorc" in result
 
 
-def test_render_vscode_launch_default_args(tmp_path):
+def test_render_vscode_launch_default_args(tmp_path, config):
     """Default debug_args includes --dev=all and --with-demo."""
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template(".vscode/launch.json.j2", ctx, VSCODE_TEMPLATE_DIR)
     parsed = json.loads(result)
@@ -442,12 +406,11 @@ def test_render_vscode_launch_default_args(tmp_path):
     assert test_config["name"] == "Debug Tests (test)"
 
 
-def test_render_vscode_launch_custom_args(tmp_path):
+def test_render_vscode_launch_custom_args(tmp_path, config):
     """Custom debug_args and debug_test_args override defaults."""
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     ws = WorkspaceConfig(
-        name="test",
         repos={"community": BranchSpec("origin/18.0")},
         templates=["common", "vscode"],
         vars={
@@ -455,7 +418,6 @@ def test_render_vscode_launch_custom_args(tmp_path):
             "debug_test_args": ["--test-tags=/phone_service"],
         },
     )
-    config = make_config(root_dir=tmp_path)
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template(".vscode/launch.json.j2", ctx, VSCODE_TEMPLATE_DIR)
     parsed = json.loads(result)
@@ -467,12 +429,11 @@ def test_render_vscode_launch_custom_args(tmp_path):
     assert test_config["args"] == ["--test-tags=/phone_service"]
 
 
-def test_render_zed_settings(tmp_path):
+def test_render_zed_settings(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_flat_repo(ws_dir, "enterprise")
-    ws = make_ws_config("test", ["community", "enterprise"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community", "enterprise"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template(".zed/settings.json.j2", ctx, ZED_TEMPLATE_DIR)
 
@@ -485,13 +446,12 @@ def test_render_zed_settings(tmp_path):
     assert '"**/.venv"' in result
 
 
-def test_render_zed_settings_full_workspace(tmp_path):
+def test_render_zed_settings_full_workspace(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     setup_flat_repo(ws_dir, "enterprise")
     setup_flat_repo(ws_dir, "brboi-addons")
-    ws = make_ws_config("test", ["community", "enterprise", "brboi-addons"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community", "enterprise", "brboi-addons"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template(".zed/settings.json.j2", ctx, ZED_TEMPLATE_DIR)
 
@@ -500,11 +460,10 @@ def test_render_zed_settings_full_workspace(tmp_path):
     assert "brboi-addons/**" in result
 
 
-def test_render_zed_debug(tmp_path):
+def test_render_zed_debug(tmp_path, config):
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template(".zed/debug.json.j2", ctx, ZED_TEMPLATE_DIR)
 
@@ -515,12 +474,11 @@ def test_render_zed_debug(tmp_path):
     assert "odoorc" in result
 
 
-def test_render_zed_debug_default_args(tmp_path):
+def test_render_zed_debug_default_args(tmp_path, config):
     """Default debug_args includes --dev=all and --with-demo."""
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
-    ws = make_ws_config("test", ["community"])
-    config = make_config(root_dir=tmp_path)
+    ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template(".zed/debug.json.j2", ctx, ZED_TEMPLATE_DIR)
     lines = [l for l in result.splitlines() if not l.strip().startswith("//")]
@@ -535,12 +493,11 @@ def test_render_zed_debug_default_args(tmp_path):
     assert test_config["label"] == "Debug Tests (test)"
 
 
-def test_render_zed_debug_custom_args(tmp_path):
+def test_render_zed_debug_custom_args(tmp_path, config):
     """Custom debug_args and debug_test_args override defaults."""
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     ws = WorkspaceConfig(
-        name="test",
         repos={"community": BranchSpec("origin/18.0")},
         templates=["common", "zed"],
         vars={
@@ -548,7 +505,6 @@ def test_render_zed_debug_custom_args(tmp_path):
             "debug_test_args": ["--test-tags=/voip_pbx"],
         },
     )
-    config = make_config(root_dir=tmp_path)
     ctx = build_template_context(ws, config, ws_dir)
     result = render_template(".zed/debug.json.j2", ctx, ZED_TEMPLATE_DIR)
     lines = [l for l in result.splitlines() if not l.strip().startswith("//")]
@@ -560,50 +516,6 @@ def test_render_zed_debug_custom_args(tmp_path):
 
     test_config = parsed[1]
     assert test_config["args"] == ["--test-tags=/voip_pbx"]
-
-
-# ---------------------------------------------------------------------------
-# cmd_create — vars parsing
-# ---------------------------------------------------------------------------
-
-
-def test_cmd_create_vars_parsing(tmp_path):
-    (tmp_path / "ow.toml").write_text("[vars]\n")
-    templates_dir = tmp_path / "templates" / "common"
-    templates_dir.mkdir(parents=True)
-    config = make_config(root_dir=tmp_path, vars={}, workspaces=[])
-
-    def fake_apply(cfg, name=None):
-        pass
-
-    with patch("ow.workspace.cmd_apply", fake_apply):
-        cmd_create(
-            config,
-            "my-ws",
-            ["community:master", "vars.http_port=8080", "vars.db_user=myuser", "templates=common,vscode"],
-        )
-
-    ws = config.workspaces[0]
-    assert ws.name == "my-ws"
-    assert "community" in ws.repos
-    assert ws.vars == {"http_port": "8080", "db_user": "myuser"}
-    assert ws.templates == ["common", "vscode"]
-
-
-def test_cmd_create_missing_templates(tmp_path, capsys):
-    (tmp_path / "ow.toml").write_text("[vars]\n")
-    config = make_config(root_dir=tmp_path, vars={}, workspaces=[])
-
-    with pytest.raises(SystemExit) as exc_info:
-        cmd_create(
-            config,
-            "my-ws",
-            ["community:master"],
-        )
-
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
-    assert "templates must be specified" in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +631,6 @@ def test_warn_if_drifted_passes_when_aligned(tmp_path, capsys):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     ws = WorkspaceConfig(
-        name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
         templates=["common"],
     )
@@ -735,7 +646,6 @@ def test_warn_if_drifted_warns_on_drift(tmp_path, capsys):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     ws = WorkspaceConfig(
-        name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
         templates=["common"],
     )
@@ -751,7 +661,6 @@ def test_warn_if_drifted_skips_unapplied_repos(tmp_path, capsys):
     ws_dir = tmp_path / "workspaces" / "test"
     ws_dir.mkdir(parents=True)
     ws = WorkspaceConfig(
-        name="test",
         repos={"community": BranchSpec("origin/master", "my-feature")},
         templates=["common"],
     )
@@ -760,3 +669,443 @@ def test_warn_if_drifted_skips_unapplied_repos(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert "Warning" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# cmd_create — checkbox uses Choice objects
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_create_checkbox_uses_choice_objects(tmp_path, config):
+    """cmd_create must use questionary.Choice objects, none selected by default."""
+    (tmp_path / "templates" / "zed").mkdir(parents=True)
+    (tmp_path / "templates" / "common").mkdir(parents=True)
+    (tmp_path / "templates" / "vscode").mkdir(parents=True)
+    config.remotes = {
+        "brboi-addons": {"origin": MagicMock(url="git@github.com:brboi/addons.git")},
+        "community": {"origin": MagicMock(url="git@github.com:odoo/odoo.git")},
+    }
+
+    checkbox_calls = []
+
+    def mock_checkbox(message, choices=None, **kwargs):
+        checkbox_calls.append({"message": message, "choices": choices})
+        mock = MagicMock()
+        if "Templates" in message:
+            mock.ask.return_value = ["common", "vscode"]
+        else:
+            mock.ask.return_value = ["brboi-addons", "community"]
+        return mock
+
+    def mock_text(message):
+        mock = MagicMock()
+        if "Workspace name" in message:
+            mock.ask.return_value = "test"
+        elif "branch spec" in message:
+            mock.ask.return_value = "master"
+        else:
+            mock.ask.return_value = ""
+        return mock
+
+    def mock_confirm(message):
+        mock = MagicMock()
+        mock.ask.return_value = True
+        return mock
+
+    with (
+        patch("ow.workspace.questionary.checkbox", side_effect=mock_checkbox),
+        patch("ow.workspace.questionary.text", side_effect=mock_text),
+        patch("ow.workspace.questionary.confirm", side_effect=mock_confirm),
+        patch("ow.workspace._ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "test", {"brboi-addons", "community"}, {})),
+        patch("ow.workspace._apply_templates"),
+        patch("ow.workspace.write_workspace_config"),
+        patch("ow.workspace.run_cmd"),
+    ):
+        from ow.workspace import cmd_create
+        cmd_create(config)
+
+    # Verify templates are alphabetical and unchecked
+    template_checkbox = checkbox_calls[0]
+    assert "Templates" in template_checkbox["message"]
+    template_names = [c.title for c in template_checkbox["choices"]]
+    assert template_names == ["common", "vscode", "zed"]  # alphabetical
+    for choice in template_checkbox["choices"]:
+        assert not choice.checked  # none selected by default
+
+    # Verify remotes are in declaration order and unchecked
+    repo_checkbox = checkbox_calls[1]
+    assert "Repos" in repo_checkbox["message"]
+    repo_names = [c.title for c in repo_checkbox["choices"]]
+    assert repo_names == ["brboi-addons", "community"]  # declaration order, not sorted
+    for choice in repo_checkbox["choices"]:
+        assert not choice.checked  # none selected by default
+
+
+def test_cmd_create_rejects_existing_workspace(tmp_path, config):
+    """cmd_create loops when workspace name already exists."""
+    (tmp_path / "templates" / "common").mkdir(parents=True)
+    (tmp_path / "workspaces" / "parrot").mkdir(parents=True)
+    config.remotes = {"community": {"origin": MagicMock(url="git@github.com:odoo/odoo.git")}}
+
+    call_count = [0]
+
+    def mock_checkbox(message, choices=None, **kwargs):
+        mock = MagicMock()
+        if "Templates" in message:
+            mock.ask.return_value = ["common"]
+        else:
+            mock.ask.return_value = ["community"]
+        return mock
+
+    def mock_text(message):
+        if "Workspace name" in message:
+            call_count[0] += 1
+            mock = MagicMock()
+            if call_count[0] == 1:
+                mock.ask.return_value = "parrot"  # already exists
+            else:
+                mock.ask.return_value = "new-ws"  # valid
+        elif "branch spec" in message:
+            mock = MagicMock()
+            mock.ask.return_value = "master"
+        else:
+            mock = MagicMock()
+            mock.ask.return_value = ""
+        return mock
+
+    def mock_confirm(message):
+        mock = MagicMock()
+        mock.ask.return_value = True
+        return mock
+
+    with (
+        patch("ow.workspace.questionary.checkbox", side_effect=mock_checkbox),
+        patch("ow.workspace.questionary.text", side_effect=mock_text),
+        patch("ow.workspace.questionary.confirm", side_effect=mock_confirm),
+        patch("ow.workspace._ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "new-ws", {"community"}, {})),
+        patch("ow.workspace._apply_templates"),
+        patch("ow.workspace.write_workspace_config"),
+        patch("ow.workspace.run_cmd"),
+    ):
+        from ow.workspace import cmd_create
+        cmd_create(config)
+
+    assert call_count[0] == 2  # asked twice: first name rejected, second accepted
+
+
+class TestSpinner:
+    def test_spinner_context_manager(self, capsys):
+        with Spinner("Testing"):
+            pass
+        captured = capsys.readouterr()
+        assert "\r" in captured.out
+        assert "Testing" in captured.out
+
+    def test_spinner_clears_on_exit(self, capsys):
+        with Spinner("Prefix"):
+            pass
+        captured = capsys.readouterr()
+        assert captured.out.endswith("\r")
+
+    def test_spinner_animates(self, capsys):
+        import time
+        with Spinner("Anim"):
+            time.sleep(0.25)
+        captured = capsys.readouterr()
+        assert captured.out.count("\r") >= 2
+
+
+# ---------------------------------------------------------------------------
+# _cleanup_failed_workspace
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_failed_workspace_removes_if_empty(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    ws_dir.mkdir(parents=True)
+    from ow.workspace import _cleanup_failed_workspace
+    _cleanup_failed_workspace(ws_dir)
+    assert not ws_dir.exists()
+
+
+def test_cleanup_failed_workspace_removes_if_only_ow_dir(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    (ws_dir / ".ow").mkdir(parents=True)
+    from ow.workspace import _cleanup_failed_workspace
+    _cleanup_failed_workspace(ws_dir)
+    assert not ws_dir.exists()
+
+
+def test_cleanup_failed_workspace_keeps_if_has_files(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    ws_dir.mkdir(parents=True)
+    (ws_dir / "somefile.txt").touch()
+    from ow.workspace import _cleanup_failed_workspace
+    _cleanup_failed_workspace(ws_dir)
+    assert ws_dir.exists()
+    assert (ws_dir / "somefile.txt").exists()
+
+
+def test_cleanup_failed_workspace_does_nothing_if_not_exists(tmp_path):
+    ws_dir = tmp_path / "workspaces" / "test"
+    from ow.workspace import _cleanup_failed_workspace
+    _cleanup_failed_workspace(ws_dir)  # should not raise
+    assert not ws_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# _check_duplicate_branches
+# ---------------------------------------------------------------------------
+
+
+def test_check_duplicate_branches_detects_same_local_branch(tmp_path, capsys, config):
+    """Abort if new repo shares local_branch with existing workspace on same alias."""
+    ws_root = tmp_path / "workspaces"
+    existing_ws = ws_root / "existing"
+    (existing_ws / ".ow").mkdir(parents=True)
+    existing_config = WorkspaceConfig(
+        repos={"community": BranchSpec("origin/master", "shared-branch")},
+        templates=["common"],
+    )
+    write_workspace_config(existing_ws / ".ow" / "config", existing_config)
+
+    new_repos = {"community": BranchSpec("origin/master", "shared-branch")}
+
+    from ow.workspace import _check_duplicate_branches
+    with pytest.raises(SystemExit) as exc_info:
+        _check_duplicate_branches(new_repos, config)
+    assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    assert "existing" in captured.err
+    assert "shared-branch" in captured.err
+
+
+def test_check_duplicate_branches_no_duplicate_if_different_local_branch(tmp_path, capsys, config):
+    """No abort if local_branch differs."""
+    ws_root = tmp_path / "workspaces"
+    existing_ws = ws_root / "existing"
+    (existing_ws / ".ow").mkdir(parents=True)
+    existing_config = WorkspaceConfig(
+        repos={"community": BranchSpec("origin/master", "other-branch")},
+        templates=["common"],
+    )
+    write_workspace_config(existing_ws / ".ow" / "config", existing_config)
+
+    new_repos = {"community": BranchSpec("origin/master", "my-branch")}
+
+    from ow.workspace import _check_duplicate_branches
+    _check_duplicate_branches(new_repos, config)  # should not raise
+
+    captured = capsys.readouterr()
+    assert "Error" not in captured.err
+
+
+def test_check_duplicate_branches_no_duplicate_if_different_alias(tmp_path, capsys, config):
+    """No abort if alias differs — git allows same branch on different aliases."""
+    ws_root = tmp_path / "workspaces"
+    existing_ws = ws_root / "existing"
+    (existing_ws / ".ow").mkdir(parents=True)
+    existing_config = WorkspaceConfig(
+        repos={"enterprise": BranchSpec("origin/master", "shared-branch")},
+        templates=["common"],
+    )
+    write_workspace_config(existing_ws / ".ow" / "config", existing_config)
+
+    new_repos = {"community": BranchSpec("origin/master", "shared-branch")}
+
+    from ow.workspace import _check_duplicate_branches
+    _check_duplicate_branches(new_repos, config)  # should not raise
+
+    captured = capsys.readouterr()
+    assert "Error" not in captured.err
+
+
+def test_check_duplicate_branches_ignores_workspaces_without_ow_config(tmp_path, capsys, config):
+    """Skip workspaces that have no .ow/config file."""
+    ws_root = tmp_path / "workspaces"
+    existing_ws = ws_root / "existing"
+    existing_ws.mkdir(parents=True)
+    # No .ow/config created
+
+    new_repos = {"community": BranchSpec("origin/master", "some-branch")}
+
+    from ow.workspace import _check_duplicate_branches
+    _check_duplicate_branches(new_repos, config)  # should not raise
+
+    captured = capsys.readouterr()
+    assert "Error" not in captured.err
+
+
+def test_check_duplicate_branches_silent_if_no_existing_workspaces(tmp_path, capsys, config):
+    """Return silently when no workspaces exist yet."""
+    new_repos = {"community": BranchSpec("origin/master", "some-branch")}
+
+    from ow.workspace import _check_duplicate_branches
+    _check_duplicate_branches(new_repos, config)  # should not raise
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+# ---------------------------------------------------------------------------
+# _recover_with_cherry_pick
+# ---------------------------------------------------------------------------
+
+
+def test_recover_with_cherry_pick_success_returns_none(tmp_path):
+    """All cherry-picks succeed → returns None."""
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    commits = ["aaa111", "bbb222", "ccc333"]
+
+    mock_reset = MagicMock()
+    mock_cp = MagicMock()
+    mock_cp.return_value = MagicMock(returncode=0)
+    mock_log = MagicMock(return_value="hash some message")
+
+    from ow.workspace import _recover_with_cherry_pick
+    with patch("ow.workspace.git_reset_hard", mock_reset), \
+         patch("ow.workspace.git_cherry_pick", mock_cp), \
+         patch("ow.workspace.git_log_oneline", mock_log):
+        result = _recover_with_cherry_pick(worktree, "origin/master", commits)
+
+    assert result is None
+    mock_reset.assert_called_once_with(worktree, "origin/master")
+    assert mock_cp.call_count == 3
+    mock_cp.assert_any_call(worktree, "aaa111")
+    mock_cp.assert_any_call(worktree, "bbb222")
+    mock_cp.assert_any_call(worktree, "ccc333")
+
+
+def test_recover_with_cherry_pick_conflict_on_second_commit_returns_hash(tmp_path):
+    """Conflict on 2nd cherry-pick → returns the failing commit hash."""
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    commits = ["aaa111", "bbb222", "ccc333"]
+
+    call_count = [0]
+
+    def mock_cp_side_effect(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 2:
+            return MagicMock(returncode=1)
+        return MagicMock(returncode=0)
+
+    mock_reset = MagicMock()
+    mock_cp = MagicMock(side_effect=mock_cp_side_effect)
+    mock_log = MagicMock(return_value="hash some message")
+
+    from ow.workspace import _recover_with_cherry_pick
+    with patch("ow.workspace.git_reset_hard", mock_reset), \
+         patch("ow.workspace.git_cherry_pick", mock_cp), \
+         patch("ow.workspace.git_log_oneline", mock_log):
+        result = _recover_with_cherry_pick(worktree, "origin/master", commits)
+
+    assert result == "bbb222"
+    assert mock_cp.call_count == 2  # stops after the conflict
+
+
+# ---------------------------------------------------------------------------
+# _analyze_repo_for_rebase
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_repo_normal_rebase_no_rewrite(tmp_path):
+    """Normal rebase: no upstream rewrite, no conflicts."""
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+
+    with patch("ow.workspace.get_rev_list_count") as mock_rev_count, \
+         patch("ow.workspace.git_merge_base_fork_point", return_value=None), \
+         patch("ow.workspace.git_rev_list", return_value=[]), \
+         patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
+        mock_rev_count.side_effect = [(3, True), (0, True)]  # local=3, unpushed=0
+
+        from ow.workspace import _analyze_repo_for_rebase
+        plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", False)
+
+    assert plan.alias == "community"
+    assert plan.track_ref == "origin/master"
+    assert plan.upstream == "origin/master"
+    assert plan.is_detached is False
+    assert plan.local_commits == 3
+    assert plan.unpushed_commits == 0
+    assert plan.fork_point is None
+    assert plan.commits_to_reapply == []
+    assert plan.upstream_rewritten is False
+    assert plan.has_conflicts is False
+
+
+def test_analyze_repo_upstream_rewritten_with_fork_point(tmp_path):
+    """Upstream rewritten but fork-point exists → recovery possible."""
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    fork = "abc123"
+    commits_list = ["def456", "ghi789"]
+
+    with patch("ow.workspace.get_rev_list_count") as mock_rev_count, \
+         patch("ow.workspace.git_merge_base_fork_point", return_value=fork), \
+         patch("ow.workspace.git_rev_list", return_value=commits_list), \
+         patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
+        mock_rev_count.side_effect = [(2, True), (2, True)]  # local=2, unpushed=2
+
+        from ow.workspace import _analyze_repo_for_rebase
+        plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", False)
+
+    assert plan.fork_point == fork
+    assert plan.commits_to_reapply == commits_list
+    assert plan.upstream_rewritten is False  # fork_point found, so not "rewritten"
+    assert plan.unpushed_commits == 2
+
+
+def test_analyze_repo_upstream_rewritten_without_fork_point(tmp_path):
+    """Upstream rewritten and no fork-point → no recovery."""
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+
+    with patch("ow.workspace.get_rev_list_count") as mock_rev_count, \
+         patch("ow.workspace.git_merge_base_fork_point", return_value=None), \
+         patch("ow.workspace.git_rev_list", return_value=[]), \
+         patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
+        mock_rev_count.side_effect = [(2, True), (2, True)]  # local=2, unpushed=2
+
+        from ow.workspace import _analyze_repo_for_rebase
+        plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", False)
+
+    assert plan.fork_point is None
+    assert plan.commits_to_reapply == []
+    assert plan.upstream_rewritten is True  # no fork_point AND unpushed > 0
+    assert plan.unpushed_commits == 2
+
+
+def test_analyze_repo_rebase_in_progress(tmp_path):
+    """rebase-merge directory exists → has_conflicts."""
+    worktree = tmp_path / "repo"
+    (worktree / ".git").mkdir(parents=True)
+    (worktree / ".git" / "rebase-merge").mkdir()
+
+    with patch("ow.workspace.get_rev_list_count", return_value=(1, True)), \
+         patch("ow.workspace.git_merge_base_fork_point", return_value=None), \
+         patch("ow.workspace.git_rev_list", return_value=[]), \
+         patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
+        from ow.workspace import _analyze_repo_for_rebase
+        plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", False)
+
+    assert plan.has_conflicts is True
+
+
+def test_analyze_repo_detached_worktree(tmp_path):
+    """Detached worktree → is_detached True, no fork-point lookup."""
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+
+    with patch("ow.workspace.get_rev_list_count", return_value=(0, True)), \
+         patch("ow.workspace.git_merge_base_fork_point", return_value=None) as mock_fork, \
+         patch("ow.workspace.git_rev_list", return_value=[]), \
+         patch("ow.workspace.get_worktree_branch", return_value=None):
+        from ow.workspace import _analyze_repo_for_rebase
+        plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", True)
+
+    assert plan.is_detached is True
+    assert mock_fork.call_count == 0  # no fork-point for detached
