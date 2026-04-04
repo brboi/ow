@@ -3,6 +3,7 @@
 services/volumes/
 services/compose.local.yml
 workspaces/*
+.ow/
 mise.local.toml
 ow.toml
 .ow.toml.archived-workspaces

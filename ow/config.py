@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import re
 import tomllib
+import tomli_w
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,34 +58,59 @@ class RemoteConfig:
 
 @dataclass
 class WorkspaceConfig:
-    name: str
     repos: dict[str, BranchSpec]
     templates: list[str]
     vars: dict[str, Any] = field(default_factory=dict)
-    _source_text: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
 class Config:
     vars: dict[str, Any]
     remotes: dict[str, dict[str, RemoteConfig]]  # alias -> remote_name -> cfg
-    workspaces: list[WorkspaceConfig]
     root_dir: Path
 
 
-def _split_workspace_blocks(text: str) -> tuple[str, list[str]]:
-    parts = re.split(r'(?=^\[\[workspace\]\])', text, flags=re.MULTILINE)
-    return parts[0], parts[1:]
-
-
-def load_config(path: Path) -> Config:
-    text = path.read_text()
+def load_workspace_config(path: Path) -> WorkspaceConfig:
+    """Read a .ow/config TOML file from an individual workspace."""
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
-    _, raw_blocks = _split_workspace_blocks(text)
+    repos = {}
+    for alias, spec_str in data.get("repos", {}).items():
+        repos[alias] = parse_branch_spec(spec_str)
 
-    vars_ = data.get("vars", {})
+    templates = data.get("templates")
+    if templates is None:
+        raise ValueError(f"Workspace config '{path}' missing required 'templates' field")
+    if not isinstance(templates, list):
+        raise ValueError(f"Workspace config '{path}' 'templates' must be a list")
+
+    return WorkspaceConfig(
+        repos=repos,
+        templates=templates,
+        vars=data.get("vars", {}),
+    )
+
+
+def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
+    """Write a .ow/config TOML file for an individual workspace."""
+    data: dict[str, Any] = {
+        "templates": ws.templates,
+        "repos": {alias: spec.to_spec_str() for alias, spec in ws.repos.items()},
+    }
+    if ws.vars:
+        data["vars"] = ws.vars
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        tomli_w.dump(data, f)
+
+
+def load_config(path: Path) -> Config:
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+
+    vars = data.get("vars", {})
 
     remotes: dict[str, dict[str, RemoteConfig]] = {}
     for alias, remote_dict in data.get("remotes", {}).items():
@@ -97,58 +122,8 @@ def load_config(path: Path) -> Config:
                 fetch=remote_cfg.get("fetch"),
             )
 
-    workspaces = []
-    for i, ws_data in enumerate(data.get("workspace", [])):
-        repos = {}
-        for alias, spec_str in ws_data.get("repo", {}).items():
-            repos[alias] = parse_branch_spec(spec_str)
-        templates = ws_data.get("templates")
-        if templates is None:
-            raise ValueError(f"Workspace '{ws_data.get('name', '<unknown>')}' missing required 'templates' field")
-        if not isinstance(templates, list) or not templates:
-            raise ValueError(f"Workspace '{ws_data.get('name', '<unknown>')}' 'templates' must be a non-empty list")
-        workspaces.append(WorkspaceConfig(
-            name=ws_data["name"],
-            repos=repos,
-            templates=templates,
-            vars=ws_data.get("vars", {}),
-            _source_text=raw_blocks[i] if i < len(raw_blocks) else None,
-        ))
-
     return Config(
-        vars=vars_,
+        vars=vars,
         remotes=remotes,
-        workspaces=workspaces,
         root_dir=path.parent,
     )
-
-
-def format_workspace(ws: WorkspaceConfig) -> str:
-    lines = ["[[workspace]]", f'name = "{ws.name}"', f'templates = {json.dumps(ws.templates)}']
-    for alias, spec in ws.repos.items():
-        lines.append(f'repo.{alias} = "{spec.to_spec_str()}"')
-    for k, v in ws.vars.items():
-        if isinstance(v, str):
-            lines.append(f'vars.{k} = "{v}"')
-        elif isinstance(v, list):
-            lines.append(f'vars.{k} = {json.dumps(v)}')
-        else:
-            lines.append(f'vars.{k} = {v}')
-    return "\n".join(lines) + "\n"
-
-
-def update_config_workspaces(path: Path, workspaces: list[WorkspaceConfig]) -> None:
-    """Rewrite workspace sections, preserving the preamble."""
-    text = path.read_text()
-    preamble, _ = _split_workspace_blocks(text)
-    parts = [ws._source_text if ws._source_text is not None else format_workspace(ws)
-             for ws in workspaces]
-    path.write_text(preamble + "".join(parts))
-
-
-def archive_workspace(config_path: Path, ws: WorkspaceConfig) -> None:
-    """Append workspace entry to the archived workspaces file."""
-    raw = ws._source_text or format_workspace(ws)
-    archive_path = config_path.parent / ".ow.toml.archived-workspaces"
-    with open(archive_path, "a") as f:
-        f.write(raw)

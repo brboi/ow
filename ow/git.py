@@ -7,9 +7,12 @@ from pathlib import Path
 from ow.config import BranchSpec, RemoteConfig
 
 
-def run_cmd(args: list[str], quiet: bool = False, **kwargs) -> subprocess.CompletedProcess:
+def run_cmd(args: list[str], quiet: bool = False, label: str | None = None, **kwargs) -> subprocess.CompletedProcess:
     if not quiet:
-        print(f"    $ {' '.join(args)}", file=sys.stderr)
+        if label:
+            print(f"  [{label}] {' '.join(args)}", file=sys.stderr)
+        else:
+            print(f"    $ {' '.join(args)}", file=sys.stderr)
     return subprocess.run(args, **kwargs)
 
 
@@ -37,6 +40,7 @@ def ensure_bare_repo(
                 "--single-branch",
                 origin.url, str(bare_repo),
             ],
+            label=alias,
             check=True,
         )
 
@@ -46,17 +50,17 @@ def ensure_bare_repo(
         if remote_name != "origin":
             run_cmd(
                 ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.url", remote_cfg.url],
-                quiet=True, check=True,
+                quiet=True, check=True, label=alias,
             )
         if remote_cfg.pushurl:
             run_cmd(
                 ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.pushurl", remote_cfg.pushurl],
-                quiet=True, check=True,
+                quiet=True, check=True, label=alias,
             )
         if remote_cfg.fetch:
             run_cmd(
                 ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.fetch", remote_cfg.fetch],
-                quiet=True, check=True,
+                quiet=True, check=True, label=alias,
             )
 
 
@@ -69,6 +73,7 @@ def ensure_ref(bare_repo: Path, remote: str, branch: str) -> None:
     if result.returncode != 0:
         run_cmd(
             ["git", "-C", str(bare_repo), "fetch", remote, f"{branch}:refs/remotes/{remote}/{branch}"],
+            label=bare_repo.stem,
             check=True,
         )
 
@@ -173,20 +178,25 @@ def _set_branch_upstream(bare_repo: Path, local_branch: str, remote: str, remote
     refspec before writing) would refuse. Writing branch.X.remote / branch.X.merge directly
     is the documented git mechanism that `--set-upstream-to` itself uses under the hood.
     """
+    alias = bare_repo.stem
     run_cmd(
         ["git", "-C", str(bare_repo), "config", f"branch.{local_branch}.remote", remote],
+        label=alias,
         check=True,
     )
     run_cmd(
         ["git", "-C", str(bare_repo), "config", f"branch.{local_branch}.merge", f"refs/heads/{remote_branch}"],
+        label=alias,
         check=True,
     )
 
 
 def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> None:
+    alias = bare_repo.stem
     if spec.is_detached:
         run_cmd(
             ["git", "-C", str(bare_repo), "worktree", "add", "--detach", str(worktree_path), spec.base_ref],
+            label=alias,
             check=True,
         )
     else:
@@ -197,26 +207,16 @@ def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
         if branch_exists:
             run_cmd(
                 ["git", "-C", str(bare_repo), "worktree", "add", str(worktree_path), spec.local_branch],
+                label=alias,
                 check=True,
             )
         else:
             run_cmd(
                 ["git", "-C", str(bare_repo), "worktree", "add", "-b", spec.local_branch, str(worktree_path), spec.base_ref],
+                label=alias,
                 check=True,
             )
         _set_branch_upstream(bare_repo, spec.local_branch, spec.remote, spec.branch)
-
-
-def remove_worktree(bare_repo: Path, worktree_path: Path, local_branch: str | None) -> None:
-    run_cmd(
-        ["git", "-C", str(bare_repo), "worktree", "remove", "--force", str(worktree_path)],
-        check=True,
-    )
-    if local_branch:
-        run_cmd(
-            ["git", "-C", str(bare_repo), "branch", "-D", local_branch],
-            check=True,
-        )
 
 
 def get_rev_list_count(repo_path: Path, ref_a: str, ref_b: str) -> tuple[int, int]:
@@ -272,6 +272,7 @@ def get_worktree_branch(worktree_path: Path) -> str | None:
 
 def attach_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> None:
     """Switch a detached worktree to a local branch tracking spec.base_ref."""
+    alias = worktree_path.name
     branch_exists = subprocess.run(
         ["git", "-C", str(bare_repo), "rev-parse", "--verify", f"refs/heads/{spec.local_branch}"],
         capture_output=True,
@@ -279,11 +280,13 @@ def attach_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
     if branch_exists:
         run_cmd(
             ["git", "-C", str(worktree_path), "switch", spec.local_branch],
+            label=alias,
             check=True,
         )
     else:
         run_cmd(
             ["git", "-C", str(worktree_path), "switch", "-c", spec.local_branch],
+            label=alias,
             check=True,
         )
     _set_branch_upstream(bare_repo, spec.local_branch, spec.remote, spec.branch)
@@ -293,12 +296,13 @@ def detach_worktree(worktree_path: Path, base_ref: str) -> None:
     """Switch an attached worktree to detached HEAD at base_ref."""
     run_cmd(
         ["git", "-C", str(worktree_path), "switch", "--detach", base_ref],
+        label=worktree_path.name,
         check=True,
     )
 
 
 def get_remote_ref_for_branch(
-    bare_repo: Path, local_branch: str, alias_remotes: dict,
+    repo: Path, local_branch: str, alias_remotes: dict,
     exclude_ref: str | None = None, base_remote: str | None = None,
 ) -> str | None:
     """Check all ow.toml-configured remotes for refs/remotes/{remote}/{local_branch}.
@@ -306,6 +310,8 @@ def get_remote_ref_for_branch(
     Returns the first match (as "{remote}/{local_branch}"), excluding exclude_ref
     (typically spec.base_ref, to avoid returning the base branch itself).
     base_remote is checked last so fork remotes are preferred over the upstream.
+
+    ``repo`` can be a bare repo or a worktree — any git repo path works.
     """
     remotes = ordered_remotes(alias_remotes)
     if base_remote and base_remote in remotes:
@@ -316,7 +322,7 @@ def get_remote_ref_for_branch(
         if candidate == exclude_ref:
             continue
         result = subprocess.run(
-            ["git", "-C", str(bare_repo), "rev-parse", "--verify",
+            ["git", "-C", str(repo), "rev-parse", "--verify",
              f"refs/remotes/{remote}/{local_branch}"],
             capture_output=True,
         )
@@ -335,7 +341,11 @@ def get_remote_url(bare_repo: Path, remote: str) -> str | None:
 
 def git(repo: Path, *args, quiet: bool = False, **kwargs) -> subprocess.CompletedProcess:
     """Central git wrapper with automatic -C."""
-    return run_cmd(["git", "-C", str(repo)] + list(args), quiet=quiet, **kwargs)
+    if repo.suffix == ".git" and repo.parent.name == ".bare-git-repos":
+        label = repo.stem
+    else:
+        label = repo.name
+    return run_cmd(["git", "-C", str(repo)] + list(args), quiet=quiet, label=label, **kwargs)
 
 
 def git_fetch(repo: Path, remote: str, refspec: str, *, force: bool = False, **kwargs) -> None:
