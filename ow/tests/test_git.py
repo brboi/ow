@@ -1359,3 +1359,47 @@ def test_git_reset_hard(tmp_path):
         git_reset_hard(worktree, "origin/master")
 
     mock_git.assert_called_once_with(worktree, "reset", "--hard", "origin/master", check=True)
+
+
+from ow.git import parallel_per_repo
+
+
+# ---------------------------------------------------------------------------
+# parallel_per_repo
+# ---------------------------------------------------------------------------
+
+def test_parallel_per_repo_runs_all_tasks():
+    results = parallel_per_repo(
+        {"a": lambda: "result_a", "b": lambda: "result_b"},
+    )
+    assert results == {"a": "result_a", "b": "result_b"}
+
+
+def test_parallel_per_repo_catches_exceptions():
+    def fail():
+        raise RuntimeError("boom")
+
+    results = parallel_per_repo(
+        {"ok": lambda: 42, "bad": fail},
+    )
+    assert results["ok"] == 42
+    assert isinstance(results["bad"], Exception)
+    assert "boom" in str(results["bad"])
+
+
+def test_parallel_per_repo_preserves_order():
+    import time
+
+    def slow():
+        time.sleep(0.05)
+        return "slow"
+
+    results = parallel_per_repo(
+        {"first": slow, "second": lambda: "fast"},
+    )
+    assert list(results.keys()) == ["first", "second"]
+
+
+def test_parallel_per_repo_empty_tasks():
+    results = parallel_per_repo({})
+    assert results == {}

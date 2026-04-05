@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from ow.config import BranchSpec, RemoteConfig
 
@@ -412,4 +414,27 @@ def git_reset_hard(worktree: Path, ref: str) -> None:
     git(worktree, "reset", "--hard", ref, check=True)
 
 
+T = TypeVar("T")
+
+
+def parallel_per_repo(
+    tasks: dict[str, Callable[[], T]],
+) -> dict[str, T | Exception]:
+    """Run callables in parallel per repo alias. Returns {alias: result_or_exception}."""
+    if not tasks:
+        return {}
+
+    results: dict[str, T | Exception] = {}
+
+    with ThreadPoolExecutor() as pool:
+        futures = {alias: pool.submit(fn) for alias, fn in tasks.items()}
+
+    for alias in tasks:
+        future = futures[alias]
+        try:
+            results[alias] = future.result()
+        except Exception as exc:
+            results[alias] = exc
+
+    return results
 
