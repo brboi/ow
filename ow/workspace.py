@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import questionary
 from jinja2 import Environment, FileSystemLoader
@@ -41,6 +41,7 @@ from ow.git import (
     git_reset_hard,
     git_rev_list,
     git_switch,
+    parallel_per_repo,
     resolve_spec,
     resolve_spec_local,
     run_cmd,
@@ -229,20 +230,25 @@ def _ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: 
     successful: set[str] = set()
     errors: dict[str, str] = {}
 
-    for alias, spec in ws.repos.items():
+    def _setup_alias(alias: str, spec: BranchSpec) -> BranchSpec:
         alias_remotes = config.remotes.get(alias, {})
-        bare_repo = bare_repos_dir / f"{alias}.git"
+        ensure_bare_repo(alias, alias_remotes, bare_repos_dir)
+        return resolve_spec(bare_repos_dir / f"{alias}.git", spec, alias_remotes)
 
-        try:
-            with Spinner(f"Setting up {alias}"):
-                ensure_bare_repo(alias, alias_remotes, bare_repos_dir)
-                resolved = resolve_spec(bare_repo, spec, alias_remotes)
-            resolved_specs[alias] = resolved
+    tasks = {alias: (lambda a=alias, s=spec: _setup_alias(a, s)) for alias, spec in ws.repos.items()}
+
+    with Spinner(f"Setting up {len(tasks)} repo(s)"):
+        results = parallel_per_repo(tasks)
+
+    for alias in ws.repos:
+        result = results[alias]
+        if isinstance(result, Exception):
+            errors[alias] = str(result)
+            _print_git_result(alias, "setup", [], False, str(result))
+        else:
+            resolved_specs[alias] = result
             successful.add(alias)
             _print_git_result(alias, "setup", [], True)
-        except Exception as e:
-            errors[alias] = str(e)
-            _print_git_result(alias, "setup", [], False, str(e))
 
     for alias, resolved in resolved_specs.items():
         bare_repo = bare_repos_dir / f"{alias}.git"
@@ -831,6 +837,21 @@ def _display_attached_status(
     return f"        {alias}:{padding}{status}"
 
 
+class _FetchJob(NamedTuple):
+    bare_repo: str
+    remote: str
+    refspec: str
+    force: bool = False
+
+
+@dataclass
+class _ResolveResult:
+    """Result of resolving specs for one alias."""
+    track_ref: str
+    upstream_ref: str | None
+    fetch_jobs: list[_FetchJob]
+
+
 def _fetch_workspace_refs(
     ws: WorkspaceConfig,
     ws_dir: Path,
@@ -843,68 +864,119 @@ def _fetch_workspace_refs(
     """Fetch refs for all workspace repos into their bare repos.
 
     Returns (resolved_tracks, resolved_upstreams) dicts mapping alias -> base_ref.
+
+    Three-phase pipeline:
+    1. Resolve specs per repo (parallel) — determines what to fetch
+    2. Execute all fetches flat (parallel) — one thread per fetch, not per repo
+    3. Print results (sequential)
     """
     bare_repos_dir = config.root_dir / ".bare-git-repos"
     resolved_tracks: dict[str, str] = {}
     resolved_upstreams: dict[str, str] = {}
 
-    for alias, spec in ws.repos.items():
+    # -- Phase 1: resolve specs per repo ----------------------------------
+
+    def _resolve_alias(alias: str, spec: BranchSpec) -> _ResolveResult:
         worktree_path = ws_dir / alias
-        if not worktree_path.exists():
-            continue
-
         alias_remotes = config.remotes.get(alias, {})
-        bare_repo = bare_repos_dir / f"{alias}.git"
+        bare_repo_path = bare_repos_dir / f"{alias}.git"
+        bare_repo = str(bare_repo_path)
         track_spec = BranchSpec(spec.base_ref)
+        jobs: list[_FetchJob] = []
 
-        try:
-            resolved_track = resolve_fn(bare_repo, track_spec, alias_remotes)
-            refspec = f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"
-            with Spinner(f"{spinner_prefix} {alias}"):
-                result = subprocess.run(
-                    ["git", "-C", str(bare_repo), "fetch", resolved_track.remote, refspec],
-                    capture_output=True,
-                )
-            if result.returncode != 0:
-                err = result.stderr.decode().strip() if result.stderr else "unknown"
-                _print_git_result(alias, "fetch", [resolved_track.remote, refspec], False, err)
+        resolved_track = resolve_fn(bare_repo_path, track_spec, alias_remotes)
+        refspec = f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"
+        jobs.append(_FetchJob(bare_repo, resolved_track.remote, refspec))
+
+        upstream_ref = None
+        if fetch_upstreams and not spec.is_detached:
+            resolved_full = resolve_fn(bare_repo_path, spec, alias_remotes)
+            if resolved_full.base_ref != resolved_track.base_ref:
+                full_refspec = f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}"
+                jobs.append(_FetchJob(bare_repo, resolved_full.remote, full_refspec, force=True))
+                upstream_ref = resolved_full.base_ref
             else:
-                _print_git_result(alias, "fetch", [resolved_track.remote, refspec], True)
-            resolved_tracks[alias] = resolved_track.base_ref
+                upstream = get_upstream(worktree_path)
+                if upstream:
+                    parts = upstream.split("/", 1)
+                    if len(parts) == 2:
+                        already_fetched = (parts[0] == resolved_track.remote and parts[1] == resolved_track.branch)
+                        if not already_fetched:
+                            upstream_refspec = f"{parts[1]}:refs/remotes/{upstream}"
+                            jobs.append(_FetchJob(bare_repo, parts[0], upstream_refspec))
 
-            if fetch_upstreams and not spec.is_detached:
-                resolved_full = resolve_fn(bare_repo, spec, alias_remotes)
-                if resolved_full.base_ref != resolved_track.base_ref:
-                    full_refspec = f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}"
-                    with Spinner(f"{spinner_prefix} {alias}"):
-                        result = subprocess.run(
-                            ["git", "-C", str(bare_repo), "fetch", "-f", resolved_full.remote, full_refspec],
-                            capture_output=True,
-                        )
-                    if result.returncode != 0:
-                        err = result.stderr.decode().strip() if result.stderr else "unknown"
-                        _print_git_result(alias, "fetch", [resolved_full.remote, full_refspec], False, err)
-                    else:
-                        _print_git_result(alias, "fetch", [resolved_full.remote, full_refspec], True)
-                    resolved_upstreams[alias] = resolved_full.base_ref
-                else:
-                    upstream = get_upstream(worktree_path)
-                    if upstream:
-                        parts = upstream.split("/", 1)
-                        if len(parts) == 2:
-                            with Spinner(f"{spinner_prefix} {alias}"):
-                                result = subprocess.run(
-                                    ["git", "-C", str(bare_repo), "fetch", parts[0], f"{parts[1]}:refs/remotes/{upstream}"],
-                                    capture_output=True,
-                                )
-                            if result.returncode != 0:
-                                err = result.stderr.decode().strip() if result.stderr else "unknown"
-                                _print_git_result(alias, "fetch", [parts[0], f"{parts[1]}:refs/remotes/{upstream}"], False, err)
-                            else:
-                                _print_git_result(alias, "fetch", [parts[0], f"{parts[1]}:refs/remotes/{upstream}"], True)
-        except (RuntimeError, subprocess.CalledProcessError) as e:
-            _print_git_result(alias, "fetch", ["?"], False, str(e))
-            resolved_tracks[alias] = spec.base_ref
+        return _ResolveResult(
+            track_ref=resolved_track.base_ref,
+            upstream_ref=upstream_ref,
+            fetch_jobs=jobs,
+        )
+
+    resolve_tasks = {}
+    skipped: list[str] = []
+    for alias, spec in ws.repos.items():
+        if not (ws_dir / alias).exists():
+            skipped.append(alias)
+            continue
+        resolve_tasks[alias] = (lambda a=alias, s=spec: _resolve_alias(a, s))
+
+    if resolve_tasks:
+        with Spinner(f"{spinner_prefix} {len(resolve_tasks)} repo(s)"):
+            resolve_results = parallel_per_repo(resolve_tasks)
+    else:
+        resolve_results = {}
+
+    # Collect resolve results; build flat fetch jobs
+    alias_resolve: dict[str, _ResolveResult] = {}
+    fetch_tasks: dict[str, _FetchJob] = {}
+    for alias in ws.repos:
+        if alias in skipped:
+            continue
+        result = resolve_results[alias]
+        if isinstance(result, Exception):
+            _print_git_result(alias, "fetch", ["?"], False, str(result))
+            resolved_tracks[alias] = ws.repos[alias].base_ref
+            continue
+        alias_resolve[alias] = result
+        for i, job in enumerate(result.fetch_jobs):
+            key = f"{alias}:{i}"
+            fetch_tasks[key] = job
+
+    # -- Phase 2: execute all fetches flat --------------------------------
+
+    def _do_fetch(job: _FetchJob) -> subprocess.CompletedProcess:
+        args = ["git", "-C", job.bare_repo, "fetch"]
+        if job.force:
+            args.append("-f")
+        args.extend([job.remote, job.refspec])
+        return subprocess.run(args, capture_output=True)
+
+    if fetch_tasks:
+        fetch_callables = {key: (lambda j=job: _do_fetch(j)) for key, job in fetch_tasks.items()}
+        with Spinner(f"Fetching {len(fetch_callables)} ref(s)"):
+            fetch_results = parallel_per_repo(fetch_callables)
+    else:
+        fetch_results = {}
+
+    # -- Phase 3: print results -------------------------------------------
+
+    for alias in ws.repos:
+        if alias in skipped or alias not in alias_resolve:
+            continue
+        resolve = alias_resolve[alias]
+        resolved_tracks[alias] = resolve.track_ref
+        if resolve.upstream_ref:
+            resolved_upstreams[alias] = resolve.upstream_ref
+
+        for i, job in enumerate(resolve.fetch_jobs):
+            key = f"{alias}:{i}"
+            fetch_result = fetch_results[key]
+            if isinstance(fetch_result, Exception):
+                _print_git_result(alias, "fetch", [job.remote, job.refspec], False, str(fetch_result))
+            elif fetch_result.returncode != 0:
+                err = fetch_result.stderr.decode().strip() if fetch_result.stderr else "unknown"
+                _print_git_result(alias, "fetch", [job.remote, job.refspec], False, err)
+            else:
+                _print_git_result(alias, "fetch", [job.remote, job.refspec], True)
 
     return resolved_tracks, resolved_upstreams
 
