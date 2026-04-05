@@ -27,7 +27,6 @@ from ow.git import (
     git_rev_list,
     git_switch,
     ordered_remotes,
-    remove_worktree,
     resolve_spec,
     resolve_spec_local,
     run_cmd,
@@ -406,42 +405,6 @@ def test_create_worktree_attached_existing_branch(tmp_path):
     )
     assert mock_run.call_args_list[3] == call(
         ["git", "-C", str(bare_repo), "config", "branch.master-feature.merge", "refs/heads/master"],
-        check=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# remove_worktree
-# ---------------------------------------------------------------------------
-
-def test_remove_worktree_detached(tmp_path):
-    bare_repo = tmp_path / "community.git"
-    worktree_path = Path("/fake/workspaces/test/community")
-
-    with patch("ow.git.subprocess.run") as mock_run:
-        remove_worktree(bare_repo, worktree_path, None)
-
-    mock_run.assert_called_once_with(
-        ["git", "-C", str(bare_repo), "worktree", "remove", "--force", str(worktree_path)],
-        check=True,
-    )
-
-
-def test_remove_worktree_attached(tmp_path):
-    bare_repo = tmp_path / "community.git"
-    worktree_path = Path("/fake/workspaces/test/community")
-
-    with patch("ow.git.subprocess.run") as mock_run:
-        remove_worktree(bare_repo, worktree_path, "master-feature")
-
-    calls = mock_run.call_args_list
-    assert len(calls) == 2
-    assert calls[0] == call(
-        ["git", "-C", str(bare_repo), "worktree", "remove", "--force", str(worktree_path)],
-        check=True,
-    )
-    assert calls[1] == call(
-        ["git", "-C", str(bare_repo), "branch", "-D", "master-feature"],
         check=True,
     )
 
@@ -1102,7 +1065,7 @@ def test_git_adds_c_flag(tmp_path):
         git(repo, "status", check=True)
 
     mock_run.assert_called_once_with(
-        ["git", "-C", str(repo), "status"], quiet=False, check=True
+        ["git", "-C", str(repo), "status"], quiet=False, label="repo", check=True
     )
 
 
@@ -1115,7 +1078,7 @@ def test_git_passes_quiet_flag(tmp_path):
         git(repo, "status", quiet=True, check=True)
 
     mock_run.assert_called_once_with(
-        ["git", "-C", str(repo), "status"], quiet=True, check=True
+        ["git", "-C", str(repo), "status"], quiet=True, label="repo", check=True
     )
 
 

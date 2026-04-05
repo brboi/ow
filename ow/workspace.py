@@ -1,23 +1,26 @@
 from __future__ import annotations
 
-import json
+import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import questionary
 from jinja2 import Environment, FileSystemLoader
 
 from ow.config import (
     BranchSpec,
     Config,
     WorkspaceConfig,
-    archive_workspace,
-    format_workspace,
+    load_workspace_config,
+    write_workspace_config,
     parse_branch_spec,
-    update_config_workspaces,
 )
 from ow.git import (
     _set_branch_upstream,
@@ -38,7 +41,6 @@ from ow.git import (
     git_reset_hard,
     git_rev_list,
     git_switch,
-    remove_worktree,
     resolve_spec,
     resolve_spec_local,
     run_cmd,
@@ -53,7 +55,7 @@ from ow.git import (
 
 
 def is_odoo_main_repo(repo_dir: Path) -> bool:
-    """Detect if a repo is the main Odoo source (community)."""
+    """Detect if a repo is the main Odoo source (has odoo-bin)."""
     return (
         (repo_dir / "odoo-bin").exists()
         and (repo_dir / "addons").is_dir()
@@ -73,11 +75,9 @@ def find_addon_paths(path: Path) -> list[Path]:
 
     children = [p for p in path.iterdir() if p.is_dir()]
 
-    # Is path itself an addons_path?
     if any((child / "__manifest__.py").exists() for child in children):
         return [path]
 
-    # Recurse into subdirectories
     result: list[Path] = []
     for child in children:
         result.extend(find_addon_paths(child))
@@ -86,6 +86,7 @@ def find_addon_paths(path: Path) -> list[Path]:
 
 
 def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> dict:
+    """Build Jinja2 template context for a workspace."""
     main_repo_alias = next(
         (alias for alias in ws.repos if is_odoo_main_repo(ws_dir / alias)),
         None,
@@ -113,7 +114,7 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
                 odools_path_items.append(str(p.relative_to(ws_dir)))
 
     return {
-        "ws_name": ws.name,
+        "ws_name": ws_dir.name,
         "main_repo_alias": main_repo_alias,
         "repos": list(ws.repos.keys()),
         "vars": {**config.vars, **ws.vars},
@@ -123,15 +124,160 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
 
 
 # ---------------------------------------------------------------------------
+# Workspace resolution
+# ---------------------------------------------------------------------------
+
+
+def _available_templates(config: Config) -> list[str]:
+    """Return sorted list of available template names."""
+    templates_dir = config.root_dir / "templates"
+    if templates_dir.exists():
+        return sorted(d.name for d in templates_dir.iterdir() if d.is_dir())
+    return []
+
+
+def _find_ow_config(start: Path) -> Path | None:
+    """Walk up from start looking for .ow/config."""
+    for parent in [start] + list(start.parents):
+        candidate = parent / ".ow" / "config"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def resolve_workspace(config: Config, name: str | None = None) -> tuple[Path, WorkspaceConfig]:
+    """Resolve workspace from name, env var, or cwd walk-up.
+
+    Returns (workspace_dir_path, WorkspaceConfig).
+    """
+    config_file = None
+    if name is not None:
+        ws_dir = config.root_dir / "workspaces" / name
+        if not ws_dir.exists():
+            print(f"Workspace '{name}' not found", file=sys.stderr)
+            sys.exit(1)
+        config_file = ws_dir / ".ow" / "config"
+        if not config_file.exists():
+            print(f"Workspace '{name}' is not a valid workspace (missing .ow/config)", file=sys.stderr)
+            sys.exit(1)
+    elif os.environ.get("OW_WORKSPACE"):
+        env_val = os.environ["OW_WORKSPACE"]
+        ws_dir = config.root_dir / "workspaces" / env_val
+        if (ws_dir / ".ow" / "config").exists():
+            config_file = ws_dir / ".ow" / "config"
+        else:
+            config_file = Path(env_val) / ".ow" / "config"
+    else:
+        config_file = _find_ow_config(Path.cwd())
+
+    if not config_file or not config_file.exists():
+        print("No workspace found. Run from a workspace or pass a path.", file=sys.stderr)
+        sys.exit(1)
+
+    ws_dir = config_file.parent.parent.resolve()
+    return ws_dir, load_workspace_config(config_file)
+
+
+# ---------------------------------------------------------------------------
+# Template application helpers (shared between cmd_create and cmd_update)
+# ---------------------------------------------------------------------------
+
+
+def _apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
+    """Apply templates in order to ws_dir (later templates override earlier ones)."""
+    templates_root = config.root_dir / "templates"
+    context = build_template_context(ws, config, ws_dir)
+
+    for template_name in ws.templates:
+        template_dir = templates_root / template_name
+        if not template_dir.exists():
+            print(f"Error: template '{template_name}' not found at {template_dir}", file=sys.stderr)
+            sys.exit(1)
+
+        env = Environment(
+            loader=FileSystemLoader(str(template_dir)),
+            keep_trailing_newline=True,
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
+
+        paths = template_dir.rglob("*")
+        file_paths = [p for p in paths if p.is_file()]
+
+        for path in sorted(file_paths):
+            rel = path.relative_to(template_dir)
+            if path.suffix == ".j2":
+                out_path = ws_dir / rel.with_suffix("")
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(env.get_template(str(rel)).render(context))
+                out_path.chmod(path.stat().st_mode)
+            else:
+                out_path = ws_dir / rel
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, out_path)
+
+
+def _ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> tuple[Path, set[str], dict[str, str]]:
+    """Ensure bare repos exist, refs are fetched, and worktrees are created.
+
+    Returns (workspace directory path, set of successfully materialized aliases, dict of alias -> error message for failures).
+    """
+    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    ws_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_specs: dict[str, BranchSpec] = {}
+    successful: set[str] = set()
+    errors: dict[str, str] = {}
+
+    for alias, spec in ws.repos.items():
+        alias_remotes = config.remotes.get(alias, {})
+        bare_repo = bare_repos_dir / f"{alias}.git"
+
+        try:
+            with Spinner(f"Setting up {alias}"):
+                ensure_bare_repo(alias, alias_remotes, bare_repos_dir)
+                resolved = resolve_spec(bare_repo, spec, alias_remotes)
+            resolved_specs[alias] = resolved
+            successful.add(alias)
+            _print_git_result(alias, "setup", [], True)
+        except Exception as e:
+            errors[alias] = str(e)
+            _print_git_result(alias, "setup", [], False, str(e))
+
+    for alias, resolved in resolved_specs.items():
+        bare_repo = bare_repos_dir / f"{alias}.git"
+        worktree_path = ws_dir / alias
+        if not worktree_exists(bare_repo, worktree_path):
+            run_cmd(["git", "-C", str(bare_repo), "worktree", "prune"], check=True, label=alias)
+            create_worktree(bare_repo, worktree_path, resolved)
+        else:
+            currently_detached = worktree_is_detached(worktree_path)
+            if currently_detached and not resolved.is_detached:
+                attach_worktree(bare_repo, worktree_path, resolved)
+            elif not currently_detached and resolved.is_detached:
+                detach_worktree(worktree_path, resolved.base_ref)
+            elif not resolved.is_detached:
+                _set_branch_upstream(
+                    bare_repo,
+                    resolved.local_branch,
+                    resolved.remote,
+                    resolved.branch,
+                )
+
+    return ws_dir, successful, errors
+
+
+# ---------------------------------------------------------------------------
 # Worktree drift detection
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class DriftResult:
+    """Result of checking worktree drift from config."""
     alias: str
     spec: BranchSpec
-    actual_branch: str | None  # None = detached
+    actual_branch: str | None
 
     @property
     def is_drifted(self) -> bool:
@@ -153,30 +299,13 @@ class DriftResult:
 
 
 def check_drift(worktree_path: Path, spec: BranchSpec, alias: str) -> DriftResult:
+    """Check if worktree state matches config spec."""
     actual_branch = get_worktree_branch(worktree_path)
     return DriftResult(alias=alias, spec=spec, actual_branch=actual_branch)
 
 
-def warn_if_drifted(ws: WorkspaceConfig | None, ws_dir: Path) -> None:
-    """Display warnings for drift or missing config; never exit."""
-    # Find actual repos in workspace
-    actual_repos = {}
-    for child in ws_dir.iterdir():
-        if child.is_dir() and (child / ".git").exists():
-            actual_repos[child.name] = get_worktree_branch(child)
-
-    if ws is None:
-        # No config in ow.toml - warn about deduced state
-        print(f"Warning: workspace '{ws_dir.name}' not in ow.toml", file=sys.stderr)
-        print("  Actual state:", file=sys.stderr)
-        for alias, branch in sorted(actual_repos.items()):
-            if branch:
-                print(f"    {alias}: branch {branch}", file=sys.stderr)
-            else:
-                print(f"    {alias}: detached HEAD", file=sys.stderr)
-        return
-
-    # Check for drift
+def warn_if_drifted(ws: WorkspaceConfig, ws_dir: Path) -> None:
+    """Display warnings for drift; never exit."""
     drifted = []
     for alias, spec in ws.repos.items():
         worktree_path = ws_dir / alias
@@ -187,62 +316,60 @@ def warn_if_drifted(ws: WorkspaceConfig | None, ws_dir: Path) -> None:
             drifted.append(result)
 
     if drifted:
-        print("Warning: drift detected between ow.toml and worktree state:", file=sys.stderr)
+        print("Warning: drift detected between config and worktree state:", file=sys.stderr)
         for d in drifted:
             print(f"  {d.message}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
-# Status helpers
+# Display helpers
 # ---------------------------------------------------------------------------
 
 
-def _parse_github_org_repo(url: str) -> str | None:
-    if url.startswith("git@github.com:"):
-        path = url[len("git@github.com:") :]
-        return path.removesuffix(".git")
-    if "github.com/" in url:
-        path = url.split("github.com/", 1)[1]
-        return path.removesuffix(".git")
-    return None
-
-
-def _osc8(url: str, text: str) -> str:
-    return f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"
-
-
 def _c(text: str, *codes: int) -> str:
+    """Apply ANSI color codes to text."""
     prefix = "".join(f"\x1b[{code}m" for code in codes)
     return f"{prefix}{text}\x1b[0m"
 
 
-_spinner_chars = ['|', '/', '-', '\\']
-_spinner_idx = 0
+class Spinner:
+    _chars = ['|', '/', '-', '\\']
 
-def _spinner() -> str:
-    global _spinner_idx
-    c = _spinner_chars[_spinner_idx]
-    _spinner_idx = (_spinner_idx + 1) % len(_spinner_chars)
-    return c
+    def __init__(self, prefix: str):
+        self._prefix = prefix
+        self._idx = 0
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _animate(self) -> None:
+        while not self._stop_event.is_set():
+            line = f"{self._prefix}  {self._chars[self._idx]}  "
+            sys.stdout.write(f"\r{line}")
+            sys.stdout.flush()
+            self._idx = (self._idx + 1) % len(self._chars)
+            self._stop_event.wait(0.1)
+
+    def __enter__(self) -> "Spinner":
+        self._thread = threading.Thread(target=self._animate, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args) -> None:
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join()
+        line_len = len(self._prefix) + 4
+        sys.stdout.write(f"\r{' ' * line_len}\r")
+        sys.stdout.flush()
 
 
 def _format_git_cmd(alias: str, cmd: str, args: list[str]) -> str:
-    return f"  [{alias}.git] {cmd} {' '.join(args)}"
-
-
-def _print_spinner(prefix: str, spinner: str) -> None:
-    line = f"{prefix}  {spinner}  "
-    sys.stdout.write(f"\r{line}")
-    sys.stdout.flush()
-
-
-def _clear_spinner_line(prefix: str) -> None:
-    line_len = len(prefix) + 4
-    sys.stdout.write(f"\r{' ' * line_len}\r")
-    sys.stdout.flush()
+    """Format a git command for display."""
+    return f"  [{alias}] git {cmd} {' '.join(args)}"
 
 
 def _print_git_result(alias: str, cmd: str, args: list[str], ok: bool, error: str | None = None) -> None:
+    """Print git command result."""
     line = _format_git_cmd(alias, cmd, args)
     if ok:
         print(f"{line}  ✓")
@@ -253,77 +380,30 @@ def _print_git_result(alias: str, cmd: str, args: list[str], ok: bool, error: st
 
 
 def _counts(behind: int, ahead: int) -> str:
+    """Format behind/ahead counts with colors."""
     b = _c(f"↓{behind}", 33) if behind > 0 else _c(f"↓{behind}", 2)
     a = _c(f"↑{ahead}", 32) if ahead > 0 else _c(f"↑{ahead}", 2)
     return f"{b} {a}"
 
 
-def _github_tree_url(org_repo: str, branch: str) -> str:
-    return f"https://github.com/{org_repo}/tree/{branch}"
+def _github_url_from_remote(remote_url: str) -> str | None:
+    """Parse git remote URL to GitHub web URL.
+    
+    git@github.com:odoo/odoo.git → https://github.com/odoo/odoo
+    https://github.com/odoo/odoo.git → https://github.com/odoo/odoo
+    """
+    ssh_match = re.match(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$", remote_url)
+    if ssh_match:
+        return f"https://github.com/{ssh_match.group(1)}/{ssh_match.group(2)}"
+    https_match = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", remote_url)
+    if https_match:
+        return f"https://github.com/{https_match.group(1)}/{https_match.group(2)}"
+    return None
 
 
-def _github_commit_url(org_repo: str, full_hash: str) -> str:
-    return f"https://github.com/{org_repo}/commit/{full_hash}"
-
-
-def _get_pr_info(org_repo: str, branch: str) -> tuple[int, str] | None:
-    try:
-        result = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--repo",
-                org_repo,
-                "--head",
-                branch,
-                "--json",
-                "number,url",
-                "--limit",
-                "1",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0:
-            return None
-        data = json.loads(result.stdout)
-        if not data:
-            return None
-        pr = data[0]
-        return (pr["number"], pr["url"])
-    except Exception:
-        return None
-
-
-def _link(url: str | None, text: str) -> str:
-    return _osc8(url, text) if url else text
-
-
-def _deduce_workspace_state(ws_dir: Path, config: Config) -> WorkspaceConfig:
-    """Deduce workspace state from actual worktrees for workspaces not in ow.toml."""
-    repos = {}
-    for child in ws_dir.iterdir():
-        if not child.is_dir() or not (child / ".git").exists():
-            continue
-        alias = child.name
-        branch = get_worktree_branch(child)
-        upstream = get_upstream(child)
-
-        if upstream:
-            # Use upstream as base_ref, create local branch spec
-            remote, remote_branch = upstream.split("/", 1)
-            base_ref = upstream
-            local_branch = branch if branch else remote_branch
-        else:
-            # No upstream - cannot determine base_ref, use detached state
-            base_ref = "HEAD"  # Placeholder, will show as error in status
-            local_branch = branch  # May be None if detached
-
-        repos[alias] = BranchSpec(base_ref, local_branch)
-
-    return WorkspaceConfig(name=ws_dir.name, repos=repos, templates=[])
+def _osc8(url: str, text: str) -> str:
+    """Create an OSC8 hyperlink."""
+    return f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"
 
 
 # ---------------------------------------------------------------------------
@@ -331,447 +411,582 @@ def _deduce_workspace_state(ws_dir: Path, config: Config) -> WorkspaceConfig:
 # ---------------------------------------------------------------------------
 
 
-def cmd_apply(config: Config, name: str | None = None) -> None:
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
-    workspaces = config.workspaces
-    if name:
-        workspaces = [ws for ws in workspaces if ws.name == name]
-
-    templates_root = config.root_dir / "templates"
-
-    for ws in workspaces:
-        ws_dir = config.root_dir / "workspaces" / ws.name
-        is_new = not ws_dir.exists()
-
-        # 1. Ensure bare repos + refs (sequential, with spinner)
-        resolved_specs: dict[str, BranchSpec] = {}
-
-        for alias, spec in ws.repos.items():
-            _print_spinner(f"Setting up {alias}", _spinner())
-
-            alias_remotes = config.remotes.get(alias, {})
-            bare_repo = bare_repos_dir / f"{alias}.git"
-
-            try:
-                ensure_bare_repo(alias, alias_remotes, bare_repos_dir)
-                resolved = resolve_spec(bare_repo, spec, alias_remotes)
-                resolved_specs[alias] = resolved
-                _clear_spinner_line(f"Setting up {alias}")
-                _print_git_result(alias, "setup", [], True)
-            except Exception as e:
-                _clear_spinner_line(f"Setting up {alias}")
-                _print_git_result(alias, "setup", [], False, str(e))
-                resolved_specs[alias] = spec  # fallback
-
-        # 2. Create worktrees if they don't exist
-        for alias, resolved in resolved_specs.items():
-            bare_repo = bare_repos_dir / f"{alias}.git"
-            worktree_path = ws_dir / alias
-            if not worktree_exists(bare_repo, worktree_path):
-                run_cmd(["git", "-C", str(bare_repo), "worktree", "prune"], check=True)
-                ws_dir.mkdir(parents=True, exist_ok=True)
-                create_worktree(bare_repo, worktree_path, resolved)
-            else:
-                currently_detached = worktree_is_detached(worktree_path)
-                if currently_detached and not resolved.is_detached:
-                    attach_worktree(bare_repo, worktree_path, resolved)
-                elif not currently_detached and resolved.is_detached:
-                    detach_worktree(worktree_path, resolved.base_ref)
-                elif not resolved.is_detached:
-                    _set_branch_upstream(
-                        bare_repo,
-                        resolved.local_branch,
-                        resolved.remote,
-                        resolved.branch,
-                    )
-
-        # 3. Apply templates in order (later templates override earlier ones)
-        ws_dir.mkdir(parents=True, exist_ok=True)
-        context = build_template_context(ws, config, ws_dir)
-
-        for template_name in ws.templates:
-            template_dir = templates_root / template_name
-            if not template_dir.exists():
-                print(f"Error: template '{template_name}' not found at {template_dir}", file=sys.stderr)
-                sys.exit(1)
-
-            env = Environment(
-                loader=FileSystemLoader(str(template_dir)),
-                keep_trailing_newline=True,
-                trim_blocks=True,
-                lstrip_blocks=True,
-            )
-
-            paths = template_dir.rglob("*")
-            file_paths = [p for p in paths if p.is_file()]
-
-            for path in sorted(file_paths):
-                rel = path.relative_to(template_dir)
-                if path.suffix == ".j2":
-                    out_path = ws_dir / rel.with_suffix("")
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    out_path.write_text(env.get_template(str(rel)).render(context))
-                    out_path.chmod(path.stat().st_mode)
-                else:
-                    out_path = ws_dir / rel
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(path, out_path)
-
-        # 4. Trust the generated mise file (only for new workspaces)
-        if is_new:
-            run_cmd(["mise", "trust", str(ws_dir / "mise.toml")], check=True)
-            print(f"\nWorkspace '{ws.name}' created. To install dependencies:")
-            print(f"    cd workspaces/{ws.name} && mise install")
-
-
-def cmd_remove(config: Config, name: str) -> None:
-    workspaces = [ws for ws in config.workspaces if ws.name == name]
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
-    ws_dir = config.root_dir / "workspaces" / name
-
-    if not workspaces:
-        if not ws_dir.exists():
-            print(f"No workspace named '{name}'", file=sys.stderr)
-            sys.exit(1)
-        # Workspace exists but not in ow.toml - remove anyway
-        warn_if_drifted(None, ws_dir)
-        ws = None  # No config, so no need to update ow.toml
-    else:
-        ws = workspaces[0]
-        warn_if_drifted(ws, ws_dir)
-
-    # Remove all worktrees in ws_dir
-    if ws_dir.exists():
-        for child in ws_dir.iterdir():
-            if child.is_dir() and (child / ".git").exists():
-                alias = child.name
-                bare_repo = bare_repos_dir / f"{alias}.git"
-                branch = get_worktree_branch(child) if ws else None
-                spec = ws.repos.get(alias) if ws else None
-                local_branch = spec.local_branch if spec else branch
-                remove_worktree(bare_repo, child, local_branch)
+def _cleanup_failed_workspace(ws_dir: Path) -> None:
+    """Remove workspace directory if it's empty or contains only .ow/."""
+    if not ws_dir.exists():
+        return
+    contents = list(ws_dir.iterdir())
+    if not contents or contents == [ws_dir / ".ow"]:
         shutil.rmtree(ws_dir)
 
-    # Update ow.toml only if workspace was in config
-    if ws:
-        config_path = config.root_dir / "ow.toml"
-        archive_workspace(config_path, ws)
-        remaining = [w for w in config.workspaces if w.name != name]
-        update_config_workspaces(config_path, remaining)
 
+def _validate_create_inputs(
+    config: Config,
+    name: str | None,
+    templates: list[str] | None,
+    repos: dict[str, BranchSpec] | None,
+    configuration: str | None,
+) -> tuple[WorkspaceConfig | None, str, Path]:
+    """Validate CLI inputs and resolve source workspace if duplicating.
 
-def cmd_status(config: Config, name: str | None = None) -> None:
-    workspaces = config.workspaces
-    if name:
-        workspaces = [ws for ws in workspaces if ws.name == name]
-        if not workspaces:
-            # Workspace not in ow.toml - check if it exists
-            ws_dir = config.root_dir / "workspaces" / name
-            if ws_dir.exists():
-                ws = _deduce_workspace_state(ws_dir, config)
-                warn_if_drifted(None, ws_dir)
-                workspaces = [ws]
-            else:
-                print(f"No workspace named '{name}'", file=sys.stderr)
-                sys.exit(1)
-
-    for ws in workspaces:
-        ws_dir = config.root_dir / "workspaces" / ws.name
-        bare_repos_dir = config.root_dir / ".bare-git-repos"
-
-        # 1. Drift warning (no longer blocks)
-        warn_if_drifted(ws, ws_dir)
-
-        # 2. Fetch (sequential, with spinner feedback)
-        for alias, spec in ws.repos.items():
-            worktree_path = ws_dir / alias
-            if not worktree_path.exists():
-                continue
-
-            _print_spinner(f"Checking {alias}", _spinner())
-
-            # Fetch track branch
-            try:
-                alias_remotes = config.remotes.get(alias, {})
-                bare_repo = bare_repos_dir / f"{alias}.git"
-                resolved = resolve_spec_local(bare_repo, spec, alias_remotes)
-                refspec = f"{resolved.branch}:refs/remotes/{resolved.remote}/{resolved.branch}"
-                _print_spinner(f"Checking {alias}", _spinner())
-                result = subprocess.run(
-                    ["git", "-C", str(bare_repo), "fetch", resolved.remote, refspec],
-                    capture_output=True,
-                )
-                if result.returncode != 0:
-                    err = result.stderr.decode().strip() if result.stderr else "unknown"
-                    _clear_spinner_line(f"Checking {alias}")
-                    _print_git_result(alias, "fetch", [resolved.remote, refspec], False, err)
-                else:
-                    _clear_spinner_line(f"Checking {alias}")
-                    _print_git_result(alias, "fetch", [resolved.remote, refspec], True)
-            except (RuntimeError, subprocess.CalledProcessError) as e:
-                _clear_spinner_line(f"Checking {alias}")
-                _print_git_result(alias, "fetch", ["?"], False, str(e))
-
-            # If attached: fetch upstream too
-            if not spec.is_detached:
-                upstream = get_upstream(worktree_path)
-                if upstream:
-                    parts = upstream.split("/", 1)
-                    if len(parts) == 2:
-                        _print_spinner(f"Checking {alias}", _spinner())
-                        result = subprocess.run(
-                            ["git", "-C", str(bare_repo), "fetch", parts[0], f"{parts[1]}:refs/remotes/{upstream}"],
-                            capture_output=True,
-                        )
-                        if result.returncode != 0:
-                            err = result.stderr.decode().strip() if result.stderr else "unknown"
-                            _clear_spinner_line(f"Checking {alias}")
-                            _print_git_result(alias, "fetch", [parts[0], f"{parts[1]}:refs/remotes/{upstream}"], False, err)
-                        else:
-                            _clear_spinner_line(f"Checking {alias}")
-                            _print_git_result(alias, "fetch", [parts[0], f"{parts[1]}:refs/remotes/{upstream}"], True)
-
-        # 3. Display
-        print(_c(f"[{ws.name}]", 1, 36))
-        print("    " + _c("branches", 2))
-
-        first_attached_branch: str | None = None
-        pr_links: list[tuple[str, int, str]] = []
-        max_alias_len = max(len(a) for a in ws.repos)
-
-        for alias, spec in ws.repos.items():
-            padding = " " * (max_alias_len - len(alias) + 1)
-            worktree_path = ws_dir / alias
-            if not worktree_path.exists():
-                print(f"        {alias}:{padding}{_c('(not applied)', 2)}")
-                continue
-
-            alias_remotes = config.remotes.get(alias, {})
-
-            bare_repo = bare_repos_dir / f"{alias}.git"
-            try:
-                spec = resolve_spec_local(bare_repo, spec, alias_remotes)
-            except (RuntimeError, subprocess.CalledProcessError):
-                pass  # keep original spec; git error caught in the outer try/except
-
-            # Helper: get org/repo for a given remote name
-            def org_repo_for(remote_name: str) -> str | None:
-                rc = alias_remotes.get(remote_name)
-                if rc:
-                    return _parse_github_org_repo(rc.url)
-                url = get_remote_url(bare_repo, remote_name)
-                return _parse_github_org_repo(url) if url else None
-
-            try:
-                if spec.is_detached:
-                    ahead, behind = get_rev_list_count(
-                        worktree_path, "HEAD", spec.base_ref
-                    )
-                    short_hash, full_hash = get_worktree_head(worktree_path)
-
-                    base_org_repo = org_repo_for(spec.remote)
-                    base_url = (
-                        _github_tree_url(base_org_repo, spec.branch)
-                        if base_org_repo
-                        else None
-                    )
-                    commit_url = (
-                        _github_commit_url(base_org_repo, full_hash)
-                        if base_org_repo
-                        else None
-                    )
-
-                    base_text = _link(base_url, _c(spec.base_ref, 1))
-                    hash_text = _link(commit_url, _c(short_hash, 33))
-                    status = f"{base_text} {_counts(behind, ahead)} ({_c('DETACHED', 33)}: {hash_text})"
-
-                else:
-                    if first_attached_branch is None:
-                        first_attached_branch = spec.local_branch
-
-                    remote_ref = get_remote_ref_for_branch(
-                        bare_repo,
-                        spec.local_branch,
-                        alias_remotes,
-                        exclude_ref=spec.base_ref,
-                        base_remote=spec.remote,
-                    )
-                    if remote_ref:
-                        # Branch found on a configured remote — Case 1 display + PR detection
-                        ahead_up, behind_up = get_rev_list_count(
-                            worktree_path, "HEAD", remote_ref
-                        )
-                        up_parts = remote_ref.split("/", 1)
-                        up_remote = up_parts[0]
-                        up_branch = up_parts[1]
-                        up_org_repo = org_repo_for(up_remote)
-                        up_url = (
-                            _github_tree_url(up_org_repo, up_branch)
-                            if up_org_repo
-                            else None
-                        )
-
-                        if up_remote != spec.remote:
-                            base_org_repo = org_repo_for(spec.remote)
-                            fork_user = (
-                                up_org_repo.split("/")[0] if up_org_repo else None
-                            )
-                            head_filter = (
-                                f"{fork_user}:{up_branch}" if fork_user else up_branch
-                            )
-                            if base_org_repo:
-                                pr_info = _get_pr_info(base_org_repo, head_filter)
-                                if not pr_info:
-                                    # Branch may be mirrored to fork but PR is on base repo directly
-                                    pr_info = _get_pr_info(base_org_repo, up_branch)
-                                if pr_info:
-                                    pr_links.append(
-                                        (base_org_repo, pr_info[0], pr_info[1])
-                                    )
-                        elif up_org_repo:
-                            pr_info = _get_pr_info(up_org_repo, up_branch)
-                            if pr_info:
-                                pr_links.append((up_org_repo, pr_info[0], pr_info[1]))
-
-                        ahead_base, behind_base = get_rev_list_count(
-                            worktree_path, remote_ref, spec.base_ref
-                        )
-                        base_org_repo = org_repo_for(spec.remote)
-                        base_url = (
-                            _github_tree_url(base_org_repo, spec.branch)
-                            if base_org_repo
-                            else None
-                        )
-                        display_text = _link(up_url, _c(remote_ref, 1))
-                        base_text = _link(base_url, _c(spec.base_ref, 1))
-                        status = f"{display_text} {_counts(behind_up, ahead_up)} ({base_text} {_counts(behind_base, ahead_base)})"
-                    else:
-                        upstream = get_upstream(worktree_path)
-                        if upstream:
-                            ahead_up, behind_up = get_rev_list_count(
-                                worktree_path, "HEAD", upstream
-                            )
-
-                            up_parts = upstream.split("/", 1)
-                            up_remote = up_parts[0] if len(up_parts) == 2 else "origin"
-                            up_branch = up_parts[1] if len(up_parts) == 2 else upstream
-                            up_org_repo = org_repo_for(up_remote)
-                            up_url = (
-                                _github_tree_url(up_org_repo, up_branch)
-                                if up_org_repo
-                                else None
-                            )
-
-                            if up_remote != spec.remote:
-                                # Branch is on a fork — PR lives in the base (origin) repo
-                                base_org_repo = org_repo_for(spec.remote)
-                                fork_user = (
-                                    up_org_repo.split("/")[0] if up_org_repo else None
-                                )
-                                head_filter = (
-                                    f"{fork_user}:{up_branch}"
-                                    if fork_user
-                                    else up_branch
-                                )
-                                if base_org_repo:
-                                    pr_info = _get_pr_info(base_org_repo, head_filter)
-                                    if not pr_info:
-                                        # Branch may be mirrored to fork but PR is on base repo directly
-                                        pr_info = _get_pr_info(base_org_repo, up_branch)
-                                    if pr_info:
-                                        pr_links.append(
-                                            (base_org_repo, pr_info[0], pr_info[1])
-                                        )
-                            elif up_org_repo:
-                                pr_info = _get_pr_info(up_org_repo, up_branch)
-                                if pr_info:
-                                    pr_links.append(
-                                        (up_org_repo, pr_info[0], pr_info[1])
-                                    )
-
-                            if upstream != spec.base_ref:
-                                # Case 1: upstream ≠ base — standard format
-                                ahead_base, behind_base = get_rev_list_count(
-                                    worktree_path, upstream, spec.base_ref
-                                )
-                                base_org_repo = org_repo_for(spec.remote)
-                                base_url = (
-                                    _github_tree_url(base_org_repo, spec.branch)
-                                    if base_org_repo
-                                    else None
-                                )
-                                display_text = _link(up_url, _c(upstream, 1))
-                                base_text = _link(base_url, _c(spec.base_ref, 1))
-                                status = f"{display_text} {_counts(behind_up, ahead_up)} ({base_text} {_counts(behind_base, ahead_base)})"
-                            else:
-                                # Case 2: upstream == base — show local branch as primary
-                                upstream_text = _link(up_url, _c(upstream, 1))
-                                status = f"{_c(spec.local_branch, 1)} {_c('(local)', 2)} ({upstream_text} {_counts(behind_up, ahead_up)})"
-
-                        else:
-                            # Case 3: no upstream
-                            base_org_repo = org_repo_for(spec.remote)
-                            base_url = (
-                                _github_tree_url(base_org_repo, spec.branch)
-                                if base_org_repo
-                                else None
-                            )
-                            ahead_base, behind_base = get_rev_list_count(
-                                worktree_path, "HEAD", spec.base_ref
-                            )
-                            base_text = _link(base_url, _c(spec.base_ref, 1))
-                            status = f"{_c(spec.local_branch, 1)} {_c('(local)', 2)} ({base_text} {_counts(behind_base, ahead_base)})"
-
-            except subprocess.CalledProcessError:
-                status = _c("(error)", 31)
-
-            print(f"        {alias}:{padding}{status}")
-
-        if pr_links or first_attached_branch:
-            print("    " + _c("links", 2))
-            for org_repo, pr_num, pr_url in pr_links:
-                pr_text = _osc8(pr_url, f"{org_repo}#{pr_num}")
-                print(f"        pr:     {pr_text}")
-
-            if first_attached_branch:
-                runbot_url = (
-                    f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
-                )
-                runbot_text = _osc8(runbot_url, first_attached_branch)
-                print(f"        runbot: {runbot_text}")
-
-        print()
-
-
-def cmd_create(config: Config, name: str, specs: list[str]) -> None:
-    repos = {}
-    ws_vars: dict[str, Any] = {}
-    templates: list[str] = []
-    for s in specs:
-        if s.startswith("vars.") and "=" in s:
-            k, v = s[len("vars.") :].split("=", 1)
-            ws_vars[k] = v
-        elif s.startswith("templates="):
-            templates = s[len("templates=") :].split(",")
-        else:
-            alias, spec = s.split(":", 1)
-            repos[alias] = parse_branch_spec(spec)
-
-    if not templates:
-        print("Error: templates must be specified, e.g. templates=common,vscode", file=sys.stderr)
+    Returns (source_ws, resolved_name, ws_dir).
+    Exits on validation errors.
+    """
+    templates_root = config.root_dir / "templates"
+    if not templates_root.exists():
+        print("Error: templates/ directory not found.", file=sys.stderr)
+        sys.exit(1)
+    available_templates = sorted(
+        d.name
+        for d in templates_root.iterdir()
+        if d.is_dir()
+    )
+    if not available_templates:
+        print("Error: no templates found in templates/", file=sys.stderr)
         sys.exit(1)
 
-    ws = WorkspaceConfig(name=name, repos=repos, templates=templates, vars=ws_vars)
-    config.workspaces.append(ws)
+    if templates is not None:
+        invalid = [t for t in templates if t not in available_templates]
+        if invalid:
+            avail = ", ".join(available_templates)
+            print(f"Error: unknown template(s): {', '.join(invalid)}. Available: {avail}", file=sys.stderr)
+            sys.exit(1)
 
-    config_path = config.root_dir / "ow.toml"
-    with open(config_path, "a") as f:
-        f.write("\n" + format_workspace(ws))
+    known_aliases = list(config.remotes.keys())
+    if repos is not None:
+        unknown = [a for a in repos if a not in known_aliases]
+        if unknown:
+            avail = ", ".join(known_aliases) if known_aliases else "(none configured)"
+            print(f"Error: unknown repo alias(es): {', '.join(unknown)}. Available: {avail}", file=sys.stderr)
+            sys.exit(1)
 
-    cmd_apply(config, name=name)
+    source_ws: WorkspaceConfig | None = None
+    if configuration is not None:
+        src_path = Path(configuration)
+        if src_path.is_dir():
+            src_config_file = src_path / ".ow" / "config"
+        else:
+            src_config_file = src_path
+        if not src_config_file.exists():
+            print(f"Error: configuration file not found: {src_config_file}", file=sys.stderr)
+            sys.exit(1)
+        source_ws = load_workspace_config(src_config_file)
+
+        available = _available_templates(config)
+        invalid = [t for t in source_ws.templates if t not in available]
+        if invalid:
+            avail = ", ".join(available) if available else "(none found)"
+            print(f"Error: configuration references unknown template(s): {', '.join(invalid)}. Available: {avail}", file=sys.stderr)
+            sys.exit(1)
+
+        for alias in source_ws.repos:
+            if alias not in known_aliases:
+                avail = ", ".join(known_aliases) if known_aliases else "(none configured)"
+                print(f"Error: configuration references repo '{alias}' but it's not defined in ow.toml [remotes]", file=sys.stderr)
+                print(f"  Available remotes: {avail}", file=sys.stderr)
+                sys.exit(1)
+
+    if name is not None:
+        name = name.strip()
+        if not name or not re.match(r'^[a-zA-Z0-9_-]+$', name):
+            print("Error: name must be alphanumeric with hyphens and underscores only.", file=sys.stderr)
+            sys.exit(1)
+        ws_dir = config.root_dir / "workspaces" / name
+        if ws_dir.exists():
+            print(f"Error: workspace '{name}' already exists at {ws_dir}.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        while True:
+            try:
+                name = questionary.text("Workspace name").ask()
+            except KeyboardInterrupt:
+                print("\nAborted.", file=sys.stderr)
+                sys.exit(1)
+            if not name:
+                print("Error: name is required.", file=sys.stderr)
+                sys.exit(1)
+            name = name.strip()
+            if not name or not re.match(r'^[a-zA-Z0-9_-]+$', name):
+                print("Error: name must be alphanumeric with hyphens and underscores only.", file=sys.stderr)
+                continue
+            ws_dir = config.root_dir / "workspaces" / name
+            if ws_dir.exists():
+                print(f"Warning: workspace '{name}' already exists at {ws_dir}. Choose another name.")
+                continue
+            break
+
+    return source_ws, name, ws_dir
+
+
+def _gather_workspace_config_interactive(
+    config: Config,
+    source_ws: WorkspaceConfig | None,
+    templates: list[str] | None,
+    repos: dict[str, BranchSpec] | None,
+) -> WorkspaceConfig:
+    """Run interactive questionnaire to build WorkspaceConfig.
+
+    Pre-populates from source_ws or CLI args where available.
+    """
+    available_templates = sorted(
+        d.name
+        for d in (config.root_dir / "templates").iterdir()
+        if d.is_dir()
+    )
+    known_aliases = list(config.remotes.keys())
+
+    if source_ws is not None:
+        pre_selected = set(source_ws.templates)
+        if templates is not None:
+            pre_selected = set(templates)
+        final_repos: dict[str, BranchSpec] = dict(source_ws.repos)
+        if repos is not None:
+            final_repos.update(repos)
+    else:
+        pre_selected = set(templates) if templates else set()
+        final_repos = dict(repos) if repos else {}
+
+    _check_duplicate_branches(final_repos, config)
+
+    try:
+        selected_templates = questionary.checkbox(
+            "Templates (space to select, enter to confirm)",
+            choices=[questionary.Choice(t, checked=(t in pre_selected)) for t in available_templates],
+        ).ask()
+    except KeyboardInterrupt:
+        print("\nAborted.", file=sys.stderr)
+        sys.exit(1)
+    if not selected_templates:
+        selected_templates = []
+
+    if known_aliases:
+        pre_selected_aliases = set(final_repos.keys())
+        try:
+            selected_aliases = questionary.checkbox(
+                "Repos to include (space to select, enter to confirm)",
+                choices=[questionary.Choice(a, checked=(a in pre_selected_aliases)) for a in known_aliases],
+            ).ask()
+        except KeyboardInterrupt:
+            print("\nAborted.", file=sys.stderr)
+            sys.exit(1)
+        if not selected_aliases:
+            selected_aliases = []
+
+        for alias in selected_aliases:
+            if alias not in final_repos:
+                try:
+                    spec_str = questionary.text(
+                        f"{alias} branch spec (e.g. master, master..my-feature)",
+                    ).ask()
+                except KeyboardInterrupt:
+                    print("\nAborted.", file=sys.stderr)
+                    sys.exit(1)
+                if not spec_str:
+                    print("Aborted.", file=sys.stderr)
+                    sys.exit(1)
+                try:
+                    final_repos[alias] = parse_branch_spec(spec_str.strip())
+                except ValueError as e:
+                    print(f"Error: invalid branch spec '{spec_str.strip()}': {e}", file=sys.stderr)
+                    sys.exit(1)
+
+    _check_duplicate_branches(final_repos, config)
+
+    ws_vars: dict[str, Any] = dict(source_ws.vars) if source_ws is not None else dict(config.vars)
+
+    return WorkspaceConfig(repos=final_repos, templates=selected_templates, vars=ws_vars)
+
+
+def cmd_create(
+    config: Config,
+    name: str | None = None,
+    templates: list[str] | None = None,
+    repos: dict[str, BranchSpec] | None = None,
+    configuration: str | None = None,
+) -> None:
+    """Interactive workspace creation with questionary.
+
+    Optional pre-populated values from CLI args:
+      name: workspace name
+      templates: list of template names to pre-select
+      repos: dict of alias -> BranchSpec to pre-select
+      configuration: path to existing workspace config to duplicate
+    """
+    # Phase 1: Validate inputs and resolve name
+    source_ws, resolved_name, ws_dir = _validate_create_inputs(
+        config, name, templates, repos, configuration
+    )
+
+    # Phase 2: Interactive questionnaire
+    ws = _gather_workspace_config_interactive(config, source_ws, templates, repos)
+
+    # Phase 3: Confirm
+    print(f"\nWorkspace '{resolved_name}' will be created with:")
+    print(f"  Templates: {', '.join(ws.templates)}")
+    for alias, spec in ws.repos.items():
+        print(f"  {alias}: {spec.to_spec_str()}")
+    if ws.vars:
+        print(f"  Vars: {ws.vars}")
+
+    try:
+        confirm = questionary.confirm("Proceed?").ask()
+    except KeyboardInterrupt:
+        print("\nAborted.", file=sys.stderr)
+        sys.exit(1)
+    if not confirm:
+        print("Aborted.")
+        return
+
+    ow_config_path = ws_dir / ".ow" / "config"
+    if ow_config_path.exists():
+        print(f"Error: workspace '{resolved_name}' already exists at workspaces/{resolved_name}", file=sys.stderr)
+        sys.exit(1)
+
+    # Phase 4: Materialize
+    _, successful, errors = _ensure_workspace_materialized(ws, config, ws_dir)
+
+    if errors:
+        if len(errors) == len(ws.repos):
+            _cleanup_failed_workspace(ws_dir)
+            print(f"\nError: all repos failed to set up:", file=sys.stderr)
+            for alias, err in errors.items():
+                print(f"  {alias}: {err}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"\nWarning: some repos failed to set up:", file=sys.stderr)
+        for alias, err in errors.items():
+            print(f"  {alias}: {err}", file=sys.stderr)
+
+    _apply_templates(ws, config, ws_dir)
+
+    write_workspace_config(ow_config_path, ws)
+
+    mise_toml = ws_dir / "mise.toml"
+    if mise_toml.exists():
+        run_cmd(["mise", "trust", str(mise_toml)], check=True)
+
+    if errors:
+        print(f"\nWorkspace '{resolved_name}' created with errors. Fix issues and run: ow update")
+    else:
+        print(f"\nWorkspace '{resolved_name}' created. To install dependencies:")
+        print(f"    cd workspaces/{resolved_name} && mise install")
+    print(f"\nWorkspace config: {ow_config_path}")
+    print("Edit it to customize vars, then run: ow update")
+
+
+def _check_duplicate_branches(new_repos: dict[str, BranchSpec], config: Config) -> None:
+    """Abort if any repo alias shares the same local_branch as an existing workspace.
+
+    Only local_branches (the part after `..`) are checked — source branches don't conflict
+    since git only prevents two worktrees on the same local branch.
+    """
+    ws_root = config.root_dir / "workspaces"
+    if not ws_root.exists():
+        return
+    for existing_ws_dir in sorted(ws_root.iterdir()):
+        if not existing_ws_dir.is_dir():
+            continue
+        ow_config = existing_ws_dir / ".ow" / "config"
+        if not ow_config.exists():
+            continue
+        existing = load_workspace_config(ow_config)
+        for alias, new_spec in new_repos.items():
+            if alias in existing.repos:
+                existing_spec = existing.repos[alias]
+                new_target = new_spec.local_branch
+                existing_target = existing_spec.local_branch
+                if new_target and existing_target and new_target == existing_target:
+                    print(f"Error: workspace '{existing_ws_dir.name}' already uses {alias}:{existing_spec.to_spec_str()}", file=sys.stderr)
+                    print(f"  Target branch '{new_target}' is already in use. Each target branch must be unique.", file=sys.stderr)
+                    sys.exit(1)
+
+
+def cmd_update(config: Config) -> None:
+    """Re-render templates and materialize worktrees for the current workspace."""
+    ws_dir, ws = resolve_workspace(config)
+    _, successful, errors = _ensure_workspace_materialized(ws, config, ws_dir)
+    _apply_templates(ws, config, ws_dir)
+
+    if errors:
+        print(f"\nWarning: repo(s) failed to set up:", file=sys.stderr)
+        for alias, err in errors.items():
+            print(f"  {alias}: {err}", file=sys.stderr)
+
+    missing_vars = {k: v for k, v in config.vars.items() if k not in ws.vars}
+    if missing_vars:
+        ws.vars = {**ws.vars, **missing_vars}
+        ow_config_path = ws_dir / ".ow" / "config"
+        write_workspace_config(ow_config_path, ws)
+
+    mise_toml = ws_dir / "mise.toml"
+    if mise_toml.exists():
+        run_cmd(["mise", "trust", str(mise_toml)], check=True)
+
+    print(f"\nWorkspace '{ws_dir.name}' updated.")
+
+
+def cmd_prune(config: Config) -> None:
+    """Clean up stale worktree references and orphaned branches from bare repos."""
+    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    if not bare_repos_dir.exists():
+        print("No bare repos found.")
+        return
+
+    cleaned = False
+    for bare_repo in sorted(bare_repos_dir.glob("*.git")):
+        alias = bare_repo.stem
+
+        # 1. Worktree prune
+        result = subprocess.run(
+            ["git", "-C", str(bare_repo), "worktree", "prune"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            print(f"  [{alias}] pruned stale worktrees")
+            cleaned = True
+
+        # 2. Delete local branches not attached to any worktree
+        wt_result = subprocess.run(
+            ["git", "-C", str(bare_repo), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        used_branches: set[str] = set()
+        if wt_result.returncode == 0:
+            for line in wt_result.stdout.splitlines():
+                if line.startswith("branch "):
+                    branch_ref = line.split(" ", 1)[1]
+                    if branch_ref.startswith("refs/heads/"):
+                        used_branches.add(branch_ref[len("refs/heads/"):])
+
+        branch_result = subprocess.run(
+            ["git", "-C", str(bare_repo), "branch", "--list"],
+            capture_output=True, text=True,
+        )
+        if branch_result.returncode == 0:
+            all_branches = {b.strip().lstrip("* ") for b in branch_result.stdout.splitlines() if b.strip()}
+            orphaned = all_branches - used_branches
+            if orphaned:
+                for branch in sorted(orphaned):
+                    subprocess.run(
+                        ["git", "-C", str(bare_repo), "branch", "-D", branch],
+                        capture_output=True, text=True,
+                    )
+                print(f"  [{alias}] deleted orphaned branches: {', '.join(sorted(orphaned))}")
+                cleaned = True
+
+    if not cleaned:
+        print("All bare repos are clean.")
+
+
+def _display_detached_status(
+    alias: str,
+    spec: BranchSpec,
+    resolved: BranchSpec,
+    worktree_path: Path,
+    max_alias_len: int,
+) -> str:
+    """Format status line for a detached worktree."""
+    padding = " " * (max_alias_len - len(alias) + 1)
+    ahead, behind = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
+    short_hash, _ = get_worktree_head(worktree_path)
+
+    status = f"{_c(resolved.base_ref, 1)} {_counts(behind, ahead)} ({_c('DETACHED', 33)}: {short_hash})"
+    return f"        {alias}:{padding}{status}"
+
+
+def _display_attached_status(
+    alias: str,
+    spec: BranchSpec,
+    resolved: BranchSpec,
+    worktree_path: Path,
+    max_alias_len: int,
+) -> str:
+    """Format status line for an attached worktree."""
+    padding = " " * (max_alias_len - len(alias) + 1)
+
+    remote_ref = get_remote_ref_for_branch(
+        worktree_path,
+        resolved.local_branch,
+        {},
+        exclude_ref=resolved.base_ref,
+        base_remote=resolved.remote,
+    )
+    if remote_ref:
+        ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", remote_ref)
+        ahead_base, behind_base = get_rev_list_count(worktree_path, remote_ref, resolved.base_ref)
+        status = f"{_c(remote_ref, 1)} {_counts(behind_up, ahead_up)} ({_c(resolved.base_ref, 1)} {_counts(behind_base, ahead_base)})"
+    else:
+        upstream = get_upstream(worktree_path)
+        if upstream:
+            ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
+            if upstream != resolved.base_ref:
+                ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, resolved.base_ref)
+                status = f"{_c(upstream, 1)} {_counts(behind_up, ahead_up)} ({_c(resolved.base_ref, 1)} {_counts(behind_base, ahead_base)})"
+            else:
+                status = f"{_c(resolved.local_branch, 1)} {_c('(local)', 2)} ({_c(upstream, 1)} {_counts(behind_up, ahead_up)})"
+        else:
+            ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
+            status = f"{_c(resolved.local_branch, 1)} {_c('(local)', 2)} ({_c(resolved.base_ref, 1)} {_counts(behind_base, ahead_base)})"
+
+    return f"        {alias}:{padding}{status}"
+
+
+def _fetch_workspace_refs(
+    ws: WorkspaceConfig,
+    ws_dir: Path,
+    config: Config,
+    *,
+    fetch_upstreams: bool = False,
+    resolve_fn=resolve_spec_local,
+    spinner_prefix: str = "Checking",
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Fetch refs for all workspace repos into their bare repos.
+
+    Returns (resolved_tracks, resolved_upstreams) dicts mapping alias -> base_ref.
+    """
+    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    resolved_tracks: dict[str, str] = {}
+    resolved_upstreams: dict[str, str] = {}
+
+    for alias, spec in ws.repos.items():
+        worktree_path = ws_dir / alias
+        if not worktree_path.exists():
+            continue
+
+        alias_remotes = config.remotes.get(alias, {})
+        bare_repo = bare_repos_dir / f"{alias}.git"
+        track_spec = BranchSpec(spec.base_ref)
+
+        try:
+            resolved_track = resolve_fn(bare_repo, track_spec, alias_remotes)
+            refspec = f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"
+            with Spinner(f"{spinner_prefix} {alias}"):
+                result = subprocess.run(
+                    ["git", "-C", str(bare_repo), "fetch", resolved_track.remote, refspec],
+                    capture_output=True,
+                )
+            if result.returncode != 0:
+                err = result.stderr.decode().strip() if result.stderr else "unknown"
+                _print_git_result(alias, "fetch", [resolved_track.remote, refspec], False, err)
+            else:
+                _print_git_result(alias, "fetch", [resolved_track.remote, refspec], True)
+            resolved_tracks[alias] = resolved_track.base_ref
+
+            if fetch_upstreams and not spec.is_detached:
+                resolved_full = resolve_fn(bare_repo, spec, alias_remotes)
+                if resolved_full.base_ref != resolved_track.base_ref:
+                    full_refspec = f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}"
+                    with Spinner(f"{spinner_prefix} {alias}"):
+                        result = subprocess.run(
+                            ["git", "-C", str(bare_repo), "fetch", "-f", resolved_full.remote, full_refspec],
+                            capture_output=True,
+                        )
+                    if result.returncode != 0:
+                        err = result.stderr.decode().strip() if result.stderr else "unknown"
+                        _print_git_result(alias, "fetch", [resolved_full.remote, full_refspec], False, err)
+                    else:
+                        _print_git_result(alias, "fetch", [resolved_full.remote, full_refspec], True)
+                    resolved_upstreams[alias] = resolved_full.base_ref
+                else:
+                    upstream = get_upstream(worktree_path)
+                    if upstream:
+                        parts = upstream.split("/", 1)
+                        if len(parts) == 2:
+                            with Spinner(f"{spinner_prefix} {alias}"):
+                                result = subprocess.run(
+                                    ["git", "-C", str(bare_repo), "fetch", parts[0], f"{parts[1]}:refs/remotes/{upstream}"],
+                                    capture_output=True,
+                                )
+                            if result.returncode != 0:
+                                err = result.stderr.decode().strip() if result.stderr else "unknown"
+                                _print_git_result(alias, "fetch", [parts[0], f"{parts[1]}:refs/remotes/{upstream}"], False, err)
+                            else:
+                                _print_git_result(alias, "fetch", [parts[0], f"{parts[1]}:refs/remotes/{upstream}"], True)
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            _print_git_result(alias, "fetch", ["?"], False, str(e))
+            resolved_tracks[alias] = spec.base_ref
+
+    return resolved_tracks, resolved_upstreams
+
+
+def cmd_status(config: Config, workspace: str | None = None) -> None:
+    """Show branch status for the current workspace."""
+    ws_dir, ws = resolve_workspace(config, name=workspace)
+    bare_repos_dir = config.root_dir / ".bare-git-repos"
+
+    warn_if_drifted(ws, ws_dir)
+
+    _fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
+
+    print(_c(f"[{ws_dir.name}]", 1, 36))
+    print("    " + _c("branches", 2))
+
+    max_alias_len = max((len(a) for a in ws.repos), default=0)
+    first_attached_branch: str | None = None
+    github_links: list[tuple[str, str]] = []
+
+    for alias, spec in ws.repos.items():
+        padding = " " * (max_alias_len - len(alias) + 1)
+        worktree_path = ws_dir / alias
+        if not worktree_path.exists():
+            print(f"        {alias}:{padding}{_c('(not applied)', 2)}")
+            continue
+
+        alias_remotes = config.remotes.get(alias, {})
+        bare_repo = bare_repos_dir / f"{alias}.git"
+
+        resolved = None
+        try:
+            resolved = resolve_spec_local(bare_repo, spec, alias_remotes)
+        except (RuntimeError, subprocess.CalledProcessError):
+            pass
+
+        if resolved is None:
+            print(f"        {alias}:{padding}{_c('(error: could not resolve)', 31)}")
+            continue
+
+        try:
+            if resolved.is_detached:
+                status_line = _display_detached_status(
+                    alias, spec, resolved, worktree_path, max_alias_len
+                )
+                short_hash, _ = get_worktree_head(worktree_path)
+                remote_url = get_remote_url(bare_repo, resolved.remote)
+                if remote_url:
+                    github_base = _github_url_from_remote(remote_url)
+                    if github_base:
+                        commit_url = f"{github_base}/commit/{short_hash}"
+                        github_links.append((alias, commit_url))
+            else:
+                status_line = _display_attached_status(
+                    alias, spec, resolved, worktree_path, max_alias_len
+                )
+                if first_attached_branch is None:
+                    first_attached_branch = resolved.local_branch
+                remote_url = get_remote_url(bare_repo, resolved.remote)
+                if remote_url:
+                    github_base = _github_url_from_remote(remote_url)
+                    if github_base:
+                        branch_url = f"{github_base}/tree/{resolved.local_branch}"
+                        github_links.append((alias, branch_url))
+            print(status_line)
+        except subprocess.CalledProcessError:
+            print(f"        {alias}:{padding}{_c('(error)', 31)}")
+
+    print("    " + _c("links", 2))
+    if first_attached_branch:
+        runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
+        runbot_text = _osc8(runbot_url, first_attached_branch)
+        print(f"        runbot: {runbot_text}")
+    for link_alias, link_url in github_links:
+        link_padding = " " * (max_alias_len - len(link_alias) + 1)
+        print(f"        {link_alias}:{link_padding}{_osc8(link_url, link_url)}")
+
+    print()
 
 
 def _report_conflict(alias: str, worktree_path: Path, onto_ref: str) -> None:
+    """Print conflict resolution instructions."""
     print(
         f"\n  {_c('CONFLICT', 31)} in {_c(alias, 1)} rebasing onto {onto_ref}",
         file=sys.stderr,
@@ -785,6 +1000,7 @@ def _report_conflict(alias: str, worktree_path: Path, onto_ref: str) -> None:
 
 @dataclass
 class RebasePlan:
+    """Plan for rebasing a single repo."""
     alias: str
     track_ref: str
     upstream: str | None
@@ -800,6 +1016,7 @@ class RebasePlan:
 def _analyze_repo_for_rebase(
     worktree: Path, track_ref: str, upstream: str | None, alias: str, is_detached: bool
 ) -> RebasePlan:
+    """Analyze the rebase situation for a single repo."""
     rebase_merge = worktree / ".git" / "rebase-merge"
     has_conflicts = rebase_merge.exists()
 
@@ -834,6 +1051,7 @@ def _analyze_repo_for_rebase(
 
 
 def _display_rebase_summary(plans: list[RebasePlan]) -> None:
+    """Display rebase summary for all repos."""
     for p in plans:
         parts = [p.track_ref]
         if p.upstream:
@@ -874,6 +1092,7 @@ def _recover_with_cherry_pick(worktree: Path, upstream: str, commits: list[str])
 
 
 def _do_rebase(worktree: Path, upstream: str | None, track_ref: str) -> bool:
+    """Execute rebase onto upstream then track_ref. Returns True on success."""
     if upstream:
         result = git_rebase(worktree, upstream)
         if result.returncode != 0:
@@ -882,180 +1101,123 @@ def _do_rebase(worktree: Path, upstream: str | None, track_ref: str) -> bool:
     return result.returncode == 0
 
 
-def cmd_rebase(config: Config, name: str) -> None:
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
-    workspaces = [ws for ws in config.workspaces if ws.name == name]
-    if not workspaces:
-        ws_dir = config.root_dir / "workspaces" / name
-        if ws_dir.exists():
-            ws = _deduce_workspace_state(ws_dir, config)
-            warn_if_drifted(None, ws_dir)
-            workspaces = [ws]
-        else:
-            print(f"No workspace named '{name}'", file=sys.stderr)
-            sys.exit(1)
+def cmd_rebase(config: Config, workspace: str | None = None) -> None:
+    """Fetch and rebase all repos in the current workspace."""
+    ws_dir, ws = resolve_workspace(config, name=workspace)
 
-    for ws in workspaces:
-        ws_dir = config.root_dir / "workspaces" / ws.name
+    warn_if_drifted(ws, ws_dir)
 
-        warn_if_drifted(ws, ws_dir)
+    resolved_tracks, resolved_upstreams = _fetch_workspace_refs(
+        ws, ws_dir, config, fetch_upstreams=True,
+        resolve_fn=resolve_spec, spinner_prefix="Preparing",
+    )
 
-        resolved_tracks: dict[str, str] = {}
-        resolved_upstreams: dict[str, str] = {}
+    plans: list[RebasePlan] = []
+    for alias, spec in ws.repos.items():
+        worktree = ws_dir / alias
+        if not worktree.exists():
+            continue
+        track_ref = resolved_tracks[alias]
+        upstream = resolved_upstreams.get(alias)
+        plans.append(_analyze_repo_for_rebase(worktree, track_ref, upstream, alias, spec.is_detached))
 
-        for alias, spec in ws.repos.items():
-            _print_spinner(f"Preparing {alias}", _spinner())
+    if not plans:
+        return
 
-            alias_remotes = config.remotes.get(alias, {})
-            bare_repo = bare_repos_dir / f"{alias}.git"
-            track_spec = BranchSpec(spec.base_ref)
+    print(_c(f"[{ws_dir.name}]", 1, 36))
+    _display_rebase_summary(plans)
 
-            try:
-                resolved_track = resolve_spec(bare_repo, track_spec, alias_remotes)
-                refspec = f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"
-                _print_spinner(f"Preparing {alias}", _spinner())
-                result = subprocess.run(
-                    ["git", "-C", str(bare_repo), "fetch", resolved_track.remote, refspec],
-                    capture_output=True,
-                )
-                if result.returncode != 0:
-                    err = result.stderr.decode().strip() if result.stderr else "unknown"
-                    _clear_spinner_line(f"Preparing {alias}")
-                    _print_git_result(alias, "fetch", [resolved_track.remote, refspec], False, err)
-                    resolved_tracks[alias] = resolved_track.base_ref
-                else:
-                    _clear_spinner_line(f"Preparing {alias}")
-                    _print_git_result(alias, "fetch", [resolved_track.remote, refspec], True)
-                    resolved_tracks[alias] = resolved_track.base_ref
+    has_rewritten_no_fork = any(
+        p.upstream_rewritten and p.fork_point is None
+        for p in plans
+    )
+    if has_rewritten_no_fork:
+        error_label = _c("Error:", 31)
+        print(f"\n  {error_label} Cannot recover some repos - fork-point not found.", file=sys.stderr)
+        print("  Manual recovery required:", file=sys.stderr)
+        for p in plans:
+            if p.upstream_rewritten and p.fork_point is None:
+                print(f"    {p.alias}:", file=sys.stderr)
+                print("      git reflog HEAD | head -20  # find previous state", file=sys.stderr)
+                print("      git cherry-pick <commit>...  # manually reapply", file=sys.stderr)
+        print()
 
-                if not spec.is_detached:
-                    resolved_full = resolve_spec(bare_repo, spec, alias_remotes)
-                    if resolved_full.base_ref != resolved_track.base_ref:
-                        _print_spinner(f"Preparing {alias}", _spinner())
-                        full_refspec = f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}"
-                        result = subprocess.run(
-                            ["git", "-C", str(bare_repo), "fetch", "-f", resolved_full.remote, full_refspec],
-                            capture_output=True,
-                        )
-                        if result.returncode != 0:
-                            err = result.stderr.decode().strip() if result.stderr else "unknown"
-                            _clear_spinner_line(f"Preparing {alias}")
-                            _print_git_result(alias, "fetch", [resolved_full.remote, full_refspec], False, err)
-                        else:
-                            _clear_spinner_line(f"Preparing {alias}")
-                            _print_git_result(alias, "fetch", [resolved_full.remote, full_refspec], True)
-                        resolved_upstreams[alias] = resolved_full.base_ref
-            except Exception as e:
-                _clear_spinner_line(f"Preparing {alias}")
-                _print_git_result(alias, "fetch", ["?"], False, str(e))
-                resolved_tracks[alias] = spec.base_ref
+    has_recoverable = any(
+        p.upstream_rewritten and p.fork_point is not None
+        for p in plans
+    )
+    if has_recoverable:
+        recovery_label = _c("Recovery:", 33)
+        print(f"\n  {recovery_label} reset --hard + cherry-pick for rewritten upstreams", file=sys.stderr)
+        for p in plans:
+            if p.upstream_rewritten and p.fork_point:
+                print(f"    {p.alias}: {len(p.commits_to_reapply)} commits to reapply", file=sys.stderr)
 
-        plans: list[RebasePlan] = []
-        for alias, spec in ws.repos.items():
-            worktree = ws_dir / alias
-            if not worktree.exists():
-                continue
-            track_ref = resolved_tracks[alias]
-            upstream = resolved_upstreams.get(alias)
-            plans.append(_analyze_repo_for_rebase(worktree, track_ref, upstream, alias, spec.is_detached))
+    has_warnings = any(
+        p.unpushed_commits > 0 and p.upstream and not p.upstream_rewritten
+        for p in plans
+    )
+    if has_warnings:
+        warning_label = _c("Warning:", 33)
+        print(f"\n  {warning_label} unpushed commits may cause conflicts", file=sys.stderr)
 
-        if not plans:
+    try:
+        response = input("\nProceed? [Y/n] ")
+    except EOFError:
+        response = ""
+
+    if response.lower() == "n":
+        print("Aborted.")
+        return
+
+    failed = []
+    for plan in plans:
+        worktree = ws_dir / plan.alias
+
+        if plan.has_conflicts:
+            print(
+                f"  Skipping {plan.alias}: rebase already in progress",
+                file=sys.stderr,
+            )
             continue
 
-        print(_c(f"[{ws.name}]", 1, 36))
-        _display_rebase_summary(plans)
+        if plan.upstream_rewritten and plan.fork_point is None:
+            print(
+                f"  Skipping {plan.alias}: no fork-point, manual recovery required",
+                file=sys.stderr,
+            )
+            continue
 
-        has_rewritten_no_fork = any(
-            p.upstream_rewritten and p.fork_point is None
-            for p in plans
-        )
-        if has_rewritten_no_fork:
-            error_label = _c("Error:", 31)
-            print(f"\n  {error_label} Cannot recover some repos - fork-point not found.", file=sys.stderr)
-            print("  Manual recovery required:", file=sys.stderr)
-            for p in plans:
-                if p.upstream_rewritten and p.fork_point is None:
-                    print(f"    {p.alias}:", file=sys.stderr)
-                    print("      git reflog HEAD | head -20  # find previous state", file=sys.stderr)
-                    print("      git cherry-pick <commit>...  # manually reapply", file=sys.stderr)
-            print()
+        print(f"  {plan.alias}:")
 
-        has_recoverable = any(
-            p.upstream_rewritten and p.fork_point is not None
-            for p in plans
-        )
-        if has_recoverable:
-            recovery_label = _c("Recovery:", 33)
-            print(f"\n  {recovery_label} reset --hard + cherry-pick for rewritten upstreams", file=sys.stderr)
-            for p in plans:
-                if p.upstream_rewritten and p.fork_point:
-                    print(f"    {p.alias}: {len(p.commits_to_reapply)} commits to reapply", file=sys.stderr)
-
-        has_warnings = any(
-            p.unpushed_commits > 0 and p.upstream and not p.upstream_rewritten
-            for p in plans
-        )
-        if has_warnings:
-            warning_label = _c("Warning:", 33)
-            print(f"\n  {warning_label} unpushed commits may cause conflicts", file=sys.stderr)
-
-        try:
-            response = input("\nProceed? [Y/n] ")
-        except EOFError:
-            response = ""
-
-        if response.lower() == "n":
-            print("Aborted.")
-            return
-
-        failed = []
-        for plan in plans:
-            worktree = ws_dir / plan.alias
-
-            if plan.has_conflicts:
+        if plan.is_detached:
+            git_switch(worktree, plan.track_ref, detach=True, check=True)
+            print("    Done (detached).")
+        elif plan.upstream_rewritten and plan.fork_point and plan.upstream:
+            failed_commit = _recover_with_cherry_pick(
+                worktree, plan.upstream, plan.commits_to_reapply
+            )
+            if failed_commit:
                 print(
-                    f"  Skipping {plan.alias}: rebase already in progress",
+                    f"\n    {_c('CONFLICT', 31)} cherry-picking {failed_commit}",
                     file=sys.stderr,
                 )
-                continue
-
-            if plan.upstream_rewritten and plan.fork_point is None:
-                print(
-                    f"  Skipping {plan.alias}: no fork-point, manual recovery required",
-                    file=sys.stderr,
-                )
-                continue
-
-            print(f"  {plan.alias}:")
-
-            if plan.is_detached:
-                git_switch(worktree, plan.track_ref, detach=True, check=True)
-                print("    Done (detached).")
-            elif plan.upstream_rewritten and plan.fork_point and plan.upstream:
-                failed_commit = _recover_with_cherry_pick(
-                    worktree, plan.upstream, plan.commits_to_reapply
-                )
-                if failed_commit:
-                    print(
-                        f"\n    {_c('CONFLICT', 31)} cherry-picking {failed_commit}",
-                        file=sys.stderr,
-                    )
-                    print("    resolve conflicts, then:", file=sys.stderr)
-                    print(f"      cd {worktree}", file=sys.stderr)
-                    print("      git cherry-pick --continue", file=sys.stderr)
-                    print("    or abort:", file=sys.stderr)
-                    print("      git cherry-pick --abort\n", file=sys.stderr)
-                    failed.append(plan.alias)
-                else:
-                    print("    Done (recovered).")
+                print("    resolve conflicts, then:", file=sys.stderr)
+                print(f"      cd {worktree}", file=sys.stderr)
+                print("      git cherry-pick --continue", file=sys.stderr)
+                print("    or abort:", file=sys.stderr)
+                print("      git cherry-pick --abort\n", file=sys.stderr)
+                failed.append(plan.alias)
             else:
-                if not _do_rebase(worktree, plan.upstream, plan.track_ref):
-                    _report_conflict(
-                        plan.alias, worktree, plan.upstream or plan.track_ref
-                    )
-                    failed.append(plan.alias)
-                else:
-                    print("    Done.")
+                print("    Done (recovered).")
+        else:
+            if not _do_rebase(worktree, plan.upstream, plan.track_ref):
+                _report_conflict(
+                    plan.alias, worktree, plan.upstream or plan.track_ref
+                )
+                failed.append(plan.alias)
+            else:
+                print("    Done.")
 
-        if failed:
-            sys.exit(1)
+    if failed:
+        sys.exit(1)
