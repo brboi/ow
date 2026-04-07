@@ -779,7 +779,7 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
         capture_output=True, text=True,
     )
     if branch_result.returncode == 0:
-        all_branches = {b.strip().lstrip("* ") for b in branch_result.stdout.splitlines() if b.strip()}
+        all_branches = {b.strip().lstrip("*+ ") for b in branch_result.stdout.splitlines() if b.strip()}
         orphaned = all_branches - used_branches
         if orphaned:
             for branch in sorted(orphaned):
