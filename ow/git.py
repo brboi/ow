@@ -26,6 +26,22 @@ def ordered_remotes(alias_remotes: dict[str, RemoteConfig]) -> list[str]:
     return result
 
 
+def _get_bare_config(bare_repo: Path) -> dict[str, str]:
+    """Read all local git config as a dict via a single subprocess."""
+    result = subprocess.run(
+        ["git", "-C", str(bare_repo), "config", "--list", "--local"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return {}
+    config: dict[str, str] = {}
+    for line in result.stdout.strip().split("\n"):
+        if "=" in line:
+            key, _, value = line.partition("=")
+            config[key] = value
+    return config
+
+
 def ensure_bare_repo(
     alias: str,
     remotes: dict[str, RemoteConfig],
@@ -46,24 +62,23 @@ def ensure_bare_repo(
             check=True,
         )
 
-    # Configure non-origin remotes (idempotent)
+    # Configure non-origin remotes (skip writes when values already match)
+    current_config = _get_bare_config(bare_repo)
     for remote_name in ordered_remotes(remotes):
         remote_cfg = remotes[remote_name]
+        desired: dict[str, str] = {}
         if remote_name != "origin":
-            run_cmd(
-                ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.url", remote_cfg.url],
-                quiet=True, check=True, label=alias,
-            )
+            desired[f"remote.{remote_name}.url"] = remote_cfg.url
         if remote_cfg.pushurl:
-            run_cmd(
-                ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.pushurl", remote_cfg.pushurl],
-                quiet=True, check=True, label=alias,
-            )
+            desired[f"remote.{remote_name}.pushurl"] = remote_cfg.pushurl
         if remote_cfg.fetch:
-            run_cmd(
-                ["git", "-C", str(bare_repo), "config", f"remote.{remote_name}.fetch", remote_cfg.fetch],
-                quiet=True, check=True, label=alias,
-            )
+            desired[f"remote.{remote_name}.fetch"] = remote_cfg.fetch
+        for key, value in desired.items():
+            if current_config.get(key) != value:
+                run_cmd(
+                    ["git", "-C", str(bare_repo), "config", key, value],
+                    quiet=True, check=True, label=alias,
+                )
 
 
 def ensure_ref(bare_repo: Path, remote: str, branch: str) -> None:
@@ -156,16 +171,28 @@ def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
     return str(worktree_path) in result.stdout
 
 
-def resolve_spec_local(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, RemoteConfig]) -> BranchSpec:
+def get_all_remote_refs(bare_repo: Path) -> set[str]:
+    """Return all remote refs as short names (e.g. 'origin/master') via a single subprocess."""
+    result = subprocess.run(
+        ["git", "-C", str(bare_repo), "for-each-ref", "--format=%(refname:short)", "refs/remotes/"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return set()
+    return {line for line in result.stdout.strip().split("\n") if line}
+
+
+def resolve_spec_local(
+    bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, RemoteConfig],
+    *, refs: set[str] | None = None,
+) -> BranchSpec:
     """Find which remote has spec.branch in local refs (no fetch). Raises RuntimeError if not found."""
+    if refs is None:
+        refs = get_all_remote_refs(bare_repo)
     remotes_to_try = [spec.remote] + [r for r in ordered_remotes(alias_remotes) if r != spec.remote]
     for remote in remotes_to_try:
-        ref = f"refs/remotes/{remote}/{spec.branch}"
-        result = subprocess.run(
-            ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
-            capture_output=True,
-        )
-        if result.returncode == 0:
+        candidate = f"{remote}/{spec.branch}"
+        if candidate in refs:
             return BranchSpec(f"{remote}/{spec.branch}", spec.local_branch)
     raise RuntimeError(f"Branch '{spec.branch}' not found in local refs")
 
@@ -306,6 +333,7 @@ def detach_worktree(worktree_path: Path, base_ref: str) -> None:
 def get_remote_ref_for_branch(
     repo: Path, local_branch: str, alias_remotes: dict,
     exclude_ref: str | None = None, base_remote: str | None = None,
+    *, refs: set[str] | None = None,
 ) -> str | None:
     """Check all ow.toml-configured remotes for refs/remotes/{remote}/{local_branch}.
 
@@ -314,7 +342,10 @@ def get_remote_ref_for_branch(
     base_remote is checked last so fork remotes are preferred over the upstream.
 
     ``repo`` can be a bare repo or a worktree — any git repo path works.
+    If ``refs`` is provided, does pure in-memory lookup instead of subprocess calls.
     """
+    if refs is None:
+        refs = get_all_remote_refs(repo)
     remotes = ordered_remotes(alias_remotes)
     if base_remote and base_remote in remotes:
         remotes.remove(base_remote)
@@ -323,12 +354,7 @@ def get_remote_ref_for_branch(
         candidate = f"{remote}/{local_branch}"
         if candidate == exclude_ref:
             continue
-        result = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify",
-             f"refs/remotes/{remote}/{local_branch}"],
-            capture_output=True,
-        )
-        if result.returncode == 0:
+        if candidate in refs:
             return candidate
     return None
 

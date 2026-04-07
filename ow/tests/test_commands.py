@@ -89,13 +89,17 @@ def test_cmd_status_drift_warns(tmp_path, capsys):
     write_ow_config(ws_dir, ["common"], {"community": "master..my-feature"})
     config = _make_config(root_dir=tmp_path)
 
-    track_run = _make_subprocess_mock()
+    resolved_spec = BranchSpec("origin/master")
+    fetch_return = ({}, {}, {"community": resolved_spec})
 
     with (
         patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"),
-        patch("ow.workspace.resolve_spec_local", return_value=BranchSpec("origin/master")),
-        patch("ow.workspace.subprocess.run", side_effect=track_run),
-        patch("ow.git.subprocess.run", side_effect=track_run),
+        patch("ow.workspace._fetch_workspace_refs", return_value=fetch_return),
+        patch("ow.workspace.get_all_remote_refs", return_value={"origin/master"}),
+        patch("ow.workspace._gather_repo_status", return_value=MagicMock(
+            status_line="        community: origin/master", first_attached_branch=None, github_link=None,
+        )),
+        patch("ow.workspace.parallel_per_repo", side_effect=lambda tasks: {k: fn() for k, fn in tasks.items()}),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
         cmd_status(config)
@@ -114,19 +118,26 @@ def test_cmd_status_fetches_before_display(tmp_path):
     write_ow_config(ws_dir, ["common"], {"community": "master"})
     config = _make_config(root_dir=tmp_path)
 
-    fetch_calls: list = []
-    track_run = _make_subprocess_mock(track_calls={"fetch": fetch_calls})
+    fetch_called = [False]
+    resolved_spec = BranchSpec("origin/master")
+
+    def mock_fetch(*args, **kwargs):
+        fetch_called[0] = True
+        return ({"community": "origin/master"}, {}, {"community": resolved_spec})
 
     with (
         patch("ow.workspace.get_worktree_branch", return_value=None),  # detached = no drift
-        patch("ow.workspace.resolve_spec_local", return_value=BranchSpec("origin/master")),
-        patch("ow.workspace.subprocess.run", side_effect=track_run),
-        patch("ow.git.subprocess.run", side_effect=track_run),
+        patch("ow.workspace._fetch_workspace_refs", side_effect=mock_fetch),
+        patch("ow.workspace.get_all_remote_refs", return_value={"origin/master"}),
+        patch("ow.workspace._gather_repo_status", return_value=MagicMock(
+            status_line="        community: origin/master", first_attached_branch=None, github_link=None,
+        )),
+        patch("ow.workspace.parallel_per_repo", side_effect=lambda tasks: {k: fn() for k, fn in tasks.items()}),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
         cmd_status(config)
 
-    assert any("fetch" in c for c in fetch_calls)
+    assert fetch_called[0]
 
 
 # ---------------------------------------------------------------------------
