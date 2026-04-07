@@ -717,9 +717,9 @@ def _check_duplicate_branches(new_repos: dict[str, BranchSpec], config: Config) 
                     sys.exit(1)
 
 
-def cmd_update(config: Config) -> None:
+def cmd_update(config: Config, workspace: str | None = None) -> None:
     """Re-render templates and materialize worktrees for the current workspace."""
-    ws_dir, ws = resolve_workspace(config)
+    ws_dir, ws = resolve_workspace(config, name=workspace)
     _, successful, errors = _ensure_workspace_materialized(ws, config, ws_dir)
     _apply_templates(ws, config, ws_dir)
 
