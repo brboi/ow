@@ -113,6 +113,9 @@ def main() -> None:
     p_update = subparsers.add_parser(
         "update", help="Re-render templates and materialize worktrees"
     )
+    p_update.add_argument(
+        "workspace", nargs="?", help="Workspace name (default: resolve from cwd)"
+    ).completer = _complete_workspace_name  # type: ignore[attr-defined]
 
     p_status = subparsers.add_parser("status", help="Show workspace status")
     p_status.add_argument(
@@ -160,7 +163,7 @@ community.origin.url = "git@github.com:odoo/odoo.git"
 
         cmd_create(config, name=args.name, templates=args.template, repos=repo_pairs, configuration=args.configuration)
     elif args.command == "update":
-        cmd_update(config)
+        cmd_update(config, workspace=args.workspace)
     elif args.command == "status":
         cmd_status(config, workspace=args.workspace)
     elif args.command == "rebase":

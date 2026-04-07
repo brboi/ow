@@ -78,6 +78,25 @@ def test_main_update(tmp_path):
     mock_update.assert_called_once()
 
 
+def test_main_update_with_workspace(tmp_path):
+    """ow update myws calls cmd_update with workspace="myws"."""
+    from ow.__main__ import main
+
+    (tmp_path / "ow.toml").write_text(
+        '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
+    )
+
+    with (
+        patch("ow.__main__.find_root", return_value=tmp_path),
+        patch("ow.__main__.cmd_update") as mock_update,
+        patch.object(sys, "argv", ["ow", "update", "myws"]),
+    ):
+        main()
+
+    mock_update.assert_called_once()
+    assert mock_update.call_args.kwargs["workspace"] == "myws"
+
+
 # ---------------------------------------------------------------------------
 # test_main_status_with_workspace
 # ---------------------------------------------------------------------------
