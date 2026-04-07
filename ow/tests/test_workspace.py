@@ -1108,4 +1108,23 @@ def test_analyze_repo_detached_worktree(tmp_path):
         plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", True)
 
     assert plan.is_detached is True
-    assert mock_fork.call_count == 0  # no fork-point for detached
+    assert mock_fork.call_count == 0
+
+
+def test_prune_bare_repo_strips_plus_prefix(tmp_path):
+    """Branch names with + prefix (worktree branches) are correctly parsed."""
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+
+    wt_result = MagicMock(returncode=0)
+    wt_result.stdout = "worktree /path/to/ws/community\nHEAD abc123\nbranch refs/heads/main-parrot\n"
+
+    branch_result = MagicMock(returncode=0)
+    branch_result.stdout = "+ main-parrot\n  other-branch\n"
+
+    with patch("ow.workspace.subprocess.run", side_effect=[MagicMock(returncode=0), wt_result, branch_result, MagicMock(returncode=0)]):
+        from ow.workspace import _prune_bare_repo
+        result = _prune_bare_repo(bare_repo)
+
+    assert "main-parrot" not in result.deleted_branches
+    assert "other-branch" in result.deleted_branches
