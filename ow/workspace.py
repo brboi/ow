@@ -28,6 +28,7 @@ from ow.git import (
     create_worktree,
     detach_worktree,
     ensure_bare_repo,
+    get_all_remote_refs,
     get_remote_ref_for_branch,
     get_remote_url,
     get_rev_list_count,
@@ -312,13 +313,22 @@ def check_drift(worktree_path: Path, spec: BranchSpec, alias: str) -> DriftResul
 
 def warn_if_drifted(ws: WorkspaceConfig, ws_dir: Path) -> None:
     """Display warnings for drift; never exit."""
-    drifted = []
+    drift_tasks: dict[str, Any] = {}
     for alias, spec in ws.repos.items():
         worktree_path = ws_dir / alias
         if not worktree_path.exists():
             continue
-        result = check_drift(worktree_path, spec, alias)
-        if result.is_drifted:
+        drift_tasks[alias] = (lambda w=worktree_path, s=spec, a=alias: check_drift(w, s, a))
+
+    if not drift_tasks:
+        return
+
+    drift_results = parallel_per_repo(drift_tasks)
+
+    drifted = []
+    for alias in ws.repos:
+        result = drift_results.get(alias)
+        if result and not isinstance(result, Exception) and result.is_drifted:
             drifted.append(result)
 
     if drifted:
@@ -731,6 +741,57 @@ def cmd_update(config: Config) -> None:
     print(f"\nWorkspace '{ws_dir.name}' updated.")
 
 
+class _PruneResult(NamedTuple):
+    alias: str
+    pruned_worktrees: bool
+    deleted_branches: list[str]
+
+
+def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
+    """Prune a single bare repo: clean worktrees and delete orphaned branches."""
+    alias = bare_repo.stem
+    pruned = False
+    deleted: list[str] = []
+
+    # 1. Worktree prune
+    result = subprocess.run(
+        ["git", "-C", str(bare_repo), "worktree", "prune"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        pruned = True
+
+    # 2. Delete local branches not attached to any worktree
+    wt_result = subprocess.run(
+        ["git", "-C", str(bare_repo), "worktree", "list", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    used_branches: set[str] = set()
+    if wt_result.returncode == 0:
+        for line in wt_result.stdout.splitlines():
+            if line.startswith("branch "):
+                branch_ref = line.split(" ", 1)[1]
+                if branch_ref.startswith("refs/heads/"):
+                    used_branches.add(branch_ref[len("refs/heads/"):])
+
+    branch_result = subprocess.run(
+        ["git", "-C", str(bare_repo), "branch", "--list"],
+        capture_output=True, text=True,
+    )
+    if branch_result.returncode == 0:
+        all_branches = {b.strip().lstrip("* ") for b in branch_result.stdout.splitlines() if b.strip()}
+        orphaned = all_branches - used_branches
+        if orphaned:
+            for branch in sorted(orphaned):
+                subprocess.run(
+                    ["git", "-C", str(bare_repo), "branch", "-D", branch],
+                    capture_output=True, text=True,
+                )
+            deleted = sorted(orphaned)
+
+    return _PruneResult(alias=alias, pruned_worktrees=pruned, deleted_branches=deleted)
+
+
 def cmd_prune(config: Config) -> None:
     """Clean up stale worktree references and orphaned branches from bare repos."""
     bare_repos_dir = config.root_dir / ".bare-git-repos"
@@ -738,47 +799,29 @@ def cmd_prune(config: Config) -> None:
         print("No bare repos found.")
         return
 
-    cleaned = False
-    for bare_repo in sorted(bare_repos_dir.glob("*.git")):
-        alias = bare_repo.stem
+    bare_repos = sorted(bare_repos_dir.glob("*.git"))
+    if not bare_repos:
+        print("No bare repos found.")
+        return
 
-        # 1. Worktree prune
-        result = subprocess.run(
-            ["git", "-C", str(bare_repo), "worktree", "prune"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
+    prune_tasks = {
+        repo.stem: (lambda r=repo: _prune_bare_repo(r))
+        for repo in bare_repos
+    }
+    prune_results = parallel_per_repo(prune_tasks)
+
+    cleaned = False
+    for repo in bare_repos:
+        alias = repo.stem
+        result = prune_results.get(alias)
+        if isinstance(result, Exception):
+            continue
+        if result.pruned_worktrees:
             print(f"  [{alias}] pruned stale worktrees")
             cleaned = True
-
-        # 2. Delete local branches not attached to any worktree
-        wt_result = subprocess.run(
-            ["git", "-C", str(bare_repo), "worktree", "list", "--porcelain"],
-            capture_output=True, text=True,
-        )
-        used_branches: set[str] = set()
-        if wt_result.returncode == 0:
-            for line in wt_result.stdout.splitlines():
-                if line.startswith("branch "):
-                    branch_ref = line.split(" ", 1)[1]
-                    if branch_ref.startswith("refs/heads/"):
-                        used_branches.add(branch_ref[len("refs/heads/"):])
-
-        branch_result = subprocess.run(
-            ["git", "-C", str(bare_repo), "branch", "--list"],
-            capture_output=True, text=True,
-        )
-        if branch_result.returncode == 0:
-            all_branches = {b.strip().lstrip("* ") for b in branch_result.stdout.splitlines() if b.strip()}
-            orphaned = all_branches - used_branches
-            if orphaned:
-                for branch in sorted(orphaned):
-                    subprocess.run(
-                        ["git", "-C", str(bare_repo), "branch", "-D", branch],
-                        capture_output=True, text=True,
-                    )
-                print(f"  [{alias}] deleted orphaned branches: {', '.join(sorted(orphaned))}")
-                cleaned = True
+        if result.deleted_branches:
+            print(f"  [{alias}] deleted orphaned branches: {', '.join(result.deleted_branches)}")
+            cleaned = True
 
     if not cleaned:
         print("All bare repos are clean.")
@@ -806,6 +849,8 @@ def _display_attached_status(
     resolved: BranchSpec,
     worktree_path: Path,
     max_alias_len: int,
+    *,
+    refs: set[str] | None = None,
 ) -> str:
     """Format status line for an attached worktree."""
     padding = " " * (max_alias_len - len(alias) + 1)
@@ -816,6 +861,7 @@ def _display_attached_status(
         {},
         exclude_ref=resolved.base_ref,
         base_remote=resolved.remote,
+        refs=refs,
     )
     if remote_ref:
         ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", remote_ref)
@@ -850,6 +896,7 @@ class _ResolveResult:
     track_ref: str
     upstream_ref: str | None
     fetch_jobs: list[_FetchJob]
+    resolved_spec: BranchSpec | None = None
 
 
 def _fetch_workspace_refs(
@@ -860,10 +907,10 @@ def _fetch_workspace_refs(
     fetch_upstreams: bool = False,
     resolve_fn=resolve_spec_local,
     spinner_prefix: str = "Checking",
-) -> tuple[dict[str, str], dict[str, str]]:
+) -> tuple[dict[str, str], dict[str, str], dict[str, BranchSpec]]:
     """Fetch refs for all workspace repos into their bare repos.
 
-    Returns (resolved_tracks, resolved_upstreams) dicts mapping alias -> base_ref.
+    Returns (resolved_tracks, resolved_upstreams, resolved_specs) dicts.
 
     Three-phase pipeline:
     1. Resolve specs per repo (parallel) — determines what to fetch
@@ -873,6 +920,7 @@ def _fetch_workspace_refs(
     bare_repos_dir = config.root_dir / ".bare-git-repos"
     resolved_tracks: dict[str, str] = {}
     resolved_upstreams: dict[str, str] = {}
+    resolved_specs: dict[str, BranchSpec] = {}
 
     # -- Phase 1: resolve specs per repo ----------------------------------
 
@@ -888,13 +936,14 @@ def _fetch_workspace_refs(
         refspec = f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"
         jobs.append(_FetchJob(bare_repo, resolved_track.remote, refspec))
 
+        resolved_spec = resolve_fn(bare_repo_path, spec, alias_remotes)
+
         upstream_ref = None
         if fetch_upstreams and not spec.is_detached:
-            resolved_full = resolve_fn(bare_repo_path, spec, alias_remotes)
-            if resolved_full.base_ref != resolved_track.base_ref:
-                full_refspec = f"{resolved_full.branch}:refs/remotes/{resolved_full.remote}/{resolved_full.branch}"
-                jobs.append(_FetchJob(bare_repo, resolved_full.remote, full_refspec, force=True))
-                upstream_ref = resolved_full.base_ref
+            if resolved_spec.base_ref != resolved_track.base_ref:
+                full_refspec = f"{resolved_spec.branch}:refs/remotes/{resolved_spec.remote}/{resolved_spec.branch}"
+                jobs.append(_FetchJob(bare_repo, resolved_spec.remote, full_refspec, force=True))
+                upstream_ref = resolved_spec.base_ref
             else:
                 upstream = get_upstream(worktree_path)
                 if upstream:
@@ -909,6 +958,7 @@ def _fetch_workspace_refs(
             track_ref=resolved_track.base_ref,
             upstream_ref=upstream_ref,
             fetch_jobs=jobs,
+            resolved_spec=resolved_spec,
         )
 
     resolve_tasks = {}
@@ -966,6 +1016,8 @@ def _fetch_workspace_refs(
         resolved_tracks[alias] = resolve.track_ref
         if resolve.upstream_ref:
             resolved_upstreams[alias] = resolve.upstream_ref
+        if resolve.resolved_spec:
+            resolved_specs[alias] = resolve.resolved_spec
 
         for i, job in enumerate(resolve.fetch_jobs):
             key = f"{alias}:{i}"
@@ -978,7 +1030,42 @@ def _fetch_workspace_refs(
             else:
                 _print_git_result(alias, "fetch", [job.remote, job.refspec], True)
 
-    return resolved_tracks, resolved_upstreams
+    return resolved_tracks, resolved_upstreams, resolved_specs
+
+
+class _StatusResult(NamedTuple):
+    status_line: str
+    first_attached_branch: str | None
+    github_link: tuple[str, str] | None
+
+
+def _gather_repo_status(
+    alias: str, spec: BranchSpec, resolved: BranchSpec,
+    worktree_path: Path, bare_repo: Path, max_alias_len: int,
+    refs: set[str],
+) -> _StatusResult:
+    """Gather all display data for one repo (runs in parallel)."""
+    if resolved.is_detached:
+        status_line = _display_detached_status(alias, spec, resolved, worktree_path, max_alias_len)
+        short_hash, _ = get_worktree_head(worktree_path)
+        remote_url = get_remote_url(bare_repo, resolved.remote)
+        link = None
+        if remote_url:
+            github_base = _github_url_from_remote(remote_url)
+            if github_base:
+                link = (alias, f"{github_base}/commit/{short_hash}")
+        return _StatusResult(status_line, None, link)
+    else:
+        status_line = _display_attached_status(
+            alias, spec, resolved, worktree_path, max_alias_len, refs=refs,
+        )
+        remote_url = get_remote_url(bare_repo, resolved.remote)
+        link = None
+        if remote_url:
+            github_base = _github_url_from_remote(remote_url)
+            if github_base:
+                link = (alias, f"{github_base}/tree/{resolved.local_branch}")
+        return _StatusResult(status_line, resolved.local_branch, link)
 
 
 def cmd_status(config: Config, workspace: str | None = None) -> None:
@@ -988,12 +1075,35 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
 
     warn_if_drifted(ws, ws_dir)
 
-    _fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
+    _, _, resolved_specs = _fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
 
     print(_c(f"[{ws_dir.name}]", 1, 36))
     print("    " + _c("branches", 2))
 
     max_alias_len = max((len(a) for a in ws.repos), default=0)
+
+    # Build parallel tasks for repos that exist and have resolved specs
+    status_tasks: dict[str, Any] = {}
+    for alias, spec in ws.repos.items():
+        worktree_path = ws_dir / alias
+        if not worktree_path.exists():
+            continue
+        resolved = resolved_specs.get(alias)
+        if resolved is None:
+            continue
+        bare_repo = bare_repos_dir / f"{alias}.git"
+        refs = get_all_remote_refs(bare_repo)
+        status_tasks[alias] = (
+            lambda a=alias, s=spec, r=resolved, w=worktree_path, b=bare_repo, rf=refs:
+            _gather_repo_status(a, s, r, w, b, max_alias_len, rf)
+        )
+
+    if status_tasks:
+        status_results = parallel_per_repo(status_tasks)
+    else:
+        status_results = {}
+
+    # Print results in config order
     first_attached_branch: str | None = None
     github_links: list[tuple[str, str]] = []
 
@@ -1004,46 +1114,21 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
             print(f"        {alias}:{padding}{_c('(not applied)', 2)}")
             continue
 
-        alias_remotes = config.remotes.get(alias, {})
-        bare_repo = bare_repos_dir / f"{alias}.git"
-
-        resolved = None
-        try:
-            resolved = resolve_spec_local(bare_repo, spec, alias_remotes)
-        except (RuntimeError, subprocess.CalledProcessError):
-            pass
-
+        resolved = resolved_specs.get(alias)
         if resolved is None:
             print(f"        {alias}:{padding}{_c('(error: could not resolve)', 31)}")
             continue
 
-        try:
-            if resolved.is_detached:
-                status_line = _display_detached_status(
-                    alias, spec, resolved, worktree_path, max_alias_len
-                )
-                short_hash, _ = get_worktree_head(worktree_path)
-                remote_url = get_remote_url(bare_repo, resolved.remote)
-                if remote_url:
-                    github_base = _github_url_from_remote(remote_url)
-                    if github_base:
-                        commit_url = f"{github_base}/commit/{short_hash}"
-                        github_links.append((alias, commit_url))
-            else:
-                status_line = _display_attached_status(
-                    alias, spec, resolved, worktree_path, max_alias_len
-                )
-                if first_attached_branch is None:
-                    first_attached_branch = resolved.local_branch
-                remote_url = get_remote_url(bare_repo, resolved.remote)
-                if remote_url:
-                    github_base = _github_url_from_remote(remote_url)
-                    if github_base:
-                        branch_url = f"{github_base}/tree/{resolved.local_branch}"
-                        github_links.append((alias, branch_url))
-            print(status_line)
-        except subprocess.CalledProcessError:
+        result = status_results.get(alias)
+        if isinstance(result, Exception):
             print(f"        {alias}:{padding}{_c('(error)', 31)}")
+            continue
+
+        print(result.status_line)
+        if first_attached_branch is None and result.first_attached_branch:
+            first_attached_branch = result.first_attached_branch
+        if result.github_link:
+            github_links.append(result.github_link)
 
     print("    " + _c("links", 2))
     if first_attached_branch:
@@ -1179,19 +1264,34 @@ def cmd_rebase(config: Config, workspace: str | None = None) -> None:
 
     warn_if_drifted(ws, ws_dir)
 
-    resolved_tracks, resolved_upstreams = _fetch_workspace_refs(
+    resolved_tracks, resolved_upstreams, _ = _fetch_workspace_refs(
         ws, ws_dir, config, fetch_upstreams=True,
         resolve_fn=resolve_spec, spinner_prefix="Preparing",
     )
 
-    plans: list[RebasePlan] = []
+    # Parallelize rebase analysis
+    analysis_tasks: dict[str, Any] = {}
     for alias, spec in ws.repos.items():
         worktree = ws_dir / alias
         if not worktree.exists():
             continue
         track_ref = resolved_tracks[alias]
         upstream = resolved_upstreams.get(alias)
-        plans.append(_analyze_repo_for_rebase(worktree, track_ref, upstream, alias, spec.is_detached))
+        analysis_tasks[alias] = (
+            lambda w=worktree, t=track_ref, u=upstream, a=alias, d=spec.is_detached:
+            _analyze_repo_for_rebase(w, t, u, a, d)
+        )
+
+    if analysis_tasks:
+        analysis_results = parallel_per_repo(analysis_tasks)
+    else:
+        analysis_results = {}
+
+    plans: list[RebasePlan] = []
+    for alias in ws.repos:
+        result = analysis_results.get(alias)
+        if result is not None and not isinstance(result, Exception):
+            plans.append(result)
 
     if not plans:
         return
