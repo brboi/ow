@@ -12,7 +12,10 @@ from ow.config import BranchSpec, RemoteConfig
 def run_cmd(args: list[str], quiet: bool = False, label: str | None = None, **kwargs) -> subprocess.CompletedProcess:
     if not quiet:
         if label:
-            print(f"  [{label}] {' '.join(args)}", file=sys.stderr)
+            display_args = args
+            if len(args) >= 3 and args[0] == "git" and args[1] == "-C":
+                display_args = ["git"] + args[3:]
+            print(f"  [{label}] {' '.join(display_args)}", file=sys.stderr)
         else:
             print(f"    $ {' '.join(args)}", file=sys.stderr)
     return subprocess.run(args, **kwargs)

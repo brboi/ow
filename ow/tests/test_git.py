@@ -66,6 +66,19 @@ def test_run_cmd_returns_completed_process():
     assert result.returncode == 0
 
 
+def test_run_cmd_hides_C_path(capsys):
+    """When git command has -C path, display strips it for cleaner output."""
+    with patch("ow.git.subprocess.run") as mock_run:
+        run_cmd(["git", "-C", "/path/to/repo", "fetch", "origin"], quiet=False, label="community", check=True)
+
+    captured = capsys.readouterr()
+    assert "[community] git fetch origin" in captured.err
+    assert "-C /path/to/repo" not in captured.err
+    mock_run.assert_called_once_with(
+        ["git", "-C", "/path/to/repo", "fetch", "origin"], check=True
+    )
+
+
 # ---------------------------------------------------------------------------
 # ordered_remotes
 # ---------------------------------------------------------------------------
