@@ -1,11 +1,9 @@
-from __future__ import annotations
-
 import textwrap
 
 import pytest
 
-from ow.config import WorkspaceConfig, write_workspace_config
-from ow.workspace import resolve_workspace
+from ow.utils.resolver import resolve_workspace
+from ow.utils.config import WorkspaceConfig, write_workspace_config
 
 
 class TestResolveWorkspace:

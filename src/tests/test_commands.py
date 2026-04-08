@@ -1,13 +1,12 @@
 import os
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ow.config import BranchSpec, Config
-from ow.workspace import cmd_create, cmd_rebase, cmd_status, cmd_update
-
+from ow.commands import cmd_create, cmd_prune, cmd_rebase, cmd_status, cmd_update
+from ow.utils.config import BranchSpec, Config, load_workspace_config, WorkspaceConfig, parse_branch_spec, write_workspace_config
 
 def _make_config(
     root_dir=None,
@@ -24,16 +23,12 @@ def _make_config(
 
 
 def write_ow_config(ws_dir: Path, templates: list[str], repos: dict[str, str], vars: dict | None = None) -> None:
-    """Write a .ow/config file in the workspace directory using the real writer."""
-    from ow.config import WorkspaceConfig, write_workspace_config, parse_branch_spec
-
     ws = WorkspaceConfig(
         repos={alias: parse_branch_spec(spec) for alias, spec in repos.items()},
         templates=templates,
         vars=vars or {},
     )
-    ow_config = ws_dir / ".ow" / "config"
-    write_workspace_config(ow_config, ws)
+    write_workspace_config(ws_dir / ".ow" / "config", ws)
 
 
 def _make_subprocess_mock(
@@ -41,38 +36,34 @@ def _make_subprocess_mock(
     rebase_fail_on: list[str] | None = None,
     track_calls: dict[str, list] | None = None,
 ) -> Any:
-    """Create a unified subprocess.run mock that works across both ow.workspace and ow.git.
-
-    Args:
-        rebase_fail_on: list of worktree path strings; rebase fails (returncode=1)
-                        when the worktree path (args[2]) matches one of these.
-                        Each worktree fails only once (tracked internally).
-        track_calls: optional dict with keys like "rebase", "switch", "fetch";
-                     matching calls get appended to the corresponding list.
-    """
     failed_rebases: set[str] = set()
 
     def side_effect(args, **kwargs):
         mock = MagicMock(returncode=0)
         mock.stdout = "0\t0\n"
-
         if track_calls is not None:
             if "rebase" in args and "rebase" in track_calls:
                 track_calls["rebase"].append(args[-1])
             if "switch" in args and "switch" in track_calls:
                 track_calls["switch"].append(list(args))
-            if "fetch" in args and "fetch" in track_calls:
-                track_calls["fetch"].append(list(args))
-
         if rebase_fail_on is not None and "rebase" in args:
             worktree = args[2] if len(args) > 2 else None
             if worktree in rebase_fail_on and worktree not in failed_rebases:
                 failed_rebases.add(worktree)
                 mock.returncode = 1
-
         return mock
 
     return side_effect
+
+
+def _mock_parallel_exec(tasks):
+    return {k: fn() for k, fn in tasks.items()}
+
+
+def _mock_fetch(tracks, upstreams, specs):
+    def _mock(ws, wsdir, config, **kw):
+        return (tracks, upstreams, specs)
+    return _mock
 
 
 # ---------------------------------------------------------------------------
@@ -80,26 +71,23 @@ def _make_subprocess_mock(
 # ---------------------------------------------------------------------------
 
 def test_cmd_status_drift_warns(tmp_path, capsys):
-    """cmd_status warns when drift is detected but continues."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
-    bare_repos_dir = tmp_path / ".bare-git-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master..my-feature"})
     config = _make_config(root_dir=tmp_path)
 
     resolved_spec = BranchSpec("origin/master")
-    fetch_return = ({}, {}, {"community": resolved_spec})
+    fetch_return = ({"community": "origin/master"}, {}, {"community": resolved_spec})
 
     with (
-        patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"),
-        patch("ow.workspace._fetch_workspace_refs", return_value=fetch_return),
-        patch("ow.workspace.get_all_remote_refs", return_value={"origin/master"}),
-        patch("ow.workspace._gather_repo_status", return_value=MagicMock(
+        patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"),
+        patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.refs.fetch_workspace_refs", return_value=fetch_return),
+        patch("ow.commands.status.get_all_remote_refs", return_value={"origin/master"}),
+        patch("ow.commands.status._gather_repo_status", return_value=MagicMock(
             status_line="        community: origin/master", first_attached_branch=None, github_link=None,
         )),
-        patch("ow.workspace.parallel_per_repo", side_effect=lambda tasks: {k: fn() for k, fn in tasks.items()}),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
         cmd_status(config)
@@ -109,30 +97,27 @@ def test_cmd_status_drift_warns(tmp_path, capsys):
 
 
 def test_cmd_status_fetches_before_display(tmp_path):
-    """cmd_status fetches track branch before displaying status."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
-    bare_repos_dir = tmp_path / ".bare-git-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master"})
     config = _make_config(root_dir=tmp_path)
 
     fetch_called = [False]
     resolved_spec = BranchSpec("origin/master")
 
-    def mock_fetch(*args, **kwargs):
+    def mock_fetch(*a, **kw):
         fetch_called[0] = True
         return ({"community": "origin/master"}, {}, {"community": resolved_spec})
 
     with (
-        patch("ow.workspace.get_worktree_branch", return_value=None),  # detached = no drift
-        patch("ow.workspace._fetch_workspace_refs", side_effect=mock_fetch),
-        patch("ow.workspace.get_all_remote_refs", return_value={"origin/master"}),
-        patch("ow.workspace._gather_repo_status", return_value=MagicMock(
+        patch("ow.utils.drift.get_worktree_branch", return_value=None),
+        patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.commands.status.fetch_workspace_refs", side_effect=mock_fetch),
+        patch("ow.commands.status.get_all_remote_refs", return_value={"origin/master"}),
+        patch("ow.commands.status._gather_repo_status", return_value=MagicMock(
             status_line="        community: origin/master", first_attached_branch=None, github_link=None,
         )),
-        patch("ow.workspace.parallel_per_repo", side_effect=lambda tasks: {k: fn() for k, fn in tasks.items()}),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
         cmd_status(config)
@@ -145,22 +130,21 @@ def test_cmd_status_fetches_before_display(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_cmd_rebase_drift_warns(tmp_path, capsys):
-    """cmd_rebase warns when drift is detected but continues."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
-    bare_repos_dir = tmp_path / ".bare-git-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master..my-feature"})
     config = _make_config(root_dir=tmp_path)
 
-    track_run = _make_subprocess_mock()
+    resolved_spec = BranchSpec("origin/master")
+    fetch_return = ({"community": "origin/master"}, {}, {"community": resolved_spec})
 
     with (
-        patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"),
-        patch("ow.workspace.resolve_spec", return_value=BranchSpec("origin/master")),
-        patch("ow.git.subprocess.run", side_effect=track_run),
-        patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"),
+        patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.refs.fetch_workspace_refs", return_value=fetch_return),
+        patch("ow.commands.rebase.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.git.subprocess.run", side_effect=_make_subprocess_mock()),
         patch("builtins.input", return_value=""),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
@@ -171,23 +155,23 @@ def test_cmd_rebase_drift_warns(tmp_path, capsys):
 
 
 def test_cmd_rebase_detached_switches(tmp_path):
-    """Detached repos get switch --detach to latest track ref."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
-    bare_repos_dir = tmp_path / ".bare-git-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master"})
     config = _make_config(root_dir=tmp_path)
 
     switch_calls: list = []
-    track_run = _make_subprocess_mock(track_calls={"switch": switch_calls})
+    resolved_spec = BranchSpec("origin/master")
+    fetch_return = ({"community": "origin/master"}, {}, {"community": resolved_spec})
+    mock_sub = _make_subprocess_mock(track_calls={"switch": switch_calls})
 
     with (
-        patch("ow.workspace.get_worktree_branch", return_value=None),
-        patch("ow.workspace.resolve_spec", return_value=BranchSpec("origin/master")),
-        patch("ow.git.subprocess.run", side_effect=track_run),
-        patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("ow.utils.drift.get_worktree_branch", return_value=None),
+        patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.refs.fetch_workspace_refs", return_value=fetch_return),
+        patch("ow.commands.rebase.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.git.subprocess.run", side_effect=mock_sub),
         patch("builtins.input", return_value=""),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
@@ -197,30 +181,33 @@ def test_cmd_rebase_detached_switches(tmp_path):
 
 
 def test_cmd_rebase_two_step_rebase(tmp_path):
-    """When work branch is pushed to a remote, rebase onto both upstream and track."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
-    bare_repos_dir = tmp_path / ".bare-git-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master..my-feature"})
     config = _make_config(root_dir=tmp_path)
 
     rebase_targets: list = []
     track_run = _make_subprocess_mock(track_calls={"rebase": rebase_targets})
 
-    # Return a fixed resolved spec: the work branch IS pushed to dev remote
-    # so the track ref is dev/my-feature, upstream is origin/master
-    def mock_resolve(bare_repo, spec, remotes):
+    def mock_spec(bare_repo, spec, remotes):
         if spec.local_branch == "my-feature":
             return BranchSpec("dev/my-feature", "my-feature")
         return BranchSpec("origin/master")
 
+    fetch_return = (
+        {"community": "dev/my-feature"},
+        {"community": "origin/master"},
+        {"community": BranchSpec("dev/my-feature", "my-feature")},
+    )
+
     with (
-        patch("ow.workspace.get_worktree_branch", return_value="my-feature"),
-        patch("ow.workspace.resolve_spec", side_effect=mock_resolve),
-        patch("ow.git.subprocess.run", side_effect=track_run),
-        patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"),
+        patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.refs.fetch_workspace_refs", return_value=fetch_return),
+        patch("ow.commands.rebase.resolve_spec", side_effect=mock_spec),
+        patch("ow.commands.rebase.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.git.subprocess.run", side_effect=track_run),
         patch("builtins.input", return_value=""),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
@@ -230,13 +217,11 @@ def test_cmd_rebase_two_step_rebase(tmp_path):
 
 
 def test_cmd_rebase_conflict_reports_and_continues(tmp_path, capsys):
-    """On conflict, report and continue to other repos."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     (ws_dir / "enterprise").mkdir(parents=True)
-    bare_repos_dir = tmp_path / ".bare-git-repos"
-    (bare_repos_dir / "community.git").mkdir(parents=True)
-    (bare_repos_dir / "enterprise.git").mkdir(parents=True)
+    (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
+    (tmp_path / ".bare-git-repos" / "enterprise.git").mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {
         "community": "master..my-feature",
         "enterprise": "master..my-feature",
@@ -246,14 +231,23 @@ def test_cmd_rebase_conflict_reports_and_continues(tmp_path, capsys):
     community_path = str(ws_dir / "community")
     track_run = _make_subprocess_mock(rebase_fail_on=[community_path])
 
-    def mock_resolve(bare_repo, spec, remotes):
+    def mock_spec(bare_repo, spec, remotes):
         return BranchSpec("origin/master", spec.local_branch)
 
+    spec = BranchSpec("origin/master", "my-feature")
+    fetch_return = (
+        {"community": "origin/master", "enterprise": "origin/master"},
+        {"community": "origin/master", "enterprise": "origin/master"},
+        {"community": spec, "enterprise": spec},
+    )
+
     with (
-        patch("ow.workspace.get_worktree_branch", return_value="my-feature"),
-        patch("ow.workspace.resolve_spec", side_effect=mock_resolve),
-        patch("ow.git.subprocess.run", side_effect=track_run),
-        patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"),
+        patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.refs.fetch_workspace_refs", return_value=fetch_return),
+        patch("ow.commands.rebase.resolve_spec", side_effect=mock_spec),
+        patch("ow.commands.rebase.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.git.subprocess.run", side_effect=track_run),
         patch("builtins.input", return_value=""),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
@@ -265,26 +259,28 @@ def test_cmd_rebase_conflict_reports_and_continues(tmp_path, capsys):
 
 
 def test_cmd_rebase_no_upstream_when_not_pushed(tmp_path):
-    """When work branch is not on any remote, only rebase onto track."""
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
-    bare_repos_dir = tmp_path / ".bare-git-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master..my-feature"})
     config = _make_config(root_dir=tmp_path)
 
     rebase_targets: list = []
     track_run = _make_subprocess_mock(track_calls={"rebase": rebase_targets})
 
-    def mock_resolve(bare_repo, spec, remotes):
+    def mock_spec(bare_repo, spec, remotes):
         return BranchSpec("origin/master", spec.local_branch)
 
+    spec = BranchSpec("origin/master", "my-feature")
+    fetch_return = ({"community": "origin/master"}, {}, {"community": spec})
+
     with (
-        patch("ow.workspace.get_worktree_branch", return_value="my-feature"),
-        patch("ow.workspace.resolve_spec", side_effect=mock_resolve),
-        patch("ow.git.subprocess.run", side_effect=track_run),
-        patch("ow.workspace.subprocess.run", side_effect=track_run),
+        patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"),
+        patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.refs.fetch_workspace_refs", return_value=fetch_return),
+        patch("ow.commands.rebase.resolve_spec", side_effect=mock_spec),
+        patch("ow.commands.rebase.parallel_per_repo", side_effect=_mock_parallel_exec),
+        patch("ow.utils.git.subprocess.run", side_effect=track_run),
         patch("builtins.input", return_value=""),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
@@ -297,15 +293,12 @@ def test_cmd_rebase_no_upstream_when_not_pushed(tmp_path):
 # cmd_create with CLI args
 # ---------------------------------------------------------------------------
 
-
 def test_cmd_create_with_cli_args(tmp_path, config_with_remotes):
-    """cmd_create accepts pre-populated CLI args and skips those questions."""
     (tmp_path / "templates" / "common").mkdir(parents=True)
     (tmp_path / "templates" / "vscode").mkdir(parents=True)
     config = config_with_remotes
 
     text_calls = []
-
     def mock_text(message):
         text_calls.append(message)
         mock = MagicMock()
@@ -314,10 +307,7 @@ def test_cmd_create_with_cli_args(tmp_path, config_with_remotes):
 
     def mock_checkbox(message, choices=None, **kwargs):
         mock = MagicMock()
-        if "Templates" in message:
-            mock.ask.return_value = ["common"]
-        else:
-            mock.ask.return_value = ["community"]
+        mock.ask.return_value = ["common"] if "Templates" in message else ["community"]
         return mock
 
     def mock_confirm(message):
@@ -326,13 +316,13 @@ def test_cmd_create_with_cli_args(tmp_path, config_with_remotes):
         return mock
 
     with (
-        patch("ow.workspace.questionary.checkbox", side_effect=mock_checkbox),
-        patch("ow.workspace.questionary.text", side_effect=mock_text),
-        patch("ow.workspace.questionary.confirm", side_effect=mock_confirm),
-        patch("ow.workspace._ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "my-ws", {"community"}, {})),
-        patch("ow.workspace._apply_templates"),
-        patch("ow.workspace.write_workspace_config"),
-        patch("ow.workspace.run_cmd"),
+        patch("questionary.checkbox", side_effect=mock_checkbox),
+        patch("questionary.text", side_effect=mock_text),
+        patch("questionary.confirm", side_effect=mock_confirm),
+        patch("ow.commands.create.ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "my-ws", {"community"}, {})),
+        patch("ow.commands.create.apply_templates"),
+        patch("ow.commands.create.write_workspace_config"),
+        patch("ow.commands.create.run_cmd"),
     ):
         cmd_create(
             config,
@@ -346,12 +336,9 @@ def test_cmd_create_with_cli_args(tmp_path, config_with_remotes):
 
 
 def test_cmd_create_rejects_invalid_template(tmp_path, capsys, config):
-    """cmd_create exits with error for unknown template."""
     (tmp_path / "templates" / "common").mkdir(parents=True)
-
     with pytest.raises(SystemExit) as exc:
         cmd_create(config, name="test", templates=["nonexistent"])
-
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "unknown template" in captured.err.lower()
@@ -359,13 +346,10 @@ def test_cmd_create_rejects_invalid_template(tmp_path, capsys, config):
 
 
 def test_cmd_create_rejects_invalid_repo_alias(tmp_path, capsys, config_with_remotes):
-    """cmd_create exits with error for unknown repo alias."""
     (tmp_path / "templates" / "common").mkdir(parents=True)
     config = config_with_remotes
-
     with pytest.raises(SystemExit) as exc:
         cmd_create(config, name="test", repos={"unknown": BranchSpec("origin/master")})
-
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "unknown repo alias" in captured.err.lower()
@@ -373,39 +357,31 @@ def test_cmd_create_rejects_invalid_repo_alias(tmp_path, capsys, config_with_rem
 
 
 def test_cmd_create_rejects_existing_workspace(tmp_path, capsys, config):
-    """cmd_create exits with error when workspace name already exists (CLI arg)."""
     (tmp_path / "templates" / "common").mkdir(parents=True)
     (tmp_path / "workspaces" / "parrot").mkdir(parents=True)
-
     with pytest.raises(SystemExit) as exc:
         cmd_create(config, name="parrot")
-
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "already exists" in captured.err.lower()
 
 
 def test_cmd_create_rejects_invalid_name(tmp_path, capsys, config):
-    """cmd_create exits with error for invalid name from CLI arg."""
     (tmp_path / "templates" / "common").mkdir(parents=True)
-
     with pytest.raises(SystemExit) as exc:
         cmd_create(config, name="bad name!")
-
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "alphanumeric" in captured.err.lower()
 
 
 def test_cmd_create_rejects_duplicate_branch(tmp_path, capsys, config_with_remotes):
-    """cmd_create exits with error when target branch is already in use by another workspace."""
     (tmp_path / "templates" / "common").mkdir(parents=True)
     existing_ws = tmp_path / "workspaces" / "parrot"
     existing_ws.mkdir(parents=True)
     ow_config = existing_ws / ".ow" / "config"
     ow_config.parent.mkdir(parents=True)
     ow_config.write_text('templates = ["common"]\n\n[repos]\ncommunity = "master..master-parrot"\n')
-
     config = config_with_remotes
 
     def mock_checkbox(message, choices=None, **kwargs):
@@ -419,8 +395,8 @@ def test_cmd_create_rejects_duplicate_branch(tmp_path, capsys, config_with_remot
         return mock
 
     with (
-        patch("ow.workspace.questionary.checkbox", side_effect=mock_checkbox),
-        patch("ow.workspace.questionary.text", side_effect=mock_text),
+        patch("questionary.checkbox", side_effect=mock_checkbox),
+        patch("questionary.text", side_effect=mock_text),
     ):
         with pytest.raises(SystemExit) as exc:
             cmd_create(config, name="new-ws", repos={"community": BranchSpec("origin/master", "master-parrot")})
@@ -432,24 +408,22 @@ def test_cmd_create_rejects_duplicate_branch(tmp_path, capsys, config_with_remot
 
 
 def test_cmd_create_accepts_different_branch(tmp_path, config_with_remotes):
-    """cmd_create succeeds when target branch is unique."""
     (tmp_path / "templates" / "common").mkdir(parents=True)
     existing_ws = tmp_path / "workspaces" / "parrot"
     existing_ws.mkdir(parents=True)
     ow_config = existing_ws / ".ow" / "config"
     ow_config.parent.mkdir(parents=True)
     ow_config.write_text('templates = ["common"]\n\n[repos]\ncommunity = "master..master-parrot"\n')
-
     config = config_with_remotes
 
     with (
-        patch("ow.workspace.questionary.checkbox", side_effect=lambda *a, **kw: MagicMock(ask=lambda: ["common"] if "Templates" in kw.get("message", "") else ["community"])),
-        patch("ow.workspace.questionary.text", return_value=MagicMock(ask=lambda: "")),
-        patch("ow.workspace.questionary.confirm", return_value=MagicMock(ask=lambda: True)),
-        patch("ow.workspace._ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "new-ws", {"community"}, {})),
-        patch("ow.workspace._apply_templates") as mock_apply,
-        patch("ow.workspace.write_workspace_config") as mock_write,
-        patch("ow.workspace.run_cmd"),
+        patch("questionary.checkbox", side_effect=lambda *a, **kw: MagicMock(ask=lambda: ["common"] if "Templates" in kw.get("message", "") else ["community"])),
+        patch("questionary.text", return_value=MagicMock(ask=lambda: "")),
+        patch("questionary.confirm", return_value=MagicMock(ask=lambda: True)),
+        patch("ow.commands.create.ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "new-ws", {"community"}, {})),
+        patch("ow.commands.create.apply_templates") as mock_apply,
+        patch("ow.commands.create.write_workspace_config") as mock_write,
+        patch("ow.commands.create.run_cmd"),
     ):
         cmd_create(config, name="new-ws", repos={"community": BranchSpec("origin/master", "master-new")})
 
@@ -458,7 +432,6 @@ def test_cmd_create_accepts_different_branch(tmp_path, config_with_remotes):
 
 
 def test_cmd_create_configuration_duplicates(tmp_path, config_with_remotes):
-    """cmd_create -c duplicates source workspace config."""
     (tmp_path / "templates" / "common").mkdir(parents=True)
     (tmp_path / "templates" / "vscode").mkdir(parents=True)
     src_ws = tmp_path / "workspaces" / "parrot"
@@ -470,7 +443,6 @@ def test_cmd_create_configuration_duplicates(tmp_path, config_with_remotes):
         '[repos]\ncommunity = "master..master-parrot"\n\n'
         '[vars]\nhttp_port = 9000\n'
     )
-
     config = _make_config(
         root_dir=tmp_path,
         vars={"http_port": 8069},
@@ -478,7 +450,6 @@ def test_cmd_create_configuration_duplicates(tmp_path, config_with_remotes):
     )
 
     checkbox_calls = []
-
     def mock_checkbox(message, choices=None, **kwargs):
         checkbox_calls.append({"message": message, "choices": choices})
         mock = MagicMock()
@@ -496,13 +467,13 @@ def test_cmd_create_configuration_duplicates(tmp_path, config_with_remotes):
         return mock
 
     with (
-        patch("ow.workspace.questionary.checkbox", side_effect=mock_checkbox),
-        patch("ow.workspace.questionary.text", side_effect=mock_text),
-        patch("ow.workspace.questionary.confirm", side_effect=mock_confirm),
-        patch("ow.workspace._ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "new-ws", {"community"}, {})),
-        patch("ow.workspace._apply_templates"),
-        patch("ow.workspace.write_workspace_config"),
-        patch("ow.workspace.run_cmd"),
+        patch("questionary.checkbox", side_effect=mock_checkbox),
+        patch("questionary.text", side_effect=mock_text),
+        patch("questionary.confirm", side_effect=mock_confirm),
+        patch("ow.commands.create.ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "new-ws", {"community"}, {})),
+        patch("ow.commands.create.apply_templates"),
+        patch("ow.commands.create.write_workspace_config"),
+        patch("ow.commands.create.run_cmd"),
     ):
         cmd_create(config, name="new-ws", repos={"community": BranchSpec("origin/master", "master-new")}, configuration=str(src_ws))
 
@@ -517,7 +488,6 @@ def test_cmd_create_configuration_duplicates(tmp_path, config_with_remotes):
 
 
 def test_cmd_create_configuration_rejects_unknown_remote(tmp_path, capsys):
-    """cmd_create -c exits with error if source config references a repo not in ow.toml."""
     (tmp_path / "templates" / "common").mkdir(parents=True)
     src_ws = tmp_path / "workspaces" / "parrot"
     src_ws.mkdir(parents=True)
@@ -527,7 +497,6 @@ def test_cmd_create_configuration_rejects_unknown_remote(tmp_path, capsys):
         'templates = ["common"]\n\n'
         '[repos]\ncommunity = "master"\nenterprise = "master"\n'
     )
-
     config = _make_config(
         root_dir=tmp_path,
         remotes={"community": {"origin": MagicMock(url="git@github.com:odoo/odoo.git")}},
@@ -548,17 +517,15 @@ def test_cmd_create_configuration_rejects_unknown_remote(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_cmd_update_renders_templates_and_materializes(tmp_path, config):
-    """cmd_update calls _apply_templates and _ensure_workspace_materialized."""
     ws_dir = tmp_path / "workspaces" / "test"
     ws_dir.mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master"})
 
     with (
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
-        patch("ow.workspace._ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})) as mock_mat,
-        patch("ow.workspace._apply_templates") as mock_apply,
+        patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})) as mock_mat,
+        patch("ow.commands.update.apply_templates") as mock_apply,
     ):
-        from ow.workspace import cmd_update
         cmd_update(config)
 
     mock_mat.assert_called_once()
@@ -566,7 +533,6 @@ def test_cmd_update_renders_templates_and_materializes(tmp_path, config):
 
 
 def test_cmd_update_merges_missing_vars(tmp_path, config):
-    """cmd_update adds missing vars from ow.toml to .ow/config."""
     ws_dir = tmp_path / "workspaces" / "test"
     ws_dir.mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master"}, vars={"http_port": 9090})
@@ -574,20 +540,17 @@ def test_cmd_update_merges_missing_vars(tmp_path, config):
 
     with (
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
-        patch("ow.workspace._ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})),
-        patch("ow.workspace._apply_templates"),
+        patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})),
+        patch("ow.commands.update.apply_templates"),
     ):
-        from ow.workspace import cmd_update
         cmd_update(config)
 
-    from ow.config import load_workspace_config
     updated = load_workspace_config(ws_dir / ".ow" / "config")
     assert updated.vars["http_port"] == 9090
     assert updated.vars["db_host"] == "localhost"
 
 
 def test_cmd_update_preserves_existing_vars(tmp_path, config):
-    """cmd_update does not overwrite existing workspace var overrides."""
     ws_dir = tmp_path / "workspaces" / "test"
     ws_dir.mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master"}, vars={"http_port": 9090})
@@ -595,44 +558,35 @@ def test_cmd_update_preserves_existing_vars(tmp_path, config):
 
     with (
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
-        patch("ow.workspace._ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})),
-        patch("ow.workspace._apply_templates"),
+        patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})),
+        patch("ow.commands.update.apply_templates"),
     ):
-        from ow.workspace import cmd_update
         cmd_update(config)
 
-    from ow.config import load_workspace_config
     updated = load_workspace_config(ws_dir / ".ow" / "config")
     assert updated.vars["http_port"] == 9090
 
 
 def test_cmd_prune_no_bare_repos(tmp_path, capsys, config):
-    """cmd_prune handles missing bare repos directory gracefully."""
-    from ow.workspace import cmd_prune
     cmd_prune(config)
     captured = capsys.readouterr()
     assert "No bare repos found" in captured.out
 
 
 def test_cmd_prune_cleans_repos(tmp_path, capsys, config):
-    """cmd_prune runs worktree prune and deletes orphaned branches on each bare repo."""
     bare_dir = tmp_path / ".bare-git-repos"
     bare_dir.mkdir()
     (bare_dir / "community.git").mkdir()
     (bare_dir / "enterprise.git").mkdir()
 
-    with patch("ow.workspace.subprocess.run") as mock_run:
+    with patch("ow.commands.prune.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        from ow.workspace import cmd_prune
         cmd_prune(config)
 
-    # Each repo: worktree prune + worktree list + branch list = 3 calls minimum
     assert mock_run.call_count >= 6
     calls = mock_run.call_args_list
-    # Verify both repos are touched
     all_args = " ".join(str(c) for c in calls)
     assert "community" in all_args
     assert "enterprise" in all_args
-    # Verify worktree prune is called for each (check the actual args list, not string repr)
     prune_calls = [c for c in calls if c[0][0][3:5] == ["worktree", "prune"]]
     assert len(prune_calls) == 2

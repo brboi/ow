@@ -15,8 +15,6 @@ This script:
 Run from the ow project root:
     python scripts/migrate-to-1.0.0.py
 """
-from __future__ import annotations
-
 import re
 import shutil
 import sys

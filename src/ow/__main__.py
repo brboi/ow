@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
-from __future__ import annotations
-
 import argparse
 import sys
 from pathlib import Path
 
 import argcomplete
 
-from ow.config import Config, load_config, parse_branch_spec
-from ow.workspace import (
-    _available_templates,
+from ow.commands import (
     cmd_create,
     cmd_init,
     cmd_prune,
@@ -18,6 +14,8 @@ from ow.workspace import (
     cmd_status,
     cmd_update,
 )
+from ow.utils.templates import available_templates
+from ow.utils.config import Config, load_config, parse_branch_spec
 
 try:
     from ow._version import version as __version__
@@ -55,7 +53,7 @@ def _complete_gen_templates(prefix, parsed_args, **kwargs):
     try:
         root = find_root()
         config = Config(vars={}, remotes={}, root_dir=root)
-        templates = _available_templates(config)
+        templates = available_templates(config)
     except (FileNotFoundError, Exception):
         templates = []
     return [t for t in templates if t.startswith(prefix)]

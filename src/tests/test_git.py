@@ -3,10 +3,9 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from ow.config import BranchSpec, RemoteConfig
-from ow.git import (
+from ow.utils.config import BranchSpec, RemoteConfig
+from ow.utils.git import (
     _get_bare_config,
-    _set_branch_upstream,
     attach_worktree,
     create_worktree,
     detach_worktree,
@@ -29,20 +28,21 @@ from ow.git import (
     git_rev_list,
     git_switch,
     ordered_remotes,
+    parallel_per_repo,
     resolve_spec,
     resolve_spec_local,
     run_cmd,
+    set_branch_upstream,
     worktree_exists,
     worktree_is_detached,
 )
-
 
 # ---------------------------------------------------------------------------
 # run_cmd
 # ---------------------------------------------------------------------------
 
 def test_run_cmd_prints_to_stderr(capsys):
-    with patch("ow.git.subprocess.run") as mock_run:
+    with patch("ow.utils.git.subprocess.run") as mock_run:
         run_cmd(["git", "status"], check=True)
 
     captured = capsys.readouterr()
@@ -51,7 +51,7 @@ def test_run_cmd_prints_to_stderr(capsys):
 
 
 def test_run_cmd_quiet_no_stderr(capsys):
-    with patch("ow.git.subprocess.run") as mock_run:
+    with patch("ow.utils.git.subprocess.run") as mock_run:
         run_cmd(["git", "config", "foo", "bar"], quiet=True, check=True)
 
     captured = capsys.readouterr()
@@ -61,14 +61,14 @@ def test_run_cmd_quiet_no_stderr(capsys):
 
 def test_run_cmd_returns_completed_process():
     mock_result = MagicMock(returncode=0)
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         result = run_cmd(["git", "status"], quiet=True)
     assert result.returncode == 0
 
 
 def test_run_cmd_hides_C_path(capsys):
     """When git command has -C path, display strips it for cleaner output."""
-    with patch("ow.git.subprocess.run") as mock_run:
+    with patch("ow.utils.git.subprocess.run") as mock_run:
         run_cmd(["git", "-C", "/path/to/repo", "fetch", "origin"], quiet=False, label="community", check=True)
 
     captured = capsys.readouterr()
@@ -116,21 +116,21 @@ def test_ordered_remotes_empty():
 def test_get_worktree_branch_returns_name():
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "master-feature\n"
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         assert get_worktree_branch(Path("/fake")) == "master-feature"
 
 
 def test_get_worktree_branch_returns_none_when_detached():
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "HEAD\n"
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         assert get_worktree_branch(Path("/fake")) is None
 
 
 def test_get_worktree_branch_returns_none_on_error():
     mock_result = MagicMock(returncode=128)
     mock_result.stdout = ""
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         assert get_worktree_branch(Path("/fake")) is None
 
 
@@ -145,7 +145,7 @@ def test_get_all_remote_refs_parses_output(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "origin/master\norigin/18.0\ndev/master-feature\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         refs = get_all_remote_refs(bare_repo)
 
     assert refs == {"origin/master", "origin/18.0", "dev/master-feature"}
@@ -157,7 +157,7 @@ def test_get_all_remote_refs_returns_empty_on_failure(tmp_path):
 
     mock_result = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         refs = get_all_remote_refs(bare_repo)
 
     assert refs == set()
@@ -170,7 +170,7 @@ def test_get_all_remote_refs_handles_empty_output(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = ""
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         refs = get_all_remote_refs(bare_repo)
 
     assert refs == set()
@@ -187,7 +187,7 @@ def test_get_bare_config_parses_key_value(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "remote.origin.url=git@github.com:odoo/odoo.git\nremote.dev.url=git@github.com:dev/odoo.git\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         config = _get_bare_config(bare_repo)
 
     assert config == {
@@ -202,7 +202,7 @@ def test_get_bare_config_returns_empty_on_failure(tmp_path):
 
     mock_result = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         config = _get_bare_config(bare_repo)
 
     assert config == {}
@@ -229,8 +229,8 @@ def test_ensure_bare_repo_skips_writes_when_config_matches(tmp_path):
         "remote.dev.fetch": "+refs/heads/*:refs/remotes/dev/*",
     }
 
-    with patch("ow.git.run_cmd") as mock_run_cmd, \
-         patch("ow.git._get_bare_config", return_value=existing_config):
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
+         patch("ow.utils.git._get_bare_config", return_value=existing_config):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     mock_run_cmd.assert_not_called()
@@ -257,8 +257,8 @@ def test_ensure_bare_repo_writes_only_changed_values(tmp_path):
         "remote.dev.fetch": "+refs/heads/*:refs/remotes/dev/*",
     }
 
-    with patch("ow.git.run_cmd") as mock_run_cmd, \
-         patch("ow.git._get_bare_config", return_value=existing_config):
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
+         patch("ow.utils.git._get_bare_config", return_value=existing_config):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     # Only pushurl should be written (url and fetch already match)
@@ -277,8 +277,8 @@ def test_ensure_bare_repo_clones_when_missing(tmp_path):
 
     remotes = {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}
 
-    with patch("ow.git.run_cmd") as mock_run_cmd, \
-         patch("ow.git._get_bare_config", return_value={}):
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
+         patch("ow.utils.git._get_bare_config", return_value={}):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     mock_run_cmd.assert_called_once_with(
@@ -296,8 +296,8 @@ def test_ensure_bare_repo_skips_clone_when_exists(tmp_path):
 
     remotes = {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}
 
-    with patch("ow.git.run_cmd") as mock_run_cmd, \
-         patch("ow.git._get_bare_config", return_value={}):
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
+         patch("ow.utils.git._get_bare_config", return_value={}):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     mock_run_cmd.assert_not_called()
@@ -317,8 +317,8 @@ def test_ensure_bare_repo_configures_extra_remotes(tmp_path):
         ),
     }
 
-    with patch("ow.git.run_cmd") as mock_run_cmd, \
-         patch("ow.git._get_bare_config", return_value={}):
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
+         patch("ow.utils.git._get_bare_config", return_value={}):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     calls = mock_run_cmd.call_args_list
@@ -351,8 +351,8 @@ def test_ensure_bare_repo_configures_origin_pushurl_and_fetch(tmp_path):
         ),
     }
 
-    with patch("ow.git.run_cmd") as mock_run_cmd, \
-         patch("ow.git._get_bare_config", return_value={}):
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
+         patch("ow.utils.git._get_bare_config", return_value={}):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     calls = mock_run_cmd.call_args_list
@@ -381,8 +381,8 @@ def test_ensure_bare_repo_ordered_remotes(tmp_path):
         "alpha": RemoteConfig(url="alpha-url"),
     }
 
-    with patch("ow.git.run_cmd") as mock_run_cmd, \
-         patch("ow.git._get_bare_config", return_value={}):
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
+         patch("ow.utils.git._get_bare_config", return_value={}):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     calls = mock_run_cmd.call_args_list
@@ -402,7 +402,7 @@ def test_ensure_ref_fetches_when_missing(tmp_path):
 
     mock_check = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", side_effect=[mock_check, MagicMock()]) as mock_run:
+    with patch("ow.utils.git.subprocess.run", side_effect=[mock_check, MagicMock()]) as mock_run:
         ensure_ref(bare_repo, "origin", "master")
 
     assert mock_run.call_count == 2
@@ -418,7 +418,7 @@ def test_ensure_ref_skips_fetch_when_exists(tmp_path):
 
     mock_check = MagicMock(returncode=0)
 
-    with patch("ow.git.subprocess.run", return_value=mock_check) as mock_run:
+    with patch("ow.utils.git.subprocess.run", return_value=mock_check) as mock_run:
         ensure_ref(bare_repo, "origin", "master")
 
     assert mock_run.call_count == 1  # only the rev-parse check
@@ -437,7 +437,7 @@ def test_worktree_exists_true(tmp_path):
     mock_result = MagicMock()
     mock_result.stdout = f"{worktree_path} abc1234 [main]\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         assert worktree_exists(bare_repo, worktree_path) is True
 
 
@@ -450,7 +450,7 @@ def test_worktree_exists_false(tmp_path):
     mock_result = MagicMock()
     mock_result.stdout = "/other/path abc1234 [main]\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         assert worktree_exists(bare_repo, worktree_path) is False
 
 
@@ -464,7 +464,7 @@ def test_worktree_exists_false_when_dir_missing_but_in_git_output(tmp_path):
     mock_result = MagicMock()
     mock_result.stdout = f"{worktree_path} abc1234 [main]\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         assert worktree_exists(bare_repo, worktree_path) is False
 
 
@@ -478,7 +478,7 @@ def test_create_worktree_detached(tmp_path):
     worktree_path = Path("/fake/workspaces/test/community")
     spec = BranchSpec("origin/master", None)
 
-    with patch("ow.git.subprocess.run") as mock_run:
+    with patch("ow.utils.git.subprocess.run") as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
     mock_run.assert_called_once_with(
@@ -496,7 +496,7 @@ def test_create_worktree_attached_new_branch(tmp_path):
 
     branch_missing = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
+    with patch("ow.utils.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
     assert mock_run.call_args_list[1] == call(
@@ -515,7 +515,7 @@ def test_create_worktree_attached_new_branch_sets_upstream(tmp_path):
 
     branch_missing = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
+    with patch("ow.utils.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
     assert mock_run.call_args_list[1] == call(
@@ -544,7 +544,7 @@ def test_create_worktree_attached_existing_branch(tmp_path):
 
     branch_exists = MagicMock(returncode=0)
 
-    with patch("ow.git.subprocess.run", side_effect=[branch_exists, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
+    with patch("ow.utils.git.subprocess.run", side_effect=[branch_exists, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
     assert mock_run.call_count == 4
@@ -570,7 +570,7 @@ def test_get_rev_list_count(tmp_path):
     mock_result = MagicMock()
     mock_result.stdout = "3\t5\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         ahead, behind = get_rev_list_count(tmp_path, "HEAD", "origin/master")
 
     assert ahead == 3
@@ -581,7 +581,7 @@ def test_get_rev_list_count_zero(tmp_path):
     mock_result = MagicMock()
     mock_result.stdout = "0\t0\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         ahead, behind = get_rev_list_count(tmp_path, "HEAD", "origin/master")
 
     assert ahead == 0
@@ -597,7 +597,7 @@ def test_get_worktree_head(tmp_path):
     mock_result = MagicMock()
     mock_result.stdout = full_hash + "\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         short, full = get_worktree_head(tmp_path)
 
     assert short == "a1b2c3d"
@@ -612,7 +612,7 @@ def test_get_upstream_returns_ref(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "dev/master-canary\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         result = get_upstream(tmp_path)
 
     assert result == "dev/master-canary"
@@ -622,7 +622,7 @@ def test_get_upstream_returns_none_when_no_upstream(tmp_path):
     mock_result = MagicMock(returncode=128)
     mock_result.stdout = ""
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         result = get_upstream(tmp_path)
 
     assert result is None
@@ -641,7 +641,7 @@ def test_resolve_spec_branch_found_on_spec_remote(tmp_path):
 
     rev_parse_ok = MagicMock(returncode=0)
 
-    with patch("ow.git.subprocess.run", return_value=rev_parse_ok) as mock_run:
+    with patch("ow.utils.git.subprocess.run", return_value=rev_parse_ok) as mock_run:
         result = resolve_spec(bare_repo, spec, remotes)
 
     assert result.remote == "origin"
@@ -669,7 +669,7 @@ def test_resolve_spec_branch_not_on_spec_remote_found_on_fallback(tmp_path):
     rev_parse_fail2 = MagicMock(returncode=1)
     fetch_ok = MagicMock(returncode=0)
 
-    with patch("ow.git.subprocess.run", side_effect=[
+    with patch("ow.utils.git.subprocess.run", side_effect=[
         rev_parse_fail,   # rev-parse origin/master-parrot → miss
         fetch_fail,       # fetch origin master-parrot → fail
         rev_parse_fail2,  # rev-parse dev/master-parrot → miss
@@ -696,7 +696,7 @@ def test_resolve_spec_branch_found_in_existing_local_refs(tmp_path):
     fetch_fail = MagicMock(returncode=1)
     rev_parse_ok = MagicMock(returncode=0)
 
-    with patch("ow.git.subprocess.run", side_effect=[
+    with patch("ow.utils.git.subprocess.run", side_effect=[
         rev_parse_fail,   # rev-parse origin/master-parrot → miss
         fetch_fail,       # fetch origin → fail
         rev_parse_ok,     # rev-parse dev/master-parrot → hit (already fetched before)
@@ -723,7 +723,7 @@ def test_resolve_spec_local_branch_found_on_remote(tmp_path):
     rev_parse_ok_dev = MagicMock(returncode=0)         # dev/master-parrot-ring-the-phone: hit
     rev_parse_ok_base = MagicMock(returncode=0)        # refs/remotes/origin/master-parrot: already present
 
-    with patch("ow.git.subprocess.run", side_effect=[
+    with patch("ow.utils.git.subprocess.run", side_effect=[
         rev_parse_fail_origin,
         fetch_fail_origin,
         rev_parse_ok_dev,
@@ -754,7 +754,7 @@ def test_resolve_spec_local_branch_not_on_remote_falls_back_to_base(tmp_path):
     # Base branch: origin/master-parrot found locally
     bp_ok = MagicMock(returncode=0)      # rev-parse origin/master-parrot
 
-    with patch("ow.git.subprocess.run", side_effect=[
+    with patch("ow.utils.git.subprocess.run", side_effect=[
         lp_fail_o, lf_fail_o, lp_fail_d, lf_fail_d,
         bp_ok,
     ]) as mock_run:
@@ -774,7 +774,7 @@ def test_resolve_spec_raises_when_branch_not_found_anywhere(tmp_path):
 
     always_fail = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", return_value=always_fail):
+    with patch("ow.utils.git.subprocess.run", return_value=always_fail):
         with pytest.raises(RuntimeError, match="nonexistent"):
             resolve_spec(bare_repo, spec, remotes)
 
@@ -828,7 +828,7 @@ def test_resolve_spec_local_raises_when_not_found(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _set_branch_upstream
+# set_branch_upstream
 # ---------------------------------------------------------------------------
 
 def test_set_branch_upstream(tmp_path):
@@ -836,8 +836,8 @@ def test_set_branch_upstream(tmp_path):
     bare_repo = tmp_path / "community.git"
     bare_repo.mkdir()
 
-    with patch("ow.git.subprocess.run") as mock_run:
-        _set_branch_upstream(bare_repo, "master-feature", "origin", "master")
+    with patch("ow.utils.git.subprocess.run") as mock_run:
+        set_branch_upstream(bare_repo, "master-feature", "origin", "master")
 
     assert mock_run.call_count == 2
     assert mock_run.call_args_list[0] == call(
@@ -855,8 +855,8 @@ def test_set_branch_upstream_non_origin(tmp_path):
     bare_repo = tmp_path / "community.git"
     bare_repo.mkdir()
 
-    with patch("ow.git.subprocess.run") as mock_run:
-        _set_branch_upstream(bare_repo, "master-parrot-ring-the-phone", "dev", "master-parrot-ring-the-phone")
+    with patch("ow.utils.git.subprocess.run") as mock_run:
+        set_branch_upstream(bare_repo, "master-parrot-ring-the-phone", "dev", "master-parrot-ring-the-phone")
 
     assert mock_run.call_args_list[0] == call(
         ["git", "-C", str(bare_repo), "config",
@@ -881,7 +881,7 @@ def test_worktree_is_detached_returns_true(tmp_path):
 
     mock_result = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         assert worktree_is_detached(worktree_path) is True
 
 
@@ -892,7 +892,7 @@ def test_worktree_is_detached_returns_false(tmp_path):
 
     mock_result = MagicMock(returncode=0)
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         assert worktree_is_detached(worktree_path) is False
 
 
@@ -909,7 +909,7 @@ def test_attach_worktree_creates_new_branch(tmp_path):
 
     branch_missing = MagicMock(returncode=1)
 
-    with patch("ow.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
+    with patch("ow.utils.git.subprocess.run", side_effect=[branch_missing, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
         attach_worktree(bare_repo, worktree_path, spec)
 
     assert mock_run.call_count == 4
@@ -936,7 +936,7 @@ def test_attach_worktree_existing_branch(tmp_path):
 
     branch_exists = MagicMock(returncode=0)
 
-    with patch("ow.git.subprocess.run", side_effect=[branch_exists, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
+    with patch("ow.utils.git.subprocess.run", side_effect=[branch_exists, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
         attach_worktree(bare_repo, worktree_path, spec)
 
     assert mock_run.call_count == 4
@@ -962,7 +962,7 @@ def test_detach_worktree(tmp_path):
     """Switches worktree to detached HEAD at base_ref."""
     worktree_path = Path("/fake/workspaces/test/community")
 
-    with patch("ow.git.subprocess.run") as mock_run:
+    with patch("ow.utils.git.subprocess.run") as mock_run:
         detach_worktree(worktree_path, "origin/master")
 
     mock_run.assert_called_once_with(
@@ -986,7 +986,7 @@ def test_resolve_spec_local_branch_found_fetches_base_ref_when_missing(tmp_path)
     rev_parse_miss_base = MagicMock(returncode=1)  # refs/remotes/origin/18.0: missing
     fetch_base_ok = MagicMock(returncode=0)         # fetch origin 18.0: success
 
-    with patch("ow.git.subprocess.run", side_effect=[
+    with patch("ow.utils.git.subprocess.run", side_effect=[
         rev_parse_ok_local,
         rev_parse_miss_base,
         fetch_base_ok,
@@ -1016,7 +1016,7 @@ def test_resolve_spec_local_branch_found_skips_base_ref_fetch_when_present(tmp_p
     rev_parse_ok_local = MagicMock(returncode=0)  # origin/18.0-my-feature already fetched
     rev_parse_ok_base = MagicMock(returncode=0)   # refs/remotes/origin/18.0: already present
 
-    with patch("ow.git.subprocess.run", side_effect=[
+    with patch("ow.utils.git.subprocess.run", side_effect=[
         rev_parse_ok_local,
         rev_parse_ok_base,
     ]) as mock_run:
@@ -1143,7 +1143,7 @@ def test_get_remote_url_returns_url(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "git@github.com:odoo-dev/odoo.git\n"
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         result = get_remote_url(bare_repo, "dev")
 
     assert result == "git@github.com:odoo-dev/odoo.git"
@@ -1157,7 +1157,7 @@ def test_get_remote_url_returns_none_when_remote_missing(tmp_path):
     mock_result = MagicMock(returncode=128)
     mock_result.stdout = ""
 
-    with patch("ow.git.subprocess.run", return_value=mock_result):
+    with patch("ow.utils.git.subprocess.run", return_value=mock_result):
         result = get_remote_url(bare_repo, "nonexistent")
 
     assert result is None
@@ -1173,7 +1173,7 @@ def test_git_adds_c_flag(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    with patch("ow.git.run_cmd") as mock_run:
+    with patch("ow.utils.git.run_cmd") as mock_run:
         git(repo, "status", check=True)
 
     mock_run.assert_called_once_with(
@@ -1186,7 +1186,7 @@ def test_git_passes_quiet_flag(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    with patch("ow.git.run_cmd") as mock_run:
+    with patch("ow.utils.git.run_cmd") as mock_run:
         git(repo, "status", quiet=True, check=True)
 
     mock_run.assert_called_once_with(
@@ -1204,7 +1204,7 @@ def test_git_fetch_basic(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    with patch("ow.git.git") as mock_git:
+    with patch("ow.utils.git.git") as mock_git:
         git_fetch(repo, "origin", "master:refs/remotes/origin/master", check=True)
 
     mock_git.assert_called_once_with(
@@ -1217,7 +1217,7 @@ def test_git_fetch_force(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    with patch("ow.git.git") as mock_git:
+    with patch("ow.utils.git.git") as mock_git:
         git_fetch(
             repo,
             "origin",
@@ -1241,7 +1241,7 @@ def test_git_switch_basic(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
 
-    with patch("ow.git.git") as mock_git:
+    with patch("ow.utils.git.git") as mock_git:
         git_switch(worktree, "master", check=True)
 
     mock_git.assert_called_once_with(worktree, "switch", "master", check=True)
@@ -1252,7 +1252,7 @@ def test_git_switch_detach(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
 
-    with patch("ow.git.git") as mock_git:
+    with patch("ow.utils.git.git") as mock_git:
         git_switch(worktree, "origin/master", detach=True, check=True)
 
     mock_git.assert_called_once_with(
@@ -1265,7 +1265,7 @@ def test_git_switch_create(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
 
-    with patch("ow.git.git") as mock_git:
+    with patch("ow.utils.git.git") as mock_git:
         git_switch(worktree, "new-branch", create=True, check=True)
 
     mock_git.assert_called_once_with(
@@ -1285,7 +1285,7 @@ def test_git_rebase_returns_completed_process(tmp_path):
 
     mock_result = MagicMock(returncode=0)
 
-    with patch("ow.git.git", return_value=mock_result) as mock_git:
+    with patch("ow.utils.git.git", return_value=mock_result) as mock_git:
         result = git_rebase(worktree, "origin/master")
 
     mock_git.assert_called_once_with(worktree, "rebase", "origin/master")
@@ -1305,7 +1305,7 @@ def test_git_merge_base_fork_point_returns_hash(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "abc123def456\n"
 
-    with patch("ow.git.git", return_value=mock_result) as mock_git:
+    with patch("ow.utils.git.git", return_value=mock_result) as mock_git:
         result = git_merge_base_fork_point(worktree, "origin/master", "feature")
 
     mock_git.assert_called_once_with(
@@ -1329,7 +1329,7 @@ def test_git_merge_base_fork_point_returns_none_on_failure(tmp_path):
     mock_result = MagicMock(returncode=1)
     mock_result.stdout = ""
 
-    with patch("ow.git.git", return_value=mock_result):
+    with patch("ow.utils.git.git", return_value=mock_result):
         result = git_merge_base_fork_point(worktree, "origin/master", "feature")
 
     assert result is None
@@ -1343,7 +1343,7 @@ def test_git_merge_base_fork_point_returns_none_on_empty_output(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "\n"
 
-    with patch("ow.git.git", return_value=mock_result):
+    with patch("ow.utils.git.git", return_value=mock_result):
         result = git_merge_base_fork_point(worktree, "origin/master", "feature")
 
     assert result is None
@@ -1362,7 +1362,7 @@ def test_git_rev_list_returns_commits(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "abc123\ndef456\nghi789\n"
 
-    with patch("ow.git.git", return_value=mock_result) as mock_git:
+    with patch("ow.utils.git.git", return_value=mock_result) as mock_git:
         result = git_rev_list(repo, "abc123..HEAD")
 
     mock_git.assert_called_once_with(
@@ -1379,7 +1379,7 @@ def test_git_rev_list_reverse(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "ghi789\ndef456\nabc123\n"
 
-    with patch("ow.git.git", return_value=mock_result) as mock_git:
+    with patch("ow.utils.git.git", return_value=mock_result) as mock_git:
         result = git_rev_list(repo, "abc123..HEAD", reverse=True)
 
     mock_git.assert_called_once_with(
@@ -1396,7 +1396,7 @@ def test_git_rev_list_empty_on_error(tmp_path):
     mock_result = MagicMock(returncode=128)
     mock_result.stdout = ""
 
-    with patch("ow.git.git", return_value=mock_result):
+    with patch("ow.utils.git.git", return_value=mock_result):
         result = git_rev_list(repo, "invalid..range")
 
     assert result == []
@@ -1415,7 +1415,7 @@ def test_git_log_oneline_returns_message(tmp_path):
     mock_result = MagicMock(returncode=0)
     mock_result.stdout = "abc123 fix: something\n"
 
-    with patch("ow.git.git", return_value=mock_result) as mock_git:
+    with patch("ow.utils.git.git", return_value=mock_result) as mock_git:
         result = git_log_oneline(repo, "abc123")
 
     mock_git.assert_called_once_with(
@@ -1432,7 +1432,7 @@ def test_git_log_oneline_returns_short_hash_on_error(tmp_path):
     mock_result = MagicMock(returncode=128)
     mock_result.stdout = ""
 
-    with patch("ow.git.git", return_value=mock_result):
+    with patch("ow.utils.git.git", return_value=mock_result):
         result = git_log_oneline(repo, "abc123def456789")
 
     assert result == "abc123d"
@@ -1450,7 +1450,7 @@ def test_git_cherry_pick(tmp_path):
 
     mock_result = MagicMock(returncode=0)
 
-    with patch("ow.git.git", return_value=mock_result) as mock_git:
+    with patch("ow.utils.git.git", return_value=mock_result) as mock_git:
         result = git_cherry_pick(worktree, "abc123")
 
     mock_git.assert_called_once_with(worktree, "cherry-pick", "abc123")
@@ -1467,13 +1467,10 @@ def test_git_reset_hard(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
 
-    with patch("ow.git.git") as mock_git:
+    with patch("ow.utils.git.git") as mock_git:
         git_reset_hard(worktree, "origin/master")
 
     mock_git.assert_called_once_with(worktree, "reset", "--hard", "origin/master", check=True)
-
-
-from ow.git import parallel_per_repo
 
 
 # ---------------------------------------------------------------------------

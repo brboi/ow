@@ -1,4 +1,0 @@
-This is where the services containers volumes will be stored.
-This file is here to ensure that the directory exists,
-as git does not track empty directories and more than that:
-this directory is gitignore'd, so it won't be tracked even if it had content.

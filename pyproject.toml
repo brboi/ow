@@ -30,10 +30,11 @@ Repository = "https://github.com/brboi/ow"
 ow = "ow.__main__:main"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["ow*"]
 
 [tool.setuptools.package-data]
-ow = ["templates/**/*", "services/**/*"]
+ow = ["_static/templates/**/*", "_static/services/**/*"]
 
 [tool.setuptools_scm]
-write_to = "ow/_version.py"
+write_to = "src/ow/_version.py"

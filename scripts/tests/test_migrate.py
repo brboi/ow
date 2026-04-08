@@ -1,6 +1,4 @@
 """Standalone tests for migrate-to-1.0.0.py."""
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 
