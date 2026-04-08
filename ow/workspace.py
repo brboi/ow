@@ -602,6 +602,9 @@ origin.url = "git@github.com:odoo/odoo.git"
 python = "3.12"
 node = { version = "latest", postinstall = "npm install -g rtlcss" }
 
+[settings]
+experimental = true
+
 [env]
 COMPOSE_FILE = "{{config_root}}/services/compose.yml"
 '''
