@@ -12,6 +12,7 @@ from ow.config import Config, load_config, parse_branch_spec
 from ow.workspace import (
     _available_templates,
     cmd_create,
+    cmd_init,
     cmd_prune,
     cmd_rebase,
     cmd_status,
@@ -133,10 +134,32 @@ def main() -> None:
         "prune", help="Clean up stale worktree references and orphaned branches"
     )
 
+    p_init = subparsers.add_parser(
+        "init", help="Initialize a new ow project"
+    )
+    p_init.add_argument(
+        "--force", action="store_true",
+        help="Overwrite existing files without backup"
+    )
+    p_init.add_argument(
+        "--force-with-backup", action="store_true",
+        help="Backup existing files before overwrite"
+    )
+
     # Tab completion for create subcommand
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
+    # Handle 'init' command separately (doesn't require existing ow.toml)
+    if args.command == "init":
+        cmd_init(
+            path=None,
+            force=args.force,
+            with_backup=args.force_with_backup
+        )
+        return
+
+    # All other commands require an existing ow.toml
     try:
         root = find_root()
     except FileNotFoundError as e:
