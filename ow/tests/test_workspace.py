@@ -16,9 +16,9 @@ from ow.workspace import (
     warn_if_drifted,
 )
 
-TEMPLATE_DIR = Path(__file__).parent.parent.parent / "templates" / "common"
-VSCODE_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "templates" / "vscode"
-ZED_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "templates" / "zed"
+TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "templates" / "common"
+VSCODE_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "templates" / "vscode"
+ZED_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "templates" / "zed"
 
 
 def setup_odoo_main_repo(ws_dir: Path, alias: str = "community") -> Path:
