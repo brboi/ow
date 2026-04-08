@@ -23,6 +23,8 @@ ow/
     │   └── bwrap-claude.j2
 ```
 
+`ow/__main__.py` is the CLI entry point. `init` is handled before the config-loading block (it doesn't require an existing `ow.toml`) and returns early; all other commands go through `find_root()` + config loading.
+
 ## Key abstractions
 
 - **`BranchSpec`** — represents `"master"` / `"master..feature"` / `"dev/master-phoenix..fix"`. Knows remote, branch, local_branch, detached vs attached.
@@ -42,6 +44,8 @@ ow/
   - `ordered_remotes(alias_remotes)` returns remote names with `origin` first, then alphabetical. Used in `resolve_spec`, `resolve_spec_local`, `get_remote_ref_for_branch`, `ensure_bare_repo`.
   - `get_worktree_branch(worktree_path)` returns the current branch name or `None` if detached (uses `rev-parse --abbrev-ref HEAD`).
 - **`ow/workspace.py`** — file generators + command functions (`cmd_*`). Commands call git helpers then render Jinja2 templates. Also owns cache/drift helpers and worktree drift detection (see below).
+  - `_copy_packaged_templates(dest)` — copies all bundled template directories from the installed package to `dest`.
+  - `_copy_ow_services(dest)` — copies the bundled `services/` files from the installed package to `dest`.
   - `resolve_workspace(path, config)` — resolves a workspace from explicit path, `OW_WORKSPACE` env var, or cwd walk-up for `.ow/config`.
   - `DriftResult` / `check_drift` / `warn_if_drifted` — detect when worktree branch state doesn't match config. `cmd_status`, `cmd_rebase`, `cmd_update` call `warn_if_drifted` to display warnings but proceed anyway.
   - `RebasePlan` / `_analyze_repo_for_rebase` — analyze the rebase situation for a single repo: track ref, upstream, fork_point, commits_to_reapply, local commits, unpushed commits, whether upstream was rewritten.
@@ -52,6 +56,7 @@ ow/
 
 | Command | Signature | Purpose |
 |---------|-----------|---------|
+| `ow init` | `cmd_init(path, *, force, with_backup)` | Initialize new project directory (no `ow.toml` required) |
 | `ow create` | `cmd_create(config, ...)` | Interactive form → create workspace + `.ow/config` |
 | `ow update` | `cmd_update(config)` | Re-render templates + materialize worktrees |
 | `ow status` | `cmd_status(config)` | Show workspace branch status |
