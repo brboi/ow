@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, TypeVar
 
-from ow.config import BranchSpec, RemoteConfig
+from ow.utils.config import BranchSpec, RemoteConfig
 
 
 def run_cmd(args: list[str], quiet: bool = False, label: str | None = None, **kwargs) -> subprocess.CompletedProcess:
@@ -200,7 +198,7 @@ def resolve_spec_local(
     raise RuntimeError(f"Branch '{spec.branch}' not found in local refs")
 
 
-def _set_branch_upstream(bare_repo: Path, local_branch: str, remote: str, remote_branch: str) -> None:
+def set_branch_upstream(bare_repo: Path, local_branch: str, remote: str, remote_branch: str) -> None:
     """Write branch.X.remote / branch.X.merge directly into the bare repo's git config.
 
     This is the correct mechanism for selective-fetch bare repos. The bare repo is cloned
@@ -248,7 +246,7 @@ def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
                 label=alias,
                 check=True,
             )
-        _set_branch_upstream(bare_repo, spec.local_branch, spec.remote, spec.branch)
+        set_branch_upstream(bare_repo, spec.local_branch, spec.remote, spec.branch)
 
 
 def get_rev_list_count(repo_path: Path, ref_a: str, ref_b: str) -> tuple[int, int]:
@@ -321,7 +319,7 @@ def attach_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
             label=alias,
             check=True,
         )
-    _set_branch_upstream(bare_repo, spec.local_branch, spec.remote, spec.branch)
+    set_branch_upstream(bare_repo, spec.local_branch, spec.remote, spec.branch)
 
 
 def detach_worktree(worktree_path: Path, base_ref: str) -> None:
@@ -466,4 +464,3 @@ def parallel_per_repo(
             results[alias] = exc
 
     return results
-

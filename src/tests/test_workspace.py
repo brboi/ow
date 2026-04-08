@@ -5,20 +5,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from jinja2 import Environment, FileSystemLoader
+from ow.commands import cmd_create
+from ow.commands.create import _check_duplicate_branches, _cleanup_failed_workspace
+from ow.utils.display import Spinner
+from ow.utils.drift import DriftResult, check_drift, warn_if_drifted
+from ow.commands.prune import _prune_bare_repo
+from ow.commands.rebase import _analyze_repo_for_rebase, _recover_with_cherry_pick
+from ow.utils.templates import build_template_context, find_addon_paths
+from ow.utils.config import BranchSpec, WorkspaceConfig, write_workspace_config
 
-from ow.config import BranchSpec, WorkspaceConfig, write_workspace_config
-from ow.workspace import (
-    DriftResult,
-    Spinner,
-    build_template_context,
-    check_drift,
-    find_addon_paths,
-    warn_if_drifted,
-)
-
-TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "templates" / "common"
-VSCODE_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "templates" / "vscode"
-ZED_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "templates" / "zed"
+TEMPLATE_DIR = Path(__file__).parent.parent / "ow" / "_static" / "templates" / "common"
+VSCODE_TEMPLATE_DIR = Path(__file__).parent.parent / "ow" / "_static" / "templates" / "vscode"
+ZED_TEMPLATE_DIR = Path(__file__).parent.parent / "ow" / "_static" / "templates" / "zed"
 
 
 def setup_odoo_main_repo(ws_dir: Path, alias: str = "community") -> Path:
@@ -603,7 +601,7 @@ def test_check_drift_uses_get_worktree_branch(tmp_path):
     worktree_path.mkdir()
     spec = BranchSpec("origin/master", "my-feature")
 
-    with patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
+    with patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"):
         result = check_drift(worktree_path, spec, "community")
 
     assert result.alias == "community"
@@ -616,7 +614,7 @@ def test_check_drift_detects_wrong_branch(tmp_path):
     worktree_path.mkdir()
     spec = BranchSpec("origin/master", "my-feature")
 
-    with patch("ow.workspace.get_worktree_branch", return_value="other-branch"):
+    with patch("ow.utils.drift.get_worktree_branch", return_value="other-branch"):
         result = check_drift(worktree_path, spec, "community")
 
     assert result.is_drifted is True
@@ -635,7 +633,7 @@ def test_warn_if_drifted_passes_when_aligned(tmp_path, capsys):
         templates=["common"],
     )
 
-    with patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
+    with patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"):
         warn_if_drifted(ws, ws_dir)
 
     captured = capsys.readouterr()
@@ -650,7 +648,7 @@ def test_warn_if_drifted_warns_on_drift(tmp_path, capsys):
         templates=["common"],
     )
 
-    with patch("ow.workspace.get_worktree_branch", return_value="wrong-branch"):
+    with patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"):
         warn_if_drifted(ws, ws_dir)
 
     captured = capsys.readouterr()
@@ -713,15 +711,14 @@ def test_cmd_create_checkbox_uses_choice_objects(tmp_path, config):
         return mock
 
     with (
-        patch("ow.workspace.questionary.checkbox", side_effect=mock_checkbox),
-        patch("ow.workspace.questionary.text", side_effect=mock_text),
-        patch("ow.workspace.questionary.confirm", side_effect=mock_confirm),
-        patch("ow.workspace._ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "test", {"brboi-addons", "community"}, {})),
-        patch("ow.workspace._apply_templates"),
-        patch("ow.workspace.write_workspace_config"),
-        patch("ow.workspace.run_cmd"),
+        patch("questionary.checkbox", side_effect=mock_checkbox),
+        patch("questionary.text", side_effect=mock_text),
+        patch("questionary.confirm", side_effect=mock_confirm),
+        patch("ow.commands.create.ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "test", {"brboi-addons", "community"}, {})),
+        patch("ow.commands.create.apply_templates"),
+        patch("ow.commands.create.write_workspace_config"),
+        patch("ow.commands.create.run_cmd"),
     ):
-        from ow.workspace import cmd_create
         cmd_create(config)
 
     # Verify templates are alphabetical and unchecked
@@ -779,15 +776,14 @@ def test_cmd_create_rejects_existing_workspace(tmp_path, config):
         return mock
 
     with (
-        patch("ow.workspace.questionary.checkbox", side_effect=mock_checkbox),
-        patch("ow.workspace.questionary.text", side_effect=mock_text),
-        patch("ow.workspace.questionary.confirm", side_effect=mock_confirm),
-        patch("ow.workspace._ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "new-ws", {"community"}, {})),
-        patch("ow.workspace._apply_templates"),
-        patch("ow.workspace.write_workspace_config"),
-        patch("ow.workspace.run_cmd"),
+        patch("questionary.checkbox", side_effect=mock_checkbox),
+        patch("questionary.text", side_effect=mock_text),
+        patch("questionary.confirm", side_effect=mock_confirm),
+        patch("ow.commands.create.ensure_workspace_materialized", return_value=(tmp_path / "workspaces" / "new-ws", {"community"}, {})),
+        patch("ow.commands.create.apply_templates"),
+        patch("ow.commands.create.write_workspace_config"),
+        patch("ow.commands.create.run_cmd"),
     ):
-        from ow.workspace import cmd_create
         cmd_create(config)
 
     assert call_count[0] == 2  # asked twice: first name rejected, second accepted
@@ -823,7 +819,6 @@ class TestSpinner:
 def test_cleanup_failed_workspace_removes_if_empty(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     ws_dir.mkdir(parents=True)
-    from ow.workspace import _cleanup_failed_workspace
     _cleanup_failed_workspace(ws_dir)
     assert not ws_dir.exists()
 
@@ -831,7 +826,6 @@ def test_cleanup_failed_workspace_removes_if_empty(tmp_path):
 def test_cleanup_failed_workspace_removes_if_only_ow_dir(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / ".ow").mkdir(parents=True)
-    from ow.workspace import _cleanup_failed_workspace
     _cleanup_failed_workspace(ws_dir)
     assert not ws_dir.exists()
 
@@ -840,7 +834,6 @@ def test_cleanup_failed_workspace_keeps_if_has_files(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
     ws_dir.mkdir(parents=True)
     (ws_dir / "somefile.txt").touch()
-    from ow.workspace import _cleanup_failed_workspace
     _cleanup_failed_workspace(ws_dir)
     assert ws_dir.exists()
     assert (ws_dir / "somefile.txt").exists()
@@ -848,7 +841,6 @@ def test_cleanup_failed_workspace_keeps_if_has_files(tmp_path):
 
 def test_cleanup_failed_workspace_does_nothing_if_not_exists(tmp_path):
     ws_dir = tmp_path / "workspaces" / "test"
-    from ow.workspace import _cleanup_failed_workspace
     _cleanup_failed_workspace(ws_dir)  # should not raise
     assert not ws_dir.exists()
 
@@ -871,7 +863,6 @@ def test_check_duplicate_branches_detects_same_local_branch(tmp_path, capsys, co
 
     new_repos = {"community": BranchSpec("origin/master", "shared-branch")}
 
-    from ow.workspace import _check_duplicate_branches
     with pytest.raises(SystemExit) as exc_info:
         _check_duplicate_branches(new_repos, config)
     assert exc_info.value.code == 1
@@ -894,7 +885,6 @@ def test_check_duplicate_branches_no_duplicate_if_different_local_branch(tmp_pat
 
     new_repos = {"community": BranchSpec("origin/master", "my-branch")}
 
-    from ow.workspace import _check_duplicate_branches
     _check_duplicate_branches(new_repos, config)  # should not raise
 
     captured = capsys.readouterr()
@@ -914,7 +904,6 @@ def test_check_duplicate_branches_no_duplicate_if_different_alias(tmp_path, caps
 
     new_repos = {"community": BranchSpec("origin/master", "shared-branch")}
 
-    from ow.workspace import _check_duplicate_branches
     _check_duplicate_branches(new_repos, config)  # should not raise
 
     captured = capsys.readouterr()
@@ -930,7 +919,6 @@ def test_check_duplicate_branches_ignores_workspaces_without_ow_config(tmp_path,
 
     new_repos = {"community": BranchSpec("origin/master", "some-branch")}
 
-    from ow.workspace import _check_duplicate_branches
     _check_duplicate_branches(new_repos, config)  # should not raise
 
     captured = capsys.readouterr()
@@ -941,7 +929,6 @@ def test_check_duplicate_branches_silent_if_no_existing_workspaces(tmp_path, cap
     """Return silently when no workspaces exist yet."""
     new_repos = {"community": BranchSpec("origin/master", "some-branch")}
 
-    from ow.workspace import _check_duplicate_branches
     _check_duplicate_branches(new_repos, config)  # should not raise
 
     captured = capsys.readouterr()
@@ -964,10 +951,9 @@ def test_recover_with_cherry_pick_success_returns_none(tmp_path):
     mock_cp.return_value = MagicMock(returncode=0)
     mock_log = MagicMock(return_value="hash some message")
 
-    from ow.workspace import _recover_with_cherry_pick
-    with patch("ow.workspace.git_reset_hard", mock_reset), \
-         patch("ow.workspace.git_cherry_pick", mock_cp), \
-         patch("ow.workspace.git_log_oneline", mock_log):
+    with patch("ow.commands.rebase.git_reset_hard", mock_reset), \
+         patch("ow.commands.rebase.git_cherry_pick", mock_cp), \
+         patch("ow.commands.rebase.git_log_oneline", mock_log):
         result = _recover_with_cherry_pick(worktree, "origin/master", commits)
 
     assert result is None
@@ -996,10 +982,9 @@ def test_recover_with_cherry_pick_conflict_on_second_commit_returns_hash(tmp_pat
     mock_cp = MagicMock(side_effect=mock_cp_side_effect)
     mock_log = MagicMock(return_value="hash some message")
 
-    from ow.workspace import _recover_with_cherry_pick
-    with patch("ow.workspace.git_reset_hard", mock_reset), \
-         patch("ow.workspace.git_cherry_pick", mock_cp), \
-         patch("ow.workspace.git_log_oneline", mock_log):
+    with patch("ow.commands.rebase.git_reset_hard", mock_reset), \
+         patch("ow.commands.rebase.git_cherry_pick", mock_cp), \
+         patch("ow.commands.rebase.git_log_oneline", mock_log):
         result = _recover_with_cherry_pick(worktree, "origin/master", commits)
 
     assert result == "bbb222"
@@ -1016,13 +1001,12 @@ def test_analyze_repo_normal_rebase_no_rewrite(tmp_path):
     worktree = tmp_path / "repo"
     worktree.mkdir()
 
-    with patch("ow.workspace.get_rev_list_count") as mock_rev_count, \
-         patch("ow.workspace.git_merge_base_fork_point", return_value=None), \
-         patch("ow.workspace.git_rev_list", return_value=[]), \
-         patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
+    with patch("ow.commands.rebase.get_rev_list_count") as mock_rev_count, \
+         patch("ow.commands.rebase.git_merge_base_fork_point", return_value=None), \
+         patch("ow.commands.rebase.git_rev_list", return_value=[]), \
+         patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"):
         mock_rev_count.side_effect = [(3, True), (0, True)]  # local=3, unpushed=0
 
-        from ow.workspace import _analyze_repo_for_rebase
         plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", False)
 
     assert plan.alias == "community"
@@ -1044,13 +1028,12 @@ def test_analyze_repo_upstream_rewritten_with_fork_point(tmp_path):
     fork = "abc123"
     commits_list = ["def456", "ghi789"]
 
-    with patch("ow.workspace.get_rev_list_count") as mock_rev_count, \
-         patch("ow.workspace.git_merge_base_fork_point", return_value=fork), \
-         patch("ow.workspace.git_rev_list", return_value=commits_list), \
-         patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
+    with patch("ow.commands.rebase.get_rev_list_count") as mock_rev_count, \
+         patch("ow.commands.rebase.git_merge_base_fork_point", return_value=fork), \
+         patch("ow.commands.rebase.git_rev_list", return_value=commits_list), \
+         patch("ow.commands.rebase.get_worktree_branch", return_value="my-feature"):
         mock_rev_count.side_effect = [(2, True), (2, True)]  # local=2, unpushed=2
 
-        from ow.workspace import _analyze_repo_for_rebase
         plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", False)
 
     assert plan.fork_point == fork
@@ -1064,13 +1047,12 @@ def test_analyze_repo_upstream_rewritten_without_fork_point(tmp_path):
     worktree = tmp_path / "repo"
     worktree.mkdir()
 
-    with patch("ow.workspace.get_rev_list_count") as mock_rev_count, \
-         patch("ow.workspace.git_merge_base_fork_point", return_value=None), \
-         patch("ow.workspace.git_rev_list", return_value=[]), \
-         patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
+    with patch("ow.commands.rebase.get_rev_list_count") as mock_rev_count, \
+         patch("ow.commands.rebase.git_merge_base_fork_point", return_value=None), \
+         patch("ow.commands.rebase.git_rev_list", return_value=[]), \
+         patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"):
         mock_rev_count.side_effect = [(2, True), (2, True)]  # local=2, unpushed=2
 
-        from ow.workspace import _analyze_repo_for_rebase
         plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", False)
 
     assert plan.fork_point is None
@@ -1085,11 +1067,10 @@ def test_analyze_repo_rebase_in_progress(tmp_path):
     (worktree / ".git").mkdir(parents=True)
     (worktree / ".git" / "rebase-merge").mkdir()
 
-    with patch("ow.workspace.get_rev_list_count", return_value=(1, True)), \
-         patch("ow.workspace.git_merge_base_fork_point", return_value=None), \
-         patch("ow.workspace.git_rev_list", return_value=[]), \
-         patch("ow.workspace.get_worktree_branch", return_value="my-feature"):
-        from ow.workspace import _analyze_repo_for_rebase
+    with patch("ow.commands.rebase.get_rev_list_count", return_value=(1, True)), \
+         patch("ow.commands.rebase.git_merge_base_fork_point", return_value=None), \
+         patch("ow.commands.rebase.git_rev_list", return_value=[]), \
+         patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"):
         plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", False)
 
     assert plan.has_conflicts is True
@@ -1100,11 +1081,10 @@ def test_analyze_repo_detached_worktree(tmp_path):
     worktree = tmp_path / "repo"
     worktree.mkdir()
 
-    with patch("ow.workspace.get_rev_list_count", return_value=(0, True)), \
-         patch("ow.workspace.git_merge_base_fork_point", return_value=None) as mock_fork, \
-         patch("ow.workspace.git_rev_list", return_value=[]), \
-         patch("ow.workspace.get_worktree_branch", return_value=None):
-        from ow.workspace import _analyze_repo_for_rebase
+    with patch("ow.commands.rebase.get_rev_list_count", return_value=(0, True)), \
+         patch("ow.commands.rebase.git_merge_base_fork_point", return_value=None) as mock_fork, \
+         patch("ow.commands.rebase.git_rev_list", return_value=[]), \
+         patch("ow.utils.drift.get_worktree_branch", return_value=None):
         plan = _analyze_repo_for_rebase(worktree, "origin/master", "origin/master", "community", True)
 
     assert plan.is_detached is True
@@ -1122,8 +1102,7 @@ def test_prune_bare_repo_strips_plus_prefix(tmp_path):
     branch_result = MagicMock(returncode=0)
     branch_result.stdout = "+ main-parrot\n  other-branch\n"
 
-    with patch("ow.workspace.subprocess.run", side_effect=[MagicMock(returncode=0), wt_result, branch_result, MagicMock(returncode=0)]):
-        from ow.workspace import _prune_bare_repo
+    with patch("ow.commands.prune.subprocess.run", side_effect=[MagicMock(returncode=0), wt_result, branch_result, MagicMock(returncode=0)]):
         result = _prune_bare_repo(bare_repo)
 
     assert "main-parrot" not in result.deleted_branches

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from ow.config import (
+from ow.utils.config import (
     BranchSpec,
     WorkspaceConfig,
     load_config,
@@ -12,7 +12,6 @@ from ow.config import (
     parse_branch_spec,
     write_workspace_config,
 )
-
 
 # ---------------------------------------------------------------------------
 # parse_branch_spec

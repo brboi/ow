@@ -1,12 +1,17 @@
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
-from ow.config import BranchSpec, Config, RemoteConfig, WorkspaceConfig, write_workspace_config
+from ow.utils.config import (
+    BranchSpec,
+    Config,
+    parse_branch_spec,
+    RemoteConfig,
+    WorkspaceConfig,
+    write_workspace_config,
+)
 
 
 def _make_config(
@@ -58,7 +63,6 @@ def ws_config() -> WorkspaceConfig:
         templates: list[str] | None = None,
         vars: dict[str, Any] | None = None,
     ) -> WorkspaceConfig:
-        from ow.config import parse_branch_spec
         if repos is None:
             repos = {"community": BranchSpec("origin/master")}
         parsed = {}
@@ -81,7 +85,6 @@ def workspace_dir(tmp_path: Path) -> Path:
         vars: dict[str, Any] | None = None,
         name: str = "test",
     ) -> Path:
-        from ow.config import parse_branch_spec
         ws_dir = tmp_path / "workspaces" / name
         ws_dir.mkdir(parents=True)
         parsed_repos = {}

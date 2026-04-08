@@ -1,11 +1,9 @@
 import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from ow.config import BranchSpec
-
+from ow.__main__ import _complete_gen_repos, _complete_gen_templates, _complete_workspace_name, main
+from ow.utils.config import BranchSpec
 
 # ---------------------------------------------------------------------------
 # test_main_no_args_exits
@@ -13,8 +11,6 @@ from ow.config import BranchSpec
 
 def test_main_no_args_exits(capsys):
     """ow without command exits with argparse error (required=True)."""
-    from ow.__main__ import main
-
     with patch.object(sys, "argv", ["ow"]):
         with pytest.raises(SystemExit) as exc:
             main()
@@ -30,8 +26,6 @@ def test_main_no_args_exits(capsys):
 
 def test_main_create_with_args(tmp_path):
     """ow create -n myws -r community master..x -t common calls cmd_create with correct args."""
-    from ow.__main__ import main
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
     )
@@ -62,8 +56,6 @@ def test_main_create_with_args(tmp_path):
 
 def test_main_update(tmp_path):
     """ow update calls cmd_update."""
-    from ow.__main__ import main
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
     )
@@ -80,8 +72,6 @@ def test_main_update(tmp_path):
 
 def test_main_update_with_workspace(tmp_path):
     """ow update myws calls cmd_update with workspace="myws"."""
-    from ow.__main__ import main
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
     )
@@ -103,8 +93,6 @@ def test_main_update_with_workspace(tmp_path):
 
 def test_main_status_with_workspace(tmp_path):
     """ow status myws calls cmd_status with workspace="myws"."""
-    from ow.__main__ import main
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
     )
@@ -126,8 +114,6 @@ def test_main_status_with_workspace(tmp_path):
 
 def test_main_status_without_workspace(tmp_path):
     """ow status calls cmd_status with workspace=None."""
-    from ow.__main__ import main
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
     )
@@ -149,8 +135,6 @@ def test_main_status_without_workspace(tmp_path):
 
 def test_main_rebase_with_workspace(tmp_path):
     """ow rebase myws calls cmd_rebase with workspace="myws"."""
-    from ow.__main__ import main
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
     )
@@ -172,8 +156,6 @@ def test_main_rebase_with_workspace(tmp_path):
 
 def test_main_prune(tmp_path):
     """ow prune calls cmd_prune."""
-    from ow.__main__ import main
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
     )
@@ -194,8 +176,6 @@ def test_main_prune(tmp_path):
 
 def test_main_creates_ow_toml_if_missing(tmp_path, capsys):
     """If ow.toml doesn't exist, it is created with minimal content."""
-    from ow.__main__ import main
-
     with (
         patch("ow.__main__.find_root", return_value=tmp_path),
         patch("ow.__main__.cmd_prune"),
@@ -218,14 +198,12 @@ def test_main_creates_ow_toml_if_missing(tmp_path, capsys):
 
 def test_main_exits_if_root_not_found(capsys):
     """If find_root fails, displays error and exits with code 1."""
-    from ow.__main__ import main
-
     with (
         patch("ow.__main__.find_root", side_effect=FileNotFoundError("ow.toml not found")),
         patch.object(sys, "argv", ["ow", "status"]),
+        pytest.raises(SystemExit) as exc
     ):
-        with pytest.raises(SystemExit) as exc:
-            main()
+        main()
 
     assert exc.value.code == 1
     captured = capsys.readouterr()
@@ -238,8 +216,6 @@ def test_main_exits_if_root_not_found(capsys):
 
 def test_complete_gen_templates(tmp_path):
     """Template completion returns correct template names."""
-    from ow.__main__ import _complete_gen_templates
-
     templates_dir = tmp_path / "templates"
     (templates_dir / "common").mkdir(parents=True)
     (templates_dir / "vscode").mkdir(parents=True)
@@ -256,8 +232,6 @@ def test_complete_gen_templates(tmp_path):
 
 def test_complete_gen_templates_with_prefix(tmp_path):
     """Template completion filters by prefix."""
-    from ow.__main__ import _complete_gen_templates
-
     templates_dir = tmp_path / "templates"
     (templates_dir / "common").mkdir(parents=True)
     (templates_dir / "vscode").mkdir(parents=True)
@@ -270,8 +244,6 @@ def test_complete_gen_templates_with_prefix(tmp_path):
 
 def test_complete_gen_templates_no_root(capsys):
     """Template completion returns empty list if root not found."""
-    from ow.__main__ import _complete_gen_templates
-
     with patch("ow.__main__.find_root", side_effect=FileNotFoundError):
         result = _complete_gen_templates("", MagicMock())
 
@@ -284,8 +256,6 @@ def test_complete_gen_templates_no_root(capsys):
 
 def test_complete_gen_repos(tmp_path):
     """Repo completion returns unused aliases."""
-    from ow.__main__ import _complete_gen_repos
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
         'enterprise.origin.url = "git@github.com:odoo/enterprise.git"\n'
@@ -302,8 +272,6 @@ def test_complete_gen_repos(tmp_path):
 
 def test_complete_gen_repos_excludes_used(tmp_path):
     """Repo completion excludes already-provided aliases."""
-    from ow.__main__ import _complete_gen_repos
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
         'enterprise.origin.url = "git@github.com:odoo/enterprise.git"\n'
@@ -320,8 +288,6 @@ def test_complete_gen_repos_excludes_used(tmp_path):
 
 def test_complete_gen_repos_with_prefix(tmp_path):
     """Repo completion filters by prefix."""
-    from ow.__main__ import _complete_gen_repos
-
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
         'enterprise.origin.url = "git@github.com:odoo/enterprise.git"\n'
@@ -337,8 +303,6 @@ def test_complete_gen_repos_with_prefix(tmp_path):
 
 def test_complete_gen_repos_no_root():
     """Repo completion returns empty list if root not found."""
-    from ow.__main__ import _complete_gen_repos
-
     parsed_args = MagicMock(repo=None)
 
     with patch("ow.__main__.find_root", side_effect=FileNotFoundError):
@@ -353,8 +317,6 @@ def test_complete_gen_repos_no_root():
 
 def test_complete_workspace_name(tmp_path):
     """Workspace completion returns existing workspace names."""
-    from ow.__main__ import _complete_workspace_name
-
     ws_dir = tmp_path / "workspaces"
     (ws_dir / "alpha").mkdir(parents=True)
     (ws_dir / "alpha" / ".ow" / "config").parent.mkdir(parents=True)
@@ -376,8 +338,6 @@ def test_complete_workspace_name(tmp_path):
 
 def test_complete_workspace_name_with_prefix(tmp_path):
     """Workspace completion filters by prefix."""
-    from ow.__main__ import _complete_workspace_name
-
     ws_dir = tmp_path / "workspaces"
     (ws_dir / "alpha").mkdir(parents=True)
     (ws_dir / "alpha" / ".ow" / "config").parent.mkdir(parents=True)
@@ -395,8 +355,6 @@ def test_complete_workspace_name_with_prefix(tmp_path):
 
 def test_complete_workspace_name_no_root():
     """Workspace completion returns empty list if root not found."""
-    from ow.__main__ import _complete_workspace_name
-
     with patch("ow.__main__.find_root", side_effect=FileNotFoundError):
         result = _complete_workspace_name("", MagicMock())
 

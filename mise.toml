@@ -7,6 +7,7 @@ experimental = true
 
 [env]
 _.path = ["{{config_root}}"]
+COMPOSE_FILE = "{{config_root}}/services/compose.yml"
 
 [hooks]
 postinstall = "pip install -e {{config_root}} -q"
