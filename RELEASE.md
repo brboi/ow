@@ -9,13 +9,13 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-Optional: create a GitHub release
+That's it. The `release.yml` GitHub Actions workflow triggers automatically and:
 
-```bash
-gh release create v0.2.0 --generate-notes
-```
+1. Builds the package
+2. Publishes to PyPI
+3. Creates a GitHub release with auto-generated notes
 
-That's it. No need to edit `pyproject.toml`.
+**Prerequisites:** the `pypi` environment in the GitHub repository settings must exist and have a `PYPI_API_TOKEN` secret configured.
 
 ## Version Format
 
