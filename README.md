@@ -27,8 +27,8 @@ CLI tool that turns interactive prompts into ready-to-code Odoo workspaces using
 ## Installation
 
 ```sh
-pipx install ow   # recommended
-pip install ow    # or in an active venv
+pipx install odoo-workspaces   # recommended
+pip install odoo-workspaces    # or in an active venv
 ```
 
 ## Quick Start
