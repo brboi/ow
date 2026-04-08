@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./volumes/postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "8025:8025"   # Web UI
+      - "1025:1025"   # SMTP
+    volumes:
+      - ./volumes/mailpit-data:/data
+    restart: unless-stopped
+
+  pgweb:
+    image: sosedoff/pgweb
+    ports:
+      - "8081:8081"
+    environment:
+      DATABASE_URL: postgres://odoo:odoo@postgres:5432/postgres?sslmode=disable
+    depends_on:
+      - postgres
+    restart: unless-stopped

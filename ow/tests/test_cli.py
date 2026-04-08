@@ -237,7 +237,7 @@ def test_main_exits_if_root_not_found(capsys):
 # ---------------------------------------------------------------------------
 
 def test_complete_gen_templates(tmp_path):
-    """Template completion returns correct template names."""
+    """Template completion returns correct template names (local + packaged)."""
     from ow.__main__ import _complete_gen_templates
 
     templates_dir = tmp_path / "templates"
@@ -248,7 +248,11 @@ def test_complete_gen_templates(tmp_path):
     with patch("ow.__main__.find_root", return_value=tmp_path):
         result = _complete_gen_templates("", MagicMock())
 
-    assert result == ["common", "vscode", "zed"]
+    # Includes local templates + packaged templates (bwrap)
+    assert "common" in result
+    assert "vscode" in result
+    assert "zed" in result
+    assert "bwrap" in result
 
 
 def test_complete_gen_templates_with_prefix(tmp_path):
