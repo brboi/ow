@@ -1,10 +1,15 @@
+# Hidden files
+/.*
+!.github
+
+# Python
 *.egg-info
-.claude/
-.opencode/
-.ow/
-.pytest_cache
 __pycache__
-docs/superpowers/
+
+# Local documentation
+docs/
+
+# OW version
 src/ow/_version.py
 
 # OW working directories
