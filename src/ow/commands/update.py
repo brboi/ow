@@ -1,3 +1,4 @@
+import sys
 from ow.utils.resolver import resolve_workspace
 from ow.utils.templates import apply_templates, ensure_workspace_materialized
 from ow.utils.config import Config, write_workspace_config
