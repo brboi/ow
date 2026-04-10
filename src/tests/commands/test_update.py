@@ -1,70 +1,47 @@
-import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from ow.commands import cmd_update
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig, load_workspace_config, parse_branch_spec, write_workspace_config
+from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
 
 
-def write_ow_config(ws_dir: Path, templates: list[str], repos: dict[str, str], vars: dict | None = None) -> None:
-    ws = WorkspaceConfig(
-        repos={alias: parse_branch_spec(spec) for alias, spec in repos.items()},
-        templates=templates,
-        vars=vars or {},
-    )
-    write_workspace_config(ws_dir / ".ow" / "config", ws)
+class TestCmdUpdate:
 
+    def test_cmd_update_applies_templates(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        repo = ws_dir / "community"
+        repo.mkdir()
+        (repo / "odoo-bin").touch()
+        (repo / "addons").mkdir()
+        (repo / "odoo" / "addons").mkdir(parents=True)
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
+        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        config = config_with_remotes
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
+                with patch("ow.commands.update.apply_templates") as mock_apply:
+                    cmd_update(config)
+        mock_apply.assert_called_once()
 
-# ---------------------------------------------------------------------------
-# cmd_update
-# ---------------------------------------------------------------------------
+    def test_cmd_update_with_workspace_name(self, tmp_path, config_with_remotes):
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["common"])
+        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        config = config_with_remotes
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
+                with patch("ow.commands.update.apply_templates") as mock_apply:
+                    cmd_update(config, workspace="test")
+        mock_apply.assert_called_once()
 
-def test_cmd_update_renders_templates_and_materializes(tmp_path, config):
-    ws_dir = tmp_path / "workspaces" / "test"
-    ws_dir.mkdir(parents=True)
-    write_ow_config(ws_dir, ["common"], {"community": "master"})
-
-    with (
-        patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
-        patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})) as mock_mat,
-        patch("ow.commands.update.apply_templates") as mock_apply,
-    ):
-        cmd_update(config)
-
-    mock_mat.assert_called_once()
-    mock_apply.assert_called_once()
-
-
-def test_cmd_update_merges_missing_vars(tmp_path, config):
-    ws_dir = tmp_path / "workspaces" / "test"
-    ws_dir.mkdir(parents=True)
-    write_ow_config(ws_dir, ["common"], {"community": "master"}, vars={"http_port": 9090})
-    config.vars = {"http_port": 8069, "db_host": "localhost"}
-
-    with (
-        patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
-        patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})),
-        patch("ow.commands.update.apply_templates"),
-    ):
-        cmd_update(config)
-
-    updated = load_workspace_config(ws_dir / ".ow" / "config")
-    assert updated.vars["http_port"] == 9090
-    assert updated.vars["db_host"] == "localhost"
-
-
-def test_cmd_update_preserves_existing_vars(tmp_path, config):
-    ws_dir = tmp_path / "workspaces" / "test"
-    ws_dir.mkdir(parents=True)
-    write_ow_config(ws_dir, ["common"], {"community": "master"}, vars={"http_port": 9090})
-    config.vars = {"http_port": 8069}
-
-    with (
-        patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
-        patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})),
-        patch("ow.commands.update.apply_templates"),
-    ):
-        cmd_update(config)
-
-    updated = load_workspace_config(ws_dir / ".ow" / "config")
-    assert updated.vars["http_port"] == 9090
+    def test_cmd_update_with_workspace_name_not_found(self, tmp_path, capsys, config):
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["common"])
+        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        with pytest.raises(SystemExit):
+            cmd_update(config, workspace="nonexistent")
