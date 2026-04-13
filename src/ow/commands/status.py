@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from ow.utils.display import c, counts, osc8
+from ow.utils.display import console, counts
 from ow.utils.drift import warn_if_drifted
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
@@ -51,7 +51,7 @@ def _display_detached_status(
     ahead, behind = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
     short_hash, _ = get_worktree_head(worktree_path)
 
-    status = f"{c(resolved.base_ref, 1)} {counts(behind, ahead)} ({c('DETACHED', 33)}: {short_hash})"
+    status = f"[bold]{resolved.base_ref}[/] {counts(behind, ahead)} ([yellow]DETACHED[/]: {short_hash})"
     return f"        {alias}:{padding}{status}"
 
 
@@ -78,19 +78,19 @@ def _display_attached_status(
     if remote_ref:
         ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", remote_ref)
         ahead_base, behind_base = get_rev_list_count(worktree_path, remote_ref, resolved.base_ref)
-        status = f"{c(remote_ref, 1)} {counts(behind_up, ahead_up)} ({c(resolved.base_ref, 1)} {counts(behind_base, ahead_base)})"
+        status = f"[bold]{remote_ref}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
     else:
         upstream = get_upstream(worktree_path)
         if upstream:
             ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
             if upstream != resolved.base_ref:
                 ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, resolved.base_ref)
-                status = f"{c(upstream, 1)} {counts(behind_up, ahead_up)} ({c(resolved.base_ref, 1)} {counts(behind_base, ahead_base)})"
+                status = f"[bold]{upstream}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
             else:
-                status = f"{c(resolved.local_branch, 1)} {c('(local)', 2)} ({c(upstream, 1)} {counts(behind_up, ahead_up)})"
+                status = f"[bold]{resolved.local_branch}[/] [dim](local)[/] ([bold]{upstream}[/] {counts(behind_up, ahead_up)})"
         else:
             ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
-            status = f"{c(resolved.local_branch, 1)} {c('(local)', 2)} ({c(resolved.base_ref, 1)} {counts(behind_base, ahead_base)})"
+            status = f"[bold]{resolved.local_branch}[/] [dim](local)[/] ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
 
     return f"        {alias}:{padding}{status}"
 
@@ -138,8 +138,8 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
 
     _, _, resolved_specs = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
 
-    print(c(f"[{ws_dir.name}]", 1, 36))
-    print("    " + c("branches", 2))
+    console.print(f"[bold cyan][[{ws_dir.name}]][/]")
+    console.print("    [dim]branches[/]")
 
     max_alias_len = max((len(a) for a in ws.repos), default=0)
 
@@ -172,32 +172,31 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
         padding = " " * (max_alias_len - len(alias) + 1)
         worktree_path = ws_dir / alias
         if not worktree_path.exists():
-            print(f"        {alias}:{padding}{c('(not applied)', 2)}")
+            console.print(f"        {alias}:{padding}[dim](not applied)[/]")
             continue
 
         resolved = resolved_specs.get(alias)
         if resolved is None:
-            print(f"        {alias}:{padding}{c('(error: could not resolve)', 31)}")
+            console.print(f"        {alias}:{padding}[red](error: could not resolve)[/]")
             continue
 
         result = status_results.get(alias)
         if isinstance(result, Exception):
-            print(f"        {alias}:{padding}{c('(error)', 31)}")
+            console.print(f"        {alias}:{padding}[red](error)[/]")
             continue
 
-        print(result.status_line)
+        console.print(result.status_line)
         if first_attached_branch is None and result.first_attached_branch:
             first_attached_branch = result.first_attached_branch
         if result.github_link:
             github_links.append(result.github_link)
 
-    print("    " + c("links", 2))
+    console.print("    [dim]links[/]")
     if first_attached_branch:
         runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
-        runbot_text = osc8(runbot_url, first_attached_branch)
-        print(f"        runbot: {runbot_text}")
+        console.print(f"        runbot: [link={runbot_url}]{first_attached_branch}[/]")
     for link_alias, link_url in github_links:
         link_padding = " " * (max_alias_len - len(link_alias) + 1)
-        print(f"        {link_alias}:{link_padding}{osc8(link_url, link_url)}")
+        console.print(f"        {link_alias}:{link_padding}[link={link_url}]{link_url}[/]")
 
-    print()
+    console.print()
