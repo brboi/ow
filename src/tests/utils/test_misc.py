@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ow.utils.display import counts, osc8
+from ow.utils.display import counts
 from ow.commands.prune import _PruneResult, _prune_bare_repo
 
 
@@ -26,9 +26,10 @@ class TestDisplayHelpers:
         assert "2" in result
         assert "3" in result
 
-    def test_osc8(self):
-        result = osc8("https://example.com", "link text")
-        assert "]8;;" in result
+    def test_osc8_replaced_by_rich_link(self):
+        """osc8 was replaced by Rich [link=url]text[/] markup inline."""
+        result = "[link=https://example.com]link text[/]"
+        assert "https://example.com" in result
         assert "link text" in result
 
 

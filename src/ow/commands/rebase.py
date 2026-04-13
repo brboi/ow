@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ow.utils.display import console
+from rich.text import Text
 from ow.utils.drift import warn_if_drifted
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
@@ -175,7 +176,8 @@ def cmd_rebase(config: Config, workspace: str | None = None) -> None:
     if not plans:
         return
 
-    console.print(f"[bold cyan][[{ws_dir.name}]][/]")
+    header = Text(f"[{ws_dir.name}]", style="bold cyan")
+    console.print(header)
     _display_rebase_summary(plans)
 
     has_rewritten_no_fork = any(

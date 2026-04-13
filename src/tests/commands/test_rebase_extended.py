@@ -20,9 +20,9 @@ class TestReportConflict:
     def test_prints_instructions(self, capsys):
         _report_conflict("community", Path("/ws/community"), "origin/master")
         captured = capsys.readouterr()
-        assert "CONFLICT" in captured.err
-        assert "rebase --continue" in captured.err
-        assert "rebase --abort" in captured.err
+        assert "CONFLICT" in captured.out
+        assert "rebase --continue" in captured.out
+        assert "rebase --abort" in captured.out
 
 
 class TestDisplayRebaseSummary:
@@ -47,7 +47,8 @@ class TestDisplayRebaseSummary:
         )]
         _display_rebase_summary(plans)
         captured = capsys.readouterr()
-        assert "rewritten, no fork-point" in captured.out
+        output = captured.out.replace("\n", "")
+        assert "rewritten, no fork-point" in output
 
     def test_upstream_rewritten_with_fork(self, capsys):
         plans = [RebasePlan(
@@ -58,7 +59,8 @@ class TestDisplayRebaseSummary:
         )]
         _display_rebase_summary(plans)
         captured = capsys.readouterr()
-        assert "rewritten, recoverable" in captured.out
+        output = captured.out.replace("\n", "")
+        assert "rewritten, recoverable" in output
 
     def test_unpushed_commits_marker(self, capsys):
         plans = [RebasePlan(
@@ -329,7 +331,7 @@ class TestCmdRebaseExtended:
             )}
             cmd_rebase(config)
         captured = capsys.readouterr()
-        assert "rebase already in progress" in captured.err
+        assert "rebase already in progress" in captured.out
 
     def test_cmd_rebase_no_fork_point_skip(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
@@ -359,8 +361,9 @@ class TestCmdRebaseExtended:
             )}
             cmd_rebase(config)
         captured = capsys.readouterr()
-        assert "no fork-point" in captured.err
-        assert "Manual recovery" in captured.err
+        output = captured.out.replace("\n", "")
+        assert "no fork-point" in output
+        assert "Manual recovery" in output
 
 
 class TestCmdRebaseExecution:
@@ -460,7 +463,7 @@ class TestCmdRebaseExecution:
             )}
             cmd_rebase(config)
         captured = capsys.readouterr()
-        assert "unpushed commits" in captured.err
+        assert "unpushed commits" in captured.out
 
     def test_cmd_rebase_no_worktrees_returns(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
