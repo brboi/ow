@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ow.utils.display import console, counts
+from rich.text import Text
+from rich.text import Text
 from ow.utils.drift import warn_if_drifted
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
@@ -138,7 +140,8 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
 
     _, _, resolved_specs = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
 
-    console.print(f"[bold cyan][[{ws_dir.name}]][/]")
+    header = Text(f"[{ws_dir.name}]", style="bold cyan")
+    console.print(header)
     console.print("    [dim]branches[/]")
 
     max_alias_len = max((len(a) for a in ws.repos), default=0)

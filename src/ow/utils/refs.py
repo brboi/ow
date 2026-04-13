@@ -98,8 +98,8 @@ def fetch_workspace_refs(
         resolve_tasks[alias] = (lambda a=alias, s=spec: _resolve_alias(a, s))
 
     if resolve_tasks:
-    with console.status(f"{spinner_prefix} {len(resolve_tasks)} repo(s)", spinner="dots"):
-        resolve_results = parallel_per_repo(resolve_tasks)
+        with console.status(f"{spinner_prefix} {len(resolve_tasks)} repo(s)", spinner="dots"):
+            resolve_results = parallel_per_repo(resolve_tasks)
     else:
         resolve_results = {}
 
@@ -128,8 +128,6 @@ def fetch_workspace_refs(
         args.extend([job.remote, job.refspec])
         return subprocess.run(args, capture_output=True)
 
-    if fetch_tasks:
-    if fetch_tasks:
     if fetch_tasks:
         fetch_callables = {key: (lambda j=job: _do_fetch(j)) for key, job in fetch_tasks.items()}
         with console.status(f"Fetching {len(fetch_callables)} ref(s)", spinner="dots"):
