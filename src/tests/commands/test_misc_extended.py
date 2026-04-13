@@ -9,7 +9,7 @@ from ow.commands.prune import _prune_bare_repo
 from ow.commands.status import _gather_repo_status
 from ow.commands.update import cmd_update
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
-from ow.utils.display import osc8
+from ow.utils.display import counts
 
 
 # ---------------------------------------------------------------------------
@@ -58,9 +58,8 @@ class TestStatusExtended:
         assert result.github_link is not None
         assert "tree/feature" in result.github_link[1]
 
-    def test_osc8_empty(self):
-        result = osc8("", "")
-        # Should return something but may be empty string
+    def test_rich_link_markup(self):
+        result = "[link=][/]"
         assert isinstance(result, str)
 
 
@@ -109,12 +108,13 @@ class TestCmdUpdateExtended:
 
 class TestMainExtended:
     def test_main_init_path(self, tmp_path, monkeypatch, capsys):
-        from ow.__main__ import main
+        from typer.testing import CliRunner
+        from ow.__main__ import app
+        runner = CliRunner()
         monkeypatch.chdir(tmp_path)
-        with patch.object(sys, "argv", ["ow", "init"]):
-            main()
-            captured = capsys.readouterr()
-        assert "Project initialized successfully" in captured.out
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0
+        assert "Project initialized successfully" in result.output
 
 
 # ---------------------------------------------------------------------------

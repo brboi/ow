@@ -194,7 +194,7 @@ def test_cmd_rebase_conflict_reports_and_continues(tmp_path, capsys):
             cmd_rebase(config)
 
     captured = capsys.readouterr()
-    assert "CONFLICT" in captured.err
+    assert "CONFLICT" in captured.out
 
 
 def test_cmd_rebase_no_upstream_when_not_pushed(tmp_path):
