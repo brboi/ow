@@ -9,7 +9,7 @@ authors = [{ name = "Bruno BOI", email = "boi@odoo.com" }]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["argcomplete", "jinja2", "questionary", "tomli-w"]
+dependencies = ["typer", "rich", "jinja2", "questionary", "tomli-w"]
 dynamic = ["version"]
 classifiers = [
     "Development Status :: 4 - Beta",
