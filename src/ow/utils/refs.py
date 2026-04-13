@@ -2,7 +2,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from ow.utils.display import Spinner, _print_git_result
+from ow.utils.display import console, print_git_result
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 from ow.utils.git import (
     get_upstream,
@@ -98,8 +98,8 @@ def fetch_workspace_refs(
         resolve_tasks[alias] = (lambda a=alias, s=spec: _resolve_alias(a, s))
 
     if resolve_tasks:
-        with Spinner(f"{spinner_prefix} {len(resolve_tasks)} repo(s)"):
-            resolve_results = parallel_per_repo(resolve_tasks)
+    with console.status(f"{spinner_prefix} {len(resolve_tasks)} repo(s)", spinner="dots"):
+        resolve_results = parallel_per_repo(resolve_tasks)
     else:
         resolve_results = {}
 
@@ -111,7 +111,7 @@ def fetch_workspace_refs(
             continue
         result = resolve_results[alias]
         if isinstance(result, Exception):
-            _print_git_result(alias, "fetch", ["?"], False, str(result))
+            print_git_result(alias, "fetch", ["?"], False, str(result))
             resolved_tracks[alias] = ws.repos[alias].base_ref
             continue
         alias_resolve[alias] = result
@@ -129,8 +129,10 @@ def fetch_workspace_refs(
         return subprocess.run(args, capture_output=True)
 
     if fetch_tasks:
+    if fetch_tasks:
+    if fetch_tasks:
         fetch_callables = {key: (lambda j=job: _do_fetch(j)) for key, job in fetch_tasks.items()}
-        with Spinner(f"Fetching {len(fetch_callables)} ref(s)"):
+        with console.status(f"Fetching {len(fetch_callables)} ref(s)", spinner="dots"):
             fetch_results = parallel_per_repo(fetch_callables)
     else:
         fetch_results = {}
@@ -151,11 +153,11 @@ def fetch_workspace_refs(
             key = f"{alias}:{i}"
             fetch_result = fetch_results[key]
             if isinstance(fetch_result, Exception):
-                _print_git_result(alias, "fetch", [job.remote, job.refspec], False, str(fetch_result))
+                print_git_result(alias, "fetch", [job.remote, job.refspec], False, str(fetch_result))
             elif fetch_result.returncode != 0:
                 err = fetch_result.stderr.decode().strip() if fetch_result.stderr else "unknown"
-                _print_git_result(alias, "fetch", [job.remote, job.refspec], False, err)
+                print_git_result(alias, "fetch", [job.remote, job.refspec], False, err)
             else:
-                _print_git_result(alias, "fetch", [job.remote, job.refspec], True)
+                print_git_result(alias, "fetch", [job.remote, job.refspec], True)
 
     return resolved_tracks, resolved_upstreams, resolved_specs
