@@ -21,11 +21,33 @@ try:
 except ImportError:
     __version__ = "dev"
 
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"ow {__version__}")
+        raise typer.Exit()
+
+
 app = typer.Typer(
     name="ow",
     help="Odoo workspace manager",
     no_args_is_help=True,
 )
+
+
+@app.callback()
+def callback(
+    version: bool = typer.Option(
+        None,
+        "--version",
+        "-V",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit.",
+    ),
+) -> None:
+    """Odoo workspace manager."""
+    pass
 
 
 def _find_root() -> Path:
