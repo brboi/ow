@@ -55,7 +55,7 @@ AGENTS.md
   - `config.py` — `BranchSpec`, `Config`, `WorkspaceConfig`, `parse_branch_spec`, `load_config`, `load_workspace_config`, `write_workspace_config`.
   - `display.py` — `console`, `err_console`, `counts`, `print_git_result`.
   - `drift.py` — `DriftResult`, `check_drift`, `warn_if_drifted`. Detect when worktree branch state doesn't match config. Commands call `warn_if_drifted` to display warnings but proceed anyway.
-  - `git.py` — all git operations: `ensure_bare_repo`, `resolve_spec`, `resolve_spec_local`, `attach_worktree`, `create_worktree`, `detach_worktree`, `git_switch`, `git_rebase`, `git_fetch`, `git_cherry_pick`, `git_reset_hard`, `git_rev_list`, `git_log_oneline`, `get_rev_list_count`, `get_upstream`, `get_all_remote_refs`, `get_remote_ref_for_branch`, `get_remote_url`, `get_worktree_branch`, `get_worktree_head`, `worktree_exists`, `worktree_is_detached`, `set_branch_upstream`, `parallel_per_repo`, `ordered_remotes`, `run_cmd`.
+  - `git.py` — worktree operations: `create_worktree`, `attach_worktree`, `detach_worktree`, `worktree_exists`, `worktree_is_detached`, `get_worktree_branch`, `get_worktree_head`. Bare repo operations: `ensure_bare_repo`, `ensure_ref`. Ref/branch queries: `resolve_spec`, `resolve_spec_local`, `get_all_remote_refs`, `get_remote_ref_for_branch`, `get_remote_url`, `get_upstream`, `set_branch_upstream`. Analysis: `rev_parse`, `is_ancestor`, `merge_base`, `count_commits`, `count_new_patches`, `count_unpushed`, `in_progress_operation`, `dirty_files`. Execution: `git`, `git_fetch`, `parallel_per_repo`, `run_cmd`.
   - `refs.py` — `fetch_workspace_refs` — three-phase pipeline for fetching workspace refs.
   - `rebase_plan.py` — `RepoFacts`, `GitStep`, `RebasePlan`, `plan_for` — pure analysis functions for rebase planning.
   - `resolver.py` — `resolve_workspace(path, config)` resolves a workspace from explicit path, `OW_WORKSPACE` env var, or cwd walk-up for `.ow/config`.
@@ -69,7 +69,7 @@ AGENTS.md
 | `ow create` | `cmd_create(config, ...)` | Interactive form → create workspace + `.ow/config` |
 | `ow update` | `cmd_update(config)` | Re-render templates + materialize worktrees |
 | `ow status` | `cmd_status(config)` | Show workspace branch status |
-| `ow rebase` | `cmd_rebase(config)` | Fetch + rebase workspace branches |
+| `ow rebase` | `cmd_rebase(config, workspace=None, *, only=None, autostash=False, dry_run=False, yes=False)` | Fetch + rebase workspace branches |
 | `ow prune` | `cmd_prune(config)` | Clean up stale worktree references from bare repos |
 
 All commands resolve the current workspace via `OW_WORKSPACE` env var or cwd walk-up for `.ow/config`.

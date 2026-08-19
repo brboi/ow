@@ -112,7 +112,7 @@ Shows a summary and asks for confirmation before touching anything.
 ```sh
 ow rebase                                  # every repo of the current workspace
 ow rebase parrot --only community          # one repo of a named workspace
-ow rebase --dry-run                        # print the git commands, run nothing
+ow rebase --dry-run                        # fetch, then print the plan — no worktree touched
 ```
 
 Running it twice in a row with nothing changed in between does nothing the second
@@ -125,11 +125,11 @@ force-pushed remote copy is detected by comparing the ref before and after the
 fetch, and handled with a single `git rebase --onto`.
 
 A repo is skipped, and the run exits non-zero, when a git operation is already in
-progress (the message gives the exact `--continue` / `--abort` command) or when the
-worktree has uncommitted changes. `--autostash` stashes and restores them instead.
-`--only` scopes this to selected repos, affecting drift warnings and ref fetching too.
+progress (the message gives the exact `--continue` / `--abort` command), when the
+worktree has uncommitted changes, or when the worktree is missing. `--autostash` stashes and restores uncommitted changes instead.
+`--only` restricts the whole run to the selected repos, including drift warnings and ref fetching.
 
-On conflict, resolve, `git rebase --continue`, then re-run `ow rebase`. Nothing is
+On conflict, resolve, `git rebase --continue`, then re-run `ow rebase --only <alias>`. Nothing is
 ever pushed: the `git push --force-with-lease` stays yours.
 
 `--dry-run` fetches refs to show you what would happen, but runs no command that
