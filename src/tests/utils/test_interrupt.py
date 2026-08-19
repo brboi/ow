@@ -168,3 +168,19 @@ class TestParallelPerRepo:
             parallel_per_repo({"slow": slow, "boom": interrupt})
 
         assert live_children() == 0
+
+    def test_an_on_done_callback_that_raises_propagates_and_does_not_hang(self):
+        """A callback raising something other than KeyboardInterrupt (e.g. a bug
+        in a caller's progress display) must not be swallowed, and must not leak
+        the pool. Asserting the shutdown itself happened is awkward from outside
+        (ThreadPoolExecutor exposes no public "is this shut down" signal); the
+        propagation this test checks, plus the explicit `except BaseException:
+        pool.shutdown(...)` clause in the implementation, are what cover it.
+        """
+        from ow.utils.git import parallel_per_repo
+
+        def boom(alias):
+            raise RuntimeError("on_done blew up")
+
+        with pytest.raises(RuntimeError, match="on_done blew up"):
+            parallel_per_repo({"a": lambda: 1}, on_done=boom)

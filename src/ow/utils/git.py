@@ -659,6 +659,11 @@ def parallel_per_repo(
         pool.shutdown(wait=False, cancel_futures=True)
         terminate_children()
         raise
+    except BaseException:
+        # Anything else reaching here came from on_done, a caller-supplied
+        # callback. It must not leak the pool on its way out.
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
     else:
         pool.shutdown(wait=True)
 
