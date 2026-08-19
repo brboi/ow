@@ -12,7 +12,7 @@ from ow.commands import (
     cmd_status,
     cmd_update,
 )
-from ow.utils.config import Config, load_config, parse_branch_spec
+from ow.utils.config import Config, find_project_root, load_config, parse_branch_spec
 from ow.utils.templates import available_templates
 
 try:
@@ -51,15 +51,12 @@ def callback(
 
 
 def _find_root() -> Path:
-    current = Path.cwd()
-    while True:
-        if (current / "ow.toml").exists() or (current / "ow.toml.example").exists():
-            return current
-        if current.parent == current:
-            raise FileNotFoundError(
-                "ow.toml not found in current directory or any parent"
-            )
-        current = current.parent
+    root = find_project_root(Path.cwd())
+    if root is None:
+        raise FileNotFoundError(
+            "ow.toml not found in current directory or any parent"
+        )
+    return root
 
 
 def _load_config() -> Config:

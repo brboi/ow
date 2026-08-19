@@ -140,7 +140,7 @@ def _do_rebase(worktree, upstream: str | None, track_ref: str) -> bool:
 
 def cmd_rebase(config: Config, workspace: str | None = None) -> None:
     """Fetch and rebase all repos in the current workspace."""
-    ws_dir, ws = resolve_workspace(config, name=workspace)
+    config, ws_dir, ws = resolve_workspace(config, name=workspace)
 
     warn_if_drifted(ws, ws_dir)
 

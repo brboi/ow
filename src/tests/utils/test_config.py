@@ -7,6 +7,7 @@ import pytest
 from ow.utils.config import (
     BranchSpec,
     WorkspaceConfig,
+    find_project_root,
     load_config,
     load_workspace_config,
     parse_branch_spec,
@@ -276,3 +277,33 @@ def test_write_workspace_config_non_origin_remote():
         ws2 = load_workspace_config(config_path)
 
     assert ws2.repos["community"] == BranchSpec("dev/master-phoenix", "fix")
+
+
+class TestFindProjectRoot:
+    """find_project_root locates the ow project owning a path."""
+
+    def test_finds_root_at_start(self, tmp_path):
+        (tmp_path / "ow.toml").write_text("[remotes]\n")
+        assert find_project_root(tmp_path) == tmp_path
+
+    def test_walks_up_from_nested_path(self, tmp_path):
+        (tmp_path / "ow.toml").write_text("[remotes]\n")
+        nested = tmp_path / "workspaces" / "ws" / "community"
+        nested.mkdir(parents=True)
+        assert find_project_root(nested) == tmp_path
+
+    def test_accepts_example_marker(self, tmp_path):
+        (tmp_path / "ow.toml.example").write_text("[remotes]\n")
+        assert find_project_root(tmp_path) == tmp_path
+
+    def test_returns_none_when_no_project_above(self, tmp_path):
+        nested = tmp_path / "a" / "b"
+        nested.mkdir(parents=True)
+        assert find_project_root(nested) is None
+
+    def test_stops_at_nearest_root(self, tmp_path):
+        (tmp_path / "ow.toml").write_text("[remotes]\n")
+        inner = tmp_path / "inner"
+        inner.mkdir()
+        (inner / "ow.toml").write_text("[remotes]\n")
+        assert find_project_root(inner) == inner

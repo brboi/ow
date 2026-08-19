@@ -3,7 +3,30 @@ import textwrap
 import pytest
 
 from ow.utils.resolver import resolve_workspace
-from ow.utils.config import WorkspaceConfig, write_workspace_config
+from ow.utils.config import (
+    WorkspaceConfig,
+    load_config,
+    write_workspace_config,
+)
+
+
+def _make_project(root, alias="community"):
+    """Create an ow project on disk and return its loaded Config."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "ow.toml").write_text(
+        f'[remotes]\n{alias}.origin.url = "git@github.com:odoo/{alias}.git"\n'
+    )
+    return load_config(root / "ow.toml")
+
+
+def _make_ws(project_root, name):
+    ws_dir = project_root / "workspaces" / name
+    (ws_dir / ".ow").mkdir(parents=True)
+    write_workspace_config(
+        ws_dir / ".ow" / "config",
+        WorkspaceConfig(templates=["common"], repos={}, vars={}),
+    )
+    return ws_dir
 
 
 class TestResolveWorkspace:
@@ -21,120 +44,184 @@ class TestResolveWorkspace:
 
         with pytest.MonkeyPatch().context() as mp:
             mp.setenv("OW_WORKSPACE", str(ws_dir))
-            resolved_dir, ws = resolve_workspace(config)
+            _, resolved_dir, ws = resolve_workspace(config)
 
         assert resolved_dir == ws_dir
         assert ws.templates == ["common"]
-
-    def test_env_var_used(self, tmp_path, monkeypatch, config):
-        ws_dir = tmp_path / "workspaces" / "env-ws"
-        ws_dir.mkdir(parents=True)
-        ow_config = ws_dir / ".ow" / "config"
-        ow_config.parent.mkdir(parents=True)
-        ow_config.write_text(textwrap.dedent("""\
-            templates = ["common"]
-
-            [repos]
-            community = "master"
-        """))
-
-        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-        resolved_dir, ws = resolve_workspace(config)
-
-        assert resolved_dir == ws_dir
 
     def test_env_var_as_workspace_name(self, tmp_path, monkeypatch, config):
-        ws_dir = tmp_path / "workspaces" / "named-ws"
-        ws_dir.mkdir(parents=True)
-        ow_config = ws_dir / ".ow" / "config"
-        ow_config.parent.mkdir(parents=True)
-        ow_config.write_text(textwrap.dedent("""\
-            templates = ["common"]
-
-            [repos]
-            community = "master"
-        """))
-
+        ws_dir = _make_ws(tmp_path, "named-ws")
         monkeypatch.setenv("OW_WORKSPACE", "named-ws")
-        resolved_dir, ws = resolve_workspace(config)
+        _, resolved_dir, ws = resolve_workspace(config)
 
         assert resolved_dir == ws_dir
         assert ws.templates == ["common"]
 
-    def test_env_var_fallback_to_path(self, tmp_path, monkeypatch, config):
+    def test_env_var_as_path_outside_workspaces_dir(self, tmp_path, monkeypatch, config):
         ws_dir = tmp_path / "elsewhere" / "my-ws"
-        ws_dir.mkdir(parents=True)
-        ow_config = ws_dir / ".ow" / "config"
-        ow_config.parent.mkdir(parents=True)
-        ow_config.write_text(textwrap.dedent("""\
-            templates = ["common"]
-
-            [repos]
-            community = "master"
-        """))
+        (ws_dir / ".ow").mkdir(parents=True)
+        write_workspace_config(
+            ws_dir / ".ow" / "config",
+            WorkspaceConfig(templates=["common"], repos={}, vars={}),
+        )
 
         monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-        resolved_dir, ws = resolve_workspace(config)
+        _, resolved_dir, _ = resolve_workspace(config)
 
         assert resolved_dir == ws_dir
 
     def test_cwd_walkup(self, tmp_path, monkeypatch, config):
         """resolve_workspace walks up from cwd to find .ow/config."""
-        ws_dir = tmp_path / "workspaces" / "walkup"
+        ws_dir = _make_ws(tmp_path, "walkup")
         subdir = ws_dir / "community" / "odoo"
         subdir.mkdir(parents=True)
-        ow_config = ws_dir / ".ow" / "config"
-        ow_config.parent.mkdir(parents=True)
-        ow_config.write_text(textwrap.dedent("""\
-            templates = ["common"]
-
-            [repos]
-            community = "master"
-        """))
 
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
         monkeypatch.chdir(subdir)
-        resolved_dir, ws = resolve_workspace(config)
+        _, resolved_dir, _ = resolve_workspace(config)
 
         assert resolved_dir == ws_dir
 
     def test_exits_when_no_workspace_found(self, tmp_path, monkeypatch, config):
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
+        monkeypatch.chdir(tmp_path)
 
         with pytest.raises(SystemExit):
             resolve_workspace(config)
 
     def test_resolve_workspace_by_name(self, tmp_path, monkeypatch, config):
-        """resolve_workspace with name argument resolves to that workspace."""
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        ws_dir = tmp_path / "workspaces" / "test"
-        ws_dir.mkdir(parents=True)
-        (ws_dir / ".ow").mkdir()
-        write_workspace_config(ws_dir / ".ow" / "config", WorkspaceConfig(
-            templates=["common"], repos={}, vars={}
-        ))
+        ws_dir = _make_ws(tmp_path, "test")
 
-        resolved_dir, ws = resolve_workspace(config, name="test")
+        _, resolved_dir, _ = resolve_workspace(config, name="test")
         assert resolved_dir == ws_dir
 
     def test_resolve_workspace_by_name_not_found(self, tmp_path, monkeypatch, capsys, config):
-        """resolve_workspace with non-existent name exits with error."""
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
 
         with pytest.raises(SystemExit):
             resolve_workspace(config, name="nonexistent")
 
-        captured = capsys.readouterr()
-        assert "Workspace 'nonexistent' not found" in captured.err
+        assert "Workspace 'nonexistent' not found" in capsys.readouterr().err
 
     def test_resolve_workspace_by_name_invalid(self, tmp_path, monkeypatch, capsys, config):
-        """resolve_workspace with name of non-workspace directory exits with error."""
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        ws_dir = tmp_path / "workspaces" / "invalid"
-        ws_dir.mkdir(parents=True)
+        (tmp_path / "workspaces" / "invalid").mkdir(parents=True)
 
         with pytest.raises(SystemExit):
             resolve_workspace(config, name="invalid")
 
+        assert "not a valid workspace" in capsys.readouterr().err
+
+
+class TestProjectRootFollowsTheWorkspace:
+    """A workspace outside the current project must be read with its own ow.toml."""
+
+    def test_path_outside_current_project_reroots(self, tmp_path, monkeypatch):
+        _make_project(tmp_path / "odoo", alias="community")
+        other = _make_project(tmp_path / "devrepo", alias="owl")
+        ws_dir = _make_ws(tmp_path / "odoo", "quattromori")
+
+        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+        cfg, resolved_dir, _ = resolve_workspace(other)
+
+        assert resolved_dir == ws_dir
+        assert cfg.root_dir == tmp_path / "odoo"
+        assert sorted(cfg.remotes) == ["community"]
+
+    def test_reroot_is_announced_on_stderr(self, tmp_path, monkeypatch, capsys):
+        _make_project(tmp_path / "odoo")
+        other = _make_project(tmp_path / "devrepo", alias="owl")
+        ws_dir = _make_ws(tmp_path / "odoo", "quattromori")
+
+        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+        resolve_workspace(other)
+
         captured = capsys.readouterr()
-        assert "not a valid workspace" in captured.err
+        assert f"Using project {tmp_path / 'odoo'}" in captured.err
+        assert captured.out == ""
+
+    def test_workspace_inside_project_keeps_the_config_untouched(self, tmp_path, monkeypatch, capsys):
+        project = _make_project(tmp_path / "odoo")
+        ws_dir = _make_ws(tmp_path / "odoo", "quattromori")
+
+        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+        cfg, _, _ = resolve_workspace(project)
+
+        assert cfg is project
+        assert capsys.readouterr().err == ""
+
+    def test_orphan_workspace_is_a_hard_failure(self, tmp_path, monkeypatch, capsys):
+        other = _make_project(tmp_path / "devrepo", alias="owl")
+        ws_dir = tmp_path / "orphan" / "ws"
+        (ws_dir / ".ow").mkdir(parents=True)
+        write_workspace_config(
+            ws_dir / ".ow" / "config",
+            WorkspaceConfig(templates=[], repos={}, vars={}),
+        )
+
+        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+        with pytest.raises(SystemExit):
+            resolve_workspace(other)
+
+        err = capsys.readouterr().err
+        assert "no ow.toml above" in err
+        assert str(ws_dir) in err
+
+    def test_positional_name_never_reroots(self, tmp_path, monkeypatch, capsys):
+        _make_project(tmp_path / "odoo")
+        other = _make_project(tmp_path / "devrepo", alias="owl")
+        _make_ws(tmp_path / "odoo", "quattromori")
+        _make_ws(tmp_path / "devrepo", "quattromori")
+
+        monkeypatch.delenv("OW_WORKSPACE", raising=False)
+        cfg, resolved_dir, _ = resolve_workspace(other, name="quattromori")
+
+        assert cfg is other
+        assert resolved_dir == tmp_path / "devrepo" / "workspaces" / "quattromori"
+        assert capsys.readouterr().err == ""
+
+
+class TestOwWorkspaceFailsLoudly:
+    """One meaning per form, one failure per form — never a silent fallback."""
+
+    def test_unknown_name_names_the_project_it_looked_in(self, tmp_path, monkeypatch, capsys):
+        project = _make_project(tmp_path / "devrepo", alias="owl")
+        monkeypatch.setenv("OW_WORKSPACE", "quattromori")
+
+        with pytest.raises(SystemExit):
+            resolve_workspace(project)
+
+        err = capsys.readouterr().err
+        assert "OW_WORKSPACE" in err
+        assert "quattromori" in err
+        assert str(tmp_path / "devrepo" / "workspaces") in err
+
+    def test_path_without_ow_config_names_the_env_var(self, tmp_path, monkeypatch, capsys):
+        project = _make_project(tmp_path / "devrepo", alias="owl")
+        stray = tmp_path / "not-a-workspace"
+        stray.mkdir()
+
+        monkeypatch.setenv("OW_WORKSPACE", str(stray))
+        with pytest.raises(SystemExit):
+            resolve_workspace(project)
+
+        err = capsys.readouterr().err
+        assert "OW_WORKSPACE" in err
+        assert str(stray) in err
+
+    def test_bare_name_never_falls_back_to_a_relative_path(self, tmp_path, monkeypatch, capsys):
+        """The old code fell through to Path(env_val)/.ow/config, relative to cwd."""
+        project = _make_project(tmp_path / "devrepo", alias="owl")
+        decoy = tmp_path / "cwd" / "quattromori"
+        (decoy / ".ow").mkdir(parents=True)
+        write_workspace_config(
+            decoy / ".ow" / "config",
+            WorkspaceConfig(templates=[], repos={}, vars={}),
+        )
+
+        monkeypatch.chdir(tmp_path / "cwd")
+        monkeypatch.setenv("OW_WORKSPACE", "quattromori")
+
+        with pytest.raises(SystemExit):
+            resolve_workspace(project)

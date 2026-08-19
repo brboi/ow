@@ -56,6 +56,10 @@ def fetch_workspace_refs(
         worktree_path = ws_dir / alias
         alias_remotes = config.remotes.get(alias, {})
         bare_repo_path = bare_repos_dir / f"{alias}.git"
+        if not bare_repo_path.exists():
+            raise RuntimeError(
+                f"no bare repo at {bare_repo_path}; run `ow update` to materialize it"
+            )
         bare_repo = str(bare_repo_path)
         track_spec = BranchSpec(spec.base_ref)
         jobs: list[_FetchJob] = []
@@ -111,7 +115,7 @@ def fetch_workspace_refs(
             continue
         result = resolve_results[alias]
         if isinstance(result, Exception):
-            print_git_result(alias, "fetch", ["?"], False, str(result))
+            print_git_result(alias, "resolve", [], False, str(result))
             resolved_tracks[alias] = ws.repos[alias].base_ref
             continue
         alias_resolve[alias] = result
