@@ -220,12 +220,16 @@ class TestAnalysisFailure:
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
             patch("ow.commands.rebase.gather_facts") as mock_gather,
+            patch("ow.commands.rebase.git") as mock_git,
             pytest.raises(SystemExit) as exc,
         ):
             cmd_rebase(config, workspace=None, yes=True)
         assert exc.value.code == 1
         mock_gather.assert_not_called()
-        assert "worktree not found" in capsys.readouterr().err
+        assert mock_git.call_count == 0
+        err = capsys.readouterr().err
+        assert "community" in err
+        assert "worktree not found" in err
 
 
 class TestMultiRepo:
