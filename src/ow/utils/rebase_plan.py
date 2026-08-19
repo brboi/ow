@@ -68,6 +68,10 @@ class RebasePlan:
     def is_noop(self) -> bool:
         return not self.steps and not self.is_skipped
 
+    @property
+    def detaches(self) -> bool:
+        return bool(self.steps) and self.steps[0].args[0] == "switch"
+
 
 def _dirty_summary(files: tuple[str, ...]) -> str:
     listed = ", ".join(files[:_MAX_LISTED_DIRTY])

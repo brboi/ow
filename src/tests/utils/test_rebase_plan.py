@@ -59,6 +59,14 @@ class TestDetached:
             GitStep(("switch", "--detach", "origin/master"), "origin/master"),
         )
 
+    def test_detaches_is_true_for_a_detached_plan(self):
+        plan = plan_for(facts(is_detached=True))
+        assert plan.detaches is True
+
+    def test_detaches_is_false_for_a_rebase_plan(self):
+        plan = plan_for(facts(base_merged=False))
+        assert plan.detaches is False
+
 
 class TestSingleRebase:
     def test_no_upstream_rebases_onto_the_base(self):
