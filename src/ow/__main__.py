@@ -193,10 +193,17 @@ def status(
 @app.command()
 def rebase(
     workspace: Optional[str] = typer.Argument(None, help="Workspace name (default: resolve from cwd)", autocompletion=complete_workspace_name),
+    only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to rebase (default: all)"),
+    autostash: bool = typer.Option(False, "--autostash", help="Stash and restore uncommitted changes around each rebase"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
 ) -> None:
     """Fetch and rebase workspace branches."""
     config = _load_config()
-    cmd_rebase(config, workspace=workspace)
+    cmd_rebase(
+        config, workspace=workspace, only=only,
+        autostash=autostash, dry_run=dry_run, yes=yes,
+    )
 
 
 @app.command()

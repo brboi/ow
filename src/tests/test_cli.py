@@ -341,3 +341,32 @@ def test_complete_workspace_name_survives_unreadable_dir(tmp_path):
     (tmp_path / "workspaces").mkdir()
     with patch.object(Path, "iterdir", side_effect=PermissionError):
         assert _complete(["status"], "", tmp_path) == []
+
+
+class TestRebaseFlags:
+    def test_flags_reach_cmd_rebase(self):
+        from typer.testing import CliRunner
+        from ow.__main__ import app
+        with patch("ow.__main__.cmd_rebase") as mock, patch("ow.__main__._load_config"):
+            CliRunner().invoke(
+                app,
+                ["rebase", "parrot", "--only", "community,enterprise",
+                 "--autostash", "--dry-run", "-y"],
+            )
+        _, kwargs = mock.call_args
+        assert kwargs["workspace"] == "parrot"
+        assert kwargs["only"] == "community,enterprise"
+        assert kwargs["autostash"] is True
+        assert kwargs["dry_run"] is True
+        assert kwargs["yes"] is True
+
+    def test_defaults_are_conservative(self):
+        from typer.testing import CliRunner
+        from ow.__main__ import app
+        with patch("ow.__main__.cmd_rebase") as mock, patch("ow.__main__._load_config"):
+            CliRunner().invoke(app, ["rebase"])
+        _, kwargs = mock.call_args
+        assert kwargs["only"] is None
+        assert kwargs["autostash"] is False
+        assert kwargs["dry_run"] is False
+        assert kwargs["yes"] is False
