@@ -26,12 +26,6 @@ class TestDisplayHelpers:
         assert "2" in result
         assert "3" in result
 
-    def test_osc8_replaced_by_rich_link(self):
-        """osc8 was replaced by Rich [link=url]text[/] markup inline."""
-        result = "[link=https://example.com]link text[/]"
-        assert "https://example.com" in result
-        assert "link text" in result
-
 
 class TestPruneBareRepoExtended:
 

@@ -9,7 +9,6 @@ from ow.commands.prune import _prune_bare_repo
 from ow.commands.status import _gather_repo_status
 from ow.commands.update import cmd_update
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
-from ow.utils.display import counts
 
 
 # ---------------------------------------------------------------------------
@@ -57,10 +56,6 @@ class TestStatusExtended:
 
         assert result.github_link is not None
         assert "tree/feature" in result.github_link[1]
-
-    def test_rich_link_markup(self):
-        result = "[link=][/]"
-        assert isinstance(result, str)
 
 
 # ---------------------------------------------------------------------------
