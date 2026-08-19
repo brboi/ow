@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -187,6 +188,44 @@ class TestSkips:
         assert exc.value.code == 1
         assert mock_git.call_count == 0
         assert "git rebase --continue" in capsys.readouterr().err
+
+
+class TestAnalysisFailure:
+    """Finding 1 of fix round 1: a repo whose analysis breaks must be
+    reported and must fail the run, not vanish with a 0 exit code."""
+
+    def test_a_failed_analysis_is_reported_and_fails_the_run(self, tmp_path, capsys):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.gather_facts", side_effect=RuntimeError("boom")),
+            patch("ow.commands.rebase.git") as mock_git,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert exc.value.code == 1
+        assert mock_git.call_count == 0
+        err = capsys.readouterr().err
+        assert "community" in err and "could not analyse" in err
+
+    def test_a_missing_worktree_is_reported_and_fails_the_run(self, tmp_path, capsys):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        shutil.rmtree(ws_dir / "community")
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.gather_facts") as mock_gather,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert exc.value.code == 1
+        mock_gather.assert_not_called()
+        assert "worktree not found" in capsys.readouterr().err
 
 
 class TestMultiRepo:
