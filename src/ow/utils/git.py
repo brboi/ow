@@ -512,6 +512,31 @@ def count_new_patches(worktree: Path, other: str) -> int:
     return int(result.stdout.strip() or 0)
 
 
+def count_unpushed(worktree: Path, bound: str, other: str) -> int:
+    """Commits in bound..HEAD whose patch `other` does not already carry.
+
+    A plain `bound..HEAD` count is wrong for the same reason `count_new_patches`
+    exists: after a rebase, commits that are already on `other` get new SHAs
+    locally, so counting SHAs would report them as unpushed forever. And using
+    `other`'s own merge-base with HEAD instead of `bound` is wrong too — the
+    moment `other`'s history diverges from HEAD's (a colleague's push, a
+    squash), that merge-base slides behind `bound` and pulls the base branch's
+    own commits into the count.
+
+    `git cherry <other> HEAD <bound>` is built exactly for this: it walks
+    `bound..HEAD`, and for each commit checks whether `other` already carries
+    an equivalent patch ('-') or not ('+'). Only the '+' commits are genuinely
+    unpushed.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "cherry", other, "HEAD", bound],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return 0
+    return sum(1 for line in result.stdout.splitlines() if line.startswith("+"))
+
+
 # Ordered: rebase markers first, because an interactive rebase also writes a
 # sequencer directory and must not be reported as a cherry-pick.
 _IN_PROGRESS_MARKERS: tuple[tuple[str, str], ...] = (

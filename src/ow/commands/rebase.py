@@ -11,6 +11,7 @@ from ow.utils.config import Config
 from ow.utils.git import (
     count_commits,
     count_new_patches,
+    count_unpushed,
     dirty_files,
     get_rev_list_count,
     get_worktree_branch,
@@ -68,14 +69,17 @@ def gather_facts(
     new_patches = 0
     unpushed = 0
 
+    bound = _bound(worktree, base, up_before)
+
     if up is not None:
         up_now = rev_parse(worktree, up)
-        if up_before and up_now and up_before != up_now:
-            force_pushed = not is_ancestor(worktree, up_before, up_now)
-        new_patches = count_new_patches(worktree, up)
-        unpushed, _ = get_rev_list_count(worktree, "HEAD", up)
+        if up_now is not None:
+            if up_before and up_before != up_now:
+                force_pushed = not is_ancestor(worktree, up_before, up_now)
+            new_patches = count_new_patches(worktree, up)
+            if bound is not None:
+                unpushed = count_unpushed(worktree, bound, up)
 
-    bound = _bound(worktree, base, up_before)
     base_merged = is_ancestor(worktree, base, "HEAD")
 
     replay_from = bound if (force_pushed or new_patches > 0) else base

@@ -3,6 +3,7 @@ import subprocess
 from ow.utils.git import (
     count_commits,
     count_new_patches,
+    count_unpushed,
     dirty_files,
     in_progress_operation,
     is_ancestor,
@@ -80,6 +81,37 @@ class TestCountNewPatches:
 
         assert count_commits(git_lab.path, "HEAD..dev/work") == 1
         assert count_new_patches(git_lab.path, "dev/work") == 0
+
+
+class TestCountUnpushed:
+    """The primitive that keeps 'unpushed' from double-counting the base."""
+
+    def test_zero_when_head_is_at_the_bound(self, git_lab):
+        bound = git_lab.sha("HEAD")
+        assert count_unpushed(git_lab.path, bound, "HEAD") == 0
+
+    def test_ignores_a_commit_whose_patch_is_already_upstream(self, git_lab):
+        # X exists on "upstream_copy", and again on HEAD under a different
+        # SHA (as after a cherry-pick/rebase). Only Y is genuinely unpushed.
+        bound = git_lab.sha("HEAD")
+        git_lab.branch("upstream_copy")
+        git_lab.checkout("upstream_copy")
+        x_sha = git_lab.commit("X")
+        git_lab.checkout("master")
+        git_lab.git("cherry-pick", x_sha)
+        git_lab.commit("Y")
+        assert count_unpushed(git_lab.path, bound, "upstream_copy") == 1
+
+    def test_commits_before_the_bound_are_not_counted(self, git_lab):
+        """A plain count of HEAD's commits missing from `other` would also
+        catch commits older than the bound — e.g. the base branch's own
+        history — which is exactly the double-counting bug this guards
+        against."""
+        git_lab.branch("other")  # published branch shares no history beyond this point
+        git_lab.commit("C")  # base-side commit, predates the bound
+        bound = git_lab.sha("HEAD")
+        git_lab.commit("W")
+        assert count_unpushed(git_lab.path, bound, "other") == 1
 
 
 class TestInProgressOperation:

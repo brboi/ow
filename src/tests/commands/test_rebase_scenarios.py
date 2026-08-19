@@ -42,6 +42,7 @@ class TestIdempotence:
             git_lab.path, "community", "origin/master", "dev/work",
             git_lab.sha("refs/remotes/dev/work"), is_detached=False,
         )
+        assert facts.unpushed == 0
         run(git_lab, plan_for(facts))
 
         assert git_lab.git("rev-list", "--count", "origin/master..HEAD") == "2"
@@ -109,6 +110,8 @@ class TestColleaguePushed:
         )
         assert facts.new_patches == 1
         assert facts.force_pushed is False
+        assert facts.bound == git_lab.git("merge-base", "HEAD", "origin/master")
+        assert facts.unpushed == 1
         run(git_lab, plan_for(facts))
 
         subjects = git_lab.git("log", "--format=%s", "origin/master..HEAD").split("\n")
@@ -136,11 +139,11 @@ class TestForcePush:
         )
         assert facts.force_pushed is True
         assert facts.bound == up_before
+        assert facts.unpushed == 1
 
         run(git_lab, plan_for(facts))
         subjects = git_lab.git("log", "--format=%s", "origin/master..HEAD").split("\n")
-        assert "W" in subjects
-        assert "XY" in subjects
+        assert sorted(subjects) == ["W", "XY"]
 
 
 class TestBoundInvariant:
@@ -216,3 +219,14 @@ class TestFactsFromState:
             git_lab.sha("refs/remotes/dev/work"), is_detached=False,
         )
         assert facts.replay_count == 2
+
+    def test_an_unresolvable_upstream_does_not_raise(self, git_lab):
+        """get_rev_list_count's check=True would otherwise blow up here."""
+        build_pushed_branch(git_lab)
+        facts = gather_facts(
+            git_lab.path, "community", "origin/master", "refs/remotes/dev/gone",
+            None, is_detached=False,
+        )
+        assert facts.force_pushed is False
+        assert facts.new_patches == 0
+        assert facts.unpushed == 0
