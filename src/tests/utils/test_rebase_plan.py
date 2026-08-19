@@ -37,6 +37,20 @@ class TestSkips:
         assert not plan.is_skipped
         assert plan.steps == (GitStep(("rebase", "--autostash", "origin/master"), "origin/master"),)
 
+    def test_autostash_does_not_apply_to_a_detached_worktree(self):
+        """git switch has no --autostash, so a dirty detached repo is still skipped."""
+        plan = plan_for(facts(dirty_files=("a.py",), is_detached=True), autostash=True)
+        assert plan.is_skipped
+        assert "--autostash does not apply" in plan.skip_reason
+        assert plan.steps == ()
+
+    def test_clean_detached_worktree_still_switches_under_autostash(self):
+        plan = plan_for(facts(is_detached=True), autostash=True)
+        assert not plan.is_skipped
+        assert plan.steps == (
+            GitStep(("switch", "--detach", "origin/master"), "origin/master"),
+        )
+
 
 class TestDetached:
     def test_switches_without_rebasing(self):

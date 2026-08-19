@@ -5,7 +5,7 @@ where a mistake costs data, and a pure function is exhaustively testable
 without a git repository.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 _MAX_LISTED_DIRTY = 3
 
@@ -94,8 +94,14 @@ def plan_for(f: RepoFacts, *, autostash: bool = False) -> RebasePlan:
             **carried,
         )
 
-    if f.dirty_files and not autostash:
-        return RebasePlan(skip_reason=_dirty_summary(f.dirty_files), **carried)
+    # --autostash is a git rebase flag; a detached worktree gets a switch,
+    # which has no equivalent, so the flag cannot apply on that path.
+    autostash_applies = autostash and not f.is_detached
+    if f.dirty_files and not autostash_applies:
+        reason = _dirty_summary(f.dirty_files)
+        if autostash and f.is_detached:
+            reason += " (--autostash does not apply to a detached switch)"
+        return RebasePlan(skip_reason=reason, **carried)
 
     if f.is_detached:
         return RebasePlan(
