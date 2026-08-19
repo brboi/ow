@@ -1,9 +1,8 @@
-import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
 from ow.utils.config import Config
-from ow.utils.git import parallel_per_repo
+from ow.utils.git import _run, parallel_per_repo
 
 
 class _PruneResult(NamedTuple):
@@ -19,7 +18,7 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
     deleted: list[str] = []
 
     # 1. Worktree prune
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "worktree", "prune"],
         capture_output=True, text=True,
     )
@@ -27,7 +26,7 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
         pruned = True
 
     # 2. Delete local branches not attached to any worktree
-    wt_result = subprocess.run(
+    wt_result = _run(
         ["git", "-C", str(bare_repo), "worktree", "list", "--porcelain"],
         capture_output=True, text=True,
     )
@@ -39,7 +38,7 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
                 if branch_ref.startswith("refs/heads/"):
                     used_branches.add(branch_ref[len("refs/heads/"):])
 
-    branch_result = subprocess.run(
+    branch_result = _run(
         ["git", "-C", str(bare_repo), "branch", "--list"],
         capture_output=True, text=True,
     )
@@ -48,7 +47,7 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
         orphaned = all_branches - used_branches
         if orphaned:
             for branch in sorted(orphaned):
-                subprocess.run(
+                _run(
                     ["git", "-C", str(bare_repo), "branch", "-D", branch],
                     capture_output=True, text=True,
                 )

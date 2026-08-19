@@ -124,7 +124,7 @@ class TestPruneExtended:
         wt_result.stdout = ""
         branch_result = MagicMock(returncode=0)
         branch_result.stdout = ""
-        with patch("ow.commands.prune.subprocess.run") as mock_run:
+        with patch("ow.commands.prune._run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(returncode=0),
                 wt_result, branch_result,

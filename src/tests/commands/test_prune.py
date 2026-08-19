@@ -32,7 +32,7 @@ def test_cmd_prune_cleans_repos(tmp_path, capsys):
     (bare_dir / "community.git").mkdir()
     (bare_dir / "enterprise.git").mkdir()
 
-    with patch("ow.commands.prune.subprocess.run") as mock_run:
+    with patch("ow.commands.prune._run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         cmd_prune(config)
 
@@ -60,7 +60,7 @@ def test_prune_bare_repo_strips_plus_prefix(tmp_path):
     branch_result = MagicMock(returncode=0)
     branch_result.stdout = "+ main-parrot\n  other-branch\n"
 
-    with patch("ow.commands.prune.subprocess.run", side_effect=[MagicMock(returncode=0), wt_result, branch_result, MagicMock(returncode=0)]):
+    with patch("ow.commands.prune._run", side_effect=[MagicMock(returncode=0), wt_result, branch_result, MagicMock(returncode=0)]):
         result = _prune_bare_repo(bare_repo)
 
     assert "main-parrot" not in result.deleted_branches

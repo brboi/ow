@@ -106,6 +106,10 @@ def test_fetch_jobs_stay_routed_through_tracked_run():
     cannot kill, and the tests would keep passing since nothing else exercises
     a real fetch. Inspecting the source is the cheapest thing that actually
     breaks on that regression.
+
+    Deliberately reads source rather than behaviour: a mock-based test of
+    _do_fetch's return value would only prove _run works, not that _do_fetch
+    still calls it — the exact way this regression could sneak back in.
     """
     import inspect
 
