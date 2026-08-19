@@ -104,6 +104,15 @@ def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
         tomli_w.dump(data, f)
 
 
+def find_project_root(start: Path) -> Path | None:
+    """Walk up from start to the nearest ow project root, or None."""
+    current = start.resolve()
+    for candidate in [current, *current.parents]:
+        if (candidate / "ow.toml").exists() or (candidate / "ow.toml.example").exists():
+            return candidate
+    return None
+
+
 def load_config(path: Path) -> Config:
     with open(path, "rb") as f:
         data = tomllib.load(f)
