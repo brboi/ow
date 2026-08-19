@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,8 +17,16 @@ def test_no_args_shows_help():
     assert "Odoo workspace manager" in result.output
 
 
+@pytest.mark.parametrize("flag", ["--version", "-V", "-v"])
+def test_version_flag(flag):
+    """-v was the argparse spelling; keep it working alongside -V."""
+    result = runner.invoke(app, [flag])
+    assert result.exit_code == 0
+    assert result.output.startswith("ow ")
+
+
 def test_create_with_args(tmp_path):
-    """ow create -n myws -r community master..x -t common calls cmd_create with correct args."""
+    """ow create -n myws -r community:master..x -t common calls cmd_create with correct args."""
     (tmp_path / "ow.toml").write_text(
         '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
     )
@@ -40,6 +49,63 @@ def test_create_with_args(tmp_path):
     assert call_kwargs.kwargs["templates"] == ["common"]
     assert "community" in call_kwargs.kwargs["repos"]
     assert call_kwargs.kwargs["repos"]["community"] == BranchSpec("origin/master", "x")
+
+
+def test_create_rejects_repo_without_spec(tmp_path):
+    """-r ALIAS with no ':' must fail loudly, not silently drop the repo."""
+    (tmp_path / "ow.toml").write_text(
+        '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
+    )
+
+    with (
+        patch("ow.__main__._find_root", return_value=tmp_path),
+        patch("ow.__main__.cmd_create") as mock_create,
+    ):
+        result = runner.invoke(app, ["create", "-n", "myws", "-r", "community"])
+
+    assert result.exit_code != 0
+    assert "ALIAS:SPEC" in result.output
+    assert "community:master..x" in result.output
+    mock_create.assert_not_called()
+
+
+def test_create_rejects_repo_with_empty_alias(tmp_path):
+    """-r :spec has no alias to attach the spec to."""
+    (tmp_path / "ow.toml").write_text(
+        '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
+    )
+
+    with (
+        patch("ow.__main__._find_root", return_value=tmp_path),
+        patch("ow.__main__.cmd_create") as mock_create,
+    ):
+        result = runner.invoke(app, ["create", "-n", "myws", "-r", ":master..x"])
+
+    assert result.exit_code != 0
+    assert "ALIAS:SPEC" in result.output
+    mock_create.assert_not_called()
+
+
+def test_create_accepts_several_repos(tmp_path):
+    """-r is repeatable."""
+    (tmp_path / "ow.toml").write_text(
+        '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
+        'enterprise.origin.url = "git@github.com:odoo/enterprise.git"\n'
+    )
+
+    with (
+        patch("ow.__main__._find_root", return_value=tmp_path),
+        patch("ow.__main__.cmd_create") as mock_create,
+    ):
+        result = runner.invoke(app, [
+            "create", "-n", "myws",
+            "-r", "community:master..x",
+            "-r", "enterprise:master..x",
+        ])
+
+    assert result.exit_code == 0
+    repos = mock_create.call_args.kwargs["repos"]
+    assert sorted(repos) == ["community", "enterprise"]
 
 
 def test_update(tmp_path):
@@ -166,18 +232,47 @@ def test_exits_if_root_not_found():
     assert "ow.toml not found" in result.output
 
 
+# ---------------------------------------------------------------------------
+# Tab completion
+#
+# These drive Click's real ShellComplete path rather than calling the callbacks
+# with a hand-built context: the callback signature and the return type are
+# part of the contract, and a fake context hides breakage in both.
+# ---------------------------------------------------------------------------
+
+
+def _complete(args, incomplete, root=None, missing_root=False):
+    from click.shell_completion import ShellComplete
+    from typer.main import get_command
+
+    comp = ShellComplete(get_command(app), {}, "ow", "_OW_COMPLETE")
+    kwargs = {"side_effect": FileNotFoundError} if missing_root else {"return_value": root}
+    with patch("ow.__main__._find_root", **kwargs):
+        return [item.value for item in comp.get_completions(args, incomplete)]
+
+
+def _make_templates(root, *names):
+    for name in names:
+        (root / "templates" / name).mkdir(parents=True)
+
+
+def _make_remotes(root, *names):
+    body = "".join(f'{n}.origin.url = "git@github.com:odoo/{n}.git"\n' for n in names)
+    (root / "ow.toml").write_text("[remotes]\n" + body)
+
+
+def _make_workspaces(root, *names, invalid=()):
+    for name in names:
+        (root / "workspaces" / name / ".ow").mkdir(parents=True)
+        (root / "workspaces" / name / ".ow" / "config").touch()
+    for name in invalid:
+        (root / "workspaces" / name).mkdir(parents=True)
+
+
 def test_complete_gen_templates(tmp_path):
     """Template completion returns correct template names."""
-    templates_dir = tmp_path / "templates"
-    (templates_dir / "common").mkdir(parents=True)
-    (templates_dir / "vscode").mkdir(parents=True)
-    (templates_dir / "zed").mkdir(parents=True)
-
-    ctx = MagicMock()
-    with patch("ow.__main__._find_root", return_value=tmp_path):
-        result = complete_gen_templates(ctx, "")
-
-    names = [c.value for c in result]
+    _make_templates(tmp_path, "common", "vscode", "zed")
+    names = _complete(["create", "-t"], "", tmp_path)
     assert "common" in names
     assert "vscode" in names
     assert "zed" in names
@@ -185,101 +280,46 @@ def test_complete_gen_templates(tmp_path):
 
 def test_complete_gen_templates_with_prefix(tmp_path):
     """Template completion filters by prefix."""
-    templates_dir = tmp_path / "templates"
-    (templates_dir / "common").mkdir(parents=True)
-    (templates_dir / "vscode").mkdir(parents=True)
-
-    ctx = MagicMock()
-    with patch("ow.__main__._find_root", return_value=tmp_path):
-        result = complete_gen_templates(ctx, "v")
-
-    names = [c.value for c in result]
-    assert names == ["vscode"]
+    _make_templates(tmp_path, "common", "vscode")
+    assert _complete(["create", "-t"], "v", tmp_path) == ["vscode"]
 
 
 def test_complete_gen_templates_no_root():
     """Template completion returns empty list if root not found."""
-    ctx = MagicMock()
-    with patch("ow.__main__._find_root", side_effect=FileNotFoundError):
-        result = complete_gen_templates(ctx, "")
-
-    assert result == []
+    assert _complete(["create", "-t"], "", missing_root=True) == []
 
 
 def test_complete_gen_repos(tmp_path):
     """Repo completion returns unused aliases."""
-    (tmp_path / "ow.toml").write_text(
-        '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
-        'enterprise.origin.url = "git@github.com:odoo/enterprise.git"\n'
-    )
-
-    ctx = MagicMock(args=[])
-    with patch("ow.__main__._find_root", return_value=tmp_path):
-        result = complete_gen_repos(ctx, "")
-
-    names = [c.value for c in result]
+    _make_remotes(tmp_path, "community", "enterprise")
+    names = _complete(["create", "-r"], "", tmp_path)
     assert "community" in names
     assert "enterprise" in names
 
 
 def test_complete_gen_repos_excludes_used(tmp_path):
-    """Repo completion excludes already-provided aliases."""
-    (tmp_path / "ow.toml").write_text(
-        '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
-        'enterprise.origin.url = "git@github.com:odoo/enterprise.git"\n'
-    )
-
-    ctx = MagicMock(args=["-r", "community:master"])
-    with patch("ow.__main__._find_root", return_value=tmp_path):
-        result = complete_gen_repos(ctx, "")
-
-    names = [c.value for c in result]
+    """Repo completion excludes aliases already given on the command line."""
+    _make_remotes(tmp_path, "community", "enterprise")
+    names = _complete(["create", "-r", "community:master", "-r"], "", tmp_path)
     assert "community" not in names
     assert "enterprise" in names
 
 
 def test_complete_gen_repos_with_prefix(tmp_path):
     """Repo completion filters by prefix."""
-    (tmp_path / "ow.toml").write_text(
-        '[remotes]\ncommunity.origin.url = "git@github.com:odoo/odoo.git"\n'
-        'enterprise.origin.url = "git@github.com:odoo/enterprise.git"\n'
-    )
-
-    ctx = MagicMock(args=[])
-    with patch("ow.__main__._find_root", return_value=tmp_path):
-        result = complete_gen_repos(ctx, "e")
-
-    names = [c.value for c in result]
-    assert names == ["enterprise"]
+    _make_remotes(tmp_path, "community", "enterprise")
+    assert _complete(["create", "-r"], "e", tmp_path) == ["enterprise"]
 
 
 def test_complete_gen_repos_no_root():
     """Repo completion returns empty list if root not found."""
-    ctx = MagicMock(args=[])
-    with patch("ow.__main__._find_root", side_effect=FileNotFoundError):
-        result = complete_gen_repos(ctx, "")
-
-    assert result == []
+    assert _complete(["create", "-r"], "", missing_root=True) == []
 
 
 def test_complete_workspace_name(tmp_path):
     """Workspace completion returns existing workspace names."""
-    ws_dir = tmp_path / "workspaces"
-    (ws_dir / "alpha").mkdir(parents=True)
-    (ws_dir / "alpha" / ".ow" / "config").parent.mkdir(parents=True)
-    (ws_dir / "alpha" / ".ow" / "config").touch()
-
-    (ws_dir / "beta").mkdir(parents=True)
-    (ws_dir / "beta" / ".ow" / "config").parent.mkdir(parents=True)
-    (ws_dir / "beta" / ".ow" / "config").touch()
-
-    (ws_dir / "gamma").mkdir(parents=True)
-
-    ctx = MagicMock()
-    with patch("ow.__main__._find_root", return_value=tmp_path):
-        result = complete_workspace_name(ctx, "")
-
-    names = [c.value for c in result]
+    _make_workspaces(tmp_path, "alpha", "beta", invalid=("gamma",))
+    names = _complete(["status"], "", tmp_path)
     assert "alpha" in names
     assert "beta" in names
     assert "gamma" not in names
@@ -287,27 +327,17 @@ def test_complete_workspace_name(tmp_path):
 
 def test_complete_workspace_name_with_prefix(tmp_path):
     """Workspace completion filters by prefix."""
-    ws_dir = tmp_path / "workspaces"
-    (ws_dir / "alpha").mkdir(parents=True)
-    (ws_dir / "alpha" / ".ow" / "config").parent.mkdir(parents=True)
-    (ws_dir / "alpha" / ".ow" / "config").touch()
-
-    (ws_dir / "beta").mkdir(parents=True)
-    (ws_dir / "beta" / ".ow" / "config").parent.mkdir(parents=True)
-    (ws_dir / "beta" / ".ow" / "config").touch()
-
-    ctx = MagicMock()
-    with patch("ow.__main__._find_root", return_value=tmp_path):
-        result = complete_workspace_name(ctx, "a")
-
-    names = [c.value for c in result]
-    assert names == ["alpha"]
+    _make_workspaces(tmp_path, "alpha", "beta")
+    assert _complete(["status"], "a", tmp_path) == ["alpha"]
 
 
 def test_complete_workspace_name_no_root():
     """Workspace completion returns empty list if root not found."""
-    ctx = MagicMock()
-    with patch("ow.__main__._find_root", side_effect=FileNotFoundError):
-        result = complete_workspace_name(ctx, "")
+    assert _complete(["status"], "", missing_root=True) == []
 
-    assert result == []
+
+def test_complete_workspace_name_survives_unreadable_dir(tmp_path):
+    """Completion must never crash the shell, even on an unreadable workspaces/."""
+    (tmp_path / "workspaces").mkdir()
+    with patch.object(Path, "iterdir", side_effect=PermissionError):
+        assert _complete(["status"], "", tmp_path) == []
