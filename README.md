@@ -11,7 +11,7 @@ CLI tool that turns interactive prompts into ready-to-code Odoo workspaces using
 - **Shared bare repos** — all workspaces share the same `.bare-git-repos/`, so fetching once updates refs for all
 - **Jinja2 template system** — generates `mise.toml`, `odoorc`, `odools.toml`, `pyrightconfig.json`, and IDE configs from customizable templates
 - **Per-workspace variables** — global `[vars]` with per-workspace overrides for ports, DB credentials, etc.
-- **Smart rebase** — two-step rebase (upstream then base), with conflict reporting and instructions
+- **Idempotent rebase** — integrates a published branch only when it has moved
 - **Rich status** — behind/ahead counts with color-coded output
 - **Optional services** — Docker Compose stack with PostgreSQL, pgweb, and mailpit for local development
 - **Tab completion** — fish, bash, zsh, powershell via `ow --install-completion`
@@ -49,7 +49,7 @@ code workspaces/my_work              # open in your IDE and enjoy
 | `ow create` | `-n/--name`, `-t/--template`, `-r/--repo`, `-c/--configuration` | Create a workspace interactively |
 | `ow update` | `[workspace]` | Re-render templates and materialize worktrees |
 | `ow status` | `[workspace]` | Show branch status with behind/ahead counts |
-| `ow rebase` | `[workspace]` | Fetch and rebase all repos in a workspace |
+| `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y` | Fetch and rebase repos in a workspace |
 | `ow prune` | — | Clean up stale worktree references from bare repos |
 
 `ow` walks up from the current directory to find `ow.toml` (the project root). Commands that need a workspace resolve it from the `OW_WORKSPACE` environment variable (set automatically by `mise`), or by walking up for `.ow/config`.
@@ -106,7 +106,34 @@ Fetches latest refs and displays branch status with color-coded behind/ahead cou
 
 ### `ow rebase`
 
-Fetches and rebases all repos in a workspace. Before executing, displays a summary of the rebase situation for each repo and asks for confirmation. Handles detached worktrees, force-pushed upstreams (with or without a recoverable fork-point), and normal two-step rebases.
+Fetches the latest refs and rebases each repo of a workspace onto its base branch.
+Shows a summary and asks for confirmation before touching anything.
+
+```sh
+ow rebase                                  # every repo of the current workspace
+ow rebase parrot --only community          # one repo of a named workspace
+ow rebase --dry-run                        # print the git commands, run nothing
+```
+
+Running it twice in a row with nothing changed in between does nothing the second
+time — no commit is rewritten.
+
+For a repo whose branch is also published on a remote (`master..my-feature` with
+`dev/my-feature` pushed), `ow` first integrates that remote copy only when it
+carries commits yours does not, then rebases everything onto the base branch. A
+force-pushed remote copy is detected by comparing the ref before and after the
+fetch, and handled with a single `git rebase --onto`.
+
+A repo is skipped, and the run exits non-zero, when a git operation is already in
+progress (the message gives the exact `--continue` / `--abort` command) or when the
+worktree has uncommitted changes. `--autostash` stashes and restores them instead.
+`--only` scopes this to selected repos, affecting drift warnings and ref fetching too.
+
+On conflict, resolve, `git rebase --continue`, then re-run `ow rebase`. Nothing is
+ever pushed: the `git push --force-with-lease` stays yours.
+
+`--dry-run` fetches refs to show you what would happen, but runs no command that
+touches your worktrees.
 
 ### `ow prune`
 

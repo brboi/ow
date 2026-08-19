@@ -12,14 +12,15 @@ src/
 │   │   ├── create.py        # cmd_create + validation, interactive, duplicate check
 │   │   ├── update.py        # cmd_update
 │   │   ├── status.py        # cmd_status + display helpers
-│   │   ├── rebase.py        # cmd_rebase + RebasePlan, analysis, recovery
+│   │   ├── rebase.py        # cmd_rebase + fact gathering, display, execution
 │   │   └── prune.py         # cmd_prune
 │   ├── utils/               # shared utilities used by commands
 │   │   ├── config.py        # Config dataclasses, TOML loading/writing, BranchSpec
-│   │   ├── display.py       # c, Spinner, _format_git_cmd, _print_git_result, counts, osc8
+│   │   ├── display.py       # console, err_console, counts, print_git_result
 │   │   ├── drift.py         # DriftResult, check_drift, warn_if_drifted
 │   │   ├── git.py           # All git operations via subprocess
 │   │   ├── refs.py          # fetch_workspace_refs
+│   │   ├── rebase_plan.py   # RepoFacts, GitStep, RebasePlan, plan_for (pure)
 │   │   ├── resolver.py      # resolve_workspace, _find_ow_config
 │   │   └── templates.py     # file generators, template resolution, application, materialization
 │   ├── migrations/          # migration code (future)
@@ -52,10 +53,11 @@ AGENTS.md
 - **`ow/commands/`** — CLI command handlers. Each module defines one `cmd_*` function plus its internal helpers. Import utilities from `ow.utils.*`.
 - **`ow/utils/`** — shared utilities:
   - `config.py` — `BranchSpec`, `Config`, `WorkspaceConfig`, `parse_branch_spec`, `load_config`, `load_workspace_config`, `write_workspace_config`.
-  - `display.py` — `c`, `Spinner`, `counts`, `osc8`, `_format_git_cmd`, `_print_git_result`.
+  - `display.py` — `console`, `err_console`, `counts`, `print_git_result`.
   - `drift.py` — `DriftResult`, `check_drift`, `warn_if_drifted`. Detect when worktree branch state doesn't match config. Commands call `warn_if_drifted` to display warnings but proceed anyway.
   - `git.py` — all git operations: `ensure_bare_repo`, `resolve_spec`, `resolve_spec_local`, `attach_worktree`, `create_worktree`, `detach_worktree`, `git_switch`, `git_rebase`, `git_fetch`, `git_cherry_pick`, `git_reset_hard`, `git_rev_list`, `git_log_oneline`, `get_rev_list_count`, `get_upstream`, `get_all_remote_refs`, `get_remote_ref_for_branch`, `get_remote_url`, `get_worktree_branch`, `get_worktree_head`, `worktree_exists`, `worktree_is_detached`, `set_branch_upstream`, `parallel_per_repo`, `ordered_remotes`, `run_cmd`.
   - `refs.py` — `fetch_workspace_refs` — three-phase pipeline for fetching workspace refs.
+  - `rebase_plan.py` — `RepoFacts`, `GitStep`, `RebasePlan`, `plan_for` — pure analysis functions for rebase planning.
   - `resolver.py` — `resolve_workspace(path, config)` resolves a workspace from explicit path, `OW_WORKSPACE` env var, or cwd walk-up for `.ow/config`.
   - `templates.py` — `is_odoo_main_repo`, `find_addon_paths`, `build_template_context`, `apply_templates`, `ensure_workspace_materialized`, `available_templates`.
 
