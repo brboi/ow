@@ -65,6 +65,17 @@ def ensure_bare_repo(
 
     # Configure non-origin remotes (skip writes when values already match)
     current_config = _get_bare_config(bare_repo)
+
+    # Bare repos default core.logAllRefUpdates to false, so remote-tracking refs
+    # get no reflog and `git merge-base --fork-point` has nothing to walk. That
+    # reflog is how a force-push stays detectable after some other command
+    # (ow status, or a plain git fetch) has already absorbed it.
+    if current_config.get("core.logallrefupdates") != "true":
+        run_cmd(
+            ["git", "-C", str(bare_repo), "config", "core.logAllRefUpdates", "true"],
+            quiet=True, check=True, label=alias,
+        )
+
     for remote_name in ordered_remotes(remotes):
         remote_cfg = remotes[remote_name]
         desired: dict[str, str] = {}
@@ -418,6 +429,23 @@ def is_ancestor(repo: Path, a: str, b: str) -> bool:
 def merge_base(repo: Path, a: str, b: str) -> str | None:
     result = subprocess.run(
         ["git", "-C", str(repo), "merge-base", a, b],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def merge_base_fork_point(repo: Path, upstream: str, ref: str = "HEAD") -> str | None:
+    """The newest past value of `upstream` that `ref` is built on.
+
+    Walks the upstream ref's reflog newest-first and returns the first entry
+    that is an ancestor of `ref`. Returns None when the reflog is missing or
+    holds nothing usable — which is why the caller must treat it as one
+    candidate among several, never as the answer.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--fork-point", upstream, ref],
         capture_output=True, text=True,
     )
     if result.returncode != 0:

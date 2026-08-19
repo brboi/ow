@@ -18,6 +18,7 @@ from ow.utils.git import (
     in_progress_operation,
     is_ancestor,
     merge_base,
+    merge_base_fork_point,
     parallel_per_repo,
     resolve_spec,
     rev_parse,
@@ -41,22 +42,32 @@ def _select_aliases(available: list[str], only: str | None) -> list[str]:
     return [a for a in available if a in wanted]
 
 
-def _bound(worktree, base: str, up_before: str | None) -> str | None:
+def _bound(worktree, base: str, up_before: str | None, up: str | None = None) -> str | None:
     """The commit after which HEAD's commits are ours to replay.
 
     Invariant: never older than merge-base(HEAD, base). That is what keeps
     the base branch's own commits out of the replay range — replaying them
     onto a stale upstream is what makes the current implementation destroy
     a second run.
+
+    Three sources, newest wins, all subject to the invariant:
+      - merge-base(HEAD, base), the floor
+      - merge-base(HEAD, up_before), when we saw the upstream move this run
+      - the upstream's fork-point, when an earlier fetch already absorbed a
+        force-push and up_before no longer shows it
     """
     b_base = merge_base(worktree, "HEAD", base)
     if b_base is None:
         return None
-    if up_before:
-        b_up = merge_base(worktree, "HEAD", up_before)
-        if b_up and b_up != b_base and is_ancestor(worktree, b_base, b_up):
-            return b_up
-    return b_base
+
+    best = b_base
+    for candidate in (
+        merge_base(worktree, "HEAD", up_before) if up_before else None,
+        merge_base_fork_point(worktree, up) if up else None,
+    ):
+        if candidate and candidate != best and is_ancestor(worktree, best, candidate):
+            best = candidate
+    return best
 
 
 def gather_facts(
@@ -78,7 +89,7 @@ def gather_facts(
     new_patches = 0
     unpushed = 0
 
-    bound = _bound(worktree, base, up_before)
+    bound = _bound(worktree, base, up_before, up)
 
     if up is not None:
         up_now = rev_parse(worktree, up)

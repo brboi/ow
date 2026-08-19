@@ -186,6 +186,80 @@ class TestBoundInvariant:
         assert not (set(replayed) & base_commits)
 
 
+class TestForcePushAlreadyFetched:
+    """Task 8 — the force-push already absorbed by an earlier command
+    (ow status, or a plain git fetch) before ow rebase ever runs. The
+    pre-fetch capture then sees up_before == up_now — the value handed to
+    gather_facts is already the post-force SHA — and only the reflog-backed
+    fork-point can still recover the pre-force value."""
+
+    def test_bound_recovers_the_pre_force_value_from_the_reflog(self, git_lab):
+        build_pushed_branch(git_lab)
+        git_lab.commit("W")  # local work to preserve
+
+        # Reflogs are on by default for a non-bare repo, but set it
+        # explicitly so the test does not depend on that default.
+        git_lab.git("config", "core.logAllRefUpdates", "true")
+
+        up_before = git_lab.sha("refs/remotes/dev/work")  # the pre-force value (Y)
+
+        # The colleague squashes X and Y into one commit and force-pushes.
+        fork = git_lab.git("merge-base", "HEAD", "origin/master")
+        git_lab.git("checkout", "-q", "-b", "squashed", fork)
+        git_lab.commit("XY")
+        git_lab.set_remote_ref("dev/work", "squashed")  # update-ref -> reflog entry written
+        git_lab.git("checkout", "-q", "work")
+
+        # Simulate `ow status` having already absorbed the force-push:
+        # gather_facts is handed up_before == the post-force value, exactly
+        # what fetch_workspace_refs would report after the ref already moved.
+        post_force = git_lab.sha("refs/remotes/dev/work")
+        facts = gather_facts(
+            git_lab.path, "community", "origin/master", "dev/work",
+            post_force, is_detached=False,
+        )
+
+        assert facts.force_pushed is False  # detection genuinely lost, as expected
+        assert facts.bound == up_before  # but the fork-point recovers it anyway
+        run(git_lab, plan_for(facts))
+
+        subjects = git_lab.git("log", "--format=%s", "origin/master..HEAD").split("\n")
+        assert sorted(subjects) == ["W", "XY"]
+
+    def test_degrades_gracefully_with_no_reflog_available(self, git_lab):
+        """No reflog to fall back on: the bound widens all the way back to
+        the base fork. gather_facts and plan_for must not raise, and the
+        plan must still run — it just replays more than necessary
+        (duplication, not destruction: the same safe-failure class as the
+        mixed force-push case already documented in the spec)."""
+        build_pushed_branch(git_lab)
+        git_lab.commit("W")
+
+        fork = git_lab.git("merge-base", "HEAD", "origin/master")
+        git_lab.git("checkout", "-q", "-b", "squashed", fork)
+        git_lab.commit("XY")
+        git_lab.set_remote_ref("dev/work", "squashed")
+        # Delete the ref's reflog entirely: fork-point has nothing to walk.
+        reflog_path = git_lab.path / ".git" / "logs" / "refs" / "remotes" / "dev" / "work"
+        assert reflog_path.exists()
+        reflog_path.unlink()
+        git_lab.git("checkout", "-q", "work")
+
+        post_force = git_lab.sha("refs/remotes/dev/work")
+        facts = gather_facts(
+            git_lab.path, "community", "origin/master", "dev/work",
+            post_force, is_detached=False,
+        )
+
+        assert facts.force_pushed is False
+        assert facts.bound == fork
+        plan = plan_for(facts)
+        run(git_lab, plan)  # must not raise
+
+        subjects = git_lab.git("log", "--format=%s", "origin/master..HEAD").split("\n")
+        assert sorted(subjects) == ["W", "X", "XY", "Y"]
+
+
 class TestFactsFromState:
     def test_busy_repo_is_reported_before_anything_else(self, git_lab):
         build_pushed_branch(git_lab)

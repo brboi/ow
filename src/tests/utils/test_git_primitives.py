@@ -8,6 +8,7 @@ from ow.utils.git import (
     in_progress_operation,
     is_ancestor,
     merge_base,
+    merge_base_fork_point,
     rev_parse,
 )
 
@@ -44,6 +45,55 @@ class TestMergeBase:
         git_lab.checkout("side")
         git_lab.commit("C")
         assert merge_base(git_lab.path, "master", "side") == fork
+
+
+class TestMergeBaseForkPoint:
+    """The primitive that recovers a force-push after some other command
+    (ow status, a plain git fetch) already absorbed it into the ref."""
+
+    def test_none_when_the_ref_has_no_reflog(self, git_lab):
+        # 'other' diverges from HEAD, so its tip is not an ancestor of HEAD.
+        # Tags never get a reflog, so this is a ref with nothing to walk —
+        # the fallback single-entry check (the ref's current value) also
+        # fails, which is what drives returncode != 0.
+        git_lab.branch("other")
+        git_lab.checkout("other")
+        git_lab.commit("Z")
+        git_lab.checkout("master")
+        git_lab.git("tag", "notrail", "other")
+
+        assert merge_base_fork_point(git_lab.path, "notrail") is None
+
+    def test_returns_the_pre_force_value_when_reflog_is_enabled(self, git_lab):
+        # X - Y            <- upstream, before the force-push
+        #      \\
+        #       W          <- HEAD, built on Y
+        #
+        # X - Z            <- upstream, after the force-push (unrelated to Y)
+        x = git_lab.sha("HEAD")
+        git_lab.branch("upstream", x)
+        y = git_lab.commit("Y")
+        git_lab.git("update-ref", "refs/heads/upstream", y)  # fast-forward
+        git_lab.commit("W")  # HEAD built on top of Y
+
+        git_lab.git("checkout", "-q", "-b", "colleague", x)
+        git_lab.commit("Z")
+        git_lab.git("checkout", "-q", "master")
+        git_lab.git("update-ref", "refs/heads/upstream", git_lab.sha("colleague"))  # force-push
+
+        # Sanity: plain merge-base only sees the old, pre-Y fork.
+        assert merge_base(git_lab.path, "upstream", "HEAD") == x
+        assert merge_base_fork_point(git_lab.path, "upstream") == y
+
+    def test_a_fast_forward_only_history_returns_an_ancestor_of_head(self, git_lab):
+        git_lab.branch("upstream")
+        git_lab.commit("B")
+        git_lab.git("update-ref", "refs/heads/upstream", "HEAD")
+
+        point = merge_base_fork_point(git_lab.path, "upstream")
+
+        assert point is not None
+        assert is_ancestor(git_lab.path, point, git_lab.sha("HEAD"))
 
 
 class TestCountCommits:
