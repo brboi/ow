@@ -8,6 +8,7 @@ import pytest
 from ow.commands import cmd_rebase
 from ow.commands.rebase import _analyze_repo_for_rebase, _recover_with_cherry_pick
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, parse_branch_spec, write_workspace_config
+from ow.utils.refs import FetchOutcome
 
 
 def write_ow_config(ws_dir: Path, templates: list[str], repos: dict[str, str], vars: dict | None = None) -> None:
@@ -64,7 +65,10 @@ def test_cmd_rebase_drift_warns(tmp_path, capsys):
     )
 
     resolved_spec = BranchSpec("origin/master")
-    fetch_return = ({"community": "origin/master"}, {}, {"community": resolved_spec})
+    fetch_return = FetchOutcome(
+        tracks={"community": "origin/master"}, upstreams={},
+        specs={"community": resolved_spec}, upstream_before={},
+    )
 
     with (
         patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"),
@@ -94,7 +98,10 @@ def test_cmd_rebase_detached_switches(tmp_path):
 
     switch_calls: list = []
     resolved_spec = BranchSpec("origin/master")
-    fetch_return = ({"community": "origin/master"}, {}, {"community": resolved_spec})
+    fetch_return = FetchOutcome(
+        tracks={"community": "origin/master"}, upstreams={},
+        specs={"community": resolved_spec}, upstream_before={},
+    )
     mock_sub = _make_subprocess_mock(track_calls={"switch": switch_calls})
 
     with (
@@ -130,10 +137,11 @@ def test_cmd_rebase_two_step_rebase(tmp_path):
             return BranchSpec("dev/my-feature", "my-feature")
         return BranchSpec("origin/master")
 
-    fetch_return = (
-        {"community": "dev/my-feature"},
-        {"community": "origin/master"},
-        {"community": BranchSpec("dev/my-feature", "my-feature")},
+    fetch_return = FetchOutcome(
+        tracks={"community": "dev/my-feature"},
+        upstreams={"community": "origin/master"},
+        specs={"community": BranchSpec("dev/my-feature", "my-feature")},
+        upstream_before={},
     )
 
     with (
@@ -174,10 +182,11 @@ def test_cmd_rebase_conflict_reports_and_continues(tmp_path, capsys):
         return BranchSpec("origin/master", spec.local_branch)
 
     spec = BranchSpec("origin/master", "my-feature")
-    fetch_return = (
-        {"community": "origin/master", "enterprise": "origin/master"},
-        {"community": "origin/master", "enterprise": "origin/master"},
-        {"community": spec, "enterprise": spec},
+    fetch_return = FetchOutcome(
+        tracks={"community": "origin/master", "enterprise": "origin/master"},
+        upstreams={"community": "origin/master", "enterprise": "origin/master"},
+        specs={"community": spec, "enterprise": spec},
+        upstream_before={},
     )
 
     with (
@@ -215,7 +224,10 @@ def test_cmd_rebase_no_upstream_when_not_pushed(tmp_path):
         return BranchSpec("origin/master", spec.local_branch)
 
     spec = BranchSpec("origin/master", "my-feature")
-    fetch_return = ({"community": "origin/master"}, {}, {"community": spec})
+    fetch_return = FetchOutcome(
+        tracks={"community": "origin/master"}, upstreams={},
+        specs={"community": spec}, upstream_before={},
+    )
 
     with (
         patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"),

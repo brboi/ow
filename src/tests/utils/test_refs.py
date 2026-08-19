@@ -49,6 +49,50 @@ class TestMissingBareRepo:
     def test_falls_back_to_the_declared_base_ref(self, tmp_path, capsys):
         config, ws, ws_dir = _workspace(tmp_path)
 
-        tracks, _, _ = fetch_workspace_refs(ws, ws_dir, config)
+        outcome = fetch_workspace_refs(ws, ws_dir, config)
 
-        assert tracks["community"] == "origin/master"
+        assert outcome.tracks["community"] == "origin/master"
+
+
+class TestUpstreamBefore:
+    """The SHA read before the fetch is what makes force-push detection
+    possible without consulting a reflog."""
+
+    def test_records_the_upstream_sha_before_fetching(self, tmp_path, monkeypatch):
+        from ow.utils.config import BranchSpec, Config, WorkspaceConfig
+        from ow.utils import refs as refs_mod
+
+        ws_dir = tmp_path / "ws"
+        (ws_dir / "community").mkdir(parents=True)
+        bare = tmp_path / ".bare-git-repos" / "community.git"
+        bare.mkdir(parents=True)
+
+        config = Config(vars={}, remotes={"community": {}}, root_dir=tmp_path)
+        ws = WorkspaceConfig(
+            repos={"community": BranchSpec("origin/master", "work")},
+            templates=[],
+        )
+
+        def fake_resolve(bare_repo, spec, alias_remotes):
+            if spec.local_branch is not None:
+                return BranchSpec("dev/work", "work")
+            return BranchSpec("origin/master")
+
+        monkeypatch.setattr(refs_mod, "rev_parse", lambda repo, ref: "cafebabe" * 5)
+        monkeypatch.setattr(refs_mod, "get_upstream", lambda p: None)
+        monkeypatch.setattr(
+            refs_mod, "parallel_per_repo",
+            lambda tasks: {k: fn() for k, fn in tasks.items()},
+        )
+        monkeypatch.setattr(
+            refs_mod.subprocess, "run",
+            lambda *a, **k: __import__("subprocess").CompletedProcess(a, 0, b"", b""),
+        )
+
+        outcome = refs_mod.fetch_workspace_refs(
+            ws, ws_dir, config, fetch_upstreams=True, resolve_fn=fake_resolve,
+        )
+
+        assert outcome.upstream_before["community"] == "cafebabe" * 5
+        assert outcome.tracks["community"] == "origin/master"
+        assert outcome.upstreams["community"] == "dev/work"

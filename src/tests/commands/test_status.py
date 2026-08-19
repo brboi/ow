@@ -7,6 +7,7 @@ import pytest
 
 from ow.commands import cmd_status
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, parse_branch_spec, write_workspace_config
+from ow.utils.refs import FetchOutcome
 
 
 def write_ow_config(ws_dir: Path, templates: list[str], repos: dict[str, str], vars: dict | None = None) -> None:
@@ -38,7 +39,10 @@ def test_cmd_status_drift_warns(tmp_path, capsys):
     )
 
     resolved_spec = BranchSpec("origin/master")
-    fetch_return = ({"community": "origin/master"}, {}, {"community": resolved_spec})
+    fetch_return = FetchOutcome(
+        tracks={"community": "origin/master"}, upstreams={},
+        specs={"community": resolved_spec}, upstream_before={},
+    )
 
     with (
         patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"),
@@ -72,7 +76,10 @@ def test_cmd_status_fetches_before_display(tmp_path):
 
     def mock_fetch(*a, **kw):
         fetch_called[0] = True
-        return ({"community": "origin/master"}, {}, {"community": resolved_spec})
+        return FetchOutcome(
+            tracks={"community": "origin/master"}, upstreams={},
+            specs={"community": resolved_spec}, upstream_before={},
+        )
 
     with (
         patch("ow.utils.drift.get_worktree_branch", return_value=None),

@@ -137,7 +137,7 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
 
     warn_if_drifted(ws, ws_dir)
 
-    _, _, resolved_specs = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
+    resolved_specs = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True).specs
 
     header = Text(f"[{ws_dir.name}]", style="bold cyan")
     console.print(header)

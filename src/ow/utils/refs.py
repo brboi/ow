@@ -8,6 +8,7 @@ from ow.utils.git import (
     get_upstream,
     parallel_per_repo,
     resolve_spec_local,
+    rev_parse,
 )
 
 
@@ -19,12 +20,28 @@ class _FetchJob(NamedTuple):
 
 
 @dataclass
+class FetchOutcome:
+    """What fetch_workspace_refs learned, per alias.
+
+    upstream_before holds each upstream ref's SHA as read *before* the fetch.
+    It is the whole basis of force-push detection: comparing it to the SHA
+    after the fetch needs no reflog, so it does not depend on
+    core.logAllRefUpdates being set on the bare repo.
+    """
+    tracks: dict[str, str]
+    upstreams: dict[str, str]
+    specs: dict[str, BranchSpec]
+    upstream_before: dict[str, str]
+
+
+@dataclass
 class _ResolveResult:
     """Result of resolving specs for one alias."""
     track_ref: str
     upstream_ref: str | None
     fetch_jobs: list[_FetchJob]
     resolved_spec: BranchSpec | None = None
+    upstream_before: str | None = None
 
 
 def fetch_workspace_refs(
@@ -35,10 +52,10 @@ def fetch_workspace_refs(
     fetch_upstreams: bool = False,
     resolve_fn=resolve_spec_local,
     spinner_prefix: str = "Checking",
-) -> tuple[dict[str, str], dict[str, str], dict[str, BranchSpec]]:
+) -> FetchOutcome:
     """Fetch refs for all workspace repos into their bare repos.
 
-    Returns (resolved_tracks, resolved_upstreams, resolved_specs) dicts.
+    Returns a FetchOutcome.
 
     Three-phase pipeline:
     1. Resolve specs per repo (parallel) — determines what to fetch
@@ -49,6 +66,7 @@ def fetch_workspace_refs(
     resolved_tracks: dict[str, str] = {}
     resolved_upstreams: dict[str, str] = {}
     resolved_specs: dict[str, BranchSpec] = {}
+    upstream_before: dict[str, str] = {}
 
     # -- Phase 1: resolve specs per repo ----------------------------------
 
@@ -71,11 +89,15 @@ def fetch_workspace_refs(
         resolved_spec = resolve_fn(bare_repo_path, spec, alias_remotes)
 
         upstream_ref = None
+        upstream_before = None
         if fetch_upstreams and not spec.is_detached:
             if resolved_spec.base_ref != resolved_track.base_ref:
                 full_refspec = f"{resolved_spec.branch}:refs/remotes/{resolved_spec.remote}/{resolved_spec.branch}"
                 jobs.append(_FetchJob(bare_repo, resolved_spec.remote, full_refspec, force=True))
                 upstream_ref = resolved_spec.base_ref
+                # Read before phase 2 rewrites the ref — this is the only
+                # moment the previous value is still observable.
+                upstream_before = rev_parse(bare_repo_path, f"refs/remotes/{upstream_ref}")
             else:
                 upstream = get_upstream(worktree_path)
                 if upstream:
@@ -91,6 +113,7 @@ def fetch_workspace_refs(
             upstream_ref=upstream_ref,
             fetch_jobs=jobs,
             resolved_spec=resolved_spec,
+            upstream_before=upstream_before,
         )
 
     resolve_tasks = {}
@@ -148,6 +171,8 @@ def fetch_workspace_refs(
         resolved_tracks[alias] = resolve.track_ref
         if resolve.upstream_ref:
             resolved_upstreams[alias] = resolve.upstream_ref
+        if resolve.upstream_before:
+            upstream_before[alias] = resolve.upstream_before
         if resolve.resolved_spec:
             resolved_specs[alias] = resolve.resolved_spec
 
@@ -162,4 +187,9 @@ def fetch_workspace_refs(
             else:
                 print_git_result(alias, "fetch", [job.remote, job.refspec], True)
 
-    return resolved_tracks, resolved_upstreams, resolved_specs
+    return FetchOutcome(
+        tracks=resolved_tracks,
+        upstreams=resolved_upstreams,
+        specs=resolved_specs,
+        upstream_before=upstream_before,
+    )

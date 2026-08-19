@@ -15,6 +15,7 @@ from ow.commands.status import (
 )
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, parse_branch_spec, write_workspace_config
 from ow.utils.config import RemoteConfig
+from ow.utils.refs import FetchOutcome
 
 
 class TestGithubUrlFromRemote:
@@ -222,7 +223,9 @@ class TestCmdStatusExtended:
 
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
-            patch("ow.commands.status.fetch_workspace_refs", return_value=({"community": "origin/master"}, {}, {})),
+            patch("ow.commands.status.fetch_workspace_refs", return_value=FetchOutcome(
+                tracks={"community": "origin/master"}, upstreams={}, specs={}, upstream_before={},
+            )),
             patch("ow.commands.status.warn_if_drifted"),
         ):
             cmd_status(config)

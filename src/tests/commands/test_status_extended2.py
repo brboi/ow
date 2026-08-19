@@ -5,6 +5,7 @@ import pytest
 
 from ow.commands.status import _StatusResult, _gather_repo_status, cmd_status
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
+from ow.utils.refs import FetchOutcome
 
 
 class TestCmdStatusErrorPaths:
@@ -18,7 +19,9 @@ class TestCmdStatusErrorPaths:
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
             patch("ow.commands.status.fetch_workspace_refs",
-                  return_value=({"community": "origin/master"}, {}, {})),
+                  return_value=FetchOutcome(
+                      tracks={"community": "origin/master"}, upstreams={}, specs={}, upstream_before={},
+                  )),
             patch("ow.commands.status.warn_if_drifted"),
         ):
             cmd_status(config)
@@ -33,7 +36,10 @@ class TestCmdStatusErrorPaths:
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
         write_workspace_config(ws_dir / ".ow" / "config", ws)
         resolved = BranchSpec("origin/master")
-        fetch_return = ({"community": "origin/master"}, {}, {"community": resolved})
+        fetch_return = FetchOutcome(
+            tracks={"community": "origin/master"}, upstreams={},
+            specs={"community": resolved}, upstream_before={},
+        )
         def mock_exec(tasks):
             return {"community": RuntimeError("boom")}
         with (
@@ -56,7 +62,10 @@ class TestCmdStatusErrorPaths:
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
         write_workspace_config(ws_dir / ".ow" / "config", ws)
         resolved = BranchSpec("origin/master")
-        fetch_return = ({"community": "origin/master"}, {}, {"community": resolved})
+        fetch_return = FetchOutcome(
+            tracks={"community": "origin/master"}, upstreams={},
+            specs={"community": resolved}, upstream_before={},
+        )
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
             patch("ow.utils.drift.get_worktree_branch", return_value=None),

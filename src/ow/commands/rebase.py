@@ -144,10 +144,12 @@ def cmd_rebase(config: Config, workspace: str | None = None) -> None:
 
     warn_if_drifted(ws, ws_dir)
 
-    resolved_tracks, resolved_upstreams, _ = fetch_workspace_refs(
+    fetched = fetch_workspace_refs(
         ws, ws_dir, config, fetch_upstreams=True,
         resolve_fn=resolve_spec, spinner_prefix="Preparing",
     )
+    resolved_tracks = fetched.tracks
+    resolved_upstreams = fetched.upstreams
 
     # Parallelize rebase analysis
     analysis_tasks: dict[str, Any] = {}
