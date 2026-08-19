@@ -95,36 +95,3 @@ def test_print_git_result_error_with_markup_close_does_not_raise(capsys):
 
 def test_console_is_rich_console():
     assert isinstance(console, Console)
-
-
-# ---------------------------------------------------------------------------
-# Spinner (console.status)
-#
-# Regression guard, not a red-green cycle: the hand-rolled Spinner this
-# replaced wrote "\r..." to stdout unconditionally, corrupting redirected
-# output. Rich only animates on a terminal — lock that in.
-# ---------------------------------------------------------------------------
-
-
-def test_status_spinner_emits_nothing_when_redirected():
-    buf = io.StringIO()
-    c = _make_console(file=buf, force_terminal=False)
-    with c.status("Fetching 3 ref(s)"):
-        pass
-    assert buf.getvalue() == ""
-
-
-def test_status_spinner_animates_on_a_terminal():
-    buf = io.StringIO()
-    c = _make_console(file=buf, force_terminal=True)
-    with c.status("Fetching 3 ref(s)"):
-        pass
-    assert "Fetching 3 ref(s)" in buf.getvalue()
-
-
-def test_status_spinner_still_runs_the_wrapped_work():
-    calls = []
-    c = _make_console(file=io.StringIO(), force_terminal=False)
-    with c.status("Setting up 2 repo(s)"):
-        calls.append("ran")
-    assert calls == ["ran"]

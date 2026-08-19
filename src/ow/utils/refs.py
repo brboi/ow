@@ -2,7 +2,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from ow.utils.display import console, print_git_result
+from ow.utils.display import print_git_result, task_progress
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 from ow.utils.git import (
     _run,
@@ -126,8 +126,10 @@ def fetch_workspace_refs(
         resolve_tasks[alias] = (lambda a=alias, s=spec: _resolve_alias(a, s))
 
     if resolve_tasks:
-        with console.status(f"{spinner_prefix} {len(resolve_tasks)} repo(s)", spinner="dots"):
-            resolve_results = parallel_per_repo(resolve_tasks)
+        with task_progress(f"{spinner_prefix} repo(s)", len(resolve_tasks)) as advance:
+            resolve_results = parallel_per_repo(
+                resolve_tasks, on_done=lambda _alias: advance()
+            )
     else:
         resolve_results = {}
 
@@ -158,8 +160,10 @@ def fetch_workspace_refs(
 
     if fetch_tasks:
         fetch_callables = {key: (lambda j=job: _do_fetch(j)) for key, job in fetch_tasks.items()}
-        with console.status(f"Fetching {len(fetch_callables)} ref(s)", spinner="dots"):
-            fetch_results = parallel_per_repo(fetch_callables)
+        with task_progress("Fetching ref(s)", len(fetch_callables)) as advance:
+            fetch_results = parallel_per_repo(
+                fetch_callables, on_done=lambda _key: advance()
+            )
     else:
         fetch_results = {}
 

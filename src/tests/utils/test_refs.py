@@ -82,7 +82,7 @@ class TestUpstreamBefore:
         monkeypatch.setattr(refs_mod, "get_upstream", lambda p: None)
         monkeypatch.setattr(
             refs_mod, "parallel_per_repo",
-            lambda tasks: {k: fn() for k, fn in tasks.items()},
+            lambda tasks, on_done=None: {k: fn() for k, fn in tasks.items()},
         )
         monkeypatch.setattr(
             refs_mod, "_run",
@@ -98,26 +98,45 @@ class TestUpstreamBefore:
         assert outcome.upstreams["community"] == "dev/work"
 
 
-def test_fetch_jobs_stay_routed_through_tracked_run():
+def test_fetch_jobs_stay_routed_through_tracked_run(tmp_path, monkeypatch):
     """Guards against `_do_fetch` reverting to a raw subprocess.run.
 
     Those are the parallel `git fetch` calls issue #26 is about: if they ever
     bypass `_run`, they spawn untracked children that `terminate_children`
     cannot kill, and the tests would keep passing since nothing else exercises
-    a real fetch. Inspecting the source is the cheapest thing that actually
-    breaks on that regression.
+    a real fetch.
 
-    Deliberately reads source rather than behaviour: a mock-based test of
-    _do_fetch's return value would only prove _run works, not that _do_fetch
-    still calls it — the exact way this regression could sneak back in.
+    Patches refs_mod._run with a Mock and drives a real fetch job through it,
+    so a trivial `import subprocess as sp; sp.run(...)` refactor still fails
+    the test — a source-text search would miss that rewrite.
     """
-    import inspect
+    import subprocess
+    from unittest.mock import Mock
 
     from ow.utils import refs as refs_mod
-
-    source = inspect.getsource(refs_mod.fetch_workspace_refs)
-    assert "subprocess.run(" not in source
-    assert "_run(" in source
-
     from ow.utils import git as git_mod
+
+    alias = "community"
+    ws_dir = tmp_path / "ws"
+    (ws_dir / alias).mkdir(parents=True)
+    bare = tmp_path / ".bare-git-repos" / f"{alias}.git"
+    bare.mkdir(parents=True)
+
+    config = Config(vars={}, remotes={alias: {}}, root_dir=tmp_path)
+    ws = WorkspaceConfig(
+        repos={alias: BranchSpec("origin/master")}, templates=[],
+    )
+
+    def fake_resolve(bare_repo, spec, alias_remotes):
+        return BranchSpec("origin/master")
+
+    # A different failure mode than a raw subprocess.run: local shadowing of
+    # the tracked _run. Check identity before patching it away below.
     assert refs_mod._run is git_mod._run
+
+    mock_run = Mock(return_value=subprocess.CompletedProcess([], 0, b"", b""))
+    monkeypatch.setattr(refs_mod, "_run", mock_run)
+
+    refs_mod.fetch_workspace_refs(ws, ws_dir, config, resolve_fn=fake_resolve)
+
+    assert mock_run.called

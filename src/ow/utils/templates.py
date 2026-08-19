@@ -4,7 +4,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader
 
-from ow.utils.display import console, print_git_result
+from ow.utils.display import print_git_result, task_progress
 from ow.utils.config import Config, WorkspaceConfig
 from ow.utils.git import (
     attach_worktree,
@@ -195,8 +195,8 @@ def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: P
 
     tasks = {alias: (lambda a=alias, s=spec: _setup_alias(a, s)) for alias, spec in ws.repos.items()}
 
-    with console.status(f"Setting up {len(tasks)} repo(s)", spinner="dots"):
-        results = parallel_per_repo(tasks)
+    with task_progress("Setting up repo(s)", len(tasks)) as advance:
+        results = parallel_per_repo(tasks, on_done=lambda _alias: advance())
 
     for alias in ws.repos:
         result = results[alias]
