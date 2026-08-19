@@ -4,7 +4,6 @@ from typing import Any, NamedTuple
 
 from ow.utils.display import console, counts
 from rich.text import Text
-from rich.text import Text
 from ow.utils.drift import warn_if_drifted
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
