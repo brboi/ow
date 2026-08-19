@@ -1,10 +1,86 @@
+import os
+import signal
 import subprocess
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, TypeVar
 
 from ow.utils.config import BranchSpec, RemoteConfig
+
+# Every git child is tracked here so an interrupt can kill it. An abandoned
+# `git fetch` holds a lock inside a bare repo that every workspace shares, so
+# the next plain `git fetch` blocks on it — issue #26.
+_children: set[subprocess.Popen] = set()
+_children_lock = threading.Lock()
+
+
+def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run, with the child in its own process group and tracked.
+
+    start_new_session detaches the child from our process group, so a Ctrl-C
+    typed at the terminal does not reach it directly — we decide when and how
+    it dies, rather than racing the signal.
+
+    Built on Popen.communicate rather than subprocess.run itself, so two
+    subprocess.run-only keywords need translating before they reach Popen:
+    `check` (Popen has no such concept) and `capture_output` (Popen has no
+    such keyword at all — it wants stdout=/stderr=PIPE instead).
+    """
+    check = kwargs.pop("check", False)
+    if kwargs.pop("capture_output", False):
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    proc = subprocess.Popen(args, start_new_session=True, **kwargs)
+    with _children_lock:
+        _children.add(proc)
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        with _children_lock:
+            _children.discard(proc)
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, args, stdout, stderr)
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+
+def live_children() -> int:
+    with _children_lock:
+        return len(_children)
+
+
+def terminate_children(grace: float = 2.0) -> int:
+    """SIGTERM every tracked child's group, SIGKILL whatever outlives `grace`.
+
+    Returns how many children were registered when called.
+    """
+    with _children_lock:
+        procs = list(_children)
+        _children.clear()
+
+    for proc in procs:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    deadline = time.monotonic() + grace
+    for proc in procs:
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
+
+    return len(procs)
 
 
 def run_cmd(args: list[str], quiet: bool = False, label: str | None = None, **kwargs) -> subprocess.CompletedProcess:
@@ -16,7 +92,7 @@ def run_cmd(args: list[str], quiet: bool = False, label: str | None = None, **kw
             print(f"  [{label}] {' '.join(display_args)}", file=sys.stderr)
         else:
             print(f"    $ {' '.join(args)}", file=sys.stderr)
-    return subprocess.run(args, **kwargs)
+    return _run(args, **kwargs)
 
 
 def ordered_remotes(alias_remotes: dict[str, RemoteConfig]) -> list[str]:
@@ -29,7 +105,7 @@ def ordered_remotes(alias_remotes: dict[str, RemoteConfig]) -> list[str]:
 
 def _get_bare_config(bare_repo: Path) -> dict[str, str]:
     """Read all local git config as a dict via a single subprocess."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "config", "--list", "--local"],
         capture_output=True, text=True,
     )
@@ -95,7 +171,7 @@ def ensure_bare_repo(
 
 def ensure_ref(bare_repo: Path, remote: str, branch: str) -> None:
     ref = f"refs/remotes/{remote}/{branch}"
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
         capture_output=True,
     )
@@ -110,11 +186,11 @@ def ensure_ref(bare_repo: Path, remote: str, branch: str) -> None:
 def _ensure_base_ref_non_fatal(bare_repo: Path, spec: BranchSpec) -> None:
     """Ensure refs/remotes/spec.remote/spec.branch exists locally; non-fatal if it can't be fetched."""
     base_ref = f"refs/remotes/{spec.remote}/{spec.branch}"
-    if subprocess.run(
+    if _run(
         ["git", "-C", str(bare_repo), "rev-parse", "--verify", base_ref],
         capture_output=True,
     ).returncode != 0:
-        subprocess.run(
+        _run(
             ["git", "-C", str(bare_repo), "fetch", spec.remote,
              f"{spec.branch}:refs/remotes/{spec.remote}/{spec.branch}"],
             capture_output=True,
@@ -137,14 +213,14 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
     if spec.local_branch is not None:
         for remote in remotes_to_try:
             ref = f"refs/remotes/{remote}/{spec.local_branch}"
-            result = subprocess.run(
+            result = _run(
                 ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
                 capture_output=True,
             )
             if result.returncode == 0:
                 _ensure_base_ref_non_fatal(bare_repo, spec)
                 return BranchSpec(f"{remote}/{spec.local_branch}", spec.local_branch)
-            result = subprocess.run(
+            result = _run(
                 ["git", "-C", str(bare_repo), "fetch", remote,
                  f"{spec.local_branch}:refs/remotes/{remote}/{spec.local_branch}"],
                 capture_output=True,
@@ -156,13 +232,13 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
     # Fall through: find which remote has the base branch.
     for remote in remotes_to_try:
         ref = f"refs/remotes/{remote}/{spec.branch}"
-        result = subprocess.run(
+        result = _run(
             ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
             capture_output=True,
         )
         if result.returncode == 0:
             return BranchSpec(f"{remote}/{spec.branch}", spec.local_branch)
-        result = subprocess.run(
+        result = _run(
             ["git", "-C", str(bare_repo), "fetch", remote,
              f"{spec.branch}:refs/remotes/{remote}/{spec.branch}"],
             capture_output=True,
@@ -176,7 +252,7 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
 def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
     if not worktree_path.exists():
         return False
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "worktree", "list"],
         capture_output=True, text=True, check=True,
     )
@@ -185,7 +261,7 @@ def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
 
 def get_all_remote_refs(bare_repo: Path) -> set[str]:
     """Return all remote refs as short names (e.g. 'origin/master') via a single subprocess."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "for-each-ref", "--format=%(refname:short)", "refs/remotes/"],
         capture_output=True, text=True,
     )
@@ -241,7 +317,7 @@ def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
             check=True,
         )
     else:
-        branch_exists = subprocess.run(
+        branch_exists = _run(
             ["git", "-C", str(bare_repo), "rev-parse", "--verify", f"refs/heads/{spec.local_branch}"],
             capture_output=True,
         ).returncode == 0
@@ -262,7 +338,7 @@ def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
 
 def get_rev_list_count(repo_path: Path, ref_a: str, ref_b: str) -> tuple[int, int]:
     """Return (ahead, behind): ref_a ahead of ref_b, ref_a behind ref_b."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(repo_path), "rev-list", "--left-right", "--count", f"{ref_a}...{ref_b}"],
         capture_output=True, text=True, check=True,
     )
@@ -272,7 +348,7 @@ def get_rev_list_count(repo_path: Path, ref_a: str, ref_b: str) -> tuple[int, in
 
 def get_worktree_head(worktree_path: Path) -> tuple[str, str]:
     """Return (short_hash, full_hash)."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
         capture_output=True, text=True, check=True,
     )
@@ -281,7 +357,7 @@ def get_worktree_head(worktree_path: Path) -> tuple[str, str]:
 
 
 def get_upstream(worktree_path: Path) -> str | None:
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
         capture_output=True, text=True,
     )
@@ -292,7 +368,7 @@ def get_upstream(worktree_path: Path) -> str | None:
 
 def worktree_is_detached(worktree_path: Path) -> bool:
     """True if HEAD is detached (no symbolic ref)."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree_path), "symbolic-ref", "--quiet", "HEAD"],
         capture_output=True,
     )
@@ -301,7 +377,7 @@ def worktree_is_detached(worktree_path: Path) -> bool:
 
 def get_worktree_branch(worktree_path: Path) -> str | None:
     """Return the current branch name, or None if HEAD is detached."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"],
         capture_output=True, text=True,
     )
@@ -314,7 +390,7 @@ def get_worktree_branch(worktree_path: Path) -> str | None:
 def attach_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> None:
     """Switch a detached worktree to a local branch tracking spec.base_ref."""
     alias = worktree_path.name
-    branch_exists = subprocess.run(
+    branch_exists = _run(
         ["git", "-C", str(bare_repo), "rev-parse", "--verify", f"refs/heads/{spec.local_branch}"],
         capture_output=True,
     ).returncode == 0
@@ -372,7 +448,7 @@ def get_remote_ref_for_branch(
 
 
 def get_remote_url(bare_repo: Path, remote: str) -> str | None:
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "remote", "get-url", remote],
         capture_output=True, text=True,
     )
@@ -400,7 +476,7 @@ def _git_dir(worktree: Path) -> Path | None:
     Worktrees attached to a bare repo have a .git *file* pointing into
     <bare>/worktrees/<name>, so `worktree / ".git"` is not a directory.
     """
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree), "rev-parse", "--absolute-git-dir"],
         capture_output=True, text=True,
     )
@@ -411,7 +487,7 @@ def _git_dir(worktree: Path) -> Path | None:
 
 def rev_parse(repo: Path, ref: str) -> str | None:
     """Resolve ref to a full SHA, or None if it does not exist."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
         capture_output=True, text=True,
     )
@@ -420,14 +496,14 @@ def rev_parse(repo: Path, ref: str) -> str | None:
 
 def is_ancestor(repo: Path, a: str, b: str) -> bool:
     """True if a is an ancestor of b (a commit is its own ancestor)."""
-    return subprocess.run(
+    return _run(
         ["git", "-C", str(repo), "merge-base", "--is-ancestor", a, b],
         capture_output=True,
     ).returncode == 0
 
 
 def merge_base(repo: Path, a: str, b: str) -> str | None:
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(repo), "merge-base", a, b],
         capture_output=True, text=True,
     )
@@ -444,7 +520,7 @@ def merge_base_fork_point(repo: Path, upstream: str, ref: str = "HEAD") -> str |
     holds nothing usable — which is why the caller must treat it as one
     candidate among several, never as the answer.
     """
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(repo), "merge-base", "--fork-point", upstream, ref],
         capture_output=True, text=True,
     )
@@ -454,7 +530,7 @@ def merge_base_fork_point(repo: Path, upstream: str, ref: str = "HEAD") -> str |
 
 
 def count_commits(repo: Path, rev_range: str) -> int:
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(repo), "rev-list", "--count", rev_range],
         capture_output=True, text=True,
     )
@@ -472,7 +548,7 @@ def count_new_patches(worktree: Path, other: str) -> int:
     run. --cherry-pick drops commits with an equivalent patch on the other
     side, which is the same test git rebase applies internally.
     """
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree), "rev-list", "--count",
          "--cherry-pick", "--right-only", "--no-merges", f"HEAD...{other}"],
         capture_output=True, text=True,
@@ -498,7 +574,7 @@ def count_unpushed(worktree: Path, bound: str, other: str) -> int:
     an equivalent patch ('-') or not ('+'). Only the '+' commits are genuinely
     unpushed.
     """
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree), "cherry", other, "HEAD", bound],
         capture_output=True, text=True,
     )
@@ -532,7 +608,7 @@ def in_progress_operation(worktree: Path) -> tuple[str, str, str] | None:
 
 def dirty_files(worktree: Path) -> list[str]:
     """Modified tracked files. Untracked files do not block a rebase."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=no"],
         capture_output=True, text=True,
     )
