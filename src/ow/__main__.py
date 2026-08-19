@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -214,7 +215,13 @@ def prune() -> None:
 
 
 def main() -> None:
-    app()
+    try:
+        app()
+    except KeyboardInterrupt:
+        # 130 is the conventional shell status for SIGINT. parallel_per_repo
+        # has already killed the git children by the time we get here.
+        print("Interrupted.", file=sys.stderr)
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

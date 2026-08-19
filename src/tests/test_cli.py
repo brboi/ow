@@ -370,3 +370,27 @@ class TestRebaseFlags:
         assert kwargs["autostash"] is False
         assert kwargs["dry_run"] is False
         assert kwargs["yes"] is False
+
+
+class TestInterrupt:
+    def test_ctrl_c_exits_130_with_a_message(self, capsys):
+        from unittest.mock import patch
+        import pytest
+        from ow.__main__ import main
+
+        with (
+            patch("ow.__main__.app", side_effect=KeyboardInterrupt),
+            pytest.raises(SystemExit) as exc,
+        ):
+            main()
+
+        assert exc.value.code == 130
+        assert "Interrupted" in capsys.readouterr().err
+
+    def test_a_normal_run_does_not_touch_the_exit_code(self):
+        from unittest.mock import patch
+        from ow.__main__ import main
+
+        with patch("ow.__main__.app") as mock_app:
+            main()
+        mock_app.assert_called_once()
