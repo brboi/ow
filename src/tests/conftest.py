@@ -143,6 +143,25 @@ class GitLab:
 
 
 @pytest.fixture
+def xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect every XDG base directory into tmp_path.
+
+    Any test that touches configuration, bare repos, the workspace index or
+    the template baseline must request this. Without it a test writes into
+    the developer's real home.
+    """
+    for var, name in (
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_STATE_HOME", "state"),
+    ):
+        target = tmp_path / name
+        target.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv(var, str(target))
+    return tmp_path
+
+
+@pytest.fixture
 def git_lab(tmp_path: Path) -> GitLab:
     repo = tmp_path / "lab"
     repo.mkdir()
