@@ -9,6 +9,9 @@ from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
 from ow.utils.config import Config
 from ow.utils.git import (
+    count_commits,
+    count_new_patches,
+    dirty_files,
     get_rev_list_count,
     get_worktree_branch,
     git_cherry_pick,
@@ -18,9 +21,79 @@ from ow.utils.git import (
     git_reset_hard,
     git_rev_list,
     git_switch,
+    in_progress_operation,
+    is_ancestor,
+    merge_base,
     parallel_per_repo,
     resolve_spec,
+    rev_parse,
 )
+from ow.utils.rebase_plan import RepoFacts
+
+
+def _bound(worktree, base: str, up_before: str | None) -> str | None:
+    """The commit after which HEAD's commits are ours to replay.
+
+    Invariant: never older than merge-base(HEAD, base). That is what keeps
+    the base branch's own commits out of the replay range — replaying them
+    onto a stale upstream is what makes the current implementation destroy
+    a second run.
+    """
+    b_base = merge_base(worktree, "HEAD", base)
+    if b_base is None:
+        return None
+    if up_before:
+        b_up = merge_base(worktree, "HEAD", up_before)
+        if b_up and b_up != b_base and is_ancestor(worktree, b_base, b_up):
+            return b_up
+    return b_base
+
+
+def gather_facts(
+    worktree,
+    alias: str,
+    base: str,
+    up: str | None,
+    up_before: str | None,
+    is_detached: bool,
+) -> RepoFacts:
+    """Observe one repo. No decisions are taken here."""
+    busy = in_progress_operation(worktree)
+    if busy is not None:
+        return RepoFacts(
+            alias=alias, base=base, up=up, is_detached=is_detached, busy=busy,
+        )
+
+    force_pushed = False
+    new_patches = 0
+    unpushed = 0
+
+    if up is not None:
+        up_now = rev_parse(worktree, up)
+        if up_before and up_now and up_before != up_now:
+            force_pushed = not is_ancestor(worktree, up_before, up_now)
+        new_patches = count_new_patches(worktree, up)
+        unpushed, _ = get_rev_list_count(worktree, "HEAD", up)
+
+    bound = _bound(worktree, base, up_before)
+    base_merged = is_ancestor(worktree, base, "HEAD")
+
+    replay_from = bound if (force_pushed or new_patches > 0) else base
+    replay_count = count_commits(worktree, f"{replay_from}..HEAD") if replay_from else 0
+
+    return RepoFacts(
+        alias=alias,
+        base=base,
+        up=up,
+        is_detached=is_detached,
+        dirty_files=tuple(dirty_files(worktree)),
+        force_pushed=force_pushed,
+        new_patches=new_patches,
+        bound=bound,
+        base_merged=base_merged,
+        replay_count=replay_count,
+        unpushed=unpushed,
+    )
 
 
 def _report_conflict(alias: str, worktree_path, onto_ref: str) -> None:
