@@ -2,7 +2,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from ow.utils.display import console
+from ow.utils.display import console, err_console
 from rich.text import Text
 from ow.utils.drift import warn_if_drifted
 from ow.utils.refs import fetch_workspace_refs
@@ -25,14 +25,14 @@ from ow.utils.git import (
 
 def _report_conflict(alias: str, worktree_path, onto_ref: str) -> None:
     """Print conflict resolution instructions."""
-    console.print(
+    err_console.print(
         f"\n  [red]CONFLICT[/] in [bold]{alias}[/] rebasing onto {onto_ref}",
     )
-    console.print("    resolve conflicts, then:")
-    console.print(f"      cd {worktree_path}")
-    console.print("      git rebase --continue")
-    console.print("    or abort:")
-    console.print("      git rebase --abort\n")
+    err_console.print("    resolve conflicts, then:")
+    err_console.print(f"      cd {worktree_path}")
+    err_console.print("      git rebase --continue")
+    err_console.print("    or abort:")
+    err_console.print("      git rebase --abort\n")
 
 
 @dataclass
@@ -185,13 +185,13 @@ def cmd_rebase(config: Config, workspace: str | None = None) -> None:
         for p in plans
     )
     if has_rewritten_no_fork:
-        console.print(f"\n  [red]Error:[/] Cannot recover some repos - fork-point not found.")
-        console.print("  Manual recovery required:")
+        err_console.print("\n  [red]Error:[/] Cannot recover some repos - fork-point not found.")
+        err_console.print("  Manual recovery required:")
         for p in plans:
             if p.upstream_rewritten and p.fork_point is None:
-                console.print(f"    {p.alias}:")
-                console.print("      git reflog HEAD | head -20  # find previous state")
-                console.print("      git cherry-pick <commit>...  # manually reapply")
+                err_console.print(f"    {p.alias}:")
+                err_console.print("      git reflog HEAD | head -20  # find previous state")
+                err_console.print("      git cherry-pick <commit>...  # manually reapply")
         console.print()
 
     has_recoverable = any(
@@ -199,17 +199,17 @@ def cmd_rebase(config: Config, workspace: str | None = None) -> None:
         for p in plans
     )
     if has_recoverable:
-        console.print(f"\n  [yellow]Recovery:[/] reset --hard + cherry-pick for rewritten upstreams")
+        err_console.print("\n  [yellow]Recovery:[/] reset --hard + cherry-pick for rewritten upstreams")
         for p in plans:
             if p.upstream_rewritten and p.fork_point:
-                console.print(f"    {p.alias}: {len(p.commits_to_reapply)} commits to reapply")
+                err_console.print(f"    {p.alias}: {len(p.commits_to_reapply)} commits to reapply")
 
     has_warnings = any(
         p.unpushed_commits > 0 and p.upstream and not p.upstream_rewritten
         for p in plans
     )
     if has_warnings:
-        console.print(f"\n  [yellow]Warning:[/] unpushed commits may cause conflicts")
+        err_console.print("\n  [yellow]Warning:[/] unpushed commits may cause conflicts")
 
     try:
         response = input("\nProceed? [Y/n] ")
@@ -225,13 +225,13 @@ def cmd_rebase(config: Config, workspace: str | None = None) -> None:
         worktree = ws_dir / plan.alias
 
         if plan.has_conflicts:
-            console.print(
+            err_console.print(
                 f"  Skipping {plan.alias}: rebase already in progress",
             )
             continue
 
         if plan.upstream_rewritten and plan.fork_point is None:
-            console.print(
+            err_console.print(
                 f"  Skipping {plan.alias}: no fork-point, manual recovery required",
             )
             continue
@@ -246,14 +246,14 @@ def cmd_rebase(config: Config, workspace: str | None = None) -> None:
                 worktree, plan.upstream, plan.commits_to_reapply
             )
             if failed_commit:
-                console.print(
+                err_console.print(
                     f"\n    [red]CONFLICT[/] cherry-picking {failed_commit}",
                 )
-                console.print("    resolve conflicts, then:")
-                console.print(f"      cd {worktree}")
-                console.print("      git cherry-pick --continue")
-                console.print("    or abort:")
-                console.print("      git cherry-pick --abort\n")
+                err_console.print("    resolve conflicts, then:")
+                err_console.print(f"      cd {worktree}")
+                err_console.print("      git cherry-pick --continue")
+                err_console.print("    or abort:")
+                err_console.print("      git cherry-pick --abort\n")
                 failed.append(plan.alias)
             else:
                 console.print("    Done (recovered).")
