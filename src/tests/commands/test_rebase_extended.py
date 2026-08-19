@@ -20,9 +20,9 @@ class TestReportConflict:
     def test_prints_instructions(self, capsys):
         _report_conflict("community", Path("/ws/community"), "origin/master")
         captured = capsys.readouterr()
-        assert "CONFLICT" in captured.out
-        assert "rebase --continue" in captured.out
-        assert "rebase --abort" in captured.out
+        assert "CONFLICT" in captured.err
+        assert "rebase --continue" in captured.err
+        assert "rebase --abort" in captured.err
 
 
 class TestDisplayRebaseSummary:
@@ -47,8 +47,7 @@ class TestDisplayRebaseSummary:
         )]
         _display_rebase_summary(plans)
         captured = capsys.readouterr()
-        output = captured.out.replace("\n", "")
-        assert "rewritten, no fork-point" in output
+        assert "rewritten, no fork-point" in captured.out
 
     def test_upstream_rewritten_with_fork(self, capsys):
         plans = [RebasePlan(
@@ -59,8 +58,7 @@ class TestDisplayRebaseSummary:
         )]
         _display_rebase_summary(plans)
         captured = capsys.readouterr()
-        output = captured.out.replace("\n", "")
-        assert "rewritten, recoverable" in output
+        assert "rewritten, recoverable" in captured.out
 
     def test_unpushed_commits_marker(self, capsys):
         plans = [RebasePlan(
@@ -331,7 +329,7 @@ class TestCmdRebaseExtended:
             )}
             cmd_rebase(config)
         captured = capsys.readouterr()
-        assert "rebase already in progress" in captured.out
+        assert "rebase already in progress" in captured.err
 
     def test_cmd_rebase_no_fork_point_skip(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
@@ -361,9 +359,8 @@ class TestCmdRebaseExtended:
             )}
             cmd_rebase(config)
         captured = capsys.readouterr()
-        output = captured.out.replace("\n", "")
-        assert "no fork-point" in output
-        assert "Manual recovery" in output
+        assert "no fork-point" in captured.err
+        assert "Manual recovery" in captured.err
 
 
 class TestCmdRebaseExecution:
@@ -435,6 +432,46 @@ class TestCmdRebaseExecution:
         captured = capsys.readouterr()
         assert "Done (recovered)" in captured.out
 
+    def test_cmd_rebase_recovery_conflict(self, tmp_path, capsys, config_with_remotes):
+        """A failed cherry-pick must report on stderr and exit non-zero."""
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "community").mkdir()
+        ws = WorkspaceConfig(
+            repos={"community": BranchSpec("origin/master", "my-feature")},
+            templates=["common"],
+        )
+        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        config = config_with_remotes
+        resolved = BranchSpec("origin/master", "my-feature")
+        fetch_return = ({"community": "origin/my-feature"}, {"community": "origin/master"}, {"community": resolved})
+        with (
+            patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
+            patch("ow.utils.drift.get_worktree_branch", return_value=None),
+            patch("ow.utils.drift.parallel_per_repo", side_effect=lambda t: {k: fn() for k, fn in t.items()}),
+            patch("ow.utils.refs.fetch_workspace_refs", return_value=fetch_return),
+            patch("ow.commands.rebase.parallel_per_repo") as mock_analyze,
+            patch("builtins.input", return_value=""),
+            patch("ow.commands.rebase.git_reset_hard"),
+            patch("ow.commands.rebase.git_log_oneline", return_value="abc fix"),
+            patch("ow.commands.rebase.git_cherry_pick", return_value=MagicMock(returncode=1)),
+        ):
+            mock_analyze.return_value = {"community": RebasePlan(
+                alias="community", track_ref="origin/master", upstream="origin/master",
+                is_detached=False, local_commits=0, unpushed_commits=2,
+                fork_point="abc", commits_to_reapply=["abc123"], upstream_rewritten=True,
+                has_conflicts=False,
+            )}
+            with pytest.raises(SystemExit) as exc:
+                cmd_rebase(config)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "CONFLICT" in captured.err
+        assert "cherry-pick --continue" in captured.err
+        assert "cherry-pick --abort" in captured.err
+        assert "Done (recovered)" not in captured.out
+
+
     def test_cmd_rebase_unpushed_warning(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
@@ -463,7 +500,7 @@ class TestCmdRebaseExecution:
             )}
             cmd_rebase(config)
         captured = capsys.readouterr()
-        assert "unpushed commits" in captured.out
+        assert "unpushed commits" in captured.err
 
     def test_cmd_rebase_no_worktrees_returns(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
