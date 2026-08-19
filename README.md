@@ -14,7 +14,7 @@ CLI tool that turns interactive prompts into ready-to-code Odoo workspaces using
 - **Smart rebase** — two-step rebase (upstream then base), with conflict reporting and instructions
 - **Rich status** — behind/ahead counts with color-coded output
 - **Optional services** — Docker Compose stack with PostgreSQL, pgweb, and mailpit for local development
-- **Tab completion** — fish, bash, zsh via `argcomplete`
+- **Tab completion** — fish, bash, zsh, powershell via `ow --install-completion`
 - **Full transparency** — git commands that change your trees are printed to your terminal before execution
 
 ## Prerequisites
@@ -68,7 +68,19 @@ Use `--force` to overwrite existing files, or `--force-with-backup` to back them
 
 ### `ow create`
 
-Interactive form: workspace name → template selection → repo aliases + branch specs → variable defaults. After confirmation:
+Interactive form: workspace name → template selection → repo aliases + branch specs → variable defaults.
+
+Flags let you skip parts of the form:
+
+```sh
+ow create -n my_work -r community:master..my-feature -r enterprise:master..my-feature -t common -t vscode
+```
+
+`-r` takes a single `ALIAS:SPEC` argument and `-t` a single template name;
+repeat either flag to pass more than one. A `-r` value without a `:` is
+rejected rather than ignored.
+
+After confirmation:
 
 1. Clones bare repos if needed
 2. Fetches required refs
@@ -196,15 +208,19 @@ smtp_port = 1025
 
 ## Tab Completion
 
-Fish (one-time setup):
+One-time setup for your current shell:
 ```sh
-register-python-argcomplete --shell fish ow > ~/.config/fish/completions/ow.fish
+ow --install-completion
 ```
 
-Bash/Zsh:
+Then restart your shell. To inspect the generated script instead of installing it:
 ```sh
-activate-global-python-argcomplete
+ow --show-completion
 ```
+
+Completion covers workspace names (`ow status <TAB>`), template names
+(`ow create -t <TAB>`) and repo aliases (`ow create -r <TAB>`, which only
+offers aliases you have not already passed).
 
 ## Sandboxing AI Coding Assistants
 
