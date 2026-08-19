@@ -1268,7 +1268,11 @@ def test_parallel_per_repo_catches_exceptions():
     assert "boom" in str(results["bad"])
 
 
-def test_parallel_per_repo_preserves_order():
+def test_parallel_per_repo_keys_results_regardless_of_completion_order():
+    """Results are now collected via as_completed (needed so an interrupt has
+    somewhere to land — see test_interrupt.py), so a slower task's alias can
+    land in the dict after a faster one's. Every caller looks results up by
+    alias rather than relying on insertion order, so only the mapping matters."""
     import time
 
     def slow():
@@ -1278,7 +1282,7 @@ def test_parallel_per_repo_preserves_order():
     results = parallel_per_repo(
         {"first": slow, "second": lambda: "fast"},
     )
-    assert list(results.keys()) == ["first", "second"]
+    assert results == {"first": "slow", "second": "fast"}
 
 
 def test_parallel_per_repo_empty_tasks():

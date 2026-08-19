@@ -4,6 +4,8 @@ import sys
 import threading
 import time
 
+import pytest
+
 from ow.utils.git import _run, live_children, terminate_children
 
 
@@ -81,4 +83,88 @@ class TestConcurrentTracking:
         thread.join()
 
         assert seen_while_running["count"] == 1
+        assert live_children() == 0
+
+    def test_lock_does_not_serialise_concurrent_runs(self):
+        """The lock in `_run` must span Popen() but release before communicate().
+
+        If it held across communicate() too, every parallel git call would run
+        one at a time — a severe, easily-missed regression. Run several slow
+        children concurrently and check the wall-clock is well under their sum.
+        """
+        n = 5
+        per_call = 0.5
+
+        def worker():
+            _run(
+                [sys.executable, "-c", f"import time; time.sleep({per_call})"],
+                capture_output=True,
+            )
+
+        threads = [threading.Thread(target=worker) for _ in range(n)]
+        start = time.monotonic()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        elapsed = time.monotonic() - start
+
+        assert elapsed < per_call * n / 2
+        assert live_children() == 0
+
+
+class TestParallelPerRepo:
+    def test_still_returns_results_keyed_by_alias(self):
+        from ow.utils.git import parallel_per_repo
+        results = parallel_per_repo({"a": lambda: 1, "b": lambda: 2})
+        assert results == {"a": 1, "b": 2}
+
+    def test_still_returns_exceptions_as_values(self):
+        from ow.utils.git import parallel_per_repo
+
+        def boom():
+            raise RuntimeError("nope")
+
+        results = parallel_per_repo({"a": boom, "b": lambda: 2})
+        assert isinstance(results["a"], RuntimeError)
+        assert results["b"] == 2
+
+    def test_on_done_fires_once_per_task(self):
+        from ow.utils.git import parallel_per_repo
+        seen = []
+        parallel_per_repo(
+            {"a": lambda: 1, "b": lambda: 2, "c": lambda: 3},
+            on_done=seen.append,
+        )
+        assert sorted(seen) == ["a", "b", "c"]
+
+    def test_on_done_fires_for_a_failing_task_too(self):
+        from ow.utils.git import parallel_per_repo
+
+        def boom():
+            raise RuntimeError("nope")
+
+        seen = []
+        parallel_per_repo({"a": boom}, on_done=seen.append)
+        assert seen == ["a"]
+
+    def test_empty_tasks_is_a_no_op(self):
+        from ow.utils.git import parallel_per_repo
+        assert parallel_per_repo({}) == {}
+
+    def test_an_interrupt_kills_the_children_and_propagates(self):
+        """The behaviour issue #26 is about: Ctrl-C must not leave git running."""
+        import sys
+        from ow.utils.git import _run, live_children, parallel_per_repo
+
+        def slow():
+            return _run([sys.executable, "-c", "import time; time.sleep(30)"],
+                        capture_output=True)
+
+        def interrupt():
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            parallel_per_repo({"slow": slow, "boom": interrupt})
+
         assert live_children() == 0

@@ -4,7 +4,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -33,8 +33,14 @@ def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     if kwargs.pop("capture_output", False):
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
-    proc = subprocess.Popen(args, start_new_session=True, **kwargs)
+    # The lock spans Popen() itself, not just the registration after it: a
+    # child that exists between Popen() returning and the lock being taken
+    # would be invisible to a terminate_children() racing that window.
+    # Spawning is a few milliseconds and there are single-digit repos, so
+    # serialising it costs nothing measurable. The lock must not extend to
+    # communicate() below, or a parallel run would become sequential.
     with _children_lock:
+        proc = subprocess.Popen(args, start_new_session=True, **kwargs)
         _children.add(proc)
     try:
         stdout, stderr = proc.communicate()
@@ -622,21 +628,38 @@ T = TypeVar("T")
 
 def parallel_per_repo(
     tasks: dict[str, Callable[[], T]],
+    *,
+    on_done: Callable[[str], None] | None = None,
 ) -> dict[str, T | Exception]:
-    """Run callables in parallel per repo alias. Returns {alias: result_or_exception}."""
+    """Run callables in parallel per repo alias. Returns {alias: result_or_exception}.
+
+    Deliberately not a `with` block: ThreadPoolExecutor's context manager exits
+    through shutdown(wait=True), which swallows an interrupt into a join and
+    leaves the git children running. Collecting through as_completed gives the
+    interrupt somewhere to land, and gives callers a completion event to count.
+    """
     if not tasks:
         return {}
 
     results: dict[str, T | Exception] = {}
-
-    with ThreadPoolExecutor() as pool:
-        futures = {alias: pool.submit(fn) for alias, fn in tasks.items()}
-
-    for alias in tasks:
-        future = futures[alias]
-        try:
-            results[alias] = future.result()
-        except Exception as exc:
-            results[alias] = exc
+    pool = ThreadPoolExecutor()
+    try:
+        futures = {pool.submit(fn): alias for alias, fn in tasks.items()}
+        for future in as_completed(futures):
+            alias = futures[future]
+            try:
+                results[alias] = future.result()
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                results[alias] = exc
+            if on_done is not None:
+                on_done(alias)
+    except KeyboardInterrupt:
+        pool.shutdown(wait=False, cancel_futures=True)
+        terminate_children()
+        raise
+    else:
+        pool.shutdown(wait=True)
 
     return results
