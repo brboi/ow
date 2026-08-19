@@ -441,6 +441,111 @@ def git_reset_hard(worktree: Path, ref: str) -> None:
     git(worktree, "reset", "--hard", ref, check=True)
 
 
+def _git_dir(worktree: Path) -> Path | None:
+    """Resolve the real .git directory.
+
+    Worktrees attached to a bare repo have a .git *file* pointing into
+    <bare>/worktrees/<name>, so `worktree / ".git"` is not a directory.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--absolute-git-dir"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return Path(result.stdout.strip())
+
+
+def rev_parse(repo: Path, ref: str) -> str | None:
+    """Resolve ref to a full SHA, or None if it does not exist."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() or None
+
+
+def is_ancestor(repo: Path, a: str, b: str) -> bool:
+    """True if a is an ancestor of b (a commit is its own ancestor)."""
+    return subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", a, b],
+        capture_output=True,
+    ).returncode == 0
+
+
+def merge_base(repo: Path, a: str, b: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", a, b],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def count_commits(repo: Path, rev_range: str) -> int:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-list", "--count", rev_range],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return 0
+    return int(result.stdout.strip() or 0)
+
+
+def count_new_patches(worktree: Path, other: str) -> int:
+    """Commits in `other` whose patch HEAD does not already carry.
+
+    Plain commit counting is wrong here: after a rebase the original commits
+    are unreachable from HEAD under their old SHAs, so `HEAD..other` stays
+    positive forever and the caller would rebase onto a stale ref on every
+    run. --cherry-pick drops commits with an equivalent patch on the other
+    side, which is the same test git rebase applies internally.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "rev-list", "--count",
+         "--cherry-pick", "--right-only", "--no-merges", f"HEAD...{other}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return 0
+    return int(result.stdout.strip() or 0)
+
+
+# Ordered: rebase markers first, because an interactive rebase also writes a
+# sequencer directory and must not be reported as a cherry-pick.
+_IN_PROGRESS_MARKERS: tuple[tuple[str, str], ...] = (
+    ("rebase-merge", "rebase"),
+    ("rebase-apply", "rebase"),
+    ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("sequencer", "cherry-pick"),
+    ("REVERT_HEAD", "revert"),
+    ("MERGE_HEAD", "merge"),
+)
+
+
+def in_progress_operation(worktree: Path) -> tuple[str, str, str] | None:
+    """Return (operation, continue_command, abort_command), or None if idle."""
+    git_dir = _git_dir(worktree)
+    if git_dir is None:
+        return None
+    for marker, operation in _IN_PROGRESS_MARKERS:
+        if (git_dir / marker).exists():
+            return operation, f"git {operation} --continue", f"git {operation} --abort"
+    return None
+
+
+def dirty_files(worktree: Path) -> list[str]:
+    """Modified tracked files. Untracked files do not block a rebase."""
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    return [line[3:] for line in result.stdout.splitlines() if line.strip()]
+
+
 T = TypeVar("T")
 
 

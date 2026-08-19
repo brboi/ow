@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -101,3 +102,53 @@ def workspace_dir(tmp_path: Path) -> Path:
         write_workspace_config(ws_dir / ".ow" / "config", ws)
         return ws_dir
     return _make
+
+
+class GitLab:
+    """A real git repository, for tests that must observe git's actual behaviour.
+
+    Mocking subprocess proves nothing about commit reachability or patch
+    identity, which is exactly what the rebase logic turns on.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(self.path), *args],
+            capture_output=True, text=True, check=True,
+        )
+        return result.stdout.strip()
+
+    def commit(self, name: str, *, content: str | None = None) -> str:
+        """Create a commit touching <name>.txt. Returns its SHA."""
+        (self.path / f"{name}.txt").write_text(content if content is not None else name)
+        self.git("add", "-A")
+        self.git("commit", "-m", name)
+        return self.sha("HEAD")
+
+    def sha(self, ref: str) -> str:
+        return self.git("rev-parse", ref)
+
+    def set_remote_ref(self, ref: str, target: str) -> None:
+        """Point refs/remotes/<ref> at <target>, e.g. set_remote_ref('origin/master', 'HEAD')."""
+        self.git("update-ref", f"refs/remotes/{ref}", self.sha(target))
+
+    def branch(self, name: str, start: str = "HEAD") -> None:
+        self.git("branch", name, start)
+
+    def checkout(self, ref: str) -> None:
+        self.git("checkout", ref)
+
+
+@pytest.fixture
+def git_lab(tmp_path: Path) -> GitLab:
+    repo = tmp_path / "lab"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "master"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True)
+    lab = GitLab(repo)
+    lab.commit("A")
+    return lab
