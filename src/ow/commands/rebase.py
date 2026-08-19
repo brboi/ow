@@ -3,9 +3,10 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from rich.markup import escape
 from rich.text import Text
 
-from ow.utils.config import Config
+from ow.utils.config import Config, WorkspaceConfig
 from ow.utils.display import console, err_console
 from ow.utils.drift import warn_if_drifted
 from ow.utils.git import (
@@ -144,9 +145,10 @@ def _display_dry_run(plans: list[RebasePlan], ws_dir: Path) -> None:
     for plan in plans:
         if plan.is_skipped or plan.is_noop:
             continue
-        console.print(f"  [{plan.alias}] cd {ws_dir / plan.alias}")
+        tag = escape(f"[{plan.alias}]")
+        console.print(f"  {tag} cd {ws_dir / plan.alias}")
         for step in plan.steps:
-            console.print(f"  [{plan.alias}] git {' '.join(step.args)}")
+            console.print(f"  {tag} git {' '.join(step.args)}")
 
 
 def _report_skip(plan: RebasePlan) -> None:
@@ -210,17 +212,25 @@ def cmd_rebase(
     config, ws_dir, ws = resolve_workspace(config, name=workspace)
     aliases = _select_aliases(list(ws.repos), only)
 
-    warn_if_drifted(ws, ws_dir)
+    # --only must also narrow drift-checking and fetching, not just execution.
+    selected_repos = {a: spec for a, spec in ws.repos.items() if a in aliases}
+    selected_ws = WorkspaceConfig(repos=selected_repos, templates=ws.templates, vars=ws.vars)
+
+    warn_if_drifted(selected_ws, ws_dir)
 
     fetched = fetch_workspace_refs(
-        ws, ws_dir, config, fetch_upstreams=True,
+        selected_ws, ws_dir, config, fetch_upstreams=True,
         resolve_fn=resolve_spec, spinner_prefix="Preparing",
     )
+
+    failed = False
 
     tasks: dict[str, Any] = {}
     for alias in aliases:
         worktree = ws_dir / alias
         if not worktree.exists():
+            err_console.print(f"  Skipping {alias}: worktree not found at {worktree}")
+            failed = True
             continue
         tasks[alias] = (
             lambda w=worktree, a=alias,
@@ -232,32 +242,47 @@ def cmd_rebase(
         )
 
     if not tasks:
+        if failed:
+            sys.exit(1)
         return
 
     results = parallel_per_repo(tasks)
-    plans = [
-        plan_for(results[a], autostash=autostash)
-        for a in aliases
-        if a in results and not isinstance(results[a], Exception)
-    ]
+    plans: list[RebasePlan] = []
+    for alias in aliases:
+        if alias not in results:
+            continue
+        result = results[alias]
+        if isinstance(result, Exception):
+            err_console.print(f"  Skipping {alias}: could not analyse — {result}")
+            failed = True
+            continue
+        plans.append(plan_for(result, autostash=autostash))
+
     if not plans:
+        if failed:
+            sys.exit(1)
         return
 
     _display_summary(ws_dir.name, plans)
 
     if dry_run:
         _display_dry_run(plans, ws_dir)
+        if failed:
+            sys.exit(1)
         return
 
     actionable = [p for p in plans if not p.is_skipped and not p.is_noop]
     if not actionable and not any(p.is_skipped for p in plans):
+        if failed:
+            sys.exit(1)
         return
 
     if actionable and not yes and not _confirm():
         console.print("Aborted.")
+        if failed:
+            sys.exit(1)
         return
 
-    failed = False
     for plan in plans:
         if plan.is_skipped:
             _report_skip(plan)

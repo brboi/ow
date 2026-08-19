@@ -144,6 +144,7 @@ class TestDryRun:
             cmd_rebase(config, workspace=None, dry_run=True)
         out = capsys.readouterr().out
         assert "git rebase origin/master" in out
+        assert "[community]" in out
         assert mock_git.call_count == 0
 
 
@@ -186,3 +187,59 @@ class TestSkips:
         assert exc.value.code == 1
         assert mock_git.call_count == 0
         assert "git rebase --continue" in capsys.readouterr().err
+
+
+class TestMultiRepo:
+    def test_a_failure_in_one_repo_does_not_stop_the_others(self, tmp_path, capsys):
+        """Failure isolation, and — since each repo must have received its
+        own facts to reach this point — the per-repo lambda binding."""
+        config, ws_dir = make_workspace(tmp_path, {
+            "community": "master..work",
+            "enterprise": "master..work",
+        })
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({
+                      "community": "origin/master", "enterprise": "origin/master",
+                  })),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git", side_effect=[_fail(), _ok()]) as mock_git,
+            patch("builtins.input", return_value="y"),
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None)
+        assert exc.value.code == 1
+        assert mock_git.call_count == 2  # enterprise still ran after community's conflict
+        err = capsys.readouterr().err
+        conflict_line = err.split("CONFLICT")[1].split("\n")[0]
+        assert "community" in conflict_line
+        assert "enterprise" not in conflict_line
+
+    def test_only_touches_the_selected_repo(self, tmp_path):
+        """--only must narrow drift-checking and fetching too, not just execution."""
+        config, ws_dir = make_workspace(tmp_path, {
+            "community": "master..work",
+            "enterprise": "master..work",
+        })
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted") as mock_drift,
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({
+                      "community": "origin/master", "enterprise": "origin/master",
+                  })) as mock_fetch,
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git", return_value=_ok()) as mock_git,
+            patch("builtins.input", return_value="y"),
+        ):
+            cmd_rebase(config, workspace=None, only="community")
+
+        touched = {call.args[0] for call in mock_git.call_args_list}
+        assert touched == {ws_dir / "community"}
+
+        drifted_ws = mock_drift.call_args.args[0]
+        fetched_ws = mock_fetch.call_args.args[0]
+        assert set(drifted_ws.repos) == {"community"}
+        assert set(fetched_ws.repos) == {"community"}
