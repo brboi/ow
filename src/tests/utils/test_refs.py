@@ -85,7 +85,7 @@ class TestUpstreamBefore:
             lambda tasks: {k: fn() for k, fn in tasks.items()},
         )
         monkeypatch.setattr(
-            refs_mod.subprocess, "run",
+            refs_mod, "_run",
             lambda *a, **k: __import__("subprocess").CompletedProcess(a, 0, b"", b""),
         )
 
@@ -96,3 +96,24 @@ class TestUpstreamBefore:
         assert outcome.upstream_before["community"] == "cafebabe" * 5
         assert outcome.tracks["community"] == "origin/master"
         assert outcome.upstreams["community"] == "dev/work"
+
+
+def test_fetch_jobs_stay_routed_through_tracked_run():
+    """Guards against `_do_fetch` reverting to a raw subprocess.run.
+
+    Those are the parallel `git fetch` calls issue #26 is about: if they ever
+    bypass `_run`, they spawn untracked children that `terminate_children`
+    cannot kill, and the tests would keep passing since nothing else exercises
+    a real fetch. Inspecting the source is the cheapest thing that actually
+    breaks on that regression.
+    """
+    import inspect
+
+    from ow.utils import refs as refs_mod
+
+    source = inspect.getsource(refs_mod.fetch_workspace_refs)
+    assert "subprocess.run(" not in source
+    assert "_run(" in source
+
+    from ow.utils import git as git_mod
+    assert refs_mod._run is git_mod._run

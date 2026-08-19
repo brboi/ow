@@ -5,6 +5,7 @@ from typing import NamedTuple
 from ow.utils.display import console, print_git_result
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 from ow.utils.git import (
+    _run,
     get_upstream,
     parallel_per_repo,
     resolve_spec_local,
@@ -153,7 +154,7 @@ def fetch_workspace_refs(
         if job.force:
             args.append("-f")
         args.extend([job.remote, job.refspec])
-        return subprocess.run(args, capture_output=True)
+        return _run(args, capture_output=True)
 
     if fetch_tasks:
         fetch_callables = {key: (lambda j=job: _do_fetch(j)) for key, job in fetch_tasks.items()}

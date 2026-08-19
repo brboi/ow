@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import threading
 import time
 
 from ow.utils.git import _run, live_children, terminate_children
@@ -57,4 +58,27 @@ class TestTerminateChildren:
             git_mod._children.add(proc)
 
         assert terminate_children() == 1
+        assert live_children() == 0
+
+
+class TestConcurrentTracking:
+    def test_live_children_sees_a_child_spawned_from_another_thread(self):
+        """parallel_per_repo drives every fetch job from a worker thread, so
+        _run is called concurrently, not just from the main thread. This
+        proves the registry a fetch job relies on actually holds the child
+        while a worker thread is inside `_run`'s communicate() call — the
+        exact shape a real `git fetch` takes when run in parallel.
+        """
+        seen_while_running = {}
+
+        def worker():
+            _run([sys.executable, "-c", "import time; time.sleep(0.3)"], capture_output=True)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        time.sleep(0.1)
+        seen_while_running["count"] = live_children()
+        thread.join()
+
+        assert seen_while_running["count"] == 1
         assert live_children() == 0
