@@ -12,7 +12,9 @@ src/
 │   │   ├── apply.py         # cmd_apply — make the tree match .ow/config.toml (--only narrows the git work, never the rendering)
 │   │   ├── status.py        # cmd_status + display helpers
 │   │   ├── rebase.py        # cmd_rebase + fact gathering, display, execution
-│   │   └── prune.py         # cmd_prune
+│   │   ├── prune.py         # cmd_prune
+│   │   ├── ls.py            # cmd_ls — list known workspaces, their path and repos, from the index (no git)
+│   │   └── templates.py     # cmd_templates — list/take/diff template files; outdated_templates() used by cmd_apply
 │   ├── utils/               # shared utilities used by commands
 │   │   ├── config.py        # Config dataclasses, TOML loading/writing, BranchSpec, select_aliases
 │   │   ├── display.py       # console, err_console, counts, print_git_result
@@ -68,7 +70,7 @@ AGENTS.md
   - `refs.py` — `fetch_workspace_refs` — three-phase pipeline for fetching workspace refs.
   - `rebase_plan.py` — `RepoFacts`, `GitStep`, `RebasePlan`, `plan_for` — pure analysis functions for rebase planning.
   - `resolver.py` — `resolve_workspace(name=None)` resolves a workspace: an explicit path, an explicit name (looked up via the index), the `OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml`. One rule, four branches, no fallback between them.
-  - `templates.py` — `is_odoo_main_repo`, `find_addon_paths`, `build_template_context`, `apply_templates`, `ensure_workspace_materialized`, `available_templates`.
+  - `templates.py` — `is_odoo_main_repo`, `find_addon_paths`, `build_template_context`, `apply_templates`, `ensure_workspace_materialized`, `available_templates`, `packaged_files`, `resolve_template_files` (local overrides win per file, packaged sibling still reachable via Jinja include/extends).
 
 ## Commands
 
@@ -78,9 +80,15 @@ AGENTS.md
 | `ow apply` | `cmd_apply(config, workspace=None, *, only=None)` | Materialize worktrees + re-render templates |
 | `ow status` | `cmd_status(config, workspace=None)` | Show workspace branch status |
 | `ow rebase` | `cmd_rebase(config, workspace=None, *, only=None, autostash=False, dry_run=False, yes=False)` | Fetch + rebase workspace branches |
-| `ow prune` | `cmd_prune(config)` | Clean up stale worktree references from bare repos |
+| `ow prune` | `cmd_prune(config)` | Clean up stale worktree references, orphaned branches, dead index entries |
+| `ow ls` | `cmd_ls()` | List every known workspace, its path, and its repos |
+| `ow templates` | `cmd_templates(take=None, show_diff=False)` | List template files with their state, take one, or diff the stale ones |
 
-Every command loads the same global config. `update`, `status` and `rebase` then resolve their target workspace via `resolve_workspace(workspace)` — an explicit path or name, the `OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml`. `init` resolves its target directory itself (current directory, or `./NAME`), since the workspace doesn't exist yet.
+Every command except `ls` loads the same global config (`ls` only reads the index and workspace
+configs — no config needed to list them). `apply`, `status` and `rebase` then resolve their
+target workspace via `resolve_workspace(workspace)` — an explicit path or name, the
+`OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml`. `init` resolves its target
+directory itself (current directory, or `./NAME`), since the workspace doesn't exist yet.
 
 ## Template system
 
