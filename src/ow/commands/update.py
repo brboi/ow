@@ -7,7 +7,7 @@ from ow.utils.git import run_cmd
 
 def cmd_update(config: Config, workspace: str | None = None) -> None:
     """Re-render templates and materialize worktrees for the current workspace."""
-    ws_dir, ws = resolve_workspace(config, name=workspace)
+    ws_dir, ws = resolve_workspace(name=workspace)
     _, successful, errors = ensure_workspace_materialized(ws, config, ws_dir)
     apply_templates(ws, config, ws_dir)
 

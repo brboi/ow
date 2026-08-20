@@ -133,7 +133,7 @@ def _gather_repo_status(
 
 def cmd_status(config: Config, workspace: str | None = None) -> None:
     """Show branch status for the current workspace."""
-    ws_dir, ws = resolve_workspace(config, name=workspace)
+    ws_dir, ws = resolve_workspace(name=workspace)
     bare_repos_dir = paths.repos_dir()
 
     warn_if_drifted(ws, ws_dir)

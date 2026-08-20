@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from ow.utils import index
-from ow.utils.config import Config, WorkspaceConfig, load_workspace_config
+from ow.utils.config import WorkspaceConfig, load_workspace_config
 
 MARKER = Path(".ow") / "config.toml"
 
@@ -72,6 +72,7 @@ def _from_env(value: str) -> tuple[Path, WorkspaceConfig]:
         _fail(
             f"Error: OW_WORKSPACE={value!r} is not an absolute path",
             "       OW_WORKSPACE takes one form: an absolute path to a workspace",
+            "       '~' is not expanded here; export the full path instead",
         )
     return _from_path(value)
 
@@ -87,17 +88,14 @@ def _from_cwd() -> tuple[Path, WorkspaceConfig]:
     )
 
 
-def resolve_workspace(config: Config, name: str | None = None) -> tuple[Path, WorkspaceConfig]:
-    """Locate a workspace. One rule, four branches, no fallbacks between them.
-
-    `config` is global and no longer derived from the workspace; it stays in
-    the signature so callers keep one entry point for "which workspace am I
-    acting on".
-    """
+def resolve_workspace(name: str | None = None) -> tuple[Path, WorkspaceConfig]:
+    """Locate a workspace. One rule, four branches, no fallbacks between them."""
     if name is not None:
         return _from_path(name) if _looks_like_path(name) else _from_name(name)
 
     env_val = os.environ.get("OW_WORKSPACE")
+    # An empty value means unset, same treatment as the XDG variables in
+    # ow.utils.paths._base: absence, not a fifth form to resolve against.
     if env_val:
         return _from_env(env_val)
 
