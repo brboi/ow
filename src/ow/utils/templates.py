@@ -2,7 +2,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from jinja2 import Environment
+from jinja2 import Environment, FileSystemLoader
 
 from ow.utils.display import print_git_result, task_progress
 from ow.utils.config import Config, WorkspaceConfig
@@ -159,24 +159,44 @@ def resolve_template_files(bundle: str) -> dict[Path, Path]:
 def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
     """Apply templates in order to ws_dir (later templates override earlier ones)."""
     context = build_template_context(ws, config, ws_dir)
-    env = Environment(
-        keep_trailing_newline=True,
-        trim_blocks=True,
-        lstrip_blocks=True,
-    )
 
     for template_name in ws.templates:
         files = resolve_template_files(template_name)
+        local_dir = paths.templates_dir() / template_name
         if not files:
+            packaged_dir = _packaged_bundle(template_name)
+            existing_dir = next(
+                (d for d in (local_dir, packaged_dir) if d is not None and d.is_dir()),
+                None,
+            )
+            if existing_dir is not None:
+                raise FileNotFoundError(
+                    f"Template '{template_name}' found in {existing_dir} but it is empty"
+                )
             raise FileNotFoundError(
                 f"Template '{template_name}' not found in local or packaged templates"
             )
+
+        # Local wins per file, but an include/extends/import inside a local
+        # file must still be able to reach a packaged sibling. A search-path
+        # loader (local first) resolves that per file, exactly like
+        # resolve_template_files does for the non-Jinja operations below.
+        search_path = [local_dir]
+        packaged_dir = _packaged_bundle(template_name)
+        if packaged_dir is not None:
+            search_path.append(packaged_dir)
+        env = Environment(
+            loader=FileSystemLoader(search_path),
+            keep_trailing_newline=True,
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
 
         for rel, src in sorted(files.items()):
             if src.suffix == ".j2":
                 out_path = ws_dir / rel.with_suffix("")
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(env.from_string(src.read_text()).render(context))
+                out_path.write_text(env.get_template(rel.as_posix()).render(context))
                 out_path.chmod(src.stat().st_mode)
             else:
                 out_path = ws_dir / rel

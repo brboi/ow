@@ -46,6 +46,14 @@ class TestAvailableTemplates:
         names = available_templates(config)
         assert names == sorted(names)
 
+    def test_bundle_in_both_trees_listed_once(self, xdg):
+        """A name present in both packaged and local trees must not be duplicated."""
+        local = paths.templates_dir() / "common"
+        local.mkdir(parents=True)
+        config = Config(vars={}, remotes={})
+        names = available_templates(config)
+        assert names.count("common") == 1
+
 
 class TestIsOdooMainRepo:
     def test_true(self, tmp_path):
@@ -126,6 +134,33 @@ class TestApplyTemplates:
         ws = WorkspaceConfig(repos={}, templates=["nonexistent-template"])
         with pytest.raises(FileNotFoundError, match="not found"):
             apply_templates(ws, config, ws_dir)
+
+    def test_empty_local_bundle_raises_accurate_message(self, tmp_path, config):
+        """The bundle directory exists (and is listed by available_templates) but holds no files."""
+        local = paths.templates_dir() / "empty-bundle"
+        local.mkdir(parents=True)
+
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["empty-bundle"])
+        with pytest.raises(FileNotFoundError, match="empty") as exc_info:
+            apply_templates(ws, config, ws_dir)
+        assert str(local) in str(exc_info.value)
+        assert "not found" not in str(exc_info.value)
+
+    def test_local_override_can_include_packaged_sibling(self, tmp_path, config):
+        """A loader-less environment cannot resolve {% include %} — this must work."""
+        local = paths.templates_dir() / "common"
+        local.mkdir(parents=True)
+        (local / "pyrightconfig.json.j2").write_text("{% include 'requirements-dev.txt' %}")
+
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["common"])
+        apply_templates(ws, config, ws_dir)
+
+        # The include pulls the packaged sibling's content.
+        assert (ws_dir / "pyrightconfig.json").read_text() == "inotify\n"
 
     def test_partial_local_bundle_does_not_hide_packaged_siblings(self, tmp_path, config):
         """Owning one file of a bundle must not fork the whole bundle."""
