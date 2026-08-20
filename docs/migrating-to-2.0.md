@@ -54,9 +54,11 @@ and workspaces was derived from where `ow.toml` sat, and each of those is now
 resolved on its own.
 
 To start clean instead, skip the copy and run `ow init`, `ow apply`,
-`ow status`, `ow rebase` or `ow prune`: ow writes a commented default with the
-community remote and tells you where it put it. `ow ls` and `ow templates`
-need no configuration, so they do not create it.
+`ow status`, `ow rebase` or `ow prune` **from outside `$OLD`**: ow writes a
+commented default with the community remote and tells you where it put it.
+Inside `$OLD` the check above fires first — ow sees the old `ow.toml` and
+stops, which is the one thing that would leave you going in circles. `ow ls`
+and `ow templates` need no configuration, so they never create it.
 
 You can leave the old `ow.toml` in place. Once `~/.config/ow/config.toml`
 exists, ow stops looking for it.
@@ -234,5 +236,9 @@ packaged template now exports mise's `{{config_root}}` — the workspace
 directory — instead, so the `ow apply` from step 5 rewrites the file
 correctly. Reopen your shell afterwards so mise drops the stale value.
 
-If you had taken `common/mise.toml.j2` in 1.x, your copy is not rewritten.
-Run `ow templates --diff common/mise.toml.j2` and fold the new line in.
+If you had a copy of `common/mise.toml.j2` in 1.x, it wins over the packaged
+one and is not rewritten. It also has no baseline, so `ow templates --diff`
+will not flag it — see the templates section above. Either add the line by
+hand, or move your copy aside, run `ow templates --take common/mise.toml.j2`,
+and re-apply your edits on top. The second way also gives you the baseline you
+were missing.

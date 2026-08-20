@@ -9,7 +9,7 @@ CLI tool that turns interactive prompts into ready-to-code Odoo workspaces using
 
 - **Git Optimized Commands** — Clone Odoo repos in minutes using shared bare repos
 - **Workspace generation** — each workspace is a folder with git worktrees and IDE configs, ready to open in VSCode or Zed
-- **Interactive setup** — `ow init` guides you through templates, repos, and variables
+- **Interactive setup** — `ow init` guides you through templates, repos and branch specs
 - **Branch spec syntax** — concise `base..feature` notation to control detached vs attached worktrees
 - **Shared bare repos** — every workspace on the machine shares the same set of bare repos, so fetching once updates refs for all of them, not just the ones under one project
 - **Jinja2 template system** — generates `mise.toml`, `odoorc`, `odools.toml`, `pyrightconfig.json`, and IDE configs from customizable templates
@@ -37,13 +37,13 @@ pip install odoo-workspaces    # or in an active venv
 ## Quick Start
 
 ```sh
-$EDITOR ~/.config/ow/config.toml     # add your remotes (created with a
-                                      # commented default the first time any
-                                      # ow command needs it, if you skip this)
+$EDITOR ~/.config/ow/config.toml   # add your remotes (created with a commented
+                                   # default the first time an ow command needs
+                                   # it, if you skip this)
 mkdir my_work && cd my_work
-ow init                              # interactive form: templates, repos, vars
+ow init                            # interactive form: templates, repos, branch specs
 mise install
-code .                                # open in your IDE and enjoy
+code .                             # open in your IDE and enjoy
 ```
 
 ## Commands
@@ -275,18 +275,21 @@ Then select it during `ow init`, or add it to `templates` in an existing workspa
 
 `ow` packages a Docker Compose stack (postgres, pgweb, mailpit) for local development, but no
 `ow` command starts, stops, or otherwise reads it — you drive it yourself with plain `docker
-compose`. Copy `compose.yml` out of wherever `ow` is installed
-(`_static/services/compose.yml` in the package, or the [repo](https://github.com/brboi/ow/blob/main/src/ow/_static/services/compose.yml))
-into `$XDG_CONFIG_HOME/ow/services/` — the conventional spot — and run it from there:
+compose`. Copy it out of the installed package into `$XDG_CONFIG_HOME/ow/services/` — the
+conventional spot — and run it from there:
 
 ```sh
 mkdir -p ~/.config/ow/services
-cp compose.yml ~/.config/ow/services/
+cp "$(python -c 'import ow, pathlib; print(pathlib.Path(ow.__file__).parent / "_static/services/compose.yml")')" \
+   ~/.config/ow/services/
 docker compose -f ~/.config/ow/services/compose.yml up -d
 ```
 
+It is also readable in the
+[repo](https://github.com/brboi/ow/blob/main/src/ow/_static/services/compose.yml).
+
 | Service | Port | Description |
-|---------|------|--------------|
+|---------|------|-------------|
 | postgres | 5432 | PostgreSQL 17 with pgvector |
 | pgweb | 8081 | Web-based PostgreSQL browser |
 | mailpit | 8025 / 1025 | Email testing (web UI / SMTP) |

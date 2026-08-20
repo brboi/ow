@@ -21,12 +21,12 @@ src/
 │   │   ├── drift.py         # DriftResult, check_drift, warn_if_drifted
 │   │   ├── git.py           # All git operations via subprocess
 │   │   ├── index.py         # remembers where workspaces live (known_workspaces, remember, find_by_name)
+│   │   ├── legacy.py        # check_legacy_layout — the 1.x gate, points at docs/migrating-to-2.0.md
 │   │   ├── paths.py         # ow's locations, resolved from the XDG base directories
 │   │   ├── refs.py          # fetch_workspace_refs
 │   │   ├── rebase_plan.py   # RepoFacts, GitStep, RebasePlan, plan_for (pure)
 │   │   ├── resolver.py      # resolve_workspace
 │   │   └── templates.py     # file generators, template resolution, application, materialization
-│   ├── migrations/          # migration code (future)
 │   └── _static/
 │       ├── templates/       # bundled template files (bwrap, common, vscode, zed)
 │       └── services/        # bundled service files (compose.yml, etc.)
@@ -48,7 +48,7 @@ pyproject.toml
 AGENTS.md
 ```
 
-`ow/__main__.py` is the CLI entry point. Every command, `init` included, loads the same global configuration via `load_global_config()` (bootstrapping a default `config.toml` on first use) — there is no project root to find, and no command is special-cased around it.
+`ow/__main__.py` is the CLI entry point. There is no project root to find: every command that needs configuration loads the same global one via `load_global_config()`, `init` included, bootstrapping a default `config.toml` on first use. Only `ls` and `templates` skip it, because neither reads it.
 
 ## Key abstractions
 
@@ -84,8 +84,9 @@ AGENTS.md
 | `ow ls` | `cmd_ls()` | List every known workspace, its path, and its repos |
 | `ow templates` | `cmd_templates(take=None, show_diff=False)` | List template files with their state, take one, or diff the stale ones |
 
-Every command except `ls` loads the same global config (`ls` only reads the index and workspace
-configs — no config needed to list them). `apply`, `status` and `rebase` then resolve their
+Every command except `ls` and `templates` loads the same global config; those two read the
+index, the workspace configs and the template files, none of which need it — so on a machine
+with no `config.toml` yet, neither creates one. `apply`, `status` and `rebase` then resolve their
 target workspace via `resolve_workspace(workspace)` — an explicit path or name, the
 `OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml`. `init` resolves its target
 directory itself (current directory, or `./NAME`), since the workspace doesn't exist yet.
