@@ -60,18 +60,35 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
 def _prune_index() -> None:
     """Drop dead workspace-index entries and report how many disappeared.
 
-    known_workspaces() prunes as a side effect of reading, rewriting the
-    index file in the process. So the "before" count must come from the raw
-    file, read before that rewrite happens — reading it again afterwards
-    would just see the already-pruned result.
+    known_workspaces() prunes on read for two unrelated reasons: a line
+    whose workspace no longer exists, and a duplicate of a line already
+    seen. Only the former is a fact worth reporting — a duplicate is
+    internal hygiene from a read-modify-write race in remember() (two
+    concurrent writers), not something the user caused or can act on. So
+    "dropped" here counts unique raw paths whose .ow/config.toml is gone,
+    not the drop in line count, which would also count collapsed
+    duplicates as deaths.
+
+    This scan is done on the raw file, read before known_workspaces()
+    rewrites it — reading it again afterwards would just see the
+    already-pruned result.
     """
     index_file = paths.index_file()
-    before = 0
+    dropped = 0
     if index_file.exists():
-        before = len([line for line in index_file.read_text().splitlines() if line.strip()])
+        seen: set[Path] = set()
+        for line in index_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            candidate = Path(line)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if not (candidate / index.MARKER).exists():
+                dropped += 1
 
-    live = index.known_workspaces()
-    dropped = before - len(live)
+    index.known_workspaces()
     if dropped > 0:
         noun = "entry" if dropped == 1 else "entries"
         print(f"Dropped {dropped} dead index {noun}.")

@@ -84,6 +84,52 @@ def test_cmd_prune_reports_nothing_when_index_is_clean(tmp_path, capsys, xdg):
     assert "index" not in captured.out
 
 
+def test_cmd_prune_reports_nothing_for_a_duplicated_live_entry(tmp_path, capsys, xdg):
+    """A duplicate raw line is internal hygiene, not a death.
+
+    Two concurrent remember() calls are a read-modify-write race, so the raw
+    index file can end up listing the same live, still-existing workspace
+    twice. Deduplicating that is not "dropping a dead entry" and must not be
+    reported as one.
+    """
+    config = _make_config()
+    live = _make_indexed_workspace(tmp_path, "live")
+
+    target = paths.index_file()
+    target.write_text(target.read_text() + f"{live.resolve()}\n")
+
+    cmd_prune(config)
+
+    captured = capsys.readouterr()
+    assert "index" not in captured.out
+    assert index.known_workspaces() == [live.resolve()]
+
+
+def test_cmd_prune_counts_only_workspaces_that_vanished(tmp_path, capsys, xdg):
+    """A duplicate of a live entry must not inflate the death count.
+
+    Guards against a naive fix that just subtracts "lines removed by
+    dedup" from the old line-count subtraction: with two genuinely dead
+    entries and one duplicate of a live entry, the correct count is 2, not
+    3 (line-count subtraction) and not 1 (subtracting only one duplicate).
+    """
+    config = _make_config()
+    live = _make_indexed_workspace(tmp_path, "live")
+    dead1 = _make_indexed_workspace(tmp_path, "dead1")
+    dead2 = _make_indexed_workspace(tmp_path, "dead2")
+    shutil.rmtree(dead1)
+    shutil.rmtree(dead2)
+
+    target = paths.index_file()
+    target.write_text(target.read_text() + f"{live.resolve()}\n")
+
+    cmd_prune(config)
+
+    captured = capsys.readouterr()
+    assert "Dropped 2 dead index entries" in captured.out
+    assert index.known_workspaces() == [live.resolve()]
+
+
 # ---------------------------------------------------------------------------
 # _prune_bare_repo
 # ---------------------------------------------------------------------------
