@@ -2,7 +2,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment
 
 from ow.utils.display import print_git_result, task_progress
 from ow.utils.config import Config, WorkspaceConfig
@@ -125,21 +125,30 @@ def available_templates(config: Config) -> list[str]:
     return sorted(local_names | packaged_names)
 
 
-def _resolve_template_dir(template_name: str, config: Config) -> Path:
-    """Resolve template directory: local first, fallback to packaged."""
-    local_dir = paths.templates_dir() / template_name
-    if local_dir.exists():
-        return local_dir
-
+def _packaged_bundle(bundle: str) -> Path | None:
+    """Return the packaged bundle directory for `bundle`, or None if unavailable."""
     try:
         from importlib.resources import files
-        pkg_dir = files("ow") / "_static" / "templates" / template_name
-        if pkg_dir.is_dir():
-            return pkg_dir
+        return files("ow") / "_static" / "templates" / bundle
     except Exception:
-        pass
+        return None
 
-    raise FileNotFoundError(f"Template '{template_name}' not found in local or packaged templates")
+
+def resolve_template_files(bundle: str) -> dict[Path, Path]:
+    """Every file of a bundle, local copy winning per file.
+
+    Per file, not per bundle: taking one file must not silently drop the
+    others. That is the difference between owning a file and forking a
+    bundle.
+    """
+    files: dict[Path, Path] = {}
+    for root in (_packaged_bundle(bundle), paths.templates_dir() / bundle):
+        if root is None or not root.is_dir():
+            continue
+        for src in sorted(root.rglob("*")):
+            if src.is_file():
+                files[src.relative_to(root)] = src
+    return files
 
 
 # ---------------------------------------------------------------------------
@@ -150,31 +159,29 @@ def _resolve_template_dir(template_name: str, config: Config) -> Path:
 def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
     """Apply templates in order to ws_dir (later templates override earlier ones)."""
     context = build_template_context(ws, config, ws_dir)
+    env = Environment(
+        keep_trailing_newline=True,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
 
     for template_name in ws.templates:
-        template_dir = _resolve_template_dir(template_name, config)
+        files = resolve_template_files(template_name)
+        if not files:
+            raise FileNotFoundError(
+                f"Template '{template_name}' not found in local or packaged templates"
+            )
 
-        env = Environment(
-            loader=FileSystemLoader(str(template_dir)),
-            keep_trailing_newline=True,
-            trim_blocks=True,
-            lstrip_blocks=True,
-        )
-
-        paths = template_dir.rglob("*")
-        file_paths = [p for p in paths if p.is_file()]
-
-        for path in sorted(file_paths):
-            rel = path.relative_to(template_dir)
-            if path.suffix == ".j2":
+        for rel, src in sorted(files.items()):
+            if src.suffix == ".j2":
                 out_path = ws_dir / rel.with_suffix("")
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(env.get_template(str(rel)).render(context))
-                out_path.chmod(path.stat().st_mode)
+                out_path.write_text(env.from_string(src.read_text()).render(context))
+                out_path.chmod(src.stat().st_mode)
             else:
                 out_path = ws_dir / rel
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, out_path)
+                shutil.copy2(src, out_path)
 
 
 def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> tuple[Path, set[str], dict[str, str]]:

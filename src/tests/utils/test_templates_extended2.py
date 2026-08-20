@@ -3,12 +3,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig
+from ow.utils.config import BranchSpec, WorkspaceConfig
 from ow.utils.templates import (
     _get_packaged_templates,
-    _resolve_template_dir,
     apply_templates,
     ensure_workspace_materialized,
+    resolve_template_files,
 )
 
 
@@ -53,12 +53,12 @@ class TestEnsureWorkspaceMaterializedExtended:
         mock_up.assert_not_called()
 
 
-class TestResolveTemplateDirExtended:
+class TestResolveTemplateFilesExtended:
 
-    def test_packaged_template_via_config(self, xdg):
-        config = Config(vars={}, remotes={})
-        result = _resolve_template_dir("zed", config)
-        assert result.is_dir()
+    def test_packaged_bundle_via_name(self, xdg):
+        result = resolve_template_files("zed")
+        assert result
+        assert all(src.is_file() for src in result.values())
 
 
 class TestApplyTemplatesExtended:

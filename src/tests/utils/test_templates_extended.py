@@ -7,7 +7,6 @@ from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 from ow.utils import paths
 from ow.utils.templates import (
     _get_packaged_templates,
-    _resolve_template_dir,
     available_templates,
     apply_templates,
     ensure_workspace_materialized,
@@ -46,26 +45,6 @@ class TestAvailableTemplates:
         config = Config(vars={}, remotes={})
         names = available_templates(config)
         assert names == sorted(names)
-
-
-class TestResolveTemplateDir:
-    def test_packaged_template(self, xdg):
-        config = Config(vars={}, remotes={})
-        result = _resolve_template_dir("common", config)
-        assert result.is_dir()
-
-    def test_local_template_takes_priority(self, xdg):
-        local = paths.templates_dir() / "common"
-        local.mkdir(parents=True)
-        (local / "custom.txt").write_text("local")
-        config = Config(vars={}, remotes={})
-        result = _resolve_template_dir("common", config)
-        assert result == local
-
-    def test_missing_template_raises(self, xdg):
-        config = Config(vars={}, remotes={})
-        with pytest.raises(FileNotFoundError, match="not found"):
-            _resolve_template_dir("nonexistent-template", config)
 
 
 class TestIsOdooMainRepo:
@@ -140,6 +119,30 @@ class TestApplyTemplates:
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common", "vscode"])
         apply_templates(ws, config, ws_dir)
         assert (ws_dir / "odoorc").exists()
+
+    def test_missing_template_raises(self, tmp_path, config):
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["nonexistent-template"])
+        with pytest.raises(FileNotFoundError, match="not found"):
+            apply_templates(ws, config, ws_dir)
+
+    def test_partial_local_bundle_does_not_hide_packaged_siblings(self, tmp_path, config):
+        """Owning one file of a bundle must not fork the whole bundle."""
+        local = paths.templates_dir() / "common"
+        local.mkdir(parents=True)
+        (local / "odoorc.j2").write_text("[options]\ncustom = true\n")
+
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["common"])
+        apply_templates(ws, config, ws_dir)
+
+        # The customised file comes from the local override.
+        assert (ws_dir / "odoorc").read_text() == "[options]\ncustom = true\n"
+        # Its packaged siblings are still materialized.
+        assert (ws_dir / "pyrightconfig.json").exists()
+        assert (ws_dir / "requirements-dev.txt").exists()
 
 
 class TestEnsureWorkspaceMaterialized:
