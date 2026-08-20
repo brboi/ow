@@ -109,11 +109,12 @@ def _get_packaged_templates() -> list[str]:
         return []
 
 
-def available_templates(config: Config) -> list[str]:
+def available_templates(config: Config | None = None) -> list[str]:
     """Return sorted list of available template names (local + packaged).
 
-    Local templates (./templates/) take priority and can override packaged ones.
-    Packaged templates are used as fallback.
+    Local templates take priority and can override packaged ones per file.
+    `config` is accepted for the existing call sites; the answer comes from
+    the directories alone.
     """
     local_templates_dir = paths.templates_dir()
     local_names = set()

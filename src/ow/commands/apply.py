@@ -1,6 +1,7 @@
 import sys
 from dataclasses import replace
 
+from ow.commands.templates import outdated_templates
 from ow.utils.config import Config, WorkspaceConfig, select_aliases, write_workspace_config
 from ow.utils.git import run_cmd
 from ow.utils.resolver import resolve_workspace
@@ -36,5 +37,12 @@ def cmd_apply(config: Config, workspace: str | None = None, *, only: str | None 
     mise_toml = ws_dir / "mise.toml"
     if mise_toml.exists():
         run_cmd(["mise", "trust", str(mise_toml)], check=True)
+
+    outdated = outdated_templates()
+    if outdated:
+        print("\nTemplate(s) ow has changed since you took them:")
+        for name in outdated:
+            print(f"  {name}")
+        print("Run `ow templates --diff` to see what changed.")
 
     print(f"\nWorkspace '{ws_dir.name}' applied.")

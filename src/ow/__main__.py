@@ -10,6 +10,7 @@ from ow.commands import (
     cmd_prune,
     cmd_rebase,
     cmd_status,
+    cmd_templates,
 )
 from ow.utils.config import Config, load_global_config, parse_branch_spec
 from ow.utils.templates import available_templates
@@ -166,6 +167,15 @@ def prune() -> None:
     """Clean up stale worktree references and orphaned branches."""
     config = _load_config()
     cmd_prune(config)
+
+
+@app.command()
+def templates(
+    take: Optional[str] = typer.Option(None, "--take", help="Copy a packaged template file (BUNDLE/PATH) into your config, keeping a pristine baseline"),
+    diff: bool = typer.Option(False, "--diff", help="Show what ow changed in the files you took, baseline against packaged"),
+) -> None:
+    """List template files and their state, or take one."""
+    cmd_templates(take=take, show_diff=diff)
 
 
 def main() -> None:
