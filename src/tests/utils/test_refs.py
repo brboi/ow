@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils import paths

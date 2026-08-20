@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, TypeVar
 
+from ow.utils import paths
 from ow.utils.config import BranchSpec, RemoteConfig
 
 # Every git child is tracked here so an interrupt can kill it. An abandoned
@@ -463,7 +464,7 @@ def get_remote_url(bare_repo: Path, remote: str) -> str | None:
 
 def git(repo: Path, *args, quiet: bool = False, **kwargs) -> subprocess.CompletedProcess:
     """Central git wrapper with automatic -C."""
-    if repo.suffix == ".git" and repo.parent.name == "repos":
+    if repo.suffix == ".git" and repo.parent == paths.repos_dir():
         label = repo.stem
     else:
         label = repo.name

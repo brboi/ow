@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from ow.utils.config import BranchSpec, RemoteConfig
+from ow.utils import paths
 from ow.utils.git import (
     _get_bare_config,
     attach_worktree,
@@ -70,6 +71,30 @@ def test_run_cmd_hides_C_path(capsys):
     mock_run.assert_called_once_with(
         ["git", "-C", "/path/to/repo", "fetch", "origin"], check=True
     )
+
+
+# ---------------------------------------------------------------------------
+# git() — bare-repo alias labelling
+# ---------------------------------------------------------------------------
+
+def test_git_labels_by_alias_under_ows_repos_dir(xdg):
+    """A repo under paths.repos_dir() is one of ow's bare repos: label by its
+    alias (the stem), not its full directory name."""
+    repo = paths.repos_dir() / "community.git"
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd:
+        git(repo, "fetch", "origin")
+    assert mock_run_cmd.call_args.kwargs["label"] == "community"
+
+
+def test_git_does_not_label_by_alias_under_an_unrelated_repos_dir(xdg, tmp_path):
+    """A repo merely sitting under *some* directory named "repos" — e.g.
+    ~/repos/foo.git, or a workspace's own repos/ subdir — is not one of ow's
+    bare repos just because its parent happens to be named "repos"."""
+    repo = tmp_path / "repos" / "community.git"
+    assert repo.parent != paths.repos_dir()
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd:
+        git(repo, "fetch", "origin")
+    assert mock_run_cmd.call_args.kwargs["label"] == "community.git"
 
 
 # ---------------------------------------------------------------------------

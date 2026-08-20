@@ -15,7 +15,6 @@ def make_workspace(tmp_path: Path, repos: dict[str, str]) -> tuple[Config, Path]
     ws_dir = tmp_path / "workspaces" / "test"
     for alias in repos:
         (ws_dir / alias).mkdir(parents=True)
-    (tmp_path / ".bare-git-repos").mkdir(parents=True, exist_ok=True)
     from ow.utils.config import parse_branch_spec
     ws = WorkspaceConfig(
         repos={a: parse_branch_spec(s) for a, s in repos.items()},

@@ -152,11 +152,16 @@ def test_creates_config_if_missing(xdg):
 
 
 def test_exits_nonzero_if_config_load_fails(xdg):
-    """A config that cannot be loaded surfaces as a CLI failure, not a silent crash."""
+    """A config that cannot be loaded surfaces as a CLI failure: nothing in
+    __main__ catches or rewrites the load error, so it propagates as-is
+    (exit code 1, the original exception and message intact) instead of
+    being swallowed into a generic non-zero exit."""
     with patch("ow.__main__.load_global_config", side_effect=OSError("boom")):
         result = runner.invoke(app, ["status"])
 
-    assert result.exit_code != 0
+    assert result.exit_code == 1
+    assert isinstance(result.exception, OSError)
+    assert str(result.exception) == "boom"
 
 
 # ---------------------------------------------------------------------------

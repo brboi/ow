@@ -98,6 +98,20 @@ class TestResolveWorkspace:
         with pytest.raises(SystemExit):
             resolve_workspace(config)
 
+    def test_workspace_config_is_named_config_toml(self, tmp_path, monkeypatch, config):
+        """Regression guard: the per-workspace config file is `.ow/config.toml`,
+        not the old extensionless `.ow/config`. Uses the path form of
+        resolution (cwd walk-up) since name-based lookup has no meaning
+        without the discovery index (see the tests below)."""
+        ws_dir = _make_ws(tmp_path, "toml-check")
+
+        monkeypatch.delenv("OW_WORKSPACE", raising=False)
+        monkeypatch.chdir(ws_dir)
+        _, resolved_dir, ws = resolve_workspace(config)
+
+        assert resolved_dir == ws_dir
+        assert ws.templates == ["common"]
+
     def test_resolve_workspace_by_name_fails_loudly(self, tmp_path, monkeypatch, capsys, config):
         """Positional name lookup has no meaning without the discovery index (task 5)."""
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
