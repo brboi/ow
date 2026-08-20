@@ -129,7 +129,7 @@ def init(
 @app.command()
 def apply(
     workspace: Optional[str] = typer.Argument(None, help="Workspace name (default: resolve from cwd)", autocompletion=complete_workspace_name),
-    only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to materialize (default: all)"),
+    only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to materialize (default: all); templates still render from the whole config, so addons_path may reference repos not yet materialized"),
 ) -> None:
     """Re-render templates and materialize worktrees."""
     config = _load_config()

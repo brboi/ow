@@ -62,7 +62,7 @@ class TestStatusExtended:
 # update — error display
 # ---------------------------------------------------------------------------
 
-class TestCmdUpdateExtended:
+class TestCmdApplyExtended:
 
     def test_cmd_apply_shows_error_when_repo_fails(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"

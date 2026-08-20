@@ -47,7 +47,7 @@ code workspaces/my_work              # open in your IDE and enjoy
 |---------|-------|-------------|
 | `ow init` | `--force`, `--force-with-backup` | Initialize a new ow project |
 | `ow create` | `-n/--name`, `-t/--template`, `-r/--repo`, `-c/--configuration` | Create a workspace interactively |
-| `ow update` | `[workspace]` | Re-render templates and materialize worktrees |
+| `ow apply` | `[workspace]` | Re-render templates and materialize worktrees |
 | `ow status` | `[workspace]` | Show branch status with behind/ahead counts |
 | `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y` | Fetch and rebase repos in a workspace |
 | `ow prune` | — | Clean up stale worktree references from bare repos |
@@ -89,7 +89,7 @@ After confirmation:
 5. Writes `workspaces/<name>/.ow/config`
 6. Trusts `mise.toml` and prints a reminder to run `mise install`
 
-### `ow update`
+### `ow apply`
 
 Re-renders templates and materializes worktrees for the current workspace. Also creates any missing worktrees and merges new vars from `ow.toml`. Useful after template changes or to regenerate workspace files.
 

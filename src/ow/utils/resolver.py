@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-
 from ow.utils import index
 from ow.utils.config import WorkspaceConfig, load_workspace_config
 
@@ -101,4 +100,3 @@ def resolve_workspace(name: str | None = None) -> tuple[Path, WorkspaceConfig]:
         return _from_env(env_val)
 
     return _from_cwd()
-

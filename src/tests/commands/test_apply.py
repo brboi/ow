@@ -78,7 +78,7 @@ class TestCmdApplyOnly:
                     cmd_apply(config_with_remotes, only="community")
 
         narrowed = materialize.call_args.args[0]
-        assert list(narrowed.repos) == ["community"]
+        assert narrowed.repos == {"community": BranchSpec("origin/master")}
 
     def test_templates_still_see_every_repo(self, tmp_path, config_with_remotes):
         """Rendering a partial config would silently break odoo.conf's addons_path."""

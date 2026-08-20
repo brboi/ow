@@ -27,7 +27,7 @@ def test_version_flag(flag):
 
 def test_init_with_args(xdg):
     """ow init myws -r community:master..x -t common calls cmd_init with correct args."""
-    with patch("ow.__main__.cmd_init") as mock_init:
+    with patch("ow.__main__.cmd_init", autospec=True) as mock_init:
         result = runner.invoke(app, [
             "init",
             "myws",
@@ -46,7 +46,7 @@ def test_init_with_args(xdg):
 
 def test_init_without_name_passes_none(xdg):
     """`ow init` with no argument means "here" — the name must reach cmd_init as None."""
-    with patch("ow.__main__.cmd_init") as mock_init:
+    with patch("ow.__main__.cmd_init", autospec=True) as mock_init:
         result = runner.invoke(app, ["init", "-r", "community:master..x", "-t", "common"])
 
     assert result.exit_code == 0
@@ -55,7 +55,7 @@ def test_init_without_name_passes_none(xdg):
 
 def test_init_rejects_repo_without_spec(xdg):
     """-r ALIAS with no ':' must fail loudly, not silently drop the repo."""
-    with patch("ow.__main__.cmd_init") as mock_init:
+    with patch("ow.__main__.cmd_init", autospec=True) as mock_init:
         result = runner.invoke(app, ["init", "myws", "-r", "community"])
 
     assert result.exit_code != 0
@@ -66,7 +66,7 @@ def test_init_rejects_repo_without_spec(xdg):
 
 def test_init_rejects_repo_with_empty_alias(xdg):
     """-r :spec has no alias to attach the spec to."""
-    with patch("ow.__main__.cmd_init") as mock_init:
+    with patch("ow.__main__.cmd_init", autospec=True) as mock_init:
         result = runner.invoke(app, ["init", "myws", "-r", ":master..x"])
 
     assert result.exit_code != 0
@@ -76,7 +76,7 @@ def test_init_rejects_repo_with_empty_alias(xdg):
 
 def test_init_accepts_several_repos(xdg):
     """-r is repeatable."""
-    with patch("ow.__main__.cmd_init") as mock_init:
+    with patch("ow.__main__.cmd_init", autospec=True) as mock_init:
         result = runner.invoke(app, [
             "init", "myws",
             "-r", "community:master..x",
@@ -90,7 +90,7 @@ def test_init_accepts_several_repos(xdg):
 
 def test_apply(xdg):
     """ow apply calls cmd_apply."""
-    with patch("ow.__main__.cmd_apply") as mock_apply:
+    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
         result = runner.invoke(app, ["apply"])
 
     assert result.exit_code == 0
@@ -99,7 +99,7 @@ def test_apply(xdg):
 
 def test_apply_with_workspace(xdg):
     """ow apply myws calls cmd_apply with workspace="myws"."""
-    with patch("ow.__main__.cmd_apply") as mock_apply:
+    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
         result = runner.invoke(app, ["apply", "myws"])
 
     assert result.exit_code == 0
@@ -109,7 +109,7 @@ def test_apply_with_workspace(xdg):
 
 def test_apply_only_reaches_cmd_apply(xdg):
     """ow apply --only community,enterprise passes only= through, same as rebase."""
-    with patch("ow.__main__.cmd_apply") as mock_apply:
+    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
         result = runner.invoke(app, ["apply", "myws", "--only", "community,enterprise"])
 
     assert result.exit_code == 0
@@ -119,7 +119,7 @@ def test_apply_only_reaches_cmd_apply(xdg):
 
 def test_apply_only_defaults_to_none(xdg):
     """No --only means no narrowing."""
-    with patch("ow.__main__.cmd_apply") as mock_apply:
+    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
         result = runner.invoke(app, ["apply"])
 
     assert result.exit_code == 0
@@ -132,6 +132,11 @@ def test_apply_only_is_really_wired_to_cmd_apply(tmp_path, xdg, monkeypatch):
     The two tests above patch cmd_apply, so they pass even when the CLI passes
     an argument the command does not accept — which is exactly how `--only`
     shipped broken once. This one calls the real function.
+
+    ensure_workspace_materialized is patched because the alias is invalid and
+    select_aliases should raise before it is ever called — if a future change
+    makes that assumption false, this must fail on a fast, offline mock
+    instead of hanging on a real clone of odoo/odoo.
     """
     ws_dir = tmp_path / "ws"
     ws_dir.mkdir()
@@ -141,16 +146,18 @@ def test_apply_only_is_really_wired_to_cmd_apply(tmp_path, xdg, monkeypatch):
     )
     monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
 
-    result = runner.invoke(app, ["apply", "--only", "nope"])
+    with patch("ow.commands.apply.ensure_workspace_materialized") as materialize:
+        result = runner.invoke(app, ["apply", "--only", "nope"])
 
     assert result.exit_code == 2
     assert "nope" in result.output
     assert "community" in result.output
+    materialize.assert_not_called()
 
 
 def test_status_with_workspace(xdg):
     """ow status myws calls cmd_status with workspace="myws"."""
-    with patch("ow.__main__.cmd_status") as mock_status:
+    with patch("ow.__main__.cmd_status", autospec=True) as mock_status:
         result = runner.invoke(app, ["status", "myws"])
 
     assert result.exit_code == 0
@@ -160,7 +167,7 @@ def test_status_with_workspace(xdg):
 
 def test_status_without_workspace(xdg):
     """ow status calls cmd_status with workspace=None."""
-    with patch("ow.__main__.cmd_status") as mock_status:
+    with patch("ow.__main__.cmd_status", autospec=True) as mock_status:
         result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
@@ -170,7 +177,7 @@ def test_status_without_workspace(xdg):
 
 def test_rebase_with_workspace(xdg):
     """ow rebase myws calls cmd_rebase with workspace="myws"."""
-    with patch("ow.__main__.cmd_rebase") as mock_rebase:
+    with patch("ow.__main__.cmd_rebase", autospec=True) as mock_rebase:
         result = runner.invoke(app, ["rebase", "myws"])
 
     assert result.exit_code == 0
@@ -180,7 +187,7 @@ def test_rebase_with_workspace(xdg):
 
 def test_prune(xdg):
     """ow prune calls cmd_prune."""
-    with patch("ow.__main__.cmd_prune") as mock_prune:
+    with patch("ow.__main__.cmd_prune", autospec=True) as mock_prune:
         result = runner.invoke(app, ["prune"])
 
     assert result.exit_code == 0
@@ -191,7 +198,7 @@ def test_creates_config_if_missing(xdg):
     """If the global config doesn't exist yet, it is bootstrapped with default content."""
     assert not paths.config_file().exists()
 
-    with patch("ow.__main__.cmd_prune"):
+    with patch("ow.__main__.cmd_prune", autospec=True):
         result = runner.invoke(app, ["prune"])
 
     assert result.exit_code == 0
@@ -300,7 +307,7 @@ class TestRebaseFlags:
     def test_flags_reach_cmd_rebase(self):
         from typer.testing import CliRunner
         from ow.__main__ import app
-        with patch("ow.__main__.cmd_rebase") as mock, patch("ow.__main__._load_config"):
+        with patch("ow.__main__.cmd_rebase", autospec=True) as mock, patch("ow.__main__._load_config"):
             CliRunner().invoke(
                 app,
                 ["rebase", "parrot", "--only", "community,enterprise",
@@ -316,7 +323,7 @@ class TestRebaseFlags:
     def test_defaults_are_conservative(self):
         from typer.testing import CliRunner
         from ow.__main__ import app
-        with patch("ow.__main__.cmd_rebase") as mock, patch("ow.__main__._load_config"):
+        with patch("ow.__main__.cmd_rebase", autospec=True) as mock, patch("ow.__main__._load_config"):
             CliRunner().invoke(app, ["rebase"])
         _, kwargs = mock.call_args
         assert kwargs["only"] is None

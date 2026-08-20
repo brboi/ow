@@ -32,8 +32,16 @@ src/
 │   ├── __init__.py
 │   ├── conftest.py          # fixtures; `xdg` redirects every XDG base dir into tmp_path
 │   ├── test_cli.py          # CLI argument parsing, completers
-│   ├── commands/            # one module per command, mirroring ow/commands/
-│   └── utils/               # one module per helper, mirroring ow/utils/
+│   ├── test_main_extended.py # more CLI-entry-point coverage, split out of test_cli.py
+│   ├── commands/            # tests mirroring ow/commands/, but not one-to-one: most
+│   │                        # commands have grown a `_extended`/`_extended2` sibling module
+│   │                        # (test_init.py + test_init_extended.py; test_status.py +
+│   │                        # test_status_extended.py + test_status_extended2.py) or a
+│   │                        # differently-named one (test_rebase.py + test_rebase_scenarios.py),
+│   │                        # and test_misc_extended.py mixes prune, status and apply tests
+│   │                        # rather than belonging to any single command
+│   └── utils/               # tests mirroring ow/utils/, with the same pattern: some helpers
+│                            # have a `_extended`/`_extended2` sibling module for tests added later
 pyproject.toml
 AGENTS.md
 ```
