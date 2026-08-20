@@ -69,6 +69,22 @@ def test_detects_old_workspace_config(xdg: Path, tmp_path: Path, monkeypatch: py
     assert "docs/migrating-to-2.0.md" in err
 
 
+def test_the_guide_is_named_by_url(xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """The reader is not standing in a checkout.
+
+    Most people meeting this message installed ow from PyPI, so a repo-relative
+    path names a file they do not have. It has to be something they can open.
+    """
+    (tmp_path / "ow.toml").write_text("")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(typer.Exit):
+        check_legacy_layout()
+
+    err = capsys.readouterr().err
+    assert "https://github.com/brboi/ow/blob/main/docs/migrating-to-2.0.md" in err
+
+
 def test_project_root_path_with_brackets_is_not_treated_as_markup(xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     """A directory name containing square brackets must print literally.
 

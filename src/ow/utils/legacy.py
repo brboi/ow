@@ -16,7 +16,11 @@ from ow.utils import paths
 from ow.utils.config import find_project_root
 from ow.utils.display import err_console
 
-_GUIDE = "see docs/migrating-to-2.0.md to migrate"
+# Named by URL, not by repo path: most people meeting this message installed ow
+# from PyPI and have no checkout to open docs/ in.
+_GUIDE = (
+    "see https://github.com/brboi/ow/blob/main/docs/migrating-to-2.0.md to migrate"
+)
 
 
 def check_legacy_layout() -> None:
