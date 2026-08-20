@@ -1,9 +1,12 @@
 """`ow ls` — list every known workspace, its path, and its repos.
 
 No git: that is what `ow status` is for. Test 6 pins this at the single
-subprocess choke point (`ow.utils.git._run`) rather than at some downstream
-symptom, so a future command that starts calling git by a different path
-still trips it.
+subprocess choke point (`subprocess.Popen`, inside `ow.utils.git._run`)
+rather than at some downstream symptom, so a future command that starts
+calling git by a different path still trips it. Patching `ow.utils.git._run`
+itself would not be airtight: `ow.utils.refs` and `ow.commands.prune` both
+import `_run` by value (`from ow.utils.git import _run`), so a patch on the
+name in `ow.utils.git` never reaches them.
 
 Every test here reaches the index, so every test takes the `xdg` fixture.
 Without it a test writes into the developer's real XDG state directory.
@@ -12,6 +15,10 @@ Without it a test writes into the developer's real XDG state directory.
 import shutil
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
+import typer
+from rich.console import Console
 
 from ow.commands.ls import cmd_ls
 from ow.utils import index
@@ -30,6 +37,28 @@ def _make_ws(base: Path, name: str, repos: dict[str, str] | None = None) -> Path
     )
     index.remember(ws_dir)
     return ws_dir
+
+
+# ---------------------------------------------------------------------------
+# 0. A legacy layout must be reported, not hidden behind "no workspaces".
+#
+# Three other error messages (resolver.py x2, index.py) tell a lost user to
+# run `ow ls`. If `ls` itself skips the legacy guard, the command they are
+# sent to is the one that lies to them.
+# ---------------------------------------------------------------------------
+
+def test_detects_legacy_layout(tmp_path, capsys, xdg):
+    """An old-layout ow.toml with no global config yet must point at the
+    migration guide, not print "No known workspaces"."""
+    (tmp_path / "ow.toml").write_text("")
+
+    with pytest.raises(typer.Exit) as exc:
+        cmd_ls()
+
+    assert exc.value.exit_code == 1
+    out, err = capsys.readouterr()
+    assert "No known workspaces" not in out
+    assert "docs/migrating-to-2.0.md" in err
 
 
 # ---------------------------------------------------------------------------
@@ -54,9 +83,17 @@ def test_two_workspaces_both_appear(tmp_path, capsys, xdg):
 # ---------------------------------------------------------------------------
 
 def test_home_is_abbreviated(tmp_path, capsys, xdg, monkeypatch):
+    """Rich sizes the PATH column to the 80-column fallback console width and
+    ellipsizes long cells, so on a narrow console the raw absolute path never
+    appears whatever the production code does — that made
+    `assert str(ws_dir) not in out` pass even against a `_display_path` that
+    returns the full path unabbreviated. Widening the console so the full
+    path actually fits is what makes the negative assertion mean something.
+    """
     fake_home = tmp_path / "home" / "dev"
     fake_home.mkdir(parents=True)
     monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setattr("ow.commands.ls.console", Console(highlight=False, soft_wrap=True, width=300))
 
     ws_dir = _make_ws(fake_home, "myws")
 
@@ -105,6 +142,53 @@ def test_broken_config_marked_error_others_still_listed(tmp_path, capsys, xdg):
 
 
 # ---------------------------------------------------------------------------
+# 4b. A workspace name that looks like Rich markup must not blow up the
+#     whole listing: table cells are plain data, not markup source.
+# ---------------------------------------------------------------------------
+
+def test_bracketed_path_does_not_break_the_listing(tmp_path, capsys, xdg, monkeypatch):
+    """"/" cannot appear inside a single filename, so the dangerous pattern
+    a real filesystem can produce is not one bracketed directory name but a
+    bracket left dangling by one path component and closed by the next one
+    down — e.g. a directory named "ws[" containing a workspace named
+    "bad]" renders, PATH column included, as ".../ws[/bad]": a closing Rich
+    tag with no opening match. console.print(table) would raise
+    MarkupError and the whole listing would be lost, including any other,
+    unrelated workspace.
+
+    Console width is widened (as in test_home_is_abbreviated) so the long
+    PATH string is not ellipsized away before the assertion can see it.
+    """
+    monkeypatch.setattr("ow.commands.ls.console", Console(highlight=False, soft_wrap=True, width=300))
+    _make_ws(tmp_path / "ws[", "bad]", {"community": "master"})
+    _make_ws(tmp_path, "normal", {"community": "master"})
+
+    cmd_ls()  # must not raise rich.errors.MarkupError
+
+    out = capsys.readouterr().out
+    assert "ws[/bad]" in out
+    assert "normal" in out
+
+
+def test_error_message_with_markup_like_text_does_not_break_the_listing(tmp_path, capsys, xdg, monkeypatch):
+    """The error cell interpolates an exception message, which is data too:
+    an exception whose text happens to contain bracket-like content must
+    not be parsed as markup either.
+    """
+    _make_ws(tmp_path, "broken")
+
+    monkeypatch.setattr(
+        "ow.commands.ls.load_workspace_config",
+        lambda path: (_ for _ in ()).throw(ValueError("bad value: [/nope]")),
+    )
+
+    cmd_ls()  # must not raise rich.errors.MarkupError
+
+    out = capsys.readouterr().out
+    assert "error" in out.lower()
+
+
+# ---------------------------------------------------------------------------
 # 5. A workspace whose directory vanished does not appear.
 # ---------------------------------------------------------------------------
 
@@ -127,7 +211,12 @@ def test_vanished_workspace_does_not_appear(tmp_path, capsys, xdg):
 def test_never_runs_git(tmp_path, capsys, xdg):
     _make_ws(tmp_path, "alpha", {"community": "master"})
 
-    with patch("ow.utils.git._run") as mock_run:
+    # subprocess.Popen (ow/utils/git.py:44) is the single point every git
+    # invocation in ow passes through, whichever module holds the name that
+    # kicked it off. Patching `ow.utils.git._run` instead would miss calls
+    # made through names bound by value elsewhere, e.g. `ow.utils.refs._run`
+    # or `ow.commands.prune._run` (both `from ow.utils.git import _run`).
+    with patch("ow.utils.git.subprocess.Popen") as mock_popen:
         cmd_ls()
 
-    mock_run.assert_not_called()
+    mock_popen.assert_not_called()

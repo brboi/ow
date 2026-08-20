@@ -9,10 +9,12 @@ import tomllib
 from pathlib import Path
 
 from rich.table import Table
+from rich.text import Text
 
 from ow.utils import index
 from ow.utils.config import load_workspace_config
 from ow.utils.display import console
+from ow.utils.legacy import check_legacy_layout
 
 MARKER = Path(".ow") / "config.toml"
 
@@ -33,22 +35,26 @@ def _display_path(path: Path) -> str:
     return f"~/{rel}"
 
 
-def _repos_cell(ws_dir: Path) -> str:
+def _repos_cell(ws_dir: Path) -> str | Text:
     """The repo column for one workspace: 'alias:spec' pairs, or an error mark.
 
     A workspace whose config.toml fails to parse must not abort the whole
     listing — that is precisely the moment a broken entry is most annoying
-    to have hidden.
+    to have hidden. The error text is built as a Text object rather than
+    markup: `exc` is an interpolated exception message, which is data, not
+    something safe to hand to Rich's markup parser.
     """
     try:
         ws = load_workspace_config(ws_dir / MARKER)
     except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
-        return f"[red](error: {exc})[/]"
+        return Text(f"(error: {exc})", style="red")
     return ", ".join(f"{alias}:{spec.to_spec_str()}" for alias, spec in ws.repos.items())
 
 
 def cmd_ls() -> None:
     """List every known workspace: its name, path, and repos."""
+    check_legacy_layout()
+
     workspaces = index.known_workspaces()
     if not workspaces:
         console.print("No known workspaces. Run `ow init` to create one.")
@@ -60,6 +66,9 @@ def cmd_ls() -> None:
     table.add_column("REPOS")
 
     for ws_dir in workspaces:
-        table.add_row(ws_dir.name, _display_path(ws_dir), _repos_cell(ws_dir))
+        # NAME and PATH come straight from the filesystem: a directory named
+        # something like "ws[/bad]" is data, not Rich markup, and must not
+        # be parsed as such — Text() renders it literally.
+        table.add_row(Text(ws_dir.name), Text(_display_path(ws_dir)), _repos_cell(ws_dir))
 
     console.print(table)

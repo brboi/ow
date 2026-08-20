@@ -12,6 +12,7 @@ import shutil
 import sys
 
 from ow.utils import paths
+from ow.utils.legacy import check_legacy_layout
 from ow.utils.templates import (
     available_templates,
     packaged_files,
@@ -116,6 +117,8 @@ def _diff() -> None:
 
 def cmd_templates(take: str | None = None, show_diff: bool = False) -> None:
     """List template files with their state, take one, or diff the stale ones."""
+    check_legacy_layout()
+
     if take is not None:
         # Taking writes a baseline identical to the packaged file, so there
         # would be nothing left for --diff to say about it.

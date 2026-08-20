@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from ow.__main__ import app
@@ -54,6 +55,24 @@ def states(output: str) -> dict[str, str]:
         if len(parts) == 2:
             parsed[parts[0]] = parts[1]
     return parsed
+
+
+class TestLegacy:
+    """Same gap as `ow ls`: skipping _load_config() also skips the legacy
+    check. Someone mid-migration should get the same answer from every
+    command, not a working `ow templates` while `ow status` tells them to
+    migrate.
+    """
+
+    def test_detects_legacy_layout(self, xdg, tmp_path, capsys):
+        (tmp_path / "ow.toml").write_text("")
+
+        with pytest.raises(typer.Exit) as exc:
+            cmd_templates()
+
+        assert exc.value.exit_code == 1
+        err = capsys.readouterr().err
+        assert "docs/migrating-to-2.0.md" in err
 
 
 class TestListing:

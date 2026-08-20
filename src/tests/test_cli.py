@@ -196,7 +196,15 @@ def test_prune(xdg):
 
 
 def test_ls(xdg):
-    """ow ls calls cmd_ls, without loading the global config."""
+    """ow ls wiring: __main__.ls() calls cmd_ls() with no arguments, and does
+    not route through _load_config() to get there — ls needs no Config.
+
+    cmd_ls is mocked here, so this is wiring only: it says nothing about
+    whether the real cmd_ls detects a legacy layout. That guard
+    (check_legacy_layout(), called from inside cmd_ls itself — see
+    ow/commands/ls.py) is exercised against the real function in
+    src/tests/commands/test_ls.py::test_detects_legacy_layout.
+    """
     with patch("ow.__main__.cmd_ls", autospec=True) as mock_ls, \
             patch("ow.__main__._load_config", autospec=True) as mock_load_config:
         result = runner.invoke(app, ["ls"])
