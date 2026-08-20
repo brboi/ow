@@ -31,7 +31,9 @@ def check_legacy_layout() -> None:
         old_root = find_project_root(Path.cwd())
         if old_root is not None:
             marker = "ow.toml" if (old_root / "ow.toml").exists() else "ow.toml.example"
-            err_console.print(f"Error: found an old project layout at {old_root} ({marker})")
+            err_console.print(
+                f"Error: found an old project layout at {old_root} ({marker})", markup=False
+            )
             err_console.print(f"       {marker} is no longer used — {_GUIDE}")
             raise typer.Exit(1)
 
@@ -39,6 +41,8 @@ def check_legacy_layout() -> None:
     for candidate in [current, *current.parents]:
         old_config = candidate / ".ow" / "config"
         if old_config.exists() and not (candidate / ".ow" / "config.toml").exists():
-            err_console.print(f"Error: found an old workspace config at {old_config}")
+            err_console.print(
+                f"Error: found an old workspace config at {old_config}", markup=False
+            )
             err_console.print(f"       expected .ow/config.toml instead — {_GUIDE}")
             raise typer.Exit(1)

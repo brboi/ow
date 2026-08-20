@@ -14,6 +14,7 @@ from ow.commands import (
     cmd_templates,
 )
 from ow.utils.config import Config, load_global_config, parse_branch_spec
+from ow.utils.display import err_console
 from ow.utils.legacy import check_legacy_layout
 from ow.utils.paths import config_file
 from ow.utils.templates import available_templates
@@ -59,12 +60,21 @@ def _load_config() -> Config:
     try:
         return load_global_config()
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        print(f"Error: could not load {config_file()}: {exc}", file=sys.stderr)
+        err_console.print(f"Error: could not load {config_file()}: {exc}", markup=False)
         raise typer.Exit(1)
 
 
 def _available_repo_aliases() -> list[str]:
-    """Return repo aliases from the global config in declaration order."""
+    """Return repo aliases from the global config in declaration order.
+
+    Reads the config only if it already exists. Completion must never
+    bootstrap it: load_global_config() would create a default config.toml,
+    silently erasing the "no global config yet" condition that
+    check_legacy_layout() depends on — the guard commands run through, but
+    completion callbacks don't.
+    """
+    if not config_file().exists():
+        return []
     try:
         cfg = load_global_config()
         return list(cfg.remotes.keys())

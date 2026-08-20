@@ -139,6 +139,21 @@ class GitLab:
         self.git("checkout", ref)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """check_legacy_layout() walks up from cwd looking for an old ow.toml.
+
+    A developer's machine may well have an old ow.toml-based checkout, or
+    (as with this very repo) a gitignored leftover ow.toml sitting at the
+    checkout root from before this rewrite — that is the developer's own
+    config, not repo content, and it must never be touched. Either way, no
+    test may run with the real working directory as cwd, or it risks
+    tripping a false positive — or worse, a false negative — depending on
+    what happens to be lying around outside the test's control.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
 @pytest.fixture
 def xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect every XDG base directory into tmp_path.

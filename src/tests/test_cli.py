@@ -11,17 +11,6 @@ from ow.utils.config import BranchSpec, WorkspaceConfig, write_workspace_config
 runner = CliRunner()
 
 
-@pytest.fixture(autouse=True)
-def _isolated_cwd(tmp_path, monkeypatch):
-    """check_legacy_layout() walks up from cwd looking for an old ow.toml.
-
-    This repo's own checkout has one at its root (a leftover from before
-    this rewrite), so any invocation here must not run with the real repo
-    as cwd or it would trip a false positive.
-    """
-    monkeypatch.chdir(tmp_path)
-
-
 def test_no_args_shows_help():
     """ow without args shows help (no_args_is_help=True)."""
     result = runner.invoke(app, [])
@@ -338,9 +327,39 @@ def test_complete_gen_repos_with_prefix(xdg):
     assert _complete(["init", "-r"], "e") == ["enterprise"]
 
 
-def test_complete_gen_repos_default_bootstrap(xdg):
-    """First run with no config file yet: bootstrap seeds the default community remote."""
-    assert _complete(["init", "-r"], "") == ["community"]
+def test_complete_gen_repos_no_config_creates_nothing(xdg):
+    """Completion must never bootstrap: with no config yet, it offers nothing
+    rather than create one.
+
+    A real `ow init -r <TAB>` from an old project root with no global config
+    used to create ~/.config/ow/config.toml as a side effect of completion,
+    permanently destroying the "no global config yet" condition that
+    check_legacy_layout() depends on — so the next real command would print
+    "no workspace found" instead of pointing at the migration guide.
+    """
+    assert not paths.config_file().exists()
+
+    names = _complete(["init", "-r"], "")
+
+    assert names == []
+    assert not paths.config_file().exists()
+
+
+def test_complete_gen_repos_preserves_legacy_detection(xdg, tmp_path):
+    """End to end: completing from a legacy layout with no global config must
+    not erase the condition the legacy check depends on — the migration
+    pointer must still fire on the next real command."""
+    (tmp_path / "ow.toml").write_text("")
+    assert not paths.config_file().exists()
+
+    _complete(["init", "-r"], "")
+
+    assert not paths.config_file().exists()
+
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 1
+    assert "ow.toml" in result.output
+    assert "docs/migrating-to-2.0.md" in result.output
 
 
 def test_complete_workspace_name_disabled(xdg):

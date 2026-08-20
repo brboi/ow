@@ -69,6 +69,26 @@ def test_detects_old_workspace_config(xdg: Path, tmp_path: Path, monkeypatch: py
     assert "docs/migrating-to-2.0.md" in err
 
 
+def test_project_root_path_with_brackets_is_not_treated_as_markup(xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """A directory name containing square brackets must print literally.
+
+    err_console.print() parses Rich markup by default; an interpolated path
+    is data, not markup, and must survive intact even if it happens to
+    contain something that looks like a markup tag.
+    """
+    project = tmp_path / "[weird]"
+    sub = project / "workspaces" / "demo"
+    sub.mkdir(parents=True)
+    (project / "ow.toml").write_text("")
+    monkeypatch.chdir(sub)
+
+    with pytest.raises(typer.Exit):
+        check_legacy_layout()
+
+    err = capsys.readouterr().err
+    assert str(project) in err
+
+
 def test_old_workspace_config_is_not_flagged_once_migrated(xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A workspace with both files (mid-migration, or .ow/config kept as a
     backup) is not a legacy layout: config.toml is what ow actually reads."""
