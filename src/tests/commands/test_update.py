@@ -26,17 +26,17 @@ class TestCmdUpdate:
                     cmd_update(config)
         mock_apply.assert_called_once()
 
-    def test_cmd_update_with_workspace_name(self, tmp_path, config_with_remotes):
+    def test_cmd_update_with_workspace_name_fails_loudly(self, tmp_path, capsys, config_with_remotes):
+        """Positional name lookup has no meaning without the discovery index (task 5)."""
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={}, templates=["common"])
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         config = config_with_remotes
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
-                with patch("ow.commands.update.apply_templates") as mock_apply:
-                    cmd_update(config, workspace="test")
-        mock_apply.assert_called_once()
+        with pytest.raises(SystemExit):
+            cmd_update(config, workspace="test")
+        err = capsys.readouterr().err
+        assert "cannot resolve workspace 'test'" in err
 
     def test_cmd_update_with_workspace_name_not_found(self, tmp_path, capsys, config):
         ws_dir = tmp_path / "workspaces" / "test"

@@ -4,6 +4,7 @@ from typing import NamedTuple
 
 from ow.utils.display import print_git_result, task_progress
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
+from ow.utils import paths
 from ow.utils.git import (
     _run,
     get_upstream,
@@ -63,7 +64,7 @@ def fetch_workspace_refs(
     2. Execute all fetches flat (parallel) — one thread per fetch, not per repo
     3. Print results (sequential)
     """
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    bare_repos_dir = paths.repos_dir()
     resolved_tracks: dict[str, str] = {}
     resolved_upstreams: dict[str, str] = {}
     resolved_specs: dict[str, BranchSpec] = {}

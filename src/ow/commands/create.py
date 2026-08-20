@@ -47,17 +47,13 @@ def _validate_create_inputs(
     Returns (source_ws, resolved_name, ws_dir).
     Exits on validation errors.
     """
-    templates_root = config.root_dir / "templates"
-    if not templates_root.exists():
-        print("Error: templates/ directory not found.", file=sys.stderr)
-        sys.exit(1)
-    available = sorted(
-        d.name
-        for d in templates_root.iterdir()
-        if d.is_dir()
-    )
+    # Packaged templates are always available even when the user hasn't taken
+    # (and thus doesn't have a local copy of) any — nothing is copied at
+    # bootstrap, so listing paths.templates_dir() alone would wrongly treat a
+    # fresh install as having no templates.
+    available = available_templates(config)
     if not available:
-        print("Error: no templates found in templates/", file=sys.stderr)
+        print("Error: no templates available.", file=sys.stderr)
         sys.exit(1)
 
     if templates is not None:
@@ -106,7 +102,9 @@ def _validate_create_inputs(
         if not name or not re.match(r'^[a-zA-Z0-9_-]+$', name):
             print("Error: name must be alphanumeric with hyphens and underscores only.", file=sys.stderr)
             sys.exit(1)
-        ws_dir = config.root_dir / "workspaces" / name
+        # Provisional: task 6 settles the create location. `Path.cwd() / name`
+        # is what it lands on, so this is early-correct rather than a stopgap.
+        ws_dir = Path.cwd() / name
         if ws_dir.exists():
             print(f"Error: workspace '{name}' already exists at {ws_dir}.", file=sys.stderr)
             sys.exit(1)
@@ -124,7 +122,7 @@ def _validate_create_inputs(
             if not name or not re.match(r'^[a-zA-Z0-9_-]+$', name):
                 print("Error: name must be alphanumeric with hyphens and underscores only.", file=sys.stderr)
                 continue
-            ws_dir = config.root_dir / "workspaces" / name
+            ws_dir = Path.cwd() / name
             if ws_dir.exists():
                 print(f"Warning: workspace '{name}' already exists at {ws_dir}. Choose another name.")
                 continue
@@ -143,11 +141,7 @@ def _gather_workspace_config_interactive(
 
     Pre-populates from source_ws or CLI args where available.
     """
-    available_t = sorted(
-        d.name
-        for d in (config.root_dir / "templates").iterdir()
-        if d.is_dir()
-    )
+    available_t = available_templates(config)
     known_aliases = list(config.remotes.keys())
 
     if source_ws is not None:
@@ -217,10 +211,14 @@ def _check_duplicate_branches(new_repos: dict[str, BranchSpec], config: Config) 
 
     Only local_branches (the part after `..`) are checked — source branches don't conflict
     since git only prevents two worktrees on the same local branch.
+
+    Provisional: without the discovery index (task 5) there is no way to
+    enumerate every workspace on the machine, so this only looks at siblings
+    of the current directory — the same provisional location a new workspace
+    is created in (see `_validate_create_inputs`). Task 5 replaces this with
+    an index-backed check across all known workspaces.
     """
-    ws_root = config.root_dir / "workspaces"
-    if not ws_root.exists():
-        return
+    ws_root = Path.cwd()
     for existing_ws_dir in sorted(ws_root.iterdir()):
         if not existing_ws_dir.is_dir():
             continue
@@ -286,7 +284,7 @@ def cmd_create(
 
     ow_config_path = ws_dir / ".ow" / "config.toml"
     if ow_config_path.exists():
-        print(f"Error: workspace '{resolved_name}' already exists at workspaces/{resolved_name}", file=sys.stderr)
+        print(f"Error: workspace '{resolved_name}' already exists at {ws_dir}", file=sys.stderr)
         sys.exit(1)
 
     # Phase 4: Materialize
@@ -316,6 +314,6 @@ def cmd_create(
         print(f"\nWorkspace '{resolved_name}' created with errors. Fix issues and run: ow update")
     else:
         print(f"\nWorkspace '{resolved_name}' created. To install dependencies:")
-        print(f"    cd workspaces/{resolved_name} && mise install")
+        print(f"    cd {ws_dir} && mise install")
     print(f"\nWorkspace config: {ow_config_path}")
     print("Edit it to customize vars, then run: ow update")

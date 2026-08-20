@@ -9,10 +9,12 @@ from ow.utils.config import (
     WorkspaceConfig,
     find_project_root,
     load_config,
+    load_global_config,
     load_workspace_config,
     parse_branch_spec,
     write_workspace_config,
 )
+from ow.utils import paths
 
 # ---------------------------------------------------------------------------
 # parse_branch_spec
@@ -102,7 +104,7 @@ def test_load_config():
         config = load_config(path)
 
     assert config.vars == {"http_port": 8069, "db_host": "localhost"}
-    assert config.root_dir == Path(tmpdir)
+    assert not hasattr(config, "root_dir")
 
     assert "community" in config.remotes
     assert config.remotes["community"]["origin"].url == "git@github.com:odoo/odoo.git"
@@ -121,6 +123,54 @@ def test_load_config_vars_empty():
         config = load_config(path)
 
     assert config.vars == {}
+
+
+# ---------------------------------------------------------------------------
+# load_global_config
+# ---------------------------------------------------------------------------
+
+def test_load_global_config_reads_the_config_file(xdg):
+    paths.config_home().mkdir(parents=True, exist_ok=True)
+    paths.config_file().write_text(SAMPLE_TOML)
+
+    config = load_global_config()
+
+    assert config.vars == {"http_port": 8069, "db_host": "localhost"}
+    assert config.remotes["community"]["origin"].url == "git@github.com:odoo/odoo.git"
+
+
+def test_load_global_config_bootstraps_when_missing(xdg, capsys):
+    path = paths.config_file()
+    assert not path.exists()
+
+    config = load_global_config()
+
+    assert path.exists()
+    content = path.read_text()
+    assert content.startswith("# ow configuration")
+    assert "community" in config.remotes
+
+    err = capsys.readouterr().err
+    assert "Created" in err
+    assert str(path) in err
+
+
+def test_load_global_config_bootstraps_only_once(xdg):
+    load_global_config()
+    path = paths.config_file()
+    first_mtime = path.stat().st_mtime_ns
+
+    load_global_config()
+
+    assert path.stat().st_mtime_ns == first_mtime
+
+
+def test_load_global_config_creates_the_parent_directory(xdg):
+    assert not paths.config_home().exists()
+
+    load_global_config()
+
+    assert paths.config_home().exists()
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ from ow.utils.drift import warn_if_drifted
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
 from ow.utils.config import BranchSpec, Config
+from ow.utils import paths
 from ow.utils.git import (
     get_all_remote_refs,
     get_remote_ref_for_branch,
@@ -133,7 +134,7 @@ def _gather_repo_status(
 def cmd_status(config: Config, workspace: str | None = None) -> None:
     """Show branch status for the current workspace."""
     config, ws_dir, ws = resolve_workspace(config, name=workspace)
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    bare_repos_dir = paths.repos_dir()
 
     warn_if_drifted(ws, ws_dir)
 

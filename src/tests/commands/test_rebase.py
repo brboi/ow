@@ -22,7 +22,7 @@ def make_workspace(tmp_path: Path, repos: dict[str, str]) -> tuple[Config, Path]
         templates=["common"],
     )
     write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-    config = Config(vars={}, remotes={}, root_dir=tmp_path)
+    config = Config(vars={}, remotes={})
     return config, ws_dir
 
 

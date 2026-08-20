@@ -6,6 +6,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from ow.utils.display import print_git_result, task_progress
 from ow.utils.config import Config, WorkspaceConfig
+from ow.utils import paths
 from ow.utils.git import (
     attach_worktree,
     create_worktree,
@@ -114,7 +115,7 @@ def available_templates(config: Config) -> list[str]:
     Local templates (./templates/) take priority and can override packaged ones.
     Packaged templates are used as fallback.
     """
-    local_templates_dir = config.root_dir / "templates"
+    local_templates_dir = paths.templates_dir()
     local_names = set()
     if local_templates_dir.exists():
         local_names = set(d.name for d in local_templates_dir.iterdir() if d.is_dir())
@@ -126,7 +127,7 @@ def available_templates(config: Config) -> list[str]:
 
 def _resolve_template_dir(template_name: str, config: Config) -> Path:
     """Resolve template directory: local first, fallback to packaged."""
-    local_dir = config.root_dir / "templates" / template_name
+    local_dir = paths.templates_dir() / template_name
     if local_dir.exists():
         return local_dir
 
@@ -181,7 +182,7 @@ def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: P
 
     Returns (workspace directory path, set of successfully materialized aliases, dict of alias -> error message for failures).
     """
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    bare_repos_dir = paths.repos_dir()
     ws_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_specs: dict[str, Any] = {}

@@ -5,6 +5,9 @@ from typing import Any
 
 import tomli_w
 
+from ow.utils import paths
+from ow.utils.display import err_console
+
 
 @dataclass
 class BranchSpec:
@@ -65,7 +68,6 @@ class WorkspaceConfig:
 class Config:
     vars: dict[str, Any]
     remotes: dict[str, dict[str, RemoteConfig]]  # alias -> remote_name -> cfg
-    root_dir: Path
 
 
 def load_workspace_config(path: Path) -> WorkspaceConfig:
@@ -132,5 +134,44 @@ def load_config(path: Path) -> Config:
     return Config(
         vars=vars,
         remotes=remotes,
-        root_dir=path.parent,
     )
+
+
+_DEFAULT_CONFIG = '''\
+# ow configuration. Everything here is optional except at least one remote.
+
+[vars]
+http_port = 8069
+db_host = "localhost"
+db_port = 5432
+db_user = "odoo"
+db_password = "odoo"
+admin_passwd = "Password"
+# smtp_server = "mailpit"
+# smtp_port = 1025
+
+[remotes.community]
+origin.url = "git@github.com:odoo/odoo.git"
+# dev.url = "git@github.com:odoo-dev/odoo.git"
+# dev.pushurl = "git@github.com:odoo-dev/odoo.git"
+# dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
+
+# [remotes.enterprise]
+# origin.url = "git@github.com:odoo/enterprise.git"
+'''
+
+
+def load_global_config() -> Config:
+    """Read the user's config, creating a commented default on first use.
+
+    Written on first run rather than at install time: pip must not create
+    files outside site-packages, post-install hooks are skipped for wheels
+    and isolated by pipx, and a package that writes into someone's home when
+    installed is a behaviour people rightly complain about.
+    """
+    path = paths.config_file()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_DEFAULT_CONFIG)
+        err_console.print(f"Created {path} — edit it to add your remotes.")
+    return load_config(path)

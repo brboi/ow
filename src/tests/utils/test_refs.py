@@ -2,14 +2,14 @@ from pathlib import Path
 
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 from ow.utils.refs import fetch_workspace_refs
+from ow.utils import paths
 
 
 def _workspace(tmp_path, alias="community"):
-    """A project whose worktree exists but whose bare repo does not."""
-    root = tmp_path / "project"
-    ws_dir = root / "workspaces" / "ws"
+    """A workspace whose worktree exists but whose bare repo does not."""
+    ws_dir = tmp_path / "workspaces" / "ws"
     (ws_dir / alias).mkdir(parents=True)
-    config = Config(vars={}, remotes={}, root_dir=root)
+    config = Config(vars={}, remotes={})
     ws = WorkspaceConfig(
         templates=[], vars={}, repos={alias: BranchSpec("origin/master", "feature")}
     )
@@ -19,16 +19,16 @@ def _workspace(tmp_path, alias="community"):
 class TestMissingBareRepo:
     """A missing bare repo is a broken project, not a missing branch."""
 
-    def test_names_the_missing_bare_repo(self, tmp_path, capsys):
+    def test_names_the_missing_bare_repo(self, tmp_path, capsys, xdg):
         config, ws, ws_dir = _workspace(tmp_path)
 
         fetch_workspace_refs(ws, ws_dir, config)
 
         err = capsys.readouterr().err
-        assert str(config.root_dir / ".bare-git-repos" / "community.git") in err
+        assert str(paths.repos_dir() / "community.git") in err
         assert "ow update" in err
 
-    def test_does_not_blame_the_branch(self, tmp_path, capsys):
+    def test_does_not_blame_the_branch(self, tmp_path, capsys, xdg):
         """The old path reported 'Branch <x> not found in local refs' instead."""
         config, ws, ws_dir = _workspace(tmp_path)
 
@@ -36,7 +36,7 @@ class TestMissingBareRepo:
 
         assert "not found in local refs" not in capsys.readouterr().err
 
-    def test_labels_the_failure_as_resolve_not_fetch(self, tmp_path, capsys):
+    def test_labels_the_failure_as_resolve_not_fetch(self, tmp_path, capsys, xdg):
         """No fetch is attempted when resolution fails; 'git fetch ?' claimed otherwise."""
         config, ws, ws_dir = _workspace(tmp_path)
 
@@ -46,7 +46,7 @@ class TestMissingBareRepo:
         assert "resolve" in err
         assert "fetch ?" not in err
 
-    def test_falls_back_to_the_declared_base_ref(self, tmp_path, capsys):
+    def test_falls_back_to_the_declared_base_ref(self, tmp_path, capsys, xdg):
         config, ws, ws_dir = _workspace(tmp_path)
 
         outcome = fetch_workspace_refs(ws, ws_dir, config)
@@ -58,16 +58,16 @@ class TestUpstreamBefore:
     """The SHA read before the fetch is what makes force-push detection
     possible without consulting a reflog."""
 
-    def test_records_the_upstream_sha_before_fetching(self, tmp_path, monkeypatch):
+    def test_records_the_upstream_sha_before_fetching(self, tmp_path, monkeypatch, xdg):
         from ow.utils.config import BranchSpec, Config, WorkspaceConfig
         from ow.utils import refs as refs_mod
 
         ws_dir = tmp_path / "ws"
         (ws_dir / "community").mkdir(parents=True)
-        bare = tmp_path / ".bare-git-repos" / "community.git"
+        bare = paths.repos_dir() / "community.git"
         bare.mkdir(parents=True)
 
-        config = Config(vars={}, remotes={"community": {}}, root_dir=tmp_path)
+        config = Config(vars={}, remotes={"community": {}})
         ws = WorkspaceConfig(
             repos={"community": BranchSpec("origin/master", "work")},
             templates=[],
@@ -98,7 +98,7 @@ class TestUpstreamBefore:
         assert outcome.upstreams["community"] == "dev/work"
 
 
-def test_fetch_jobs_stay_routed_through_tracked_run(tmp_path, monkeypatch):
+def test_fetch_jobs_stay_routed_through_tracked_run(tmp_path, monkeypatch, xdg):
     """Guards against `_do_fetch` reverting to a raw subprocess.run.
 
     Those are the parallel `git fetch` calls issue #26 is about: if they ever
@@ -119,10 +119,10 @@ def test_fetch_jobs_stay_routed_through_tracked_run(tmp_path, monkeypatch):
     alias = "community"
     ws_dir = tmp_path / "ws"
     (ws_dir / alias).mkdir(parents=True)
-    bare = tmp_path / ".bare-git-repos" / f"{alias}.git"
+    bare = paths.repos_dir() / f"{alias}.git"
     bare.mkdir(parents=True)
 
-    config = Config(vars={}, remotes={alias: {}}, root_dir=tmp_path)
+    config = Config(vars={}, remotes={alias: {}})
     ws = WorkspaceConfig(
         repos={alias: BranchSpec("origin/master")}, templates=[],
     )

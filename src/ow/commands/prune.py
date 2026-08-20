@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from ow.utils.config import Config
+from ow.utils import paths
 from ow.utils.git import _run, parallel_per_repo
 
 
@@ -58,7 +59,7 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
 
 def cmd_prune(config: Config) -> None:
     """Clean up stale worktree references and orphaned branches from bare repos."""
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    bare_repos_dir = paths.repos_dir()
     if not bare_repos_dir.exists():
         print("No bare repos found.")
         return

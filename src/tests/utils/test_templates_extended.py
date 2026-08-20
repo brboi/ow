@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
+from ow.utils import paths
 from ow.utils.templates import (
     _get_packaged_templates,
     _resolve_template_dir,
@@ -23,46 +24,46 @@ class TestGetPackagedTemplates:
 
 
 class TestAvailableTemplates:
-    def test_returns_packaged_only(self, tmp_path):
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
+    def test_returns_packaged_only(self, xdg):
+        config = Config(vars={}, remotes={})
         names = available_templates(config)
         assert "common" in names
         assert "vscode" in names
 
-    def test_merges_local_and_packaged(self, tmp_path):
-        local = tmp_path / "templates" / "my-custom"
+    def test_merges_local_and_packaged(self, xdg):
+        local = paths.templates_dir() / "my-custom"
         local.mkdir(parents=True)
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
+        config = Config(vars={}, remotes={})
         names = available_templates(config)
         assert "my-custom" in names
         assert "common" in names
         assert "vscode" in names
 
-    def test_sorted_order(self, tmp_path):
+    def test_sorted_order(self, xdg):
         for name in ["my-custom"]:
-            d = tmp_path / "templates" / name
+            d = paths.templates_dir() / name
             d.mkdir(parents=True)
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
+        config = Config(vars={}, remotes={})
         names = available_templates(config)
         assert names == sorted(names)
 
 
 class TestResolveTemplateDir:
-    def test_packaged_template(self, tmp_path):
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
+    def test_packaged_template(self, xdg):
+        config = Config(vars={}, remotes={})
         result = _resolve_template_dir("common", config)
         assert result.is_dir()
 
-    def test_local_template_takes_priority(self, tmp_path):
-        local = tmp_path / "templates" / "common"
+    def test_local_template_takes_priority(self, xdg):
+        local = paths.templates_dir() / "common"
         local.mkdir(parents=True)
         (local / "custom.txt").write_text("local")
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
+        config = Config(vars={}, remotes={})
         result = _resolve_template_dir("common", config)
         assert result == local
 
-    def test_missing_template_raises(self, tmp_path):
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
+    def test_missing_template_raises(self, xdg):
+        config = Config(vars={}, remotes={})
         with pytest.raises(FileNotFoundError, match="not found"):
             _resolve_template_dir("nonexistent-template", config)
 

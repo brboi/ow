@@ -1,16 +1,15 @@
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from ow.commands import cmd_prune
 from ow.commands.prune import _prune_bare_repo
 from ow.utils.config import Config
+from ow.utils import paths
 
 
-def _make_config(root_dir=None, vars=None, remotes=None) -> Config:
+def _make_config(vars=None, remotes=None) -> Config:
     return Config(
         vars=vars if vars is not None else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
         remotes=remotes or {},
-        root_dir=root_dir or Path("/root"),
     )
 
 
@@ -18,17 +17,17 @@ def _make_config(root_dir=None, vars=None, remotes=None) -> Config:
 # cmd_prune
 # ---------------------------------------------------------------------------
 
-def test_cmd_prune_no_bare_repos(tmp_path, capsys):
-    config = _make_config(root_dir=tmp_path)
+def test_cmd_prune_no_bare_repos(tmp_path, capsys, xdg):
+    config = _make_config()
     cmd_prune(config)
     captured = capsys.readouterr()
     assert "No bare repos found" in captured.out
 
 
-def test_cmd_prune_cleans_repos(tmp_path, capsys):
-    config = _make_config(root_dir=tmp_path)
-    bare_dir = tmp_path / ".bare-git-repos"
-    bare_dir.mkdir()
+def test_cmd_prune_cleans_repos(tmp_path, capsys, xdg):
+    config = _make_config()
+    bare_dir = paths.repos_dir()
+    bare_dir.mkdir(parents=True)
     (bare_dir / "community.git").mkdir()
     (bare_dir / "enterprise.git").mkdir()
 

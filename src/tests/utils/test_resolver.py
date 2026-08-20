@@ -11,7 +11,12 @@ from ow.utils.config import (
 
 
 def _make_project(root, alias="community"):
-    """Create an ow project on disk and return its loaded Config."""
+    """Create an ow.toml-based config on disk and return it loaded.
+
+    Only used here to build a realistic Config for the tests below — config
+    is global now, so this no longer represents "a project" the way it used
+    to.
+    """
     root.mkdir(parents=True, exist_ok=True)
     (root / "ow.toml").write_text(
         f'[remotes]\n{alias}.origin.url = "git@github.com:odoo/{alias}.git"\n'
@@ -49,13 +54,17 @@ class TestResolveWorkspace:
         assert resolved_dir == ws_dir
         assert ws.templates == ["common"]
 
-    def test_env_var_as_workspace_name(self, tmp_path, monkeypatch, config):
-        ws_dir = _make_ws(tmp_path, "named-ws")
+    def test_env_var_as_workspace_name_fails_loudly(self, tmp_path, monkeypatch, capsys, config):
+        """Name-based lookup has no meaning without the discovery index (task 5)."""
         monkeypatch.setenv("OW_WORKSPACE", "named-ws")
-        _, resolved_dir, ws = resolve_workspace(config)
 
-        assert resolved_dir == ws_dir
-        assert ws.templates == ["common"]
+        with pytest.raises(SystemExit):
+            resolve_workspace(config)
+
+        err = capsys.readouterr().err
+        assert "OW_WORKSPACE" in err
+        assert "named-ws" in err
+        assert "path instead" in err
 
     def test_env_var_as_path_outside_workspaces_dir(self, tmp_path, monkeypatch, config):
         ws_dir = tmp_path / "elsewhere" / "my-ws"
@@ -89,27 +98,17 @@ class TestResolveWorkspace:
         with pytest.raises(SystemExit):
             resolve_workspace(config)
 
-    def test_resolve_workspace_by_name(self, tmp_path, monkeypatch, config):
+    def test_resolve_workspace_by_name_fails_loudly(self, tmp_path, monkeypatch, capsys, config):
+        """Positional name lookup has no meaning without the discovery index (task 5)."""
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        ws_dir = _make_ws(tmp_path, "test")
+        _make_ws(tmp_path, "test")
 
-        _, resolved_dir, _ = resolve_workspace(config, name="test")
-        assert resolved_dir == ws_dir
+        with pytest.raises(SystemExit):
+            resolve_workspace(config, name="test")
 
-    def test_workspace_config_is_named_config_toml(self, tmp_path, monkeypatch, config):
-        """The workspace config file is .ow/config.toml.toml, not the old .ow/config.toml (task 3)."""
-        monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        ws_dir = tmp_path / "workspaces" / "toml-check"
-        ws_dir.mkdir(parents=True)
-        write_workspace_config(
-            ws_dir / ".ow" / "config.toml",
-            WorkspaceConfig(templates=["common"], repos={}, vars={}),
-        )
-
-        _, resolved_dir, ws = resolve_workspace(config, name="toml-check")
-
-        assert resolved_dir == ws_dir
-        assert ws.templates == ["common"]
+        err = capsys.readouterr().err
+        assert "cannot resolve workspace 'test'" in err
+        assert "path instead" in err
 
     def test_resolve_workspace_by_name_not_found(self, tmp_path, monkeypatch, capsys, config):
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
@@ -117,90 +116,51 @@ class TestResolveWorkspace:
         with pytest.raises(SystemExit):
             resolve_workspace(config, name="nonexistent")
 
-        assert "Workspace 'nonexistent' not found" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "cannot resolve workspace 'nonexistent'" in err
+        assert "path instead" in err
 
     def test_resolve_workspace_by_name_invalid(self, tmp_path, monkeypatch, capsys, config):
+        """A directory that isn't even a valid workspace fails the same loud way."""
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
         (tmp_path / "workspaces" / "invalid").mkdir(parents=True)
 
         with pytest.raises(SystemExit):
             resolve_workspace(config, name="invalid")
 
-        assert "not a valid workspace" in capsys.readouterr().err
-
-
-class TestProjectRootFollowsTheWorkspace:
-    """A workspace outside the current project must be read with its own ow.toml."""
-
-    def test_path_outside_current_project_reroots(self, tmp_path, monkeypatch):
-        _make_project(tmp_path / "odoo", alias="community")
-        other = _make_project(tmp_path / "devrepo", alias="owl")
-        ws_dir = _make_ws(tmp_path / "odoo", "quattromori")
-
-        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-        cfg, resolved_dir, _ = resolve_workspace(other)
-
-        assert resolved_dir == ws_dir
-        assert cfg.root_dir == tmp_path / "odoo"
-        assert sorted(cfg.remotes) == ["community"]
-
-    def test_reroot_is_announced_on_stderr(self, tmp_path, monkeypatch, capsys):
-        _make_project(tmp_path / "odoo")
-        other = _make_project(tmp_path / "devrepo", alias="owl")
-        ws_dir = _make_ws(tmp_path / "odoo", "quattromori")
-
-        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-        resolve_workspace(other)
-
-        captured = capsys.readouterr()
-        assert f"Using project {tmp_path / 'odoo'}" in captured.err
-        assert captured.out == ""
-
-    def test_workspace_inside_project_keeps_the_config_untouched(self, tmp_path, monkeypatch, capsys):
-        project = _make_project(tmp_path / "odoo")
-        ws_dir = _make_ws(tmp_path / "odoo", "quattromori")
-
-        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-        cfg, _, _ = resolve_workspace(project)
-
-        assert cfg is project
-        assert capsys.readouterr().err == ""
-
-    def test_orphan_workspace_is_a_hard_failure(self, tmp_path, monkeypatch, capsys):
-        other = _make_project(tmp_path / "devrepo", alias="owl")
-        ws_dir = tmp_path / "orphan" / "ws"
-        (ws_dir / ".ow").mkdir(parents=True)
-        write_workspace_config(
-            ws_dir / ".ow" / "config.toml",
-            WorkspaceConfig(templates=[], repos={}, vars={}),
-        )
-
-        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-        with pytest.raises(SystemExit):
-            resolve_workspace(other)
-
         err = capsys.readouterr().err
-        assert "no ow.toml above" in err
-        assert str(ws_dir) in err
+        assert "cannot resolve workspace 'invalid'" in err
 
-    def test_positional_name_never_reroots(self, tmp_path, monkeypatch, capsys):
-        _make_project(tmp_path / "odoo")
-        other = _make_project(tmp_path / "devrepo", alias="owl")
-        _make_ws(tmp_path / "odoo", "quattromori")
-        _make_ws(tmp_path / "devrepo", "quattromori")
+
+class TestConfigIsGlobal:
+    """Configuration is global now — there is only ever one Config, and
+    resolve_workspace never swaps it out for "the project owning this
+    workspace" the way the old per-project scheme did."""
+
+    def test_path_form_returns_the_same_config_object(self, tmp_path, monkeypatch, config):
+        ws_dir = _make_ws(tmp_path, "quattromori")
+
+        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+        cfg, resolved_dir, _ = resolve_workspace(config)
+
+        assert cfg is config
+        assert resolved_dir == ws_dir
+
+    def test_cwd_walkup_returns_the_same_config_object(self, tmp_path, monkeypatch, config):
+        ws_dir = _make_ws(tmp_path, "walkup")
 
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        cfg, resolved_dir, _ = resolve_workspace(other, name="quattromori")
+        monkeypatch.chdir(ws_dir)
+        cfg, resolved_dir, _ = resolve_workspace(config)
 
-        assert cfg is other
-        assert resolved_dir == tmp_path / "devrepo" / "workspaces" / "quattromori"
-        assert capsys.readouterr().err == ""
+        assert cfg is config
+        assert resolved_dir == ws_dir
 
 
 class TestOwWorkspaceFailsLoudly:
     """One meaning per form, one failure per form — never a silent fallback."""
 
-    def test_unknown_name_names_the_project_it_looked_in(self, tmp_path, monkeypatch, capsys):
+    def test_unknown_name_via_env_var_fails_with_a_clear_message(self, tmp_path, monkeypatch, capsys):
         project = _make_project(tmp_path / "devrepo", alias="owl")
         monkeypatch.setenv("OW_WORKSPACE", "quattromori")
 
@@ -210,7 +170,7 @@ class TestOwWorkspaceFailsLoudly:
         err = capsys.readouterr().err
         assert "OW_WORKSPACE" in err
         assert "quattromori" in err
-        assert str(tmp_path / "devrepo" / "workspaces") in err
+        assert "path instead" in err
 
     def test_path_without_ow_config_names_the_env_var(self, tmp_path, monkeypatch, capsys):
         project = _make_project(tmp_path / "devrepo", alias="owl")

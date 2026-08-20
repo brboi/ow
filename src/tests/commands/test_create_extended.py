@@ -7,6 +7,7 @@ import pytest
 from ow.commands import cmd_create
 from ow.commands.create import _validate_create_inputs, _gather_workspace_config_interactive
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
+from ow.utils import paths
 
 
 # ---------------------------------------------------------------------------
@@ -17,7 +18,7 @@ class TestValidateCreateInputs:
     """Coverage for lines 52-53, 84, 86-87, 93-95, 117-119, 121-122, 125-126, 226."""
 
     def test_validate_rejects_unknown_template(self, tmp_path, capsys, config):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         with pytest.raises(SystemExit) as exc:
             _validate_create_inputs(config, "test", ["nonexistent"], {}, configuration=None)
@@ -26,7 +27,7 @@ class TestValidateCreateInputs:
         assert "unknown template" in captured.err.lower()
 
     def test_validate_rejects_unknown_repo_alias(self, tmp_path, capsys, config_with_remotes):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         with pytest.raises(SystemExit) as exc:
@@ -36,7 +37,7 @@ class TestValidateCreateInputs:
         assert "unknown repo alias" in captured.err.lower()
 
     def test_validate_configuration_file(self, tmp_path, capsys, config_with_remotes):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         src_config = tmp_path / "src" / ".ow" / "config.toml"
@@ -49,7 +50,7 @@ class TestValidateCreateInputs:
         assert source_ws.repos["community"].local_branch == "my-branch"
 
     def test_validate_configuration_not_found(self, tmp_path, capsys, config_with_remotes):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         with pytest.raises(SystemExit) as exc:
@@ -59,7 +60,7 @@ class TestValidateCreateInputs:
         assert "not found" in captured.err.lower()
 
     def test_validate_configuration_invalid_template(self, tmp_path, capsys, config_with_remotes):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         src_config = tmp_path / "src" / ".ow" / "config.toml"
@@ -72,7 +73,7 @@ class TestValidateCreateInputs:
         assert "unknown template" in captured.err.lower()
 
     def test_validate_configuration_invalid_alias(self, tmp_path, capsys, config_with_remotes):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         src_config = tmp_path / "src" / ".ow" / "config.toml"
@@ -84,10 +85,11 @@ class TestValidateCreateInputs:
         captured = capsys.readouterr()
         assert "unknown_alias" in captured.err
 
-    def test_validate_existing_workspace_name(self, tmp_path, capsys, config):
-        tpl = tmp_path / "templates" / "common"
+    def test_validate_existing_workspace_name(self, tmp_path, capsys, config, monkeypatch):
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
-        (tmp_path / "workspaces" / "existing").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "existing").mkdir(parents=True)
         with pytest.raises(SystemExit) as exc:
             _validate_create_inputs(config, "existing", None, None, configuration=None)
         assert exc.value.code == 1
@@ -95,7 +97,7 @@ class TestValidateCreateInputs:
         assert "already exists" in captured.err.lower()
 
     def test_validate_name_empty(self, tmp_path, capsys, config):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         with pytest.raises(SystemExit) as exc:
             _validate_create_inputs(config, "  ", None, None, configuration=None)
@@ -106,7 +108,7 @@ class TestValidateCreateInputs:
 class TestCmdCreateExtended:
 
     def test_cmd_create_interactive_name_retry(self, tmp_path, capsys, config_with_remotes):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         call_count = [0]
@@ -144,7 +146,7 @@ class TestCmdCreateExtended:
         # name was provided so questionary.text was not called for name prompt
 
     def test_cmd_create_interactive_spec_input(self, tmp_path, config_with_remotes):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         text_answers = iter(["my-ws", "master"])
@@ -169,7 +171,7 @@ class TestCmdCreateExtended:
             cmd_create(config)
 
     def test_cmd_create_confirm_abort(self, tmp_path, capsys, config_with_remotes):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         with (
@@ -182,7 +184,7 @@ class TestCmdCreateExtended:
         assert "Aborted." in captured.out
 
     def test_cmd_create_all_repos_fail(self, tmp_path, capsys, config_with_remotes, tmp_path_factory):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         with (
@@ -199,7 +201,7 @@ class TestCmdCreateExtended:
             assert exc.value.code == 1
 
     def test_cmd_create_some_repos_fail(self, tmp_path, capsys, config_with_remotes):
-        tpl = tmp_path / "templates" / "common"
+        tpl = paths.templates_dir() / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
         with (

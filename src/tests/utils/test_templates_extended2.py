@@ -55,8 +55,8 @@ class TestEnsureWorkspaceMaterializedExtended:
 
 class TestResolveTemplateDirExtended:
 
-    def test_packaged_template_via_config(self, tmp_path):
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
+    def test_packaged_template_via_config(self, xdg):
+        config = Config(vars={}, remotes={})
         result = _resolve_template_dir("zed", config)
         assert result.is_dir()
 

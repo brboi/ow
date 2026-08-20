@@ -7,10 +7,10 @@ import pytest
 from ow.commands import cmd_create
 from ow.commands.create import _check_duplicate_branches, _cleanup_failed_workspace
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, parse_branch_spec, write_workspace_config
+from ow.utils import paths
 
 
 def _make_config(
-    root_dir=None,
     vars=None,
     remotes=None,
 ) -> Config:
@@ -19,7 +19,6 @@ def _make_config(
         if vars is not None
         else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
         remotes=remotes or {},
-        root_dir=root_dir or Path("/root"),
     )
 
 
@@ -28,8 +27,8 @@ def _make_config(
 # ---------------------------------------------------------------------------
 
 def test_cmd_create_with_cli_args(tmp_path, config_with_remotes):
-    (tmp_path / "templates" / "common").mkdir(parents=True)
-    (tmp_path / "templates" / "vscode").mkdir(parents=True)
+    (paths.templates_dir() / "common").mkdir(parents=True)
+    (paths.templates_dir() / "vscode").mkdir(parents=True)
     config = config_with_remotes
 
     text_calls = []
@@ -70,7 +69,7 @@ def test_cmd_create_with_cli_args(tmp_path, config_with_remotes):
 
 
 def test_cmd_create_rejects_invalid_template(tmp_path, capsys, config):
-    (tmp_path / "templates" / "common").mkdir(parents=True)
+    (paths.templates_dir() / "common").mkdir(parents=True)
     with pytest.raises(SystemExit) as exc:
         cmd_create(config, name="test", templates=["nonexistent"])
     assert exc.value.code == 1
@@ -80,7 +79,7 @@ def test_cmd_create_rejects_invalid_template(tmp_path, capsys, config):
 
 
 def test_cmd_create_rejects_invalid_repo_alias(tmp_path, capsys, config_with_remotes):
-    (tmp_path / "templates" / "common").mkdir(parents=True)
+    (paths.templates_dir() / "common").mkdir(parents=True)
     config = config_with_remotes
     with pytest.raises(SystemExit) as exc:
         cmd_create(config, name="test", repos={"unknown": BranchSpec("origin/master")})
@@ -90,9 +89,10 @@ def test_cmd_create_rejects_invalid_repo_alias(tmp_path, capsys, config_with_rem
     assert "community" in captured.err
 
 
-def test_cmd_create_rejects_existing_workspace(tmp_path, capsys, config):
-    (tmp_path / "templates" / "common").mkdir(parents=True)
-    (tmp_path / "workspaces" / "parrot").mkdir(parents=True)
+def test_cmd_create_rejects_existing_workspace(tmp_path, capsys, config, monkeypatch):
+    (paths.templates_dir() / "common").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "parrot").mkdir(parents=True)
     with pytest.raises(SystemExit) as exc:
         cmd_create(config, name="parrot")
     assert exc.value.code == 1
@@ -101,7 +101,7 @@ def test_cmd_create_rejects_existing_workspace(tmp_path, capsys, config):
 
 
 def test_cmd_create_rejects_invalid_name(tmp_path, capsys, config):
-    (tmp_path / "templates" / "common").mkdir(parents=True)
+    (paths.templates_dir() / "common").mkdir(parents=True)
     with pytest.raises(SystemExit) as exc:
         cmd_create(config, name="bad name!")
     assert exc.value.code == 1
@@ -109,9 +109,10 @@ def test_cmd_create_rejects_invalid_name(tmp_path, capsys, config):
     assert "alphanumeric" in captured.err.lower()
 
 
-def test_cmd_create_rejects_duplicate_branch(tmp_path, capsys, config_with_remotes):
-    (tmp_path / "templates" / "common").mkdir(parents=True)
-    existing_ws = tmp_path / "workspaces" / "parrot"
+def test_cmd_create_rejects_duplicate_branch(tmp_path, capsys, config_with_remotes, monkeypatch):
+    (paths.templates_dir() / "common").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    existing_ws = tmp_path / "parrot"
     existing_ws.mkdir(parents=True)
     ow_config = existing_ws / ".ow" / "config.toml"
     ow_config.parent.mkdir(parents=True)
@@ -141,9 +142,10 @@ def test_cmd_create_rejects_duplicate_branch(tmp_path, capsys, config_with_remot
     assert "master-parrot" in captured.err
 
 
-def test_cmd_create_accepts_different_branch(tmp_path, config_with_remotes):
-    (tmp_path / "templates" / "common").mkdir(parents=True)
-    existing_ws = tmp_path / "workspaces" / "parrot"
+def test_cmd_create_accepts_different_branch(tmp_path, config_with_remotes, monkeypatch):
+    (paths.templates_dir() / "common").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    existing_ws = tmp_path / "parrot"
     existing_ws.mkdir(parents=True)
     ow_config = existing_ws / ".ow" / "config.toml"
     ow_config.parent.mkdir(parents=True)
@@ -166,8 +168,8 @@ def test_cmd_create_accepts_different_branch(tmp_path, config_with_remotes):
 
 
 def test_cmd_create_configuration_duplicates(tmp_path, config_with_remotes):
-    (tmp_path / "templates" / "common").mkdir(parents=True)
-    (tmp_path / "templates" / "vscode").mkdir(parents=True)
+    (paths.templates_dir() / "common").mkdir(parents=True)
+    (paths.templates_dir() / "vscode").mkdir(parents=True)
     src_ws = tmp_path / "workspaces" / "parrot"
     src_ws.mkdir(parents=True)
     ow_config = src_ws / ".ow" / "config.toml"
@@ -178,7 +180,6 @@ def test_cmd_create_configuration_duplicates(tmp_path, config_with_remotes):
         '[vars]\nhttp_port = 9000\n'
     )
     config = _make_config(
-        root_dir=tmp_path,
         vars={"http_port": 8069},
         remotes=config_with_remotes.remotes,
     )
@@ -221,8 +222,8 @@ def test_cmd_create_configuration_duplicates(tmp_path, config_with_remotes):
     assert "community" in checked
 
 
-def test_cmd_create_configuration_rejects_unknown_remote(tmp_path, capsys):
-    (tmp_path / "templates" / "common").mkdir(parents=True)
+def test_cmd_create_configuration_rejects_unknown_remote(tmp_path, capsys, xdg):
+    (paths.templates_dir() / "common").mkdir(parents=True)
     src_ws = tmp_path / "workspaces" / "parrot"
     src_ws.mkdir(parents=True)
     ow_config = src_ws / ".ow" / "config.toml"
@@ -232,7 +233,6 @@ def test_cmd_create_configuration_rejects_unknown_remote(tmp_path, capsys):
         '[repos]\ncommunity = "master"\nenterprise = "master"\n'
     )
     config = _make_config(
-        root_dir=tmp_path,
         remotes={"community": {"origin": MagicMock(url="git@github.com:odoo/odoo.git")}},
     )
 
@@ -250,11 +250,9 @@ def test_cmd_create_configuration_rejects_unknown_remote(tmp_path, capsys):
 # cmd_create — checkbox uses Choice objects
 # ---------------------------------------------------------------------------
 
-def test_cmd_create_checkbox_uses_choice_objects(tmp_path, config):
+def test_cmd_create_checkbox_uses_choice_objects(tmp_path, config, monkeypatch):
     """cmd_create must use questionary.Choice objects, none selected by default."""
-    (tmp_path / "templates" / "zed").mkdir(parents=True)
-    (tmp_path / "templates" / "common").mkdir(parents=True)
-    (tmp_path / "templates" / "vscode").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
     config.remotes = {
         "brboi-addons": {"origin": MagicMock(url="git@github.com:brboi/addons.git")},
         "community": {"origin": MagicMock(url="git@github.com:odoo/odoo.git")},
@@ -301,7 +299,8 @@ def test_cmd_create_checkbox_uses_choice_objects(tmp_path, config):
     template_checkbox = checkbox_calls[0]
     assert "Templates" in template_checkbox["message"]
     template_names = [c.title for c in template_checkbox["choices"]]
-    assert template_names == ["common", "vscode", "zed"]  # alphabetical
+    assert template_names == sorted(template_names)  # alphabetical
+    assert {"common", "vscode", "zed"} <= set(template_names)  # packaged templates
     for choice in template_checkbox["choices"]:
         assert not choice.checked  # none selected by default
 
@@ -314,10 +313,11 @@ def test_cmd_create_checkbox_uses_choice_objects(tmp_path, config):
         assert not choice.checked  # none selected by default
 
 
-def test_cmd_create_rejects_existing_workspace_interactive(tmp_path, config):
+def test_cmd_create_rejects_existing_workspace_interactive(tmp_path, config, monkeypatch):
     """cmd_create loops when workspace name already exists."""
-    (tmp_path / "templates" / "common").mkdir(parents=True)
-    (tmp_path / "workspaces" / "parrot").mkdir(parents=True)
+    (paths.templates_dir() / "common").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "parrot").mkdir(parents=True)
     config.remotes = {"community": {"origin": MagicMock(url="git@github.com:odoo/odoo.git")}}
 
     call_count = [0]
@@ -402,10 +402,10 @@ def test_cleanup_failed_workspace_does_nothing_if_not_exists(tmp_path):
 # _check_duplicate_branches
 # ---------------------------------------------------------------------------
 
-def test_check_duplicate_branches_detects_same_local_branch(tmp_path, capsys, config):
+def test_check_duplicate_branches_detects_same_local_branch(tmp_path, capsys, config, monkeypatch):
     """Abort if new repo shares local_branch with existing workspace on same alias."""
-    ws_root = tmp_path / "workspaces"
-    existing_ws = ws_root / "existing"
+    monkeypatch.chdir(tmp_path)
+    existing_ws = tmp_path / "existing"
     (existing_ws / ".ow").mkdir(parents=True)
     existing_config = WorkspaceConfig(
         repos={"community": BranchSpec("origin/master", "shared-branch")},
@@ -424,10 +424,10 @@ def test_check_duplicate_branches_detects_same_local_branch(tmp_path, capsys, co
     assert "shared-branch" in captured.err
 
 
-def test_check_duplicate_branches_no_duplicate_if_different_local_branch(tmp_path, capsys, config):
+def test_check_duplicate_branches_no_duplicate_if_different_local_branch(tmp_path, capsys, config, monkeypatch):
     """No abort if local_branch differs."""
-    ws_root = tmp_path / "workspaces"
-    existing_ws = ws_root / "existing"
+    monkeypatch.chdir(tmp_path)
+    existing_ws = tmp_path / "existing"
     (existing_ws / ".ow").mkdir(parents=True)
     existing_config = WorkspaceConfig(
         repos={"community": BranchSpec("origin/master", "other-branch")},
@@ -443,10 +443,10 @@ def test_check_duplicate_branches_no_duplicate_if_different_local_branch(tmp_pat
     assert "Error" not in captured.err
 
 
-def test_check_duplicate_branches_no_duplicate_if_different_alias(tmp_path, capsys, config):
+def test_check_duplicate_branches_no_duplicate_if_different_alias(tmp_path, capsys, config, monkeypatch):
     """No abort if alias differs — git allows same branch on different aliases."""
-    ws_root = tmp_path / "workspaces"
-    existing_ws = ws_root / "existing"
+    monkeypatch.chdir(tmp_path)
+    existing_ws = tmp_path / "existing"
     (existing_ws / ".ow").mkdir(parents=True)
     existing_config = WorkspaceConfig(
         repos={"enterprise": BranchSpec("origin/master", "shared-branch")},
@@ -462,10 +462,10 @@ def test_check_duplicate_branches_no_duplicate_if_different_alias(tmp_path, caps
     assert "Error" not in captured.err
 
 
-def test_check_duplicate_branches_ignores_workspaces_without_ow_config(tmp_path, capsys, config):
+def test_check_duplicate_branches_ignores_workspaces_without_ow_config(tmp_path, capsys, config, monkeypatch):
     """Skip workspaces that have no .ow/config.toml file."""
-    ws_root = tmp_path / "workspaces"
-    existing_ws = ws_root / "existing"
+    monkeypatch.chdir(tmp_path)
+    existing_ws = tmp_path / "existing"
     existing_ws.mkdir(parents=True)
     # No .ow/config.toml created
 
@@ -477,8 +477,9 @@ def test_check_duplicate_branches_ignores_workspaces_without_ow_config(tmp_path,
     assert "Error" not in captured.err
 
 
-def test_check_duplicate_branches_silent_if_no_existing_workspaces(tmp_path, capsys, config):
+def test_check_duplicate_branches_silent_if_no_existing_workspaces(tmp_path, capsys, config, monkeypatch):
     """Return silently when no workspaces exist yet."""
+    monkeypatch.chdir(tmp_path)
     new_repos = {"community": BranchSpec("origin/master", "some-branch")}
 
     _check_duplicate_branches(new_repos, config)  # should not raise

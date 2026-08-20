@@ -16,41 +16,38 @@ from ow.utils.config import (
 
 
 def _make_config(
-    root_dir: Path | str | None = None,
     vars: dict[str, Any] | None = None,
     remotes: dict[str, dict[str, RemoteConfig]] | None = None,
 ) -> Config:
     return Config(
         vars=vars if vars is not None else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
         remotes=remotes or {},
-        root_dir=Path(root_dir) if root_dir is not None else Path("/root"),
     )
 
 
 @pytest.fixture
-def config(tmp_path: Path) -> Config:
-    return _make_config(root_dir=tmp_path)
+def config(xdg: Path) -> Config:
+    return _make_config()
 
 
 @pytest.fixture
-def config_with_remotes(tmp_path: Path) -> Config:
+def config_with_remotes(xdg: Path) -> Config:
     remotes = {
         "community": {
             "origin": MagicMock(url="git@github.com:odoo/odoo.git"),
         },
     }
-    return _make_config(root_dir=tmp_path, remotes=remotes)
+    return _make_config(remotes=remotes)
 
 
 @pytest.fixture
-def config_full(tmp_path: Path) -> Config:
+def config_full(xdg: Path) -> Config:
     remotes = {
         "community": {
             "origin": MagicMock(url="git@github.com:odoo/odoo.git"),
         },
     }
     return _make_config(
-        root_dir=tmp_path,
         vars={"http_port": 8069, "db_host": "localhost", "db_port": 5432},
         remotes=remotes,
     )

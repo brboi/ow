@@ -463,7 +463,7 @@ def get_remote_url(bare_repo: Path, remote: str) -> str | None:
 
 def git(repo: Path, *args, quiet: bool = False, **kwargs) -> subprocess.CompletedProcess:
     """Central git wrapper with automatic -C."""
-    if repo.suffix == ".git" and repo.parent.name == ".bare-git-repos":
+    if repo.suffix == ".git" and repo.parent.name == "repos":
         label = repo.stem
     else:
         label = repo.name

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import sys
-from pathlib import Path
 from typing import Any, Optional
 
 import typer
@@ -13,7 +12,7 @@ from ow.commands import (
     cmd_status,
     cmd_update,
 )
-from ow.utils.config import Config, find_project_root, load_config, parse_branch_spec
+from ow.utils.config import Config, load_global_config, parse_branch_spec
 from ow.utils.templates import available_templates
 
 try:
@@ -51,47 +50,19 @@ def callback(
     pass
 
 
-def _find_root() -> Path:
-    root = find_project_root(Path.cwd())
-    if root is None:
-        raise FileNotFoundError(
-            "ow.toml not found in current directory or any parent"
-        )
-    return root
-
-
 def _load_config() -> Config:
-    """Find root and load ow.toml, creating minimal config if needed."""
-    try:
-        root = _find_root()
-    except FileNotFoundError as e:
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(1)
-
-    toml_path = root / "ow.toml"
-    if not toml_path.exists():
-        minimal_config = """\
-[remotes]
-community.origin.url = "git@github.com:odoo/odoo.git"
-"""
-        toml_path.write_text(minimal_config)
-        typer.echo("Created ow.toml with default configuration. Edit it to suit your needs.")
-
-    return load_config(toml_path)
+    """Load the user's global configuration, bootstrapping it on first use."""
+    return load_global_config()
 
 
 def _available_repo_aliases() -> list[str]:
-    """Return repo aliases from ow.toml in declaration order."""
+    """Return repo aliases from the global config in declaration order."""
     try:
-        root = _find_root()
-        toml_path = root / "ow.toml"
-        if toml_path.exists():
-            cfg = load_config(toml_path)
-            return list(cfg.remotes.keys())
+        cfg = load_global_config()
+        return list(cfg.remotes.keys())
     except Exception:
-        # Completion must never crash the shell, whatever state ow.toml is in.
-        pass
-    return []
+        # Completion must never crash the shell, whatever state the config is in.
+        return []
 
 
 def _provided_repo_aliases(ctx: typer.Context) -> set[str]:
@@ -117,11 +88,10 @@ def _parse_repo_value(value: list[str] | None) -> dict[str, Any] | None:
 def complete_gen_templates(ctx: typer.Context, incomplete: str) -> list[str]:
     """Tab completion for -t/--template."""
     try:
-        root = _find_root()
-        config = Config(vars={}, remotes={}, root_dir=root)
+        config = load_global_config()
         templates = available_templates(config)
     except Exception:
-        # Completion must never crash the shell, whatever state ow.toml is in.
+        # Completion must never crash the shell, whatever state the config is in.
         templates = []
     return [name for name in templates if name.startswith(incomplete)]
 
@@ -136,19 +106,12 @@ def complete_gen_repos(ctx: typer.Context, incomplete: str) -> list[str]:
 
 
 def complete_workspace_name(ctx: typer.Context, incomplete: str) -> list[str]:
-    """Tab completion for workspace name."""
-    try:
-        root = _find_root()
-        workspaces_dir = root / "workspaces"
-        if workspaces_dir.exists():
-            return [
-                d.name for d in workspaces_dir.iterdir()
-                if d.is_dir() and (d / ".ow" / "config.toml").exists()
-                and d.name.startswith(incomplete)
-            ]
-    except Exception:
-        # Completion must never crash the shell, whatever state the tree is in.
-        pass
+    """Tab completion for workspace name.
+
+    Disabled for now: workspaces are no longer confined to one project root,
+    so there is no fixed directory to list from. Task 5 restores this via
+    the discovery index.
+    """
     return []
 
 
