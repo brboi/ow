@@ -72,16 +72,18 @@ def test_known_workspaces_does_not_rewrite_when_nothing_pruned(xdg: Path) -> Non
     ws = _make_workspace(xdg, "alpha")
     index.remember(ws)
 
-    target = paths.index_file()
-    target.chmod(0o444)
+    # os.replace() consults the *directory's* write permission, not the
+    # target file's mode bits — a read-only file would not stop a write.
+    # Making the directory read-only is what actually forces a write to
+    # raise, which is the only way this test can distinguish "no rewrite
+    # attempted" from "rewrite attempted and happened to produce the same
+    # bytes".
+    index_dir = paths.index_file().parent
+    index_dir.chmod(0o555)
     try:
-        # A read-only file would raise if known_workspaces() tried to write
-        # it. No exception is the proof that nothing was pruned, and hence
-        # nothing was rewritten — mtime comparisons can be too coarse to
-        # trust on some filesystems.
         result = index.known_workspaces()
     finally:
-        target.chmod(0o644)
+        index_dir.chmod(0o755)  # so tmp_path cleanup can remove it
 
     assert result == [ws.resolve()]
 
@@ -96,6 +98,18 @@ def test_known_workspaces_does_not_rewrite_when_nothing_pruned_mtime(xdg: Path) 
 
     after = paths.index_file().stat().st_mtime_ns
     assert after == before
+
+
+def test_known_workspaces_dedupes_and_rewrites(xdg: Path) -> None:
+    ws = _make_workspace(xdg, "alpha")
+    target = paths.index_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"{ws.resolve()}\n{ws.resolve()}\n")
+
+    result = index.known_workspaces()
+
+    assert result == [ws.resolve()]
+    assert target.read_text().splitlines() == [str(ws.resolve())]
 
 
 def test_find_by_name(xdg: Path) -> None:

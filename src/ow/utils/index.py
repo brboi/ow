@@ -22,7 +22,11 @@ def _is_workspace(candidate: Path) -> bool:
 def _write(entries: list[Path]) -> None:
     target = paths.index_file()
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".tmp")
+    # A per-process suffix avoids two concurrent writers interleaving on the
+    # same temp name; with_name (not with_suffix) appends rather than
+    # replacing, so it doesn't collide if the index were ever renamed to
+    # something containing a dot.
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     tmp.write_text("".join(f"{p}\n" for p in entries))
     os.replace(tmp, target)
 
