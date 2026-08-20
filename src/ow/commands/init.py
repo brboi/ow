@@ -66,7 +66,7 @@ def _validate_init_inputs(
     # (and thus doesn't have a local copy of) any — nothing is copied at
     # bootstrap, so listing paths.templates_dir() alone would wrongly treat a
     # fresh install as having no templates.
-    available = available_templates(config)
+    available = available_templates()
 
     if templates is not None:
         invalid = [t for t in templates if t not in available]
@@ -161,7 +161,7 @@ def _workspace_config_from_flags(
     # well. This guard exists solely to catch the accidental bare `ow init`
     # in a non-interactive context.
     if templates is None and repos is None and source_ws is None:
-        avail_t = ", ".join(available_templates(config))
+        avail_t = ", ".join(available_templates())
         avail_r = ", ".join(config.remotes) or "(none configured)"
         print("Error: stdin is not a terminal, so ow init cannot ask. Nothing was given:", file=sys.stderr)
         print(f"         -t/--template NAME     available: {avail_t}", file=sys.stderr)
@@ -185,7 +185,7 @@ def _gather_workspace_config_interactive(
 
     Pre-populates from source_ws or CLI args where available.
     """
-    available_t = available_templates(config)
+    available_t = available_templates()
     known_aliases = list(config.remotes.keys())
     pre_selected_templates, final_repos = _preselection(source_ws, templates, repos)
     pre_selected = set(pre_selected_templates)

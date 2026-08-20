@@ -109,12 +109,10 @@ def _get_packaged_templates() -> list[str]:
         return []
 
 
-def available_templates(config: Config | None = None) -> list[str]:
+def available_templates() -> list[str]:
     """Return sorted list of available template names (local + packaged).
 
     Local templates take priority and can override packaged ones per file.
-    `config` is accepted for the existing call sites; the answer comes from
-    the directories alone.
     """
     local_templates_dir = paths.templates_dir()
     local_names = set()
@@ -135,6 +133,22 @@ def _packaged_bundle(bundle: str) -> Path | None:
         return None
 
 
+def _files_under(root: Path | None) -> dict[Path, Path]:
+    """Every file found by walking `root`, keyed by its path relative to root."""
+    if root is None or not root.is_dir():
+        return {}
+    return {
+        src.relative_to(root): src for src in sorted(root.rglob("*")) if src.is_file()
+    }
+
+
+def packaged_files(bundle: str) -> dict[str, Path]:
+    """Every file the packaged bundle ships, keyed by its relative posix path."""
+    return {
+        rel.as_posix(): src for rel, src in _files_under(_packaged_bundle(bundle)).items()
+    }
+
+
 def resolve_template_files(bundle: str) -> dict[Path, Path]:
     """Every file of a bundle, local copy winning per file.
 
@@ -144,11 +158,7 @@ def resolve_template_files(bundle: str) -> dict[Path, Path]:
     """
     files: dict[Path, Path] = {}
     for root in (_packaged_bundle(bundle), paths.templates_dir() / bundle):
-        if root is None or not root.is_dir():
-            continue
-        for src in sorted(root.rglob("*")):
-            if src.is_file():
-                files[src.relative_to(root)] = src
+        files.update(_files_under(root))
     return files
 
 

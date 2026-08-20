@@ -115,6 +115,59 @@ class TestTake:
         assert copy.read_bytes() == b"my own edits\n"
         assert not base.exists()
 
+    def test_take_wins_over_diff(self, xdg, capsys):
+        """--take and --diff together: the take happens, --diff prints nothing.
+
+        Set up an unrelated outdated file first, so a diff would have
+        something to say if it ran — proving take's priority, not just an
+        absence of anything to diff.
+        """
+        other_rel = "odools.toml.j2"
+        other_copy = paths.templates_dir() / BUNDLE / other_rel
+        other_copy.parent.mkdir(parents=True, exist_ok=True)
+        other_copy.write_bytes(b"my own edits\n")
+        other_base = paths.template_base_dir() / BUNDLE / other_rel
+        other_base.parent.mkdir(parents=True, exist_ok=True)
+        other_base.write_bytes(b"what ow shipped back then\n")
+
+        original = packaged_file().read_bytes()
+        cmd_templates(take=NAME, show_diff=True)
+
+        out = capsys.readouterr().out
+        assert f"Took {NAME}" in out
+        assert "@@" not in out
+        copy = paths.templates_dir() / BUNDLE / REL
+        base = paths.template_base_dir() / BUNDLE / REL
+        assert copy.read_bytes() == original
+        assert base.read_bytes() == original
+
+    def test_take_refuses_to_overwrite_when_a_baseline_already_exists(self, xdg, capsys):
+        """The other refusal branch: a copy AND a baseline both already exist.
+
+        A wrong guard could silently reset the baseline to the current
+        packaged file here, destroying the record that answers "did ow
+        change this?" for a file the user edited by hand after taking it.
+        """
+        cmd_templates(take=NAME)
+        capsys.readouterr()
+        copy = paths.templates_dir() / BUNDLE / REL
+        base = paths.template_base_dir() / BUNDLE / REL
+        copy.write_bytes(b"my own edits\n")
+        # Diverge the baseline from the packaged file, as it would after ow
+        # ships an update. A reset-to-packaged bug is only visible this way:
+        # if the baseline still equalled packaged, a wrongful reset would
+        # write back the very same bytes.
+        base.write_bytes(b"what ow shipped back then\n")
+        baseline_before = base.read_bytes()
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_templates(take=NAME)
+        assert exc.value.code != 0
+        err = capsys.readouterr().err
+        assert f"'{NAME}' is already taken" in err
+        assert copy.read_bytes() == b"my own edits\n"
+        assert base.read_bytes() == baseline_before
+
     def test_take_rejects_a_path_matching_no_packaged_file(self, xdg, capsys):
         with pytest.raises(SystemExit) as exc:
             cmd_templates(take="nosuch/thing.j2")

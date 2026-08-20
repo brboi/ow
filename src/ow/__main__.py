@@ -88,8 +88,7 @@ def _parse_repo_value(value: list[str] | None) -> dict[str, Any] | None:
 def complete_gen_templates(ctx: typer.Context, incomplete: str) -> list[str]:
     """Tab completion for -t/--template."""
     try:
-        config = load_global_config()
-        templates = available_templates(config)
+        templates = available_templates()
     except Exception:
         # Completion must never crash the shell, whatever state the config is in.
         templates = []
@@ -172,7 +171,7 @@ def prune() -> None:
 @app.command()
 def templates(
     take: Optional[str] = typer.Option(None, "--take", help="Copy a packaged template file (BUNDLE/PATH) into your config, keeping a pristine baseline"),
-    diff: bool = typer.Option(False, "--diff", help="Show what ow changed in the files you took, baseline against packaged"),
+    diff: bool = typer.Option(False, "--diff", help="Show what ow changed in the files you took, baseline against packaged (ignored if --take is also given)"),
 ) -> None:
     """List template files and their state, or take one."""
     cmd_templates(take=take, show_diff=diff)

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig
+from ow.utils.config import BranchSpec, WorkspaceConfig
 from ow.utils import paths
 from ow.utils.templates import (
     _get_packaged_templates,
@@ -24,16 +24,14 @@ class TestGetPackagedTemplates:
 
 class TestAvailableTemplates:
     def test_returns_packaged_only(self, xdg):
-        config = Config(vars={}, remotes={})
-        names = available_templates(config)
+        names = available_templates()
         assert "common" in names
         assert "vscode" in names
 
     def test_merges_local_and_packaged(self, xdg):
         local = paths.templates_dir() / "my-custom"
         local.mkdir(parents=True)
-        config = Config(vars={}, remotes={})
-        names = available_templates(config)
+        names = available_templates()
         assert "my-custom" in names
         assert "common" in names
         assert "vscode" in names
@@ -42,16 +40,14 @@ class TestAvailableTemplates:
         for name in ["my-custom"]:
             d = paths.templates_dir() / name
             d.mkdir(parents=True)
-        config = Config(vars={}, remotes={})
-        names = available_templates(config)
+        names = available_templates()
         assert names == sorted(names)
 
     def test_bundle_in_both_trees_listed_once(self, xdg):
         """A name present in both packaged and local trees must not be duplicated."""
         local = paths.templates_dir() / "common"
         local.mkdir(parents=True)
-        config = Config(vars={}, remotes={})
-        names = available_templates(config)
+        names = available_templates()
         assert names.count("common") == 1
 
 

@@ -10,12 +10,11 @@ it in the first place.
 import difflib
 import shutil
 import sys
-from pathlib import Path
 
 from ow.utils import paths
 from ow.utils.templates import (
-    _packaged_bundle,
     available_templates,
+    packaged_files,
     resolve_template_files,
 )
 
@@ -24,23 +23,11 @@ TAKEN = "taken"
 OUTDATED = "taken, outdated"
 
 
-def _packaged_files(bundle: str) -> dict[str, Path]:
-    """Every file the packaged bundle ships, keyed by its relative posix path."""
-    root = _packaged_bundle(bundle)
-    if root is None or not root.is_dir():
-        return {}
-    return {
-        src.relative_to(root).as_posix(): src
-        for src in sorted(root.rglob("*"))
-        if src.is_file()
-    }
-
-
 def _states() -> list[tuple[str, str]]:
     """Every available template file as (bundle/relpath, state), sorted."""
     entries: list[tuple[str, str]] = []
     for bundle in available_templates():
-        packaged = _packaged_files(bundle)
+        packaged = packaged_files(bundle)
         for rel in resolve_template_files(bundle):
             name = f"{bundle}/{rel.as_posix()}"
             if not (paths.templates_dir() / bundle / rel).is_file():
@@ -67,7 +54,7 @@ def outdated_templates() -> list[str]:
 
 def _takeable_bundles() -> list[str]:
     """Bundles with something to take — a local-only bundle has nothing."""
-    return [bundle for bundle in available_templates() if _packaged_files(bundle)]
+    return [bundle for bundle in available_templates() if packaged_files(bundle)]
 
 
 def _list() -> None:
@@ -82,7 +69,7 @@ def _list() -> None:
 
 def _take(name: str) -> None:
     bundle, _, rel = name.partition("/")
-    src = _packaged_files(bundle).get(rel) if bundle and rel else None
+    src = packaged_files(bundle).get(rel) if bundle and rel else None
     if src is None:
         bundles = ", ".join(_takeable_bundles()) or "(none)"
         print(f"Error: no packaged template file named '{name}'.", file=sys.stderr)
@@ -91,14 +78,18 @@ def _take(name: str) -> None:
         sys.exit(1)
 
     copy = paths.templates_dir() / bundle / rel
+    baseline = paths.template_base_dir() / bundle / rel
     if copy.exists():
         # Overwriting would destroy the user's edits and, worse, silently
         # reset the baseline so the next diff reports nothing.
         print(f"Error: '{name}' is already taken: {copy}", file=sys.stderr)
-        print("       Delete that file to take it again.", file=sys.stderr)
+        print(
+            f"       Delete that file to take it again, or place a baseline "
+            f"yourself at {baseline}.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    baseline = paths.template_base_dir() / bundle / rel
     for target in (copy, baseline):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, target)
@@ -112,7 +103,7 @@ def _diff() -> None:
     for name in outdated_templates():
         bundle, _, rel = name.partition("/")
         baseline = paths.template_base_dir() / bundle / rel
-        packaged = _packaged_files(bundle)[rel]
+        packaged = packaged_files(bundle)[rel]
         lines = difflib.unified_diff(
             baseline.read_text().splitlines(keepends=True),
             packaged.read_text().splitlines(keepends=True),
