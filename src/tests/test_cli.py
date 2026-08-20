@@ -1,3 +1,4 @@
+import tomllib
 from unittest.mock import patch
 
 import pytest
@@ -8,6 +9,17 @@ from ow.utils import paths
 from ow.utils.config import BranchSpec, WorkspaceConfig, write_workspace_config
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path, monkeypatch):
+    """check_legacy_layout() walks up from cwd looking for an old ow.toml.
+
+    This repo's own checkout has one at its root (a leftover from before
+    this rewrite), so any invocation here must not run with the real repo
+    as cwd or it would trip a false positive.
+    """
+    monkeypatch.chdir(tmp_path)
 
 
 def test_no_args_shows_help():
@@ -209,16 +221,49 @@ def test_creates_config_if_missing(xdg):
 
 
 def test_exits_nonzero_if_config_load_fails(xdg):
-    """A config that cannot be loaded surfaces as a CLI failure: nothing in
-    __main__ catches or rewrites the load error, so it propagates as-is
-    (exit code 1, the original exception and message intact) instead of
-    being swallowed into a generic non-zero exit."""
+    """An unreadable config surfaces as a short message, not a traceback."""
     with patch("ow.__main__.load_global_config", side_effect=OSError("boom")):
         result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 1
-    assert isinstance(result.exception, OSError)
-    assert str(result.exception) == "boom"
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "boom" in result.output
+    assert str(paths.config_file()) in result.output
+
+
+def test_exits_nonzero_if_config_is_malformed_toml(xdg):
+    """A config.toml that fails to parse is reported the same way, by name."""
+    with patch(
+        "ow.__main__.load_global_config",
+        side_effect=tomllib.TOMLDecodeError("bad toml"),
+    ):
+        result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "bad toml" in result.output
+    assert str(paths.config_file()) in result.output
+
+
+def test_legacy_layout_is_detected_before_the_config_bootstrap(xdg, tmp_path):
+    """The load-bearing test of task 10: the legacy check must run before
+    load_global_config() creates a default config.toml.
+
+    If the order were reversed, load_global_config() would bootstrap
+    config.toml on this very call — erasing the "no global config yet"
+    condition that form 1 of the legacy check depends on — and the command
+    would proceed as if nothing were wrong.
+    """
+    (tmp_path / "ow.toml").write_text("")
+
+    with patch("ow.__main__.cmd_status", autospec=True) as mock_status:
+        result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 1
+    assert "ow.toml" in result.output
+    assert "docs/migrating-to-2.0.md" in result.output
+    mock_status.assert_not_called()
+    assert not paths.config_file().exists()
 
 
 # ---------------------------------------------------------------------------

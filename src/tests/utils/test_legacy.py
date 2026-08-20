@@ -1,0 +1,81 @@
+"""Tests for ow.utils.legacy — detecting the pre-2.0 layout.
+
+check_legacy_layout() exists to point someone still on the old per-project
+layout (an `ow.toml` project root, a per-workspace `.ow/config` with no
+extension) at the migration guide, instead of leaving them staring at "no
+workspace found" while their workspaces sit right there.
+"""
+
+from pathlib import Path
+
+import pytest
+import typer
+
+from ow.utils import paths
+from ow.utils.legacy import check_legacy_layout
+
+
+def test_silent_when_global_config_already_exists(xdg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No false positive: a normal, already-migrated setup says nothing."""
+    paths.config_home().mkdir(parents=True, exist_ok=True)
+    paths.config_file().write_text("")
+    monkeypatch.chdir(xdg)
+
+    check_legacy_layout()  # must not raise
+
+
+def test_silent_in_an_empty_directory(xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No false positive: nothing anywhere, nothing to say."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+
+    check_legacy_layout()  # must not raise
+
+
+def test_detects_old_project_root(xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """Form 1: no global config yet, but an ow.toml project root exists above cwd."""
+    project = tmp_path / "project"
+    sub = project / "workspaces" / "demo"
+    sub.mkdir(parents=True)
+    (project / "ow.toml").write_text("")
+    monkeypatch.chdir(sub)
+    assert not paths.config_file().exists()
+
+    with pytest.raises(typer.Exit) as exc:
+        check_legacy_layout()
+
+    assert exc.value.exit_code == 1
+    err = capsys.readouterr().err
+    assert str(project) in err
+    assert "ow.toml" in err
+    assert "docs/migrating-to-2.0.md" in err
+
+
+def test_detects_old_workspace_config(xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """Form 2: a workspace still has `.ow/config`, not `.ow/config.toml`."""
+    ws = tmp_path / "myws"
+    (ws / ".ow").mkdir(parents=True)
+    old_config = ws / ".ow" / "config"
+    old_config.write_text("")
+    monkeypatch.chdir(ws)
+
+    with pytest.raises(typer.Exit) as exc:
+        check_legacy_layout()
+
+    assert exc.value.exit_code == 1
+    err = capsys.readouterr().err
+    assert str(old_config) in err
+    assert "docs/migrating-to-2.0.md" in err
+
+
+def test_old_workspace_config_is_not_flagged_once_migrated(xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workspace with both files (mid-migration, or .ow/config kept as a
+    backup) is not a legacy layout: config.toml is what ow actually reads."""
+    ws = tmp_path / "myws"
+    (ws / ".ow").mkdir(parents=True)
+    (ws / ".ow" / "config").write_text("")
+    (ws / ".ow" / "config.toml").write_text("")
+    monkeypatch.chdir(ws)
+
+    check_legacy_layout()  # must not raise

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import tomllib
 from typing import Any, Optional
 
 import typer
@@ -13,6 +14,8 @@ from ow.commands import (
     cmd_templates,
 )
 from ow.utils.config import Config, load_global_config, parse_branch_spec
+from ow.utils.legacy import check_legacy_layout
+from ow.utils.paths import config_file
 from ow.utils.templates import available_templates
 
 try:
@@ -52,7 +55,12 @@ def callback(
 
 def _load_config() -> Config:
     """Load the user's global configuration, bootstrapping it on first use."""
-    return load_global_config()
+    check_legacy_layout()
+    try:
+        return load_global_config()
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        print(f"Error: could not load {config_file()}: {exc}", file=sys.stderr)
+        raise typer.Exit(1)
 
 
 def _available_repo_aliases() -> list[str]:
