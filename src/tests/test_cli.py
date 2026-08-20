@@ -5,7 +5,7 @@ from typer.testing import CliRunner
 
 from ow.__main__ import app
 from ow.utils import paths
-from ow.utils.config import BranchSpec
+from ow.utils.config import BranchSpec, WorkspaceConfig, write_workspace_config
 
 runner = CliRunner()
 
@@ -88,23 +88,64 @@ def test_init_accepts_several_repos(xdg):
     assert sorted(repos) == ["community", "enterprise"]
 
 
-def test_update(xdg):
-    """ow update calls cmd_update."""
-    with patch("ow.__main__.cmd_update") as mock_update:
-        result = runner.invoke(app, ["update"])
+def test_apply(xdg):
+    """ow apply calls cmd_apply."""
+    with patch("ow.__main__.cmd_apply") as mock_apply:
+        result = runner.invoke(app, ["apply"])
 
     assert result.exit_code == 0
-    mock_update.assert_called_once()
+    mock_apply.assert_called_once()
 
 
-def test_update_with_workspace(xdg):
-    """ow update myws calls cmd_update with workspace="myws"."""
-    with patch("ow.__main__.cmd_update") as mock_update:
-        result = runner.invoke(app, ["update", "myws"])
+def test_apply_with_workspace(xdg):
+    """ow apply myws calls cmd_apply with workspace="myws"."""
+    with patch("ow.__main__.cmd_apply") as mock_apply:
+        result = runner.invoke(app, ["apply", "myws"])
 
     assert result.exit_code == 0
-    mock_update.assert_called_once()
-    assert mock_update.call_args.kwargs["workspace"] == "myws"
+    mock_apply.assert_called_once()
+    assert mock_apply.call_args.kwargs["workspace"] == "myws"
+
+
+def test_apply_only_reaches_cmd_apply(xdg):
+    """ow apply --only community,enterprise passes only= through, same as rebase."""
+    with patch("ow.__main__.cmd_apply") as mock_apply:
+        result = runner.invoke(app, ["apply", "myws", "--only", "community,enterprise"])
+
+    assert result.exit_code == 0
+    mock_apply.assert_called_once()
+    assert mock_apply.call_args.kwargs["only"] == "community,enterprise"
+
+
+def test_apply_only_defaults_to_none(xdg):
+    """No --only means no narrowing."""
+    with patch("ow.__main__.cmd_apply") as mock_apply:
+        result = runner.invoke(app, ["apply"])
+
+    assert result.exit_code == 0
+    assert mock_apply.call_args.kwargs["only"] is None
+
+
+def test_apply_only_is_really_wired_to_cmd_apply(tmp_path, xdg, monkeypatch):
+    """End to end, without patching cmd_apply.
+
+    The two tests above patch cmd_apply, so they pass even when the CLI passes
+    an argument the command does not accept — which is exactly how `--only`
+    shipped broken once. This one calls the real function.
+    """
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    write_workspace_config(
+        ws_dir / ".ow" / "config.toml",
+        WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[]),
+    )
+    monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+
+    result = runner.invoke(app, ["apply", "--only", "nope"])
+
+    assert result.exit_code == 2
+    assert "nope" in result.output
+    assert "community" in result.output
 
 
 def test_status_with_workspace(xdg):

@@ -7,7 +7,7 @@ import pytest
 from ow.commands.prune import _prune_bare_repo
 
 from ow.commands.status import _gather_repo_status
-from ow.commands.update import cmd_update
+from ow.commands.apply import cmd_apply
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
 
 
@@ -64,7 +64,7 @@ class TestStatusExtended:
 
 class TestCmdUpdateExtended:
 
-    def test_cmd_update_shows_error_when_repo_fails(self, tmp_path, capsys, config_with_remotes):
+    def test_cmd_apply_shows_error_when_repo_fails(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[])
@@ -72,15 +72,15 @@ class TestCmdUpdateExtended:
         config = config_with_remotes
 
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, set(), {"community": "clone failed"})):
-                with patch("ow.commands.update.apply_templates"):
-                    cmd_update(config)
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {"community": "clone failed"})):
+                with patch("ow.commands.apply.apply_templates"):
+                    cmd_apply(config)
 
         captured = capsys.readouterr()
         assert "Warning" in captured.err or "Warning" in captured.out
         assert "community" in (captured.err + captured.out)
 
-    def test_cmd_update_no_errors_no_warning(self, tmp_path, capsys, config_with_remotes):
+    def test_cmd_apply_no_errors_no_warning(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={}, templates=["common"])
@@ -88,9 +88,9 @@ class TestCmdUpdateExtended:
         config = config_with_remotes
 
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
-                with patch("ow.commands.update.apply_templates"):
-                    cmd_update(config)
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
+                with patch("ow.commands.apply.apply_templates"):
+                    cmd_apply(config)
 
         captured = capsys.readouterr()
         assert "Warning" not in captured.err

@@ -5,11 +5,11 @@ from typing import Any, Optional
 import typer
 
 from ow.commands import (
+    cmd_apply,
     cmd_init,
     cmd_prune,
     cmd_rebase,
     cmd_status,
-    cmd_update,
 )
 from ow.utils.config import Config, load_global_config, parse_branch_spec
 from ow.utils.templates import available_templates
@@ -127,12 +127,13 @@ def init(
 
 
 @app.command()
-def update(
+def apply(
     workspace: Optional[str] = typer.Argument(None, help="Workspace name (default: resolve from cwd)", autocompletion=complete_workspace_name),
+    only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to materialize (default: all)"),
 ) -> None:
     """Re-render templates and materialize worktrees."""
     config = _load_config()
-    cmd_update(config, workspace=workspace)
+    cmd_apply(config, workspace=workspace, only=only)
 
 
 @app.command()

@@ -121,7 +121,7 @@ def _validate_init_inputs(
     # ow refuses to walk over is an existing workspace definition.
     if (ws_dir / MARKER).exists():
         print(f"Error: {ws_dir} is already a workspace.", file=sys.stderr)
-        print(f"       {ws_dir / MARKER} exists; edit it and run `ow update`.", file=sys.stderr)
+        print(f"       {ws_dir / MARKER} exists; edit it and run `ow apply`.", file=sys.stderr)
         sys.exit(1)
 
     return source_ws, ws_dir
@@ -346,9 +346,9 @@ def cmd_init(
     index.remember(ws_dir)
 
     if errors:
-        print(f"\nWorkspace '{ws_dir.name}' created with errors. Fix issues and run: ow update")
+        print(f"\nWorkspace '{ws_dir.name}' created with errors. Fix issues and run: ow apply")
     else:
         print(f"\nWorkspace '{ws_dir.name}' created. To install dependencies:")
         print(f"    cd {ws_dir} && mise install")
     print(f"\nWorkspace config: {ow_config_path}")
-    print("Edit it to customize vars, then run: ow update")
+    print("Edit it to customize vars, then run: ow apply")

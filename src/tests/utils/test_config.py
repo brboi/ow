@@ -10,6 +10,7 @@ from ow.utils.config import (
     find_project_root,
     load_config,
     load_global_config,
+    select_aliases,
     load_workspace_config,
     parse_branch_spec,
     write_workspace_config,
@@ -357,3 +358,22 @@ class TestFindProjectRoot:
         inner.mkdir()
         (inner / "ow.toml").write_text("[remotes]\n")
         assert find_project_root(inner) == inner
+
+
+class TestSelectAliases:
+    """Shared by every --only flag; lives in config.py beside the repo aliases it filters."""
+    def test_none_selects_everything(self):
+        assert select_aliases(["a", "b"], None) == ["a", "b"]
+
+    def test_only_filters_and_preserves_config_order(self):
+        assert select_aliases(["a", "b", "c"], "c,a") == ["a", "c"]
+
+    def test_only_tolerates_spaces(self):
+        assert select_aliases(["a", "b"], " a , b ") == ["a", "b"]
+
+    def test_unknown_alias_raises_and_lists_the_valid_ones(self):
+        import typer
+        with pytest.raises(typer.BadParameter) as exc:
+            select_aliases(["a", "b"], "nope")
+        assert "nope" in str(exc.value)
+        assert "a, b" in str(exc.value)

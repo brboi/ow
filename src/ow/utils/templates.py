@@ -143,7 +143,7 @@ def _resolve_template_dir(template_name: str, config: Config) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Template application helpers (shared between cmd_init and cmd_update)
+# Template application helpers (shared between cmd_init and cmd_apply)
 # ---------------------------------------------------------------------------
 
 

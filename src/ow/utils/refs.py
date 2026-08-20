@@ -78,7 +78,7 @@ def fetch_workspace_refs(
         bare_repo_path = bare_repos_dir / f"{alias}.git"
         if not bare_repo_path.exists():
             raise RuntimeError(
-                f"no bare repo at {bare_repo_path}; run `ow update` to materialize it"
+                f"no bare repo at {bare_repo_path}; run `ow apply` to materialize it"
             )
         bare_repo = str(bare_repo_path)
         track_spec = BranchSpec(spec.base_ref)

@@ -9,12 +9,12 @@ src/
 │   ├── commands/            # CLI command handlers only
 │   │   ├── __init__.py      # re-exports cmd_* functions
 │   │   ├── init.py          # cmd_init — create a workspace, here or in ./NAME; validation, interactive questionnaire, duplicate-branch check
-│   │   ├── update.py        # cmd_update
+│   │   ├── apply.py         # cmd_apply — make the tree match .ow/config.toml (--only narrows the git work, never the rendering)
 │   │   ├── status.py        # cmd_status + display helpers
 │   │   ├── rebase.py        # cmd_rebase + fact gathering, display, execution
 │   │   └── prune.py         # cmd_prune
 │   ├── utils/               # shared utilities used by commands
-│   │   ├── config.py        # Config dataclasses, TOML loading/writing, BranchSpec
+│   │   ├── config.py        # Config dataclasses, TOML loading/writing, BranchSpec, select_aliases
 │   │   ├── display.py       # console, err_console, counts, print_git_result
 │   │   ├── drift.py         # DriftResult, check_drift, warn_if_drifted
 │   │   ├── git.py           # All git operations via subprocess
@@ -30,12 +30,10 @@ src/
 │       └── services/        # bundled service files (compose.yml, etc.)
 ├── tests/
 │   ├── __init__.py
+│   ├── conftest.py          # fixtures; `xdg` redirects every XDG base dir into tmp_path
 │   ├── test_cli.py          # CLI argument parsing, completers
-│   ├── test_config.py       # parse_branch_spec, load_config, load_workspace_config
-│   ├── test_git.py          # git functions (subprocess mocked)
-│   ├── test_workspace.py    # file generators, template rendering, drift, rebase analysis
-│   ├── test_commands.py     # cmd_status, cmd_rebase, cmd_create, cmd_update, cmd_prune
-│   └── test_resolve_workspace.py  # workspace resolution logic
+│   ├── commands/            # one module per command, mirroring ow/commands/
+│   └── utils/               # one module per helper, mirroring ow/utils/
 pyproject.toml
 AGENTS.md
 ```
@@ -69,7 +67,7 @@ AGENTS.md
 | Command | Signature | Purpose |
 |---------|-----------|---------|
 | `ow init` | `cmd_init(config, name=None, templates=None, repos=None, configuration=None)` | Create a workspace in the current directory, or in `./NAME` — interactive form, or flags-only when stdin isn't a terminal |
-| `ow update` | `cmd_update(config, workspace=None)` | Re-render templates + materialize worktrees |
+| `ow apply` | `cmd_apply(config, workspace=None, *, only=None)` | Materialize worktrees + re-render templates |
 | `ow status` | `cmd_status(config, workspace=None)` | Show workspace branch status |
 | `ow rebase` | `cmd_rebase(config, workspace=None, *, only=None, autostash=False, dry_run=False, yes=False)` | Fetch + rebase workspace branches |
 | `ow prune` | `cmd_prune(config)` | Clean up stale worktree references from bare repos |

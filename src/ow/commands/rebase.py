@@ -2,11 +2,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import typer
 from rich.markup import escape
 from rich.text import Text
 
-from ow.utils.config import Config, WorkspaceConfig
+from ow.utils.config import Config, WorkspaceConfig, select_aliases
 from ow.utils.display import console, err_console
 from ow.utils.drift import warn_if_drifted
 from ow.utils.git import (
@@ -26,20 +25,6 @@ from ow.utils.git import (
 from ow.utils.rebase_plan import RebasePlan, RepoFacts, plan_for
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
-
-
-def _select_aliases(available: list[str], only: str | None) -> list[str]:
-    """Filter aliases by --only, preserving config order."""
-    if only is None:
-        return list(available)
-    wanted = [a.strip() for a in only.split(",") if a.strip()]
-    unknown = [a for a in wanted if a not in available]
-    if unknown:
-        raise typer.BadParameter(
-            f"unknown repo alias(es): {', '.join(unknown)}. "
-            f"Available: {', '.join(available)}"
-        )
-    return [a for a in available if a in wanted]
 
 
 def _bound(worktree, base: str, up_before: str | None, up: str | None = None) -> str | None:
@@ -221,7 +206,7 @@ def cmd_rebase(
 ) -> None:
     """Fetch and rebase the repos of a workspace."""
     ws_dir, ws = resolve_workspace(name=workspace)
-    aliases = _select_aliases(list(ws.repos), only)
+    aliases = select_aliases(list(ws.repos), only)
 
     # --only must also narrow drift-checking and fetching, not just execution.
     selected_repos = {a: spec for a, spec in ws.repos.items() if a in aliases}

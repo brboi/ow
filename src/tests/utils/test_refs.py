@@ -24,7 +24,7 @@ class TestMissingBareRepo:
 
         err = capsys.readouterr().err
         assert str(paths.repos_dir() / "community.git") in err
-        assert "ow update" in err
+        assert "ow apply" in err
 
     def test_does_not_blame_the_branch(self, tmp_path, capsys, xdg):
         """The old path reported 'Branch <x> not found in local refs' instead."""

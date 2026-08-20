@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import tomli_w
+import typer
 
 from ow.utils import paths
 from ow.utils.display import err_console
@@ -104,6 +105,26 @@ def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         tomli_w.dump(data, f)
+
+
+def select_aliases(available: list[str], only: str | None) -> list[str]:
+    """Filter repo aliases by --only, preserving the order of the config.
+
+    Shared by every command whose --only narrows a workspace-wide operation
+    down to specific repos (`ow rebase`, `ow apply`). typer.BadParameter is
+    deliberate: Typer renders it as a usage error and exit code 2, where a
+    bare SystemExit would look like the operation itself had failed.
+    """
+    if only is None:
+        return list(available)
+    wanted = [a.strip() for a in only.split(",") if a.strip()]
+    unknown = [a for a in wanted if a not in available]
+    if unknown:
+        raise typer.BadParameter(
+            f"unknown repo alias(es): {', '.join(unknown)}. "
+            f"Available: {', '.join(available)}"
+        )
+    return [a for a in available if a in wanted]
 
 
 def find_project_root(start: Path) -> Path | None:

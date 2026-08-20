@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ow.commands.rebase import _select_aliases, cmd_rebase
+from ow.commands.rebase import cmd_rebase
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
 from ow.utils.rebase_plan import RepoFacts
 from ow.utils.refs import FetchOutcome
@@ -63,24 +63,6 @@ def _facts_busy(worktree, alias, base, up, up_before, is_detached):
         alias=alias, base=base,
         busy=("rebase", "git rebase --continue", "git rebase --abort"),
     )
-
-
-class TestSelectAliases:
-    def test_none_selects_everything(self):
-        assert _select_aliases(["a", "b"], None) == ["a", "b"]
-
-    def test_only_filters_and_preserves_config_order(self):
-        assert _select_aliases(["a", "b", "c"], "c,a") == ["a", "c"]
-
-    def test_only_tolerates_spaces(self):
-        assert _select_aliases(["a", "b"], " a , b ") == ["a", "b"]
-
-    def test_unknown_alias_raises_and_lists_the_valid_ones(self):
-        import typer
-        with pytest.raises(typer.BadParameter) as exc:
-            _select_aliases(["a", "b"], "nope")
-        assert "nope" in str(exc.value)
-        assert "a, b" in str(exc.value)
 
 
 class TestConfirmation:
