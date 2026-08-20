@@ -88,7 +88,7 @@ class TestConfirmation:
         """A destructive command must not default to yes with no one to ask."""
         config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted"),
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
@@ -103,7 +103,7 @@ class TestConfirmation:
     def test_plain_enter_aborts(self, tmp_path, capsys):
         config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted"),
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
@@ -117,7 +117,7 @@ class TestConfirmation:
     def test_yes_flag_skips_the_prompt(self, tmp_path):
         config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted"),
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
@@ -133,7 +133,7 @@ class TestDryRun:
     def test_prints_the_commands_and_runs_nothing(self, tmp_path, capsys):
         config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted"),
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
@@ -153,7 +153,7 @@ class TestConflictReporting:
         """Defect 1.2: the message used to always name the upstream."""
         config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted"),
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
@@ -174,7 +174,7 @@ class TestSkips:
     def test_a_busy_repo_is_skipped_and_counts_as_a_failure(self, tmp_path, capsys):
         config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted"),
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
@@ -196,7 +196,7 @@ class TestAnalysisFailure:
     def test_a_failed_analysis_is_reported_and_fails_the_run(self, tmp_path, capsys):
         config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted"),
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
@@ -214,7 +214,7 @@ class TestAnalysisFailure:
         config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
         shutil.rmtree(ws_dir / "community")
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted"),
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
@@ -240,7 +240,7 @@ class TestMultiRepo:
             "enterprise": "master..work",
         })
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted"),
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({
@@ -266,7 +266,7 @@ class TestMultiRepo:
             "enterprise": "master..work",
         })
         with (
-            patch("ow.commands.rebase.resolve_workspace", return_value=(config, ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
             patch("ow.commands.rebase.warn_if_drifted") as mock_drift,
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({

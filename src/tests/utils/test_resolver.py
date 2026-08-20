@@ -1,216 +1,375 @@
-import textwrap
+"""Tests for ow.utils.resolver.
+
+Four forms, one meaning each, one failure each, and no fallback between
+them: a path-shaped argument, a bare name looked up in the discovery index,
+OW_WORKSPACE as an absolute path, and the walk-up from cwd. Every successful
+resolution is written back to the index.
+
+Every test here reaches the index, so every test takes the `xdg` fixture
+(directly, or through `config`, which depends on it). Without it a test
+writes into the developer's real XDG state directory.
+"""
+
+from pathlib import Path
 
 import pytest
 
+from ow.utils import index
+from ow.utils.config import Config, WorkspaceConfig, write_workspace_config
 from ow.utils.resolver import resolve_workspace
-from ow.utils.config import (
-    WorkspaceConfig,
-    load_config,
-    write_workspace_config,
-)
 
 
-def _make_project(root, alias="community"):
-    """Create an ow.toml-based config on disk and return it loaded.
-
-    Only used here to build a realistic Config for the tests below — config
-    is global now, so this no longer represents "a project" the way it used
-    to.
-    """
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "ow.toml").write_text(
-        f'[remotes]\n{alias}.origin.url = "git@github.com:odoo/{alias}.git"\n'
-    )
-    return load_config(root / "ow.toml")
-
-
-def _make_ws(project_root, name):
-    ws_dir = project_root / "workspaces" / name
-    (ws_dir / ".ow").mkdir(parents=True)
+def _make_ws(base: Path, name: str, *, templates: list[str] | None = None) -> Path:
+    """A real workspace on disk: a directory holding .ow/config.toml."""
+    ws_dir = base / name
     write_workspace_config(
         ws_dir / ".ow" / "config.toml",
-        WorkspaceConfig(templates=["common"], repos={}, vars={}),
+        WorkspaceConfig(repos={}, templates=templates or ["common"], vars={}),
     )
     return ws_dir
 
 
-class TestResolveWorkspace:
-    def test_env_var_resolution(self, tmp_path, config):
-        ws_dir = tmp_path / "workspaces" / "test"
-        ws_dir.mkdir(parents=True)
-        ow_config = ws_dir / ".ow" / "config.toml"
-        ow_config.parent.mkdir(parents=True)
-        ow_config.write_text(textwrap.dedent("""\
-            templates = ["common"]
-
-            [repos]
-            community = "master"
-        """))
-
-        with pytest.MonkeyPatch().context() as mp:
-            mp.setenv("OW_WORKSPACE", str(ws_dir))
-            _, resolved_dir, ws = resolve_workspace(config)
-
-        assert resolved_dir == ws_dir
-        assert ws.templates == ["common"]
-
-    def test_env_var_as_workspace_name_fails_loudly(self, tmp_path, monkeypatch, capsys, config):
-        """Name-based lookup has no meaning without the discovery index (task 5)."""
-        monkeypatch.setenv("OW_WORKSPACE", "named-ws")
-
-        with pytest.raises(SystemExit):
-            resolve_workspace(config)
-
-        err = capsys.readouterr().err
-        assert "OW_WORKSPACE" in err
-        assert "named-ws" in err
-        assert "path instead" in err
-
-    def test_env_var_as_path_outside_workspaces_dir(self, tmp_path, monkeypatch, config):
-        ws_dir = tmp_path / "elsewhere" / "my-ws"
-        (ws_dir / ".ow").mkdir(parents=True)
-        write_workspace_config(
-            ws_dir / ".ow" / "config.toml",
-            WorkspaceConfig(templates=["common"], repos={}, vars={}),
-        )
-
-        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-        _, resolved_dir, _ = resolve_workspace(config)
-
-        assert resolved_dir == ws_dir
-
-    def test_cwd_walkup(self, tmp_path, monkeypatch, config):
-        """resolve_workspace walks up from cwd to find .ow/config.toml."""
-        ws_dir = _make_ws(tmp_path, "walkup")
-        subdir = ws_dir / "community" / "odoo"
-        subdir.mkdir(parents=True)
-
-        monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        monkeypatch.chdir(subdir)
-        _, resolved_dir, _ = resolve_workspace(config)
-
-        assert resolved_dir == ws_dir
-
-    def test_exits_when_no_workspace_found(self, tmp_path, monkeypatch, config):
-        monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        monkeypatch.chdir(tmp_path)
-
-        with pytest.raises(SystemExit):
-            resolve_workspace(config)
-
-    def test_workspace_config_is_named_config_toml(self, tmp_path, monkeypatch, config):
-        """Regression guard: the per-workspace config file is `.ow/config.toml`,
-        not the old extensionless `.ow/config`. Uses the path form of
-        resolution (cwd walk-up) since name-based lookup has no meaning
-        without the discovery index (see the tests below)."""
-        ws_dir = _make_ws(tmp_path, "toml-check")
-
-        monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        monkeypatch.chdir(ws_dir)
-        _, resolved_dir, ws = resolve_workspace(config)
-
-        assert resolved_dir == ws_dir
-        assert ws.templates == ["common"]
-
-    def test_resolve_workspace_by_name_fails_loudly(self, tmp_path, monkeypatch, capsys, config):
-        """Positional name lookup has no meaning without the discovery index (task 5)."""
-        monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        _make_ws(tmp_path, "test")
-
-        with pytest.raises(SystemExit):
-            resolve_workspace(config, name="test")
-
-        err = capsys.readouterr().err
-        assert "cannot resolve workspace 'test'" in err
-        assert "path instead" in err
-
-    def test_resolve_workspace_by_name_not_found(self, tmp_path, monkeypatch, capsys, config):
-        monkeypatch.delenv("OW_WORKSPACE", raising=False)
-
-        with pytest.raises(SystemExit):
-            resolve_workspace(config, name="nonexistent")
-
-        err = capsys.readouterr().err
-        assert "cannot resolve workspace 'nonexistent'" in err
-        assert "path instead" in err
-
-    def test_resolve_workspace_by_name_invalid(self, tmp_path, monkeypatch, capsys, config):
-        """A directory that isn't even a valid workspace fails the same loud way."""
-        monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        (tmp_path / "workspaces" / "invalid").mkdir(parents=True)
-
-        with pytest.raises(SystemExit):
-            resolve_workspace(config, name="invalid")
-
-        err = capsys.readouterr().err
-        assert "cannot resolve workspace 'invalid'" in err
+@pytest.fixture(autouse=True)
+def _no_inherited_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The developer's own OW_WORKSPACE must not leak into these tests."""
+    monkeypatch.delenv("OW_WORKSPACE", raising=False)
 
 
-class TestConfigIsGlobal:
-    """Configuration is global now — there is only ever one Config, and
-    resolve_workspace never swaps it out for "the project owning this
-    workspace" the way the old per-project scheme did."""
-
-    def test_path_form_returns_the_same_config_object(self, tmp_path, monkeypatch, config):
-        ws_dir = _make_ws(tmp_path, "quattromori")
-
-        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-        cfg, resolved_dir, _ = resolve_workspace(config)
-
-        assert cfg is config
-        assert resolved_dir == ws_dir
-
-    def test_cwd_walkup_returns_the_same_config_object(self, tmp_path, monkeypatch, config):
-        ws_dir = _make_ws(tmp_path, "walkup")
-
-        monkeypatch.delenv("OW_WORKSPACE", raising=False)
-        monkeypatch.chdir(ws_dir)
-        cfg, resolved_dir, _ = resolve_workspace(config)
-
-        assert cfg is config
-        assert resolved_dir == ws_dir
+# ---------------------------------------------------------------------------
+# 1-2. No argument: walk up from cwd
+# ---------------------------------------------------------------------------
 
 
-class TestOwWorkspaceFailsLoudly:
-    """One meaning per form, one failure per form — never a silent fallback."""
+def test_walks_up_from_a_subdirectory(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir = _make_ws(xdg, "walkup", templates=["common", "odoo"])
+    deep = ws_dir / "community" / "addons"
+    deep.mkdir(parents=True)
+    monkeypatch.chdir(deep)
 
-    def test_unknown_name_via_env_var_fails_with_a_clear_message(self, tmp_path, monkeypatch, capsys):
-        project = _make_project(tmp_path / "devrepo", alias="owl")
-        monkeypatch.setenv("OW_WORKSPACE", "quattromori")
+    resolved_dir, ws = resolve_workspace(config)
 
-        with pytest.raises(SystemExit):
-            resolve_workspace(project)
+    assert resolved_dir == ws_dir.resolve()
+    assert ws.templates == ["common", "odoo"]
 
-        err = capsys.readouterr().err
-        assert "OW_WORKSPACE" in err
-        assert "quattromori" in err
-        assert "path instead" in err
 
-    def test_path_without_ow_config_names_the_env_var(self, tmp_path, monkeypatch, capsys):
-        project = _make_project(tmp_path / "devrepo", alias="owl")
-        stray = tmp_path / "not-a-workspace"
-        stray.mkdir()
+def test_outside_any_workspace_fails_and_suggests_ow_ls(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    barren = xdg / "nowhere" / "at" / "all"
+    barren.mkdir(parents=True)
+    monkeypatch.chdir(barren)
 
-        monkeypatch.setenv("OW_WORKSPACE", str(stray))
-        with pytest.raises(SystemExit):
-            resolve_workspace(project)
+    with pytest.raises(SystemExit):
+        resolve_workspace(config)
 
-        err = capsys.readouterr().err
-        assert "OW_WORKSPACE" in err
-        assert str(stray) in err
+    err = capsys.readouterr().err
+    assert "no workspace" in err.lower()
+    assert "ow ls" in err
 
-    def test_bare_name_never_falls_back_to_a_relative_path(self, tmp_path, monkeypatch, capsys):
-        """The old code fell through to Path(env_val)/.ow/config.toml, relative to cwd."""
-        project = _make_project(tmp_path / "devrepo", alias="owl")
-        decoy = tmp_path / "cwd" / "quattromori"
-        (decoy / ".ow").mkdir(parents=True)
-        write_workspace_config(
-            decoy / ".ow" / "config.toml",
-            WorkspaceConfig(templates=[], repos={}, vars={}),
-        )
 
-        monkeypatch.chdir(tmp_path / "cwd")
-        monkeypatch.setenv("OW_WORKSPACE", "quattromori")
+# ---------------------------------------------------------------------------
+# 3-5. A bare name: looked up in the index
+# ---------------------------------------------------------------------------
 
-        with pytest.raises(SystemExit):
-            resolve_workspace(project)
+
+def test_unique_name_resolves_through_the_index(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir = _make_ws(xdg / "somewhere", "quattromori", templates=["odoo"])
+    index.remember(ws_dir)
+    # cwd is deliberately not the workspace: the name is what resolves it.
+    monkeypatch.chdir(xdg)
+
+    resolved_dir, ws = resolve_workspace(config, name="quattromori")
+
+    assert resolved_dir == ws_dir.resolve()
+    assert ws.templates == ["odoo"]
+
+
+def test_unknown_name_fails_and_suggests_ow_ls(
+    xdg: Path, config: Config, capsys: pytest.CaptureFixture
+) -> None:
+    with pytest.raises(SystemExit):
+        resolve_workspace(config, name="quattromori")
+
+    err = capsys.readouterr().err
+    assert "quattromori" in err
+    assert "ow ls" in err
+
+
+def test_ambiguous_name_lists_every_candidate_and_picks_none(
+    xdg: Path, config: Config, capsys: pytest.CaptureFixture
+) -> None:
+    left = _make_ws(xdg / "left", "twin")
+    right = _make_ws(xdg / "right", "twin")
+    index.remember(left)
+    index.remember(right)
+
+    with pytest.raises(SystemExit):
+        resolve_workspace(config, name="twin")
+
+    err = capsys.readouterr().err
+    assert "twin" in err
+    assert str(left.resolve()) in err
+    assert str(right.resolve()) in err
+
+
+def test_a_name_never_falls_back_to_a_relative_path(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A real workspace sitting in cwd is still not a *name* the index knows."""
+    decoy = _make_ws(xdg / "cwd", "ghost")
+    monkeypatch.chdir(decoy.parent)
+    assert index.find_by_name("ghost") == []
+
+    with pytest.raises(SystemExit):
+        resolve_workspace(config, name="ghost")
+
+    err = capsys.readouterr().err
+    assert "ghost" in err
+    assert "ow ls" in err
+
+
+# ---------------------------------------------------------------------------
+# 6-8. A path-shaped argument
+# ---------------------------------------------------------------------------
+
+
+def test_absolute_path_argument_resolves(xdg: Path, config: Config) -> None:
+    ws_dir = _make_ws(xdg, "by-path", templates=["common"])
+
+    resolved_dir, ws = resolve_workspace(config, name=str(ws_dir))
+
+    assert resolved_dir == ws_dir.resolve()
+    assert ws.templates == ["common"]
+
+
+def test_relative_path_argument_resolves(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir = _make_ws(xdg / "holder", "relative-ws")
+    monkeypatch.chdir(ws_dir.parent)
+
+    resolved_dir, _ = resolve_workspace(config, name="./relative-ws")
+
+    assert resolved_dir == ws_dir.resolve()
+
+
+def test_dot_is_a_path_not_a_name(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir = _make_ws(xdg, "dot-ws")
+    monkeypatch.chdir(ws_dir)
+
+    resolved_dir, _ = resolve_workspace(config, name=".")
+
+    assert resolved_dir == ws_dir.resolve()
+
+
+def test_dotdot_is_a_path_not_a_name(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir = _make_ws(xdg, "dotdot-ws")
+    inside = ws_dir / "community"
+    inside.mkdir()
+    monkeypatch.chdir(inside)
+
+    resolved_dir, _ = resolve_workspace(config, name="..")
+
+    assert resolved_dir == ws_dir.resolve()
+
+
+def test_tilde_is_expanded(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = xdg / "home"
+    home.mkdir()
+    ws_dir = _make_ws(home, "tilde-ws")
+    monkeypatch.setenv("HOME", str(home))
+    # cwd is not the home, so an unexpanded "~/tilde-ws" would resolve to the
+    # non-existent <cwd>/~/tilde-ws rather than to the workspace.
+    monkeypatch.chdir(xdg)
+
+    resolved_dir, _ = resolve_workspace(config, name="~/tilde-ws")
+
+    assert resolved_dir == ws_dir.resolve()
+
+
+def test_path_that_is_not_a_workspace_names_the_missing_config(
+    xdg: Path, config: Config, capsys: pytest.CaptureFixture
+) -> None:
+    stray = xdg / "not-a-workspace"
+    stray.mkdir()
+
+    with pytest.raises(SystemExit):
+        resolve_workspace(config, name=str(stray))
+
+    err = capsys.readouterr().err
+    assert str(stray.resolve() / ".ow" / "config.toml") in err
+
+
+def test_workspace_config_is_named_config_toml(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: the per-workspace config file is `.ow/config.toml`,
+    not the old extensionless `.ow/config`. Uses the path form of resolution
+    so that only the filename literal is under test."""
+    ws_dir = _make_ws(xdg, "toml-check", templates=["common"])
+    assert (ws_dir / ".ow" / "config.toml").exists()
+    assert not (ws_dir / ".ow" / "config").exists()
+
+    resolved_dir, ws = resolve_workspace(config, name=str(ws_dir))
+
+    assert resolved_dir == ws_dir.resolve()
+    assert ws.templates == ["common"]
+
+
+# ---------------------------------------------------------------------------
+# 9-10. OW_WORKSPACE: one form only
+# ---------------------------------------------------------------------------
+
+
+def test_ow_workspace_absolute_path_resolves(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir = _make_ws(xdg, "env-ws", templates=["common"])
+    monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+    monkeypatch.chdir(xdg)
+
+    resolved_dir, ws = resolve_workspace(config)
+
+    assert resolved_dir == ws_dir.resolve()
+    assert ws.templates == ["common"]
+
+
+def test_ow_workspace_as_a_bare_name_fails_even_when_the_index_knows_it(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The point of the rewrite: OW_WORKSPACE is never guessed as a name."""
+    ws_dir = _make_ws(xdg, "env-name")
+    index.remember(ws_dir)
+    assert index.find_by_name("env-name") == [ws_dir.resolve()]
+    monkeypatch.setenv("OW_WORKSPACE", "env-name")
+
+    with pytest.raises(SystemExit):
+        resolve_workspace(config)
+
+    err = capsys.readouterr().err
+    assert "OW_WORKSPACE" in err
+    assert "env-name" in err
+    assert "absolute path" in err
+
+
+def test_ow_workspace_as_a_relative_path_fails(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    ws_dir = _make_ws(xdg / "holder", "rel-env")
+    monkeypatch.chdir(ws_dir.parent)
+    monkeypatch.setenv("OW_WORKSPACE", "./rel-env")
+
+    with pytest.raises(SystemExit):
+        resolve_workspace(config)
+
+    err = capsys.readouterr().err
+    assert "OW_WORKSPACE" in err
+    assert "absolute path" in err
+
+
+def test_ow_workspace_as_a_tilde_path_fails(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """`~` is a shell nicety, not an absolute path — one form only."""
+    home = xdg / "home"
+    home.mkdir()
+    _make_ws(home, "tilde-env")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("OW_WORKSPACE", "~/tilde-env")
+
+    with pytest.raises(SystemExit):
+        resolve_workspace(config)
+
+    err = capsys.readouterr().err
+    assert "OW_WORKSPACE" in err
+    assert "absolute path" in err
+
+
+def test_ow_workspace_absolute_path_that_is_not_a_workspace_fails(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    stray = xdg / "env-stray"
+    stray.mkdir()
+    monkeypatch.setenv("OW_WORKSPACE", str(stray))
+
+    with pytest.raises(SystemExit):
+        resolve_workspace(config)
+
+    err = capsys.readouterr().err
+    assert str(stray.resolve() / ".ow" / "config.toml") in err
+
+
+def test_an_explicit_argument_beats_ow_workspace(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wanted = _make_ws(xdg, "wanted", templates=["wanted"])
+    other = _make_ws(xdg, "other", templates=["other"])
+    monkeypatch.setenv("OW_WORKSPACE", str(other))
+
+    resolved_dir, ws = resolve_workspace(config, name=str(wanted))
+
+    assert resolved_dir == wanted.resolve()
+    assert ws.templates == ["wanted"]
+
+
+# ---------------------------------------------------------------------------
+# 11. Every success is remembered
+# ---------------------------------------------------------------------------
+
+
+def test_path_form_is_remembered(xdg: Path, config: Config) -> None:
+    ws_dir = _make_ws(xdg, "remember-path")
+    assert index.known_workspaces() == []
+
+    resolve_workspace(config, name=str(ws_dir))
+
+    assert index.known_workspaces() == [ws_dir.resolve()]
+
+
+def test_cwd_walkup_is_remembered(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir = _make_ws(xdg, "remember-cwd")
+    inside = ws_dir / "community"
+    inside.mkdir()
+    monkeypatch.chdir(inside)
+    assert index.known_workspaces() == []
+
+    resolve_workspace(config)
+
+    assert index.known_workspaces() == [ws_dir.resolve()]
+
+
+def test_ow_workspace_form_is_remembered(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir = _make_ws(xdg, "remember-env")
+    monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+    assert index.known_workspaces() == []
+
+    resolve_workspace(config)
+
+    assert index.known_workspaces() == [ws_dir.resolve()]
+
+
+def test_a_failed_resolution_is_not_remembered(
+    xdg: Path, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stray = xdg / "failed"
+    stray.mkdir()
+    monkeypatch.chdir(stray)
+
+    with pytest.raises(SystemExit):
+        resolve_workspace(config, name=str(stray))
+
+    assert index.known_workspaces() == []

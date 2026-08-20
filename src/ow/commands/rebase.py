@@ -220,7 +220,7 @@ def cmd_rebase(
     yes: bool = False,
 ) -> None:
     """Fetch and rebase the repos of a workspace."""
-    config, ws_dir, ws = resolve_workspace(config, name=workspace)
+    ws_dir, ws = resolve_workspace(config, name=workspace)
     aliases = _select_aliases(list(ws.repos), only)
 
     # --only must also narrow drift-checking and fetching, not just execution.
