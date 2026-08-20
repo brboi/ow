@@ -313,10 +313,10 @@ Then restart your shell. To inspect the generated script instead of installing i
 ow --show-completion
 ```
 
-Completion covers template names (`ow init -t <TAB>`) and repo aliases (`ow init -r <TAB>`,
-which only offers aliases you haven't already passed). Workspace-name completion
-(`ow status <TAB>`) is wired into the CLI but currently returns nothing — `ow ls` is the way to
-see what `ow` knows about instead.
+Completion covers template names (`ow init -t <TAB>`), repo aliases (`ow init -r <TAB>`,
+which only offers aliases you haven't already passed) and workspace names
+(`ow status <TAB>`, from the same discovery index `ow ls` reads — so a workspace `ow` has
+never resolved is not offered).
 
 ## Sandboxing AI Coding Assistants
 

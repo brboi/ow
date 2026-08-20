@@ -381,9 +381,27 @@ def test_complete_gen_repos_preserves_legacy_detection(xdg, tmp_path):
     assert "docs/migrating-to-2.0.md" in result.output
 
 
-def test_complete_workspace_name_disabled(xdg):
-    """Workspace name completion is disabled until task 5 adds the discovery index."""
+def test_complete_workspace_name_offers_known_workspaces(xdg, tmp_path):
+    """Workspace name completion reads the same discovery index `ow ls` reads."""
+    from ow.utils import index
+
+    # Two of them share a name: `ow ls` distinguishes them by path, but a
+    # completion candidate is only a name, so it is offered once.
+    for path in ("canary", "trunk", "elsewhere/canary"):
+        ws = tmp_path / path
+        (ws / ".ow").mkdir(parents=True)
+        (ws / ".ow" / "config.toml").write_text("")
+        index.remember(ws)
+
+    assert _complete(["status"], "") == ["canary", "trunk"]
+    assert _complete(["status"], "c") == ["canary"]
+
+
+def test_complete_workspace_name_with_no_index_creates_nothing(xdg):
+    """No index yet means no candidates — and completion writes nothing."""
     assert _complete(["status"], "") == []
+    assert not paths.index_file().exists()
+    assert not paths.config_file().exists()
 
 
 class TestRebaseFlags:

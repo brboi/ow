@@ -14,6 +14,7 @@ from ow.commands import (
     cmd_status,
     cmd_templates,
 )
+from ow.utils import index
 from ow.utils.config import Config, load_global_config, parse_branch_spec
 from ow.utils.display import err_console
 from ow.utils.legacy import check_legacy_layout
@@ -124,13 +125,18 @@ def complete_gen_repos(ctx: typer.Context, incomplete: str) -> list[str]:
 
 
 def complete_workspace_name(ctx: typer.Context, incomplete: str) -> list[str]:
-    """Tab completion for workspace name.
+    """Tab completion for workspace name, from the discovery index.
 
-    Disabled for now: workspaces are no longer confined to one project root,
-    so there is no fixed directory to list from. Task 5 restores this via
-    the discovery index.
+    The same names `ow ls` shows. A workspace ow has never resolved is not in
+    the index and so is not offered — completing a name it could not then
+    resolve would be worse than offering nothing.
     """
-    return []
+    try:
+        names = sorted({p.name for p in index.known_workspaces()})
+    except Exception:
+        # Completion must never crash the shell, whatever state the index is in.
+        return []
+    return [name for name in names if name.startswith(incomplete)]
 
 
 @app.command()
