@@ -1,0 +1,65 @@
+"""`ow ls` — list every known workspace, its path, and its repos.
+
+Reads the index and the workspace configs it points at. No git: that is
+what `ow status` is for, and a listing that takes ten seconds because it
+hit the network is not a listing.
+"""
+
+import tomllib
+from pathlib import Path
+
+from rich.table import Table
+
+from ow.utils import index
+from ow.utils.config import load_workspace_config
+from ow.utils.display import console
+
+MARKER = Path(".ow") / "config.toml"
+
+
+def _display_path(path: Path) -> str:
+    """Render a path with the home directory abbreviated to ~.
+
+    A full absolute path drowns the useful part of a workspace listing in
+    repetition — every entry shares the same long prefix.
+    """
+    home = Path.home()
+    try:
+        rel = path.relative_to(home)
+    except ValueError:
+        return str(path)
+    if str(rel) == ".":
+        return "~"
+    return f"~/{rel}"
+
+
+def _repos_cell(ws_dir: Path) -> str:
+    """The repo column for one workspace: 'alias:spec' pairs, or an error mark.
+
+    A workspace whose config.toml fails to parse must not abort the whole
+    listing — that is precisely the moment a broken entry is most annoying
+    to have hidden.
+    """
+    try:
+        ws = load_workspace_config(ws_dir / MARKER)
+    except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
+        return f"[red](error: {exc})[/]"
+    return ", ".join(f"{alias}:{spec.to_spec_str()}" for alias, spec in ws.repos.items())
+
+
+def cmd_ls() -> None:
+    """List every known workspace: its name, path, and repos."""
+    workspaces = index.known_workspaces()
+    if not workspaces:
+        console.print("No known workspaces. Run `ow init` to create one.")
+        return
+
+    table = Table(box=None)
+    table.add_column("NAME")
+    table.add_column("PATH")
+    table.add_column("REPOS")
+
+    for ws_dir in workspaces:
+        table.add_row(ws_dir.name, _display_path(ws_dir), _repos_cell(ws_dir))
+
+    console.print(table)

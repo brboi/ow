@@ -8,6 +8,7 @@ import typer
 from ow.commands import (
     cmd_apply,
     cmd_init,
+    cmd_ls,
     cmd_prune,
     cmd_rebase,
     cmd_status,
@@ -177,6 +178,12 @@ def rebase(
         config, workspace=workspace, only=only,
         autostash=autostash, dry_run=dry_run, yes=yes,
     )
+
+
+@app.command()
+def ls() -> None:
+    """List every known workspace, its path, and its repos."""
+    cmd_ls()
 
 
 @app.command()

@@ -195,6 +195,17 @@ def test_prune(xdg):
     mock_prune.assert_called_once()
 
 
+def test_ls(xdg):
+    """ow ls calls cmd_ls, without loading the global config."""
+    with patch("ow.__main__.cmd_ls", autospec=True) as mock_ls, \
+            patch("ow.__main__._load_config", autospec=True) as mock_load_config:
+        result = runner.invoke(app, ["ls"])
+
+    assert result.exit_code == 0
+    mock_ls.assert_called_once_with()
+    mock_load_config.assert_not_called()
+
+
 def test_creates_config_if_missing(xdg):
     """If the global config doesn't exist yet, it is bootstrapped with default content."""
     assert not paths.config_file().exists()
