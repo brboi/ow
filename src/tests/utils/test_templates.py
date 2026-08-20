@@ -327,6 +327,24 @@ def test_render_mise_toml(tmp_path, config):
     assert "{{config_root}}/community" in result
 
 
+def test_render_mise_toml_exports_an_absolute_ow_workspace(tmp_path, config):
+    """OW_WORKSPACE takes one form — an absolute path. A name is rejected.
+
+    mise expands {{config_root}} to the directory holding mise.toml, which is
+    the workspace itself. Exporting the bare name here made every ow command
+    run under mise fail on the variable the workspace generated for itself.
+    """
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config(["community"])
+    ctx = build_template_context(ws, config, ws_dir)
+    result = render_template("mise.toml.j2", ctx)
+
+    exported = re.search(r'^OW_WORKSPACE = "(.*)"$', result, re.M)
+    assert exported, "the common bundle must export OW_WORKSPACE"
+    assert exported.group(1) == "{{config_root}}"
+
+
 # ---------------------------------------------------------------------------
 # Template rendering - pyrightconfig.json
 # ---------------------------------------------------------------------------

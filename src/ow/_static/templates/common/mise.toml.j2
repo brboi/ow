@@ -5,7 +5,7 @@ python = "3.12"
 postinstall = "python -m ensurepip --default-pip && pip install -r {% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}/requirements.txt -r {% raw %}{{config_root}}{% endraw %}/requirements-dev.txt"
 
 [env]
-OW_WORKSPACE = "{{ ws_name }}"
+OW_WORKSPACE = "{% raw %}{{config_root}}{% endraw %}"
 ODOO_RC = "{% raw %}{{config_root}}{% endraw %}/odoorc"
 _.python.venv = { path = ".venv", create = true }
 _.path = ["{% raw %}{{config_root}}{% endraw %}", "{% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}"]
