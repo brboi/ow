@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from ow.utils.config import Config
-from ow.utils import paths
+from ow.utils import index, paths
 from ow.utils.git import _run, parallel_per_repo
 
 
@@ -57,8 +57,30 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
     return _PruneResult(alias=alias, pruned_worktrees=pruned, deleted_branches=deleted)
 
 
+def _prune_index() -> None:
+    """Drop dead workspace-index entries and report how many disappeared.
+
+    known_workspaces() prunes as a side effect of reading, rewriting the
+    index file in the process. So the "before" count must come from the raw
+    file, read before that rewrite happens — reading it again afterwards
+    would just see the already-pruned result.
+    """
+    index_file = paths.index_file()
+    before = 0
+    if index_file.exists():
+        before = len([line for line in index_file.read_text().splitlines() if line.strip()])
+
+    live = index.known_workspaces()
+    dropped = before - len(live)
+    if dropped > 0:
+        noun = "entry" if dropped == 1 else "entries"
+        print(f"Dropped {dropped} dead index {noun}.")
+
+
 def cmd_prune(config: Config) -> None:
-    """Clean up stale worktree references and orphaned branches from bare repos."""
+    """Clean up stale worktree references, orphaned branches, and dead index entries."""
+    _prune_index()
+
     bare_repos_dir = paths.repos_dir()
     if not bare_repos_dir.exists():
         print("No bare repos found.")
