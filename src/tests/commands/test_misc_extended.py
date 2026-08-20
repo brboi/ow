@@ -98,21 +98,6 @@ class TestCmdUpdateExtended:
 
 
 # ---------------------------------------------------------------------------
-# __main__ — find_root, init via main
-# ---------------------------------------------------------------------------
-
-class TestMainExtended:
-    def test_main_init_path(self, tmp_path, monkeypatch, capsys):
-        from typer.testing import CliRunner
-        from ow.__main__ import app
-        runner = CliRunner()
-        monkeypatch.chdir(tmp_path)
-        result = runner.invoke(app, ["init"])
-        assert result.exit_code == 0
-        assert "Project initialized successfully" in result.output
-
-
-# ---------------------------------------------------------------------------
 # prune — edge case: no git command works
 # ---------------------------------------------------------------------------
 

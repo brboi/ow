@@ -5,7 +5,6 @@ from typing import Any, Optional
 import typer
 
 from ow.commands import (
-    cmd_create,
     cmd_init,
     cmd_prune,
     cmd_rebase,
@@ -117,23 +116,14 @@ def complete_workspace_name(ctx: typer.Context, incomplete: str) -> list[str]:
 
 @app.command()
 def init(
-    force: bool = typer.Option(False, "--force", help="Overwrite existing files without backup"),
-    force_with_backup: bool = typer.Option(False, "--force-with-backup", help="Backup existing files before overwrite"),
-) -> None:
-    """Initialize a new ow project."""
-    cmd_init(path=None, force=force, with_backup=force_with_backup)
-
-
-@app.command()
-def create(
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Workspace name"),
+    name: Optional[str] = typer.Argument(None, help="Workspace directory to create under the current one (default: the current directory itself)"),
     configuration: Optional[str] = typer.Option(None, "--configuration", "-c", help="Path to existing workspace config to duplicate"),
     template: Optional[list[str]] = typer.Option(None, "--template", "-t", help="Templates to apply (repeatable)", autocompletion=complete_gen_templates),
     repo: Optional[list[str]] = typer.Option(None, "--repo", "-r", help="Repo alias and branch spec (repeatable, e.g. -r community:master..x)", autocompletion=complete_gen_repos),
 ) -> None:
-    """Create a new workspace."""
+    """Create a workspace here, or in ./NAME."""
     config = _load_config()
-    cmd_create(config, name=name, templates=template, repos=_parse_repo_value(repo), configuration=configuration)
+    cmd_init(config, name=name, templates=template, repos=_parse_repo_value(repo), configuration=configuration)
 
 
 @app.command()

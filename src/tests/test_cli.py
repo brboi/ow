@@ -25,57 +25,66 @@ def test_version_flag(flag):
     assert result.output.startswith("ow ")
 
 
-def test_create_with_args(xdg):
-    """ow create -n myws -r community:master..x -t common calls cmd_create with correct args."""
-    with patch("ow.__main__.cmd_create") as mock_create:
+def test_init_with_args(xdg):
+    """ow init myws -r community:master..x -t common calls cmd_init with correct args."""
+    with patch("ow.__main__.cmd_init") as mock_init:
         result = runner.invoke(app, [
-            "create",
-            "-n", "myws",
+            "init",
+            "myws",
             "-r", "community:master..x",
             "-t", "common",
         ])
 
     assert result.exit_code == 0
-    mock_create.assert_called_once()
-    call_kwargs = mock_create.call_args
+    mock_init.assert_called_once()
+    call_kwargs = mock_init.call_args
     assert call_kwargs.kwargs["name"] == "myws"
     assert call_kwargs.kwargs["templates"] == ["common"]
     assert "community" in call_kwargs.kwargs["repos"]
     assert call_kwargs.kwargs["repos"]["community"] == BranchSpec("origin/master", "x")
 
 
-def test_create_rejects_repo_without_spec(xdg):
+def test_init_without_name_passes_none(xdg):
+    """`ow init` with no argument means "here" — the name must reach cmd_init as None."""
+    with patch("ow.__main__.cmd_init") as mock_init:
+        result = runner.invoke(app, ["init", "-r", "community:master..x", "-t", "common"])
+
+    assert result.exit_code == 0
+    assert mock_init.call_args.kwargs["name"] is None
+
+
+def test_init_rejects_repo_without_spec(xdg):
     """-r ALIAS with no ':' must fail loudly, not silently drop the repo."""
-    with patch("ow.__main__.cmd_create") as mock_create:
-        result = runner.invoke(app, ["create", "-n", "myws", "-r", "community"])
+    with patch("ow.__main__.cmd_init") as mock_init:
+        result = runner.invoke(app, ["init", "myws", "-r", "community"])
 
     assert result.exit_code != 0
     assert "ALIAS:SPEC" in result.output
     assert "community:master..x" in result.output
-    mock_create.assert_not_called()
+    mock_init.assert_not_called()
 
 
-def test_create_rejects_repo_with_empty_alias(xdg):
+def test_init_rejects_repo_with_empty_alias(xdg):
     """-r :spec has no alias to attach the spec to."""
-    with patch("ow.__main__.cmd_create") as mock_create:
-        result = runner.invoke(app, ["create", "-n", "myws", "-r", ":master..x"])
+    with patch("ow.__main__.cmd_init") as mock_init:
+        result = runner.invoke(app, ["init", "myws", "-r", ":master..x"])
 
     assert result.exit_code != 0
     assert "ALIAS:SPEC" in result.output
-    mock_create.assert_not_called()
+    mock_init.assert_not_called()
 
 
-def test_create_accepts_several_repos(xdg):
+def test_init_accepts_several_repos(xdg):
     """-r is repeatable."""
-    with patch("ow.__main__.cmd_create") as mock_create:
+    with patch("ow.__main__.cmd_init") as mock_init:
         result = runner.invoke(app, [
-            "create", "-n", "myws",
+            "init", "myws",
             "-r", "community:master..x",
             "-r", "enterprise:master..x",
         ])
 
     assert result.exit_code == 0
-    repos = mock_create.call_args.kwargs["repos"]
+    repos = mock_init.call_args.kwargs["repos"]
     assert sorted(repos) == ["community", "enterprise"]
 
 
@@ -195,7 +204,7 @@ def _write_remotes(*names):
 def test_complete_gen_templates(xdg):
     """Template completion returns correct template names."""
     _make_templates("common", "vscode", "zed")
-    names = _complete(["create", "-t"], "")
+    names = _complete(["init", "-t"], "")
     assert "common" in names
     assert "vscode" in names
     assert "zed" in names
@@ -204,12 +213,12 @@ def test_complete_gen_templates(xdg):
 def test_complete_gen_templates_with_prefix(xdg):
     """Template completion filters by prefix."""
     _make_templates("common", "vscode")
-    assert _complete(["create", "-t"], "v") == ["vscode"]
+    assert _complete(["init", "-t"], "v") == ["vscode"]
 
 
 def test_complete_gen_templates_none_taken(xdg):
     """Template completion still offers the packaged templates when nothing local exists."""
-    names = _complete(["create", "-t"], "")
+    names = _complete(["init", "-t"], "")
     assert "common" in names
     assert "vscode" in names
 
@@ -217,7 +226,7 @@ def test_complete_gen_templates_none_taken(xdg):
 def test_complete_gen_repos(xdg):
     """Repo completion returns unused aliases."""
     _write_remotes("community", "enterprise")
-    names = _complete(["create", "-r"], "")
+    names = _complete(["init", "-r"], "")
     assert "community" in names
     assert "enterprise" in names
 
@@ -225,7 +234,7 @@ def test_complete_gen_repos(xdg):
 def test_complete_gen_repos_excludes_used(xdg):
     """Repo completion excludes aliases already given on the command line."""
     _write_remotes("community", "enterprise")
-    names = _complete(["create", "-r", "community:master", "-r"], "")
+    names = _complete(["init", "-r", "community:master", "-r"], "")
     assert "community" not in names
     assert "enterprise" in names
 
@@ -233,12 +242,12 @@ def test_complete_gen_repos_excludes_used(xdg):
 def test_complete_gen_repos_with_prefix(xdg):
     """Repo completion filters by prefix."""
     _write_remotes("community", "enterprise")
-    assert _complete(["create", "-r"], "e") == ["enterprise"]
+    assert _complete(["init", "-r"], "e") == ["enterprise"]
 
 
 def test_complete_gen_repos_default_bootstrap(xdg):
     """First run with no config file yet: bootstrap seeds the default community remote."""
-    assert _complete(["create", "-r"], "") == ["community"]
+    assert _complete(["init", "-r"], "") == ["community"]
 
 
 def test_complete_workspace_name_disabled(xdg):
