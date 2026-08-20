@@ -79,7 +79,7 @@ def ws_config() -> WorkspaceConfig:
 
 @pytest.fixture
 def workspace_dir(tmp_path: Path) -> Path:
-    """Create a temporary workspace with a .ow/config file."""
+    """Create a temporary workspace with a .ow/config.toml file."""
     def _make(
         templates: list[str] | None = None,
         repos: dict[str, str] | None = None,
@@ -99,7 +99,7 @@ def workspace_dir(tmp_path: Path) -> Path:
             templates=templates or ["common"],
             vars=vars or {},
         )
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         return ws_dir
     return _make
 

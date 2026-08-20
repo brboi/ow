@@ -68,7 +68,7 @@ class TestCmdUpdateExtended:
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         config = config_with_remotes
 
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
@@ -84,7 +84,7 @@ class TestCmdUpdateExtended:
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={}, templates=["common"])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         config = config_with_remotes
 
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):

@@ -143,7 +143,7 @@ def complete_workspace_name(ctx: typer.Context, incomplete: str) -> list[str]:
         if workspaces_dir.exists():
             return [
                 d.name for d in workspaces_dir.iterdir()
-                if d.is_dir() and (d / ".ow" / "config").exists()
+                if d.is_dir() and (d / ".ow" / "config.toml").exists()
                 and d.name.startswith(incomplete)
             ]
     except Exception:

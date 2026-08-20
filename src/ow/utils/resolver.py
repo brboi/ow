@@ -13,9 +13,9 @@ from ow.utils.display import err_console
 
 
 def _find_ow_config(start: Path) -> Path | None:
-    """Walk up from start looking for .ow/config."""
+    """Walk up from start looking for .ow/config.toml."""
     for parent in [start] + list(start.parents):
-        candidate = parent / ".ow" / "config"
+        candidate = parent / ".ow" / "config.toml"
         if candidate.exists():
             return candidate
     return None
@@ -60,9 +60,9 @@ def _by_name(config: Config, name: str) -> tuple[Path, WorkspaceConfig]:
     ws_dir = config.root_dir / "workspaces" / name
     if not ws_dir.exists():
         _fail(f"Workspace '{name}' not found")
-    config_file = ws_dir / ".ow" / "config"
+    config_file = ws_dir / ".ow" / "config.toml"
     if not config_file.exists():
-        _fail(f"Workspace '{name}' is not a valid workspace (missing .ow/config)")
+        _fail(f"Workspace '{name}' is not a valid workspace (missing .ow/config.toml)")
     return ws_dir.resolve(), load_workspace_config(config_file)
 
 
@@ -81,7 +81,7 @@ def resolve_workspace(
       - `name`                  -> <current project>/workspaces/<name>
       - OW_WORKSPACE=<name>     -> <current project>/workspaces/<name>
       - OW_WORKSPACE=<path>     -> that path, project found by walking up
-      - neither                 -> walk up from cwd for .ow/config
+      - neither                 -> walk up from cwd for .ow/config.toml
     """
     if name is not None:
         return (config, *_by_name(config, name))
@@ -90,7 +90,7 @@ def resolve_workspace(
     if env_val:
         if _looks_like_path(env_val):
             ws_dir = Path(env_val).expanduser().resolve()
-            config_file = ws_dir / ".ow" / "config"
+            config_file = ws_dir / ".ow" / "config.toml"
             if not config_file.exists():
                 _fail(
                     f"Error: OW_WORKSPACE={env_val!r} is not a workspace",
@@ -103,7 +103,7 @@ def resolve_workspace(
             )
 
         ws_dir = (config.root_dir / "workspaces" / env_val).resolve()
-        config_file = ws_dir / ".ow" / "config"
+        config_file = ws_dir / ".ow" / "config.toml"
         if not config_file.exists():
             _fail(
                 f"Error: OW_WORKSPACE={env_val!r} not found",

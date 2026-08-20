@@ -39,7 +39,7 @@ class TestValidateCreateInputs:
         tpl = tmp_path / "templates" / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
-        src_config = tmp_path / "src" / ".ow" / "config"
+        src_config = tmp_path / "src" / ".ow" / "config.toml"
         src_config.parent.mkdir(parents=True)
         src_config.write_text('templates = ["common"]\n\n[repos]\ncommunity = "master..my-branch"\n')
         source_ws, name, ws_dir = _validate_create_inputs(
@@ -62,7 +62,7 @@ class TestValidateCreateInputs:
         tpl = tmp_path / "templates" / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
-        src_config = tmp_path / "src" / ".ow" / "config"
+        src_config = tmp_path / "src" / ".ow" / "config.toml"
         src_config.parent.mkdir(parents=True)
         src_config.write_text('templates = ["common", "nonexistent"]\n\n[repos]\ncommunity = "master"\n')
         with pytest.raises(SystemExit) as exc:
@@ -75,7 +75,7 @@ class TestValidateCreateInputs:
         tpl = tmp_path / "templates" / "common"
         tpl.mkdir(parents=True)
         config = config_with_remotes
-        src_config = tmp_path / "src" / ".ow" / "config"
+        src_config = tmp_path / "src" / ".ow" / "config.toml"
         src_config.parent.mkdir(parents=True)
         src_config.write_text('templates = ["common"]\n\n[repos]\nunknown_alias = "master"\n')
         with pytest.raises(SystemExit) as exc:

@@ -79,7 +79,7 @@ def _validate_create_inputs(
     if configuration is not None:
         src_path = Path(configuration)
         if src_path.is_dir():
-            src_config_file = src_path / ".ow" / "config"
+            src_config_file = src_path / ".ow" / "config.toml"
         else:
             src_config_file = src_path
         if not src_config_file.exists():
@@ -224,7 +224,7 @@ def _check_duplicate_branches(new_repos: dict[str, BranchSpec], config: Config) 
     for existing_ws_dir in sorted(ws_root.iterdir()):
         if not existing_ws_dir.is_dir():
             continue
-        ow_config = existing_ws_dir / ".ow" / "config"
+        ow_config = existing_ws_dir / ".ow" / "config.toml"
         if not ow_config.exists():
             continue
         existing = load_workspace_config(ow_config)
@@ -284,7 +284,7 @@ def cmd_create(
         print("Aborted.")
         return
 
-    ow_config_path = ws_dir / ".ow" / "config"
+    ow_config_path = ws_dir / ".ow" / "config.toml"
     if ow_config_path.exists():
         print(f"Error: workspace '{resolved_name}' already exists at workspaces/{resolved_name}", file=sys.stderr)
         sys.exit(1)

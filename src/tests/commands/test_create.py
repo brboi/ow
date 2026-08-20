@@ -113,7 +113,7 @@ def test_cmd_create_rejects_duplicate_branch(tmp_path, capsys, config_with_remot
     (tmp_path / "templates" / "common").mkdir(parents=True)
     existing_ws = tmp_path / "workspaces" / "parrot"
     existing_ws.mkdir(parents=True)
-    ow_config = existing_ws / ".ow" / "config"
+    ow_config = existing_ws / ".ow" / "config.toml"
     ow_config.parent.mkdir(parents=True)
     ow_config.write_text('templates = ["common"]\n\n[repos]\ncommunity = "master..master-parrot"\n')
     config = config_with_remotes
@@ -145,7 +145,7 @@ def test_cmd_create_accepts_different_branch(tmp_path, config_with_remotes):
     (tmp_path / "templates" / "common").mkdir(parents=True)
     existing_ws = tmp_path / "workspaces" / "parrot"
     existing_ws.mkdir(parents=True)
-    ow_config = existing_ws / ".ow" / "config"
+    ow_config = existing_ws / ".ow" / "config.toml"
     ow_config.parent.mkdir(parents=True)
     ow_config.write_text('templates = ["common"]\n\n[repos]\ncommunity = "master..master-parrot"\n')
     config = config_with_remotes
@@ -170,7 +170,7 @@ def test_cmd_create_configuration_duplicates(tmp_path, config_with_remotes):
     (tmp_path / "templates" / "vscode").mkdir(parents=True)
     src_ws = tmp_path / "workspaces" / "parrot"
     src_ws.mkdir(parents=True)
-    ow_config = src_ws / ".ow" / "config"
+    ow_config = src_ws / ".ow" / "config.toml"
     ow_config.parent.mkdir(parents=True)
     ow_config.write_text(
         'templates = ["common", "vscode"]\n\n'
@@ -225,7 +225,7 @@ def test_cmd_create_configuration_rejects_unknown_remote(tmp_path, capsys):
     (tmp_path / "templates" / "common").mkdir(parents=True)
     src_ws = tmp_path / "workspaces" / "parrot"
     src_ws.mkdir(parents=True)
-    ow_config = src_ws / ".ow" / "config"
+    ow_config = src_ws / ".ow" / "config.toml"
     ow_config.parent.mkdir(parents=True)
     ow_config.write_text(
         'templates = ["common"]\n\n'
@@ -411,7 +411,7 @@ def test_check_duplicate_branches_detects_same_local_branch(tmp_path, capsys, co
         repos={"community": BranchSpec("origin/master", "shared-branch")},
         templates=["common"],
     )
-    write_workspace_config(existing_ws / ".ow" / "config", existing_config)
+    write_workspace_config(existing_ws / ".ow" / "config.toml", existing_config)
 
     new_repos = {"community": BranchSpec("origin/master", "shared-branch")}
 
@@ -433,7 +433,7 @@ def test_check_duplicate_branches_no_duplicate_if_different_local_branch(tmp_pat
         repos={"community": BranchSpec("origin/master", "other-branch")},
         templates=["common"],
     )
-    write_workspace_config(existing_ws / ".ow" / "config", existing_config)
+    write_workspace_config(existing_ws / ".ow" / "config.toml", existing_config)
 
     new_repos = {"community": BranchSpec("origin/master", "my-branch")}
 
@@ -452,7 +452,7 @@ def test_check_duplicate_branches_no_duplicate_if_different_alias(tmp_path, caps
         repos={"enterprise": BranchSpec("origin/master", "shared-branch")},
         templates=["common"],
     )
-    write_workspace_config(existing_ws / ".ow" / "config", existing_config)
+    write_workspace_config(existing_ws / ".ow" / "config.toml", existing_config)
 
     new_repos = {"community": BranchSpec("origin/master", "shared-branch")}
 
@@ -463,11 +463,11 @@ def test_check_duplicate_branches_no_duplicate_if_different_alias(tmp_path, caps
 
 
 def test_check_duplicate_branches_ignores_workspaces_without_ow_config(tmp_path, capsys, config):
-    """Skip workspaces that have no .ow/config file."""
+    """Skip workspaces that have no .ow/config.toml file."""
     ws_root = tmp_path / "workspaces"
     existing_ws = ws_root / "existing"
     existing_ws.mkdir(parents=True)
-    # No .ow/config created
+    # No .ow/config.toml created
 
     new_repos = {"community": BranchSpec("origin/master", "some-branch")}
 

@@ -264,7 +264,7 @@ def _make_remotes(root, *names):
 def _make_workspaces(root, *names, invalid=()):
     for name in names:
         (root / "workspaces" / name / ".ow").mkdir(parents=True)
-        (root / "workspaces" / name / ".ow" / "config").touch()
+        (root / "workspaces" / name / ".ow" / "config.toml").touch()
     for name in invalid:
         (root / "workspaces" / name).mkdir(parents=True)
 

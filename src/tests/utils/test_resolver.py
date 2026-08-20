@@ -23,7 +23,7 @@ def _make_ws(project_root, name):
     ws_dir = project_root / "workspaces" / name
     (ws_dir / ".ow").mkdir(parents=True)
     write_workspace_config(
-        ws_dir / ".ow" / "config",
+        ws_dir / ".ow" / "config.toml",
         WorkspaceConfig(templates=["common"], repos={}, vars={}),
     )
     return ws_dir
@@ -33,7 +33,7 @@ class TestResolveWorkspace:
     def test_env_var_resolution(self, tmp_path, config):
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
-        ow_config = ws_dir / ".ow" / "config"
+        ow_config = ws_dir / ".ow" / "config.toml"
         ow_config.parent.mkdir(parents=True)
         ow_config.write_text(textwrap.dedent("""\
             templates = ["common"]
@@ -61,7 +61,7 @@ class TestResolveWorkspace:
         ws_dir = tmp_path / "elsewhere" / "my-ws"
         (ws_dir / ".ow").mkdir(parents=True)
         write_workspace_config(
-            ws_dir / ".ow" / "config",
+            ws_dir / ".ow" / "config.toml",
             WorkspaceConfig(templates=["common"], repos={}, vars={}),
         )
 
@@ -71,7 +71,7 @@ class TestResolveWorkspace:
         assert resolved_dir == ws_dir
 
     def test_cwd_walkup(self, tmp_path, monkeypatch, config):
-        """resolve_workspace walks up from cwd to find .ow/config."""
+        """resolve_workspace walks up from cwd to find .ow/config.toml."""
         ws_dir = _make_ws(tmp_path, "walkup")
         subdir = ws_dir / "community" / "odoo"
         subdir.mkdir(parents=True)
@@ -95,6 +95,21 @@ class TestResolveWorkspace:
 
         _, resolved_dir, _ = resolve_workspace(config, name="test")
         assert resolved_dir == ws_dir
+
+    def test_workspace_config_is_named_config_toml(self, tmp_path, monkeypatch, config):
+        """The workspace config file is .ow/config.toml.toml, not the old .ow/config.toml (task 3)."""
+        monkeypatch.delenv("OW_WORKSPACE", raising=False)
+        ws_dir = tmp_path / "workspaces" / "toml-check"
+        ws_dir.mkdir(parents=True)
+        write_workspace_config(
+            ws_dir / ".ow" / "config.toml",
+            WorkspaceConfig(templates=["common"], repos={}, vars={}),
+        )
+
+        _, resolved_dir, ws = resolve_workspace(config, name="toml-check")
+
+        assert resolved_dir == ws_dir
+        assert ws.templates == ["common"]
 
     def test_resolve_workspace_by_name_not_found(self, tmp_path, monkeypatch, capsys, config):
         monkeypatch.delenv("OW_WORKSPACE", raising=False)
@@ -156,7 +171,7 @@ class TestProjectRootFollowsTheWorkspace:
         ws_dir = tmp_path / "orphan" / "ws"
         (ws_dir / ".ow").mkdir(parents=True)
         write_workspace_config(
-            ws_dir / ".ow" / "config",
+            ws_dir / ".ow" / "config.toml",
             WorkspaceConfig(templates=[], repos={}, vars={}),
         )
 
@@ -211,12 +226,12 @@ class TestOwWorkspaceFailsLoudly:
         assert str(stray) in err
 
     def test_bare_name_never_falls_back_to_a_relative_path(self, tmp_path, monkeypatch, capsys):
-        """The old code fell through to Path(env_val)/.ow/config, relative to cwd."""
+        """The old code fell through to Path(env_val)/.ow/config.toml, relative to cwd."""
         project = _make_project(tmp_path / "devrepo", alias="owl")
         decoy = tmp_path / "cwd" / "quattromori"
         (decoy / ".ow").mkdir(parents=True)
         write_workspace_config(
-            decoy / ".ow" / "config",
+            decoy / ".ow" / "config.toml",
             WorkspaceConfig(templates=[], repos={}, vars={}),
         )
 

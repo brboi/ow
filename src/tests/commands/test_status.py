@@ -16,7 +16,7 @@ def write_ow_config(ws_dir: Path, templates: list[str], repos: dict[str, str], v
         templates=templates,
         vars=vars or {},
     )
-    write_workspace_config(ws_dir / ".ow" / "config", ws)
+    write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
 
 
 def _mock_parallel_exec(tasks):

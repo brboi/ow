@@ -69,7 +69,7 @@ class Config:
 
 
 def load_workspace_config(path: Path) -> WorkspaceConfig:
-    """Read a .ow/config TOML file from an individual workspace."""
+    """Read the .ow/config.toml file from an individual workspace."""
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
@@ -91,7 +91,7 @@ def load_workspace_config(path: Path) -> WorkspaceConfig:
 
 
 def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
-    """Write a .ow/config TOML file for an individual workspace."""
+    """Write the .ow/config.toml file for an individual workspace."""
     data: dict[str, Any] = {
         "templates": ws.templates,
         "repos": {alias: spec.to_spec_str() for alias, spec in ws.repos.items()},

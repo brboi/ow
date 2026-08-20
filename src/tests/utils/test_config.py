@@ -141,7 +141,7 @@ http_port = 8067
 
 def test_load_workspace_config():
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(SAMPLE_WS_CONFIG)
         ws = load_workspace_config(config_path)
@@ -160,7 +160,7 @@ def test_load_workspace_config_no_vars():
         community = "master"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(toml)
         ws = load_workspace_config(config_path)
@@ -174,7 +174,7 @@ def test_load_workspace_config_missing_templates():
         community = "master"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(toml)
         with pytest.raises(ValueError, match="missing required 'templates'"):
@@ -190,7 +190,7 @@ def test_load_workspace_config_empty_templates():
         community = "master"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(toml)
         ws = load_workspace_config(config_path)
@@ -205,7 +205,7 @@ def test_load_workspace_config_templates_not_list():
         community = "master"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(toml)
         with pytest.raises(ValueError, match="must be a list"):
@@ -226,7 +226,7 @@ def test_write_workspace_config_round_trip():
         vars={"http_port": 8067},
     )
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         write_workspace_config(config_path, ws)
         ws2 = load_workspace_config(config_path)
 
@@ -241,7 +241,7 @@ def test_write_workspace_config_no_vars():
         templates=["common"],
     )
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         write_workspace_config(config_path, ws)
         content = config_path.read_text()
         ws2 = load_workspace_config(config_path)
@@ -258,7 +258,7 @@ def test_write_workspace_config_detached():
         templates=["common"],
     )
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         write_workspace_config(config_path, ws)
         ws2 = load_workspace_config(config_path)
 
@@ -272,7 +272,7 @@ def test_write_workspace_config_non_origin_remote():
         templates=["common"],
     )
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         write_workspace_config(config_path, ws)
         ws2 = load_workspace_config(config_path)
 

@@ -19,7 +19,7 @@ def cmd_update(config: Config, workspace: str | None = None) -> None:
     missing_vars = {k: v for k, v in config.vars.items() if k not in ws.vars}
     if missing_vars:
         ws.vars = {**ws.vars, **missing_vars}
-        ow_config_path = ws_dir / ".ow" / "config"
+        ow_config_path = ws_dir / ".ow" / "config.toml"
         write_workspace_config(ow_config_path, ws)
 
     mise_toml = ws_dir / "mise.toml"

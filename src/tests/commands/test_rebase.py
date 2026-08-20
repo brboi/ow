@@ -21,14 +21,14 @@ def make_workspace(tmp_path: Path, repos: dict[str, str]) -> tuple[Config, Path]
         repos={a: parse_branch_spec(s) for a, s in repos.items()},
         templates=["common"],
     )
-    write_workspace_config(ws_dir / ".ow" / "config", ws)
+    write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
     config = Config(vars={}, remotes={}, root_dir=tmp_path)
     return config, ws_dir
 
 
 def _ws(ws_dir: Path) -> WorkspaceConfig:
     from ow.utils.config import load_workspace_config
-    return load_workspace_config(ws_dir / ".ow" / "config")
+    return load_workspace_config(ws_dir / ".ow" / "config.toml")
 
 
 def fetch_returning(tracks: dict[str, str]) -> FetchOutcome:

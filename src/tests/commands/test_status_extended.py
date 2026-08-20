@@ -219,7 +219,7 @@ class TestCmdStatusExtended:
             repos={"community": BranchSpec("origin/master")},
             templates=["common"],
         )
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
 
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),

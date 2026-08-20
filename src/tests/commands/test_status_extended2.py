@@ -15,7 +15,7 @@ class TestCmdStatusErrorPaths:
         ws_dir.mkdir(parents=True)
         (ws_dir / "community").mkdir()
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
             patch("ow.commands.status.fetch_workspace_refs",
@@ -34,7 +34,7 @@ class TestCmdStatusErrorPaths:
         ws_dir.mkdir(parents=True)
         (ws_dir / "community").mkdir()
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         resolved = BranchSpec("origin/master")
         fetch_return = FetchOutcome(
             tracks={"community": "origin/master"}, upstreams={},
@@ -60,7 +60,7 @@ class TestCmdStatusErrorPaths:
         (ws_dir / "community").mkdir()
         (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         resolved = BranchSpec("origin/master")
         fetch_return = FetchOutcome(
             tracks={"community": "origin/master"}, upstreams={},

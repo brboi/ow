@@ -18,7 +18,7 @@ class TestCmdUpdate:
         (repo / "addons").mkdir()
         (repo / "odoo" / "addons").mkdir(parents=True)
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         config = config_with_remotes
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
@@ -30,7 +30,7 @@ class TestCmdUpdate:
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={}, templates=["common"])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         config = config_with_remotes
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
@@ -42,6 +42,6 @@ class TestCmdUpdate:
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={}, templates=["common"])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         with pytest.raises(SystemExit):
             cmd_update(config, workspace="nonexistent")
