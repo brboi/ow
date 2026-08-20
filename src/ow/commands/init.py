@@ -155,21 +155,21 @@ def _workspace_config_from_flags(
     Used when stdin is not a terminal. The flags have to carry everything;
     what they don't carry is named, not prompted for.
     """
-    chosen_templates, chosen_repos = _preselection(source_ws, templates, repos)
-
-    missing: list[str] = []
-    if not chosen_templates:
-        avail = ", ".join(available_templates(config))
-        missing.append(f"-t/--template NAME     available: {avail}")
-    if not chosen_repos:
-        avail = ", ".join(config.remotes) or "(none configured)"
-        missing.append(f"-r/--repo ALIAS:SPEC   aliases: {avail}")
-    if missing:
-        print("Error: stdin is not a terminal, so ow init cannot ask. Missing:", file=sys.stderr)
-        for line in missing:
-            print(f"         {line}", file=sys.stderr)
+    # Refuse only when nothing at all was given. A repo-less workspace is
+    # legitimate here too — the interactive path already allows ticking no
+    # repo, so `ow init tools -t common` in a script has to be allowed as
+    # well. This guard exists solely to catch the accidental bare `ow init`
+    # in a non-interactive context.
+    if templates is None and repos is None and source_ws is None:
+        avail_t = ", ".join(available_templates(config))
+        avail_r = ", ".join(config.remotes) or "(none configured)"
+        print("Error: stdin is not a terminal, so ow init cannot ask. Nothing was given:", file=sys.stderr)
+        print(f"         -t/--template NAME     available: {avail_t}", file=sys.stderr)
+        print(f"         -r/--repo ALIAS:SPEC   aliases: {avail_r}", file=sys.stderr)
         print("       or pass -c/--configuration to copy an existing workspace.", file=sys.stderr)
         sys.exit(1)
+
+    chosen_templates, chosen_repos = _preselection(source_ws, templates, repos)
 
     ws_vars = dict(source_ws.vars) if source_ws is not None else dict(config.vars)
     return WorkspaceConfig(repos=chosen_repos, templates=chosen_templates, vars=ws_vars)

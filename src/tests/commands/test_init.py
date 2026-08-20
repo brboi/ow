@@ -10,6 +10,7 @@ from ow.utils.config import (
     BranchSpec,
     Config,
     WorkspaceConfig,
+    load_workspace_config,
     parse_branch_spec,
     write_workspace_config,
 )
@@ -191,30 +192,31 @@ def test_init_refuses_the_current_directory_when_it_is_already_a_workspace(tmp_p
 # The questionnaire only happens on a terminal
 # ---------------------------------------------------------------------------
 
-def test_init_without_a_tty_refuses_when_no_template_is_given(tmp_path, monkeypatch, capsys, config_with_remotes):
+def test_init_without_a_tty_refuses_when_nothing_is_given(tmp_path, monkeypatch, capsys, config_with_remotes):
+    """No -t, no -r, no -c: the one case the refusal exists to catch."""
     monkeypatch.chdir(tmp_path)
 
     with _tty(False), _questionary_answers(), _no_git(tmp_path), pytest.raises(SystemExit) as exc:
-        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes)
 
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "not a terminal" in err
     assert "--template" in err
-    assert not (tmp_path / ".ow" / "config.toml").exists()
-
-
-def test_init_without_a_tty_refuses_when_no_repo_is_given(tmp_path, monkeypatch, capsys, config_with_remotes):
-    monkeypatch.chdir(tmp_path)
-
-    with _tty(False), _questionary_answers(), _no_git(tmp_path), pytest.raises(SystemExit) as exc:
-        cmd_init(config_with_remotes, templates=["common"])
-
-    assert exc.value.code == 1
-    err = capsys.readouterr().err
-    assert "not a terminal" in err
     assert "--repo" in err
     assert not (tmp_path / ".ow" / "config.toml").exists()
+
+
+def test_init_without_a_tty_succeeds_with_only_a_template(tmp_path, monkeypatch, config_with_remotes):
+    """A repo-less workspace is legitimate: the interactive path allows it too."""
+    monkeypatch.chdir(tmp_path)
+
+    with _tty(False), _questionary_answers(), _no_git(tmp_path):
+        cmd_init(config_with_remotes, templates=["common"])
+
+    ws = load_workspace_config(tmp_path / ".ow" / "config.toml")
+    assert ws.templates == ["common"]
+    assert ws.repos == {}
 
 
 def test_init_without_a_tty_asks_nothing(tmp_path, monkeypatch, config_with_remotes):
@@ -581,3 +583,35 @@ def test_init_accepts_a_different_branch(tmp_path, monkeypatch, config_with_remo
         )
 
     assert (tmp_path / "new-ws" / ".ow" / "config.toml").exists()
+
+
+def test_init_with_a_tty_checks_duplicates_before_asking_anything(tmp_path, monkeypatch, capsys, config_with_remotes):
+    """The interactive path fails on a doomed `-r` before the questionnaire runs.
+
+    Pins the ordering of the early `_check_duplicate_branches` call in
+    `_gather_workspace_config_interactive` — not just that the command
+    eventually exits with an error, but that no question was ever asked.
+    """
+    _remembered_workspace(tmp_path / "parrot", "community", "master..master-parrot")
+    monkeypatch.chdir(tmp_path)
+
+    with (
+        _tty(True),
+        patch("questionary.checkbox") as checkbox,
+        patch("questionary.text") as text,
+        patch("questionary.confirm") as confirm,
+        pytest.raises(SystemExit) as exc,
+    ):
+        cmd_init(
+            config_with_remotes,
+            name="new-ws",
+            repos={"community": BranchSpec("origin/master", "master-parrot")},
+        )
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "already uses" in err.lower()
+    assert "master-parrot" in err
+    checkbox.assert_not_called()
+    text.assert_not_called()
+    confirm.assert_not_called()
