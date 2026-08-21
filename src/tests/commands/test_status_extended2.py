@@ -24,7 +24,7 @@ class TestCmdStatusErrorPaths:
                   )),
             patch("ow.commands.status.warn_if_drifted"),
         ):
-            cmd_status(config)
+            cmd_status(config, fetch=True)
         captured = capsys.readouterr()
         assert "error" in captured.out.lower()
 
@@ -103,7 +103,7 @@ class TestCmdStatusErrorPaths:
             patch("ow.commands.status.get_remote_url", return_value="file:///srv/mirrors/odoo.git"),
             patch("ow.commands.status.warn_if_drifted"),
         ):
-            cmd_status(config)
+            cmd_status(config, fetch=True)
         captured = capsys.readouterr()
         assert "links" not in captured.out
 
@@ -123,6 +123,6 @@ class TestCmdStatusErrorPaths:
             patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
             patch("ow.commands.status.warn_if_drifted"),
         ):
-            cmd_status(config)
+            cmd_status(config, fetch=True)
         captured = capsys.readouterr()
         assert alias in captured.out
