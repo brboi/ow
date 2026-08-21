@@ -88,9 +88,6 @@ def _kill_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
             pass
 
 
-def live_children() -> int:
-    with _children_lock:
-        return len(_children)
 
 
 def terminate_children(grace: float = 2.0) -> int:
@@ -364,18 +361,6 @@ def ensure_bare_repo(
                 )
 
 
-def ensure_ref(bare_repo: Path, remote: str, branch: str) -> None:
-    ref = f"refs/remotes/{remote}/{branch}"
-    result = _run(
-        ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        run_cmd(
-            ["git", "-C", str(bare_repo), "fetch", remote, f"{branch}:refs/remotes/{remote}/{branch}"],
-            label=bare_repo.stem,
-            check=True,
-        )
 
 
 def _ensure_base_ref_non_fatal(bare_repo: Path, spec: BranchSpec) -> None:
@@ -668,10 +653,6 @@ def git(repo: Path, *args, quiet: bool = False, **kwargs) -> subprocess.Complete
     return run_cmd(["git", "-C", str(repo)] + list(args), quiet=quiet, label=label, **kwargs)
 
 
-def git_fetch(repo: Path, remote: str, refspec: str, *, force: bool = False, **kwargs) -> None:
-    """Fetch with optional force (+refspec)."""
-    ref = f"+{refspec}" if force else refspec
-    git(repo, "fetch", remote, ref, **kwargs)
 
 
 def _git_dir(worktree: Path) -> Path | None:

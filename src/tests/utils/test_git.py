@@ -13,7 +13,6 @@ from ow.utils.git import (
     create_worktree,
     detach_worktree,
     ensure_bare_repo,
-    ensure_ref,
     get_all_remote_refs,
     get_remote_ref_for_branch,
     get_remote_url,
@@ -22,7 +21,6 @@ from ow.utils.git import (
     get_worktree_branch,
     get_worktree_head,
     git,
-    git_fetch,
     ordered_remotes,
     parallel_per_repo,
     resolve_spec,
@@ -721,37 +719,6 @@ def test_ensure_bare_repo_ordered_remotes(tmp_path):
     assert "remote.alpha.url" in calls[2].args[0][-2]
     assert "remote.zebra.url" in calls[3].args[0][-2]
 
-
-# ---------------------------------------------------------------------------
-# ensure_ref
-# ---------------------------------------------------------------------------
-
-def test_ensure_ref_fetches_when_missing(tmp_path):
-    bare_repo = tmp_path / "community.git"
-    bare_repo.mkdir()
-
-    mock_check = MagicMock(returncode=1)
-
-    with patch("ow.utils.git._run", side_effect=[mock_check, MagicMock()]) as mock_run:
-        ensure_ref(bare_repo, "origin", "master")
-
-    assert mock_run.call_count == 2
-    assert mock_run.call_args_list[1] == call(
-        ["git", "-C", str(bare_repo), "fetch", "origin", "master:refs/remotes/origin/master"],
-        check=True,
-    )
-
-
-def test_ensure_ref_skips_fetch_when_exists(tmp_path):
-    bare_repo = tmp_path / "community.git"
-    bare_repo.mkdir()
-
-    mock_check = MagicMock(returncode=0)
-
-    with patch("ow.utils.git._run", return_value=mock_check) as mock_run:
-        ensure_ref(bare_repo, "origin", "master")
-
-    assert mock_run.call_count == 1  # only the rev-parse check
 
 
 # ---------------------------------------------------------------------------
@@ -1580,42 +1547,6 @@ def test_git_passes_quiet_flag(tmp_path):
         ["git", "-C", str(repo), "status"], quiet=True, label="repo", check=True
     )
 
-
-# ---------------------------------------------------------------------------
-# git_fetch
-# ---------------------------------------------------------------------------
-
-
-def test_git_fetch_basic(tmp_path):
-    """git_fetch builds correct fetch command."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    with patch("ow.utils.git.git") as mock_git:
-        git_fetch(repo, "origin", "master:refs/remotes/origin/master", check=True)
-
-    mock_git.assert_called_once_with(
-        repo, "fetch", "origin", "master:refs/remotes/origin/master", check=True
-    )
-
-
-def test_git_fetch_force(tmp_path):
-    """git_fetch with force=True prepends + to refspec."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    with patch("ow.utils.git.git") as mock_git:
-        git_fetch(
-            repo,
-            "origin",
-            "master:refs/remotes/origin/master",
-            force=True,
-            check=True,
-        )
-
-    mock_git.assert_called_once_with(
-        repo, "fetch", "origin", "+master:refs/remotes/origin/master", check=True
-    )
 
 
 # ---------------------------------------------------------------------------
