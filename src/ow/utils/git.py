@@ -1,4 +1,5 @@
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -156,6 +157,56 @@ def _get_bare_config(bare_repo: Path) -> dict[str, str]:
     return config
 
 
+def _is_bare_repo(path: Path) -> bool:
+    """True only if `path` is itself a git repository.
+
+    `--absolute-git-dir` rather than a bare `--git-dir` check: git discovers
+    repositories by walking upwards, so a plain directory that happens to sit
+    inside one would otherwise answer yes. Comparing what git resolved against
+    the path asked about pins the answer to this directory.
+    """
+    if not path.is_dir():
+        return False
+    result = _run(
+        ["git", "-C", str(path), "rev-parse", "--absolute-git-dir"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return False
+    return Path(result.stdout.strip()) == path
+
+
+def _clone_bare_into_place(alias: str, url: str, bare_repo: Path) -> None:
+    """Clone into a sibling directory and move it into place once it is whole.
+
+    Nothing appears at the final path until there is a complete repository to
+    put there, so a clone that is interrupted — terminate_children() SIGKILLs
+    after a two-second grace, which an Odoo-sized clone will not always beat —
+    leaves no half-repo for the next run to trust.
+
+    The staging path is derived from the alias rather than randomised, so a
+    killed run leaves at most one leftover and the next one reuses the space
+    instead of accumulating another copy.
+    """
+    staging = bare_repo.with_name(f"{bare_repo.name}.incoming")
+    bare_repo.parent.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        _clone_bare(alias, url, staging)
+        if bare_repo.exists():
+            # Whatever is there is not a repository, but ow did not put it
+            # there and cannot know it holds nothing of the user's. One slot,
+            # so a repeatedly-repaired repo cannot fill the disk with copies.
+            broken = bare_repo.with_name(f"{bare_repo.name}.broken")
+            shutil.rmtree(broken, ignore_errors=True)
+            os.rename(bare_repo, broken)
+            print(f"  [{alias}] {bare_repo} was not a git repository; moved to {broken}",
+                  file=sys.stderr)
+        os.rename(staging, bare_repo)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def _undefined_repo_message(alias: str, remotes: dict[str, RemoteConfig]) -> str:
     """Why ow cannot clone `alias`, in the user's terms and with a file to open.
 
@@ -214,11 +265,11 @@ def ensure_bare_repo(
     bare_repos_dir: Path,
 ) -> None:
     bare_repo = bare_repos_dir / f"{alias}.git"
-    if not bare_repo.exists():
+    if not _is_bare_repo(bare_repo):
         origin = remotes.get("origin")
         if not origin:
             raise ValueError(_undefined_repo_message(alias, remotes))
-        _clone_bare(alias, origin.url, bare_repo)
+        _clone_bare_into_place(alias, origin.url, bare_repo)
 
     # Configure non-origin remotes (skip writes when values already match)
     current_config = _get_bare_config(bare_repo)

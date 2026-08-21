@@ -1,9 +1,11 @@
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from ow.utils.config import BranchSpec, RemoteConfig
+from ow.utils import git as git_mod
 from ow.utils import paths
 from ow.utils.git import (
     _get_bare_config,
@@ -30,6 +32,18 @@ from ow.utils.git import (
     worktree_exists,
     worktree_is_detached,
 )
+
+def make_bare_repo(path: Path) -> Path:
+    """A real bare repository at `path`.
+
+    ensure_bare_repo asks git whether the directory is a repository, so a
+    mkdir() no longer stands in for one — which is the whole point of the
+    check: an empty or half-written directory is not a clone that worked.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "--bare", "-q", str(path)], check=True)
+    return path
+
 
 # ---------------------------------------------------------------------------
 # run_cmd
@@ -229,8 +243,7 @@ def test_get_bare_config_returns_empty_on_failure(tmp_path):
 def test_ensure_bare_repo_skips_writes_when_config_matches(tmp_path):
     """When config values already match, no git config writes should occur."""
     bare_repos_dir = tmp_path / "bare-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    bare_repo = make_bare_repo(bare_repos_dir / "community.git")
 
     remotes = {
         "origin": RemoteConfig(url="git@github.com:odoo/odoo.git"),
@@ -258,8 +271,7 @@ def test_ensure_bare_repo_skips_writes_when_config_matches(tmp_path):
 def test_ensure_bare_repo_writes_only_changed_values(tmp_path):
     """Only writes config values that differ from current config."""
     bare_repos_dir = tmp_path / "bare-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    bare_repo = make_bare_repo(bare_repos_dir / "community.git")
 
     remotes = {
         "origin": RemoteConfig(url="git@github.com:odoo/odoo.git"),
@@ -290,31 +302,144 @@ def test_ensure_bare_repo_writes_only_changed_values(tmp_path):
 # ensure_bare_repo
 # ---------------------------------------------------------------------------
 
-def test_ensure_bare_repo_clones_when_missing(tmp_path):
-    bare_repos_dir = tmp_path / "bare-repos"
-    bare_repos_dir.mkdir()
-    # bare_repo doesn't exist yet
+def test_clone_bare_asks_for_the_cheapest_clone_git_will_give(tmp_path):
+    """--filter=blob:none --single-branch is the difference between a few MB and
+    the whole of odoo/odoo. Nothing else in ow re-applies these, so a repair
+    path that skips this function silently pulls full history."""
+    destination = tmp_path / "community.git"
 
-    remotes = {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd:
+        git_mod._clone_bare("community", "git@github.com:odoo/odoo.git", destination)
 
-    with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
-         patch("ow.utils.git._get_bare_config", return_value={}):
-        ensure_bare_repo("community", remotes, bare_repos_dir)
-
-    calls = mock_run_cmd.call_args_list
-    assert calls[0] == call(
+    mock_run_cmd.assert_called_once_with(
         ["git", "clone", "--bare", "--filter=blob:none", "--single-branch",
-         "git@github.com:odoo/odoo.git", str(bare_repos_dir / "community.git")],
+         "git@github.com:odoo/odoo.git", str(destination)],
         label="community",
         check=True,
         capture_output=True,
         text=True,
     )
+
+
+def test_ensure_bare_repo_clones_when_missing(tmp_path):
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repos_dir.mkdir()
+    bare_repo = bare_repos_dir / "community.git"
+    # bare_repo doesn't exist yet
+
+    remotes = {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}
+
+    def fake_clone(alias, url, destination):
+        make_bare_repo(destination)
+
+    with patch.object(git_mod, "_clone_bare", autospec=True, side_effect=fake_clone) as mock_clone, \
+         patch("ow.utils.git.run_cmd") as mock_run_cmd, \
+         patch("ow.utils.git._get_bare_config", return_value={}):
+        ensure_bare_repo("community", remotes, bare_repos_dir)
+
+    # Cloned to one side, then moved in: the final path only ever holds a
+    # repository that finished cloning.
+    mock_clone.assert_called_once_with(
+        "community", "git@github.com:odoo/odoo.git", bare_repos_dir / "community.git.incoming",
+    )
+    assert (bare_repo / "HEAD").exists()
+    assert not (bare_repos_dir / "community.git.incoming").exists()
+
     # Also turns on reflogs for the bare repo (needed for --fork-point).
-    assert calls[1] == call(
-        ["git", "-C", str(bare_repos_dir / "community.git"), "config", "core.logAllRefUpdates", "true"],
+    assert mock_run_cmd.call_args_list[0] == call(
+        ["git", "-C", str(bare_repo), "config", "core.logAllRefUpdates", "true"],
         quiet=True, check=True, label="community",
     )
+
+
+def test_ensure_bare_repo_repairs_a_directory_that_is_not_a_repository(tmp_path, xdg, git_lab):
+    """A directory at the path is not proof that a clone ever succeeded.
+
+    Trusting bare_repo.exists() means a SIGKILLed clone, or anything else that
+    left a directory there, poisons that repo for good: every later run dies
+    with "fatal: not in a git directory" and no ow command repairs it.
+
+    The origin is a repository in tmp_path, so this never leaves the machine.
+    """
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repo = bare_repos_dir / "community.git"
+    bare_repo.mkdir(parents=True)
+    (bare_repo / "half-a-clone").write_text("junk")
+    remotes = {"origin": RemoteConfig(url=str(git_lab.path))}
+
+    ensure_bare_repo("community", remotes, bare_repos_dir)
+
+    assert subprocess.run(
+        ["git", "-C", str(bare_repo), "rev-parse", "--absolute-git-dir"],
+        capture_output=True, text=True,
+    ).stdout.strip() == str(bare_repo)
+    # The repair is a real clone, so it keeps the flags that make the clone
+    # cheap — the old self-heal-by-fetch silently pulled full history.
+    assert subprocess.run(
+        ["git", "-C", str(bare_repo), "config", "--get", "remote.origin.partialclonefilter"],
+        capture_output=True, text=True,
+    ).stdout.strip() == "blob:none"
+    # The remnant is moved aside, not deleted: ow did not put it there and
+    # cannot know it holds nothing of the user's.
+    assert (bare_repos_dir / "community.git.broken" / "half-a-clone").read_text() == "junk"
+
+
+def test_ensure_bare_repo_clears_a_leftover_staging_directory(tmp_path, xdg, git_lab):
+    """The run that was killed mid-clone left its staging directory behind, and
+    git refuses to clone into a non-empty one. Nothing else would ever remove
+    it, so the alias would be stuck exactly as it was before staging existed."""
+    bare_repos_dir = tmp_path / "bare-repos"
+    leftover = bare_repos_dir / "community.git.incoming"
+    leftover.mkdir(parents=True)
+    (leftover / "objects").mkdir()
+    remotes = {"origin": RemoteConfig(url=str(git_lab.path))}
+
+    ensure_bare_repo("community", remotes, bare_repos_dir)
+
+    assert (bare_repos_dir / "community.git" / "HEAD").exists()
+    assert not leftover.exists()
+
+
+def test_ensure_bare_repo_is_not_fooled_by_an_enclosing_repository(tmp_path, xdg, git_lab):
+    """git resolves a repository by walking upwards, so "is this a repo?" asked
+    of a plain directory answers yes for anyone who keeps their home directory
+    in git — a common dotfiles habit, and ow's repos live under $HOME."""
+    enclosing = tmp_path / "home"
+    enclosing.mkdir()
+    subprocess.run(["git", "init", "-q", str(enclosing)], check=True)
+    bare_repos_dir = enclosing / "repos"
+    bare_repo = bare_repos_dir / "community.git"
+    bare_repo.mkdir(parents=True)
+    remotes = {"origin": RemoteConfig(url=str(git_lab.path))}
+
+    ensure_bare_repo("community", remotes, bare_repos_dir)
+
+    assert subprocess.run(
+        ["git", "-C", str(bare_repo), "rev-parse", "--absolute-git-dir"],
+        capture_output=True, text=True,
+    ).stdout.strip() == str(bare_repo)
+
+
+def test_ensure_bare_repo_leaves_nothing_at_the_final_path_when_a_clone_dies(tmp_path, xdg):
+    """A clone that is killed partway must not leave a half-repo behind.
+
+    Cloning straight to the final path means whatever git managed to write
+    before the SIGKILL becomes the thing every later run trusts.
+    """
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repos_dir.mkdir()
+    remotes = {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}
+
+    def half_a_clone(alias, url, destination):
+        destination.mkdir(parents=True)
+        (destination / "objects").mkdir()
+        raise KeyboardInterrupt
+
+    with patch.object(git_mod, "_clone_bare", autospec=True, side_effect=half_a_clone), \
+         pytest.raises(KeyboardInterrupt):
+        ensure_bare_repo("community", remotes, bare_repos_dir)
+
+    assert not (bare_repos_dir / "community.git").exists()
 
 
 def test_ensure_bare_repo_names_the_config_file_when_the_repo_is_undefined(tmp_path, xdg):
@@ -375,8 +500,7 @@ def test_ensure_bare_repo_reports_git_s_own_message_when_the_clone_fails(tmp_pat
 
 def test_ensure_bare_repo_skips_clone_when_exists(tmp_path):
     bare_repos_dir = tmp_path / "bare-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    bare_repo = make_bare_repo(bare_repos_dir / "community.git")
 
     remotes = {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}
 
@@ -393,8 +517,7 @@ def test_ensure_bare_repo_skips_clone_when_exists(tmp_path):
 
 def test_ensure_bare_repo_configures_extra_remotes(tmp_path):
     bare_repos_dir = tmp_path / "bare-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    bare_repo = make_bare_repo(bare_repos_dir / "community.git")
 
     remotes = {
         "origin": RemoteConfig(url="git@github.com:odoo/odoo.git"),
@@ -432,8 +555,7 @@ def test_ensure_bare_repo_configures_extra_remotes(tmp_path):
 def test_ensure_bare_repo_configures_origin_pushurl_and_fetch(tmp_path):
     """Origin url is set by git clone, but pushurl and fetch must still be configured."""
     bare_repos_dir = tmp_path / "bare-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    bare_repo = make_bare_repo(bare_repos_dir / "community.git")
 
     remotes = {
         "origin": RemoteConfig(
@@ -468,8 +590,7 @@ def test_ensure_bare_repo_configures_origin_pushurl_and_fetch(tmp_path):
 def test_ensure_bare_repo_ordered_remotes(tmp_path):
     """Non-origin remotes are configured in alphabetical order."""
     bare_repos_dir = tmp_path / "bare-repos"
-    bare_repo = bare_repos_dir / "community.git"
-    bare_repo.mkdir(parents=True)
+    bare_repo = make_bare_repo(bare_repos_dir / "community.git")
 
     remotes = {
         "origin": RemoteConfig(url="origin-url"),
