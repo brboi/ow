@@ -452,10 +452,11 @@ def test_init_removes_the_directory_it_created_when_every_repo_fails(tmp_path, m
         _tty(False),
         _questionary_answers(),
         _no_git(tmp_path / "parrot", errors={"community": "boom"}),
-        pytest.raises(SystemExit),
+        pytest.raises(SystemExit) as exc,
     ):
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
+    assert exc.value.code == 1
     assert not (tmp_path / "parrot").exists()
 
 
@@ -472,10 +473,11 @@ def test_init_keeps_going_when_only_some_repos_fail(tmp_path, monkeypatch, capsy
         _tty(False),
         _questionary_answers(),
         _no_git(tmp_path, errors={"community": "boom"}),
-        pytest.raises(SystemExit),
+        pytest.raises(SystemExit) as exc,
     ):
         cmd_init(config_full, templates=["common"], repos=repos)
 
+    assert exc.value.code == 1
     assert (tmp_path / ".ow" / "config.toml").exists()
     assert index.known_workspaces() == [tmp_path.resolve()]
     captured = capsys.readouterr()
