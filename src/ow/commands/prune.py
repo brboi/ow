@@ -39,20 +39,24 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
                 if branch_ref.startswith("refs/heads/"):
                     used_branches.add(branch_ref[len("refs/heads/"):])
 
+    # for-each-ref, not `branch --list`: the latter is a porcelain command and
+    # honours color.ui=always, which paints every name with escape codes that
+    # no prefix-stripping removes. A branch name is an identifier we hand back
+    # to git, not a string to display.
     branch_result = _run(
-        ["git", "-C", str(bare_repo), "branch", "--list"],
+        ["git", "-C", str(bare_repo), "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
         capture_output=True, text=True,
     )
     if branch_result.returncode == 0:
-        all_branches = {b.strip().lstrip("*+ ") for b in branch_result.stdout.splitlines() if b.strip()}
-        orphaned = all_branches - used_branches
-        if orphaned:
-            for branch in sorted(orphaned):
-                _run(
-                    ["git", "-C", str(bare_repo), "branch", "-D", branch],
-                    capture_output=True, text=True,
-                )
-            deleted = sorted(orphaned)
+        all_branches = {b.strip() for b in branch_result.stdout.splitlines() if b.strip()}
+        for branch in sorted(all_branches - used_branches):
+            # Only a delete git confirmed. Claiming a refusal as a deletion
+            # sends the user looking elsewhere for work that is still here.
+            if _run(
+                ["git", "-C", str(bare_repo), "branch", "-D", branch],
+                capture_output=True, text=True,
+            ).returncode == 0:
+                deleted.append(branch)
 
     return _PruneResult(alias=alias, pruned_worktrees=pruned, deleted_branches=deleted)
 

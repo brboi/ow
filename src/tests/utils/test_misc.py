@@ -1,10 +1,4 @@
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
-
 from ow.utils.display import counts
-from ow.commands.prune import _PruneResult, _prune_bare_repo
 
 
 class TestDisplayHelpers:
@@ -25,29 +19,3 @@ class TestDisplayHelpers:
         result = counts(2, 3)
         assert "2" in result
         assert "3" in result
-
-
-class TestPruneBareRepoExtended:
-
-    def test_prune_bare_repo_no_worktrees(self, tmp_path):
-        bare_repo = tmp_path / "community.git"
-        bare_repo.mkdir()
-        with patch("ow.commands.prune._run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="")
-            result = _prune_bare_repo(bare_repo)
-        assert result.deleted_branches == []
-        assert len(result.deleted_branches) == 0
-
-    def test_prune_bare_repo_worktree_branches(self, tmp_path):
-        bare_repo = tmp_path / "community.git"
-        bare_repo.mkdir()
-        wt_result = MagicMock(returncode=0)
-        wt_result.stdout = "worktree /path/to/ws/community\nHEAD abc123\nbranch refs/heads/main-parrot\n"
-        branch_result = MagicMock(returncode=0)
-        branch_result.stdout = "+ main-parrot\n  old-branch\n"
-        prune_result = MagicMock(returncode=0, stdout="", stderr="")
-        with patch("ow.commands.prune._run") as mock_run:
-            mock_run.side_effect = [MagicMock(returncode=0), wt_result, branch_result, prune_result]
-            result = _prune_bare_repo(bare_repo)
-        assert "main-parrot" not in result.deleted_branches
-        assert "old-branch" in result.deleted_branches

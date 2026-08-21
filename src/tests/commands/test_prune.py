@@ -1,8 +1,9 @@
 import shutil
+import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from ow.commands import cmd_prune
-from ow.commands.prune import _prune_bare_repo
 from ow.utils.config import Config
 from ow.utils import index, paths
 
@@ -130,23 +131,113 @@ def test_cmd_prune_counts_only_workspaces_that_vanished(tmp_path, capsys, xdg):
     assert index.known_workspaces() == [live.resolve()]
 
 
+
 # ---------------------------------------------------------------------------
-# _prune_bare_repo
+# Real bare repos
+#
+# prune deletes refs. Mocking subprocess proves nothing about which commits
+# survive, and both of the bugs these tests pin — a colorized branch listing
+# and an unchecked delete exit code — are invisible to a mock that answers
+# every call with returncode=0 and an empty stdout.
 # ---------------------------------------------------------------------------
 
-def test_prune_bare_repo_strips_plus_prefix(tmp_path):
-    """Branch names with + prefix (worktree branches) are correctly parsed."""
-    bare_repo = tmp_path / "community.git"
-    bare_repo.mkdir()
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
 
-    wt_result = MagicMock(returncode=0)
-    wt_result.stdout = "worktree /path/to/ws/community\nHEAD abc123\nbranch refs/heads/main-parrot\n"
 
-    branch_result = MagicMock(returncode=0)
-    branch_result.stdout = "+ main-parrot\n  other-branch\n"
+def _bare_repo(tmp_path: Path, alias: str = "community") -> Path:
+    """A real bare repo where ow keeps them, mirroring what `ow init` leaves behind.
 
-    with patch("ow.commands.prune._run", side_effect=[MagicMock(returncode=0), wt_result, branch_result, MagicMock(returncode=0)]):
-        result = _prune_bare_repo(bare_repo)
+    Requires the xdg fixture: repos_dir() must already point into tmp_path.
+    """
+    src = tmp_path / "origin" / alias
+    src.mkdir(parents=True)
+    _git_init(src)
+    (src / "a.txt").write_text("a")
+    _git(src, "add", "-A")
+    _git(src, "commit", "-qm", "A")
 
-    assert "main-parrot" not in result.deleted_branches
-    assert "other-branch" in result.deleted_branches
+    repos = paths.repos_dir()
+    repos.mkdir(parents=True, exist_ok=True)
+    bare = repos / f"{alias}.git"
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(src), str(bare)],
+        capture_output=True, text=True, check=True,
+    )
+    _git(bare, "config", "user.email", "t@t")
+    _git(bare, "config", "user.name", "T")
+    # ow fetches base refs into refs/remotes/<remote>/<branch> with explicit
+    # refspecs; `clone --bare` alone leaves none behind.
+    _git(bare, "update-ref", "refs/remotes/origin/master", "refs/heads/master")
+    return bare
+
+
+def _git_init(repo: Path) -> None:
+    subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "master"], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "T")
+
+
+def _branches(bare: Path) -> list[str]:
+    out = _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+    return out.splitlines() if out else []
+
+
+def test_prune_reads_branch_names_uncolorized(tmp_path, capsys, xdg):
+    """`git branch --list` honours color.ui=always; a name is not a display string.
+
+    With colour on, the listing yields "\x1b[32morphanbr\x1b[m", which no
+    amount of stripping "*+ " repairs — git is then asked to delete a branch
+    that does not exist, and the user is told it was deleted.
+    """
+    bare = _bare_repo(tmp_path)
+    _git(bare, "config", "color.ui", "always")
+    _git(bare, "branch", "orphanbr", "master")
+
+    cmd_prune(_make_config())
+
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out
+    assert "orphanbr" not in _branches(bare)
+
+
+def test_prune_does_not_delete_a_branch_held_by_a_live_worktree(tmp_path, capsys, xdg):
+    """The colour bug's near-miss: a used branch landed in the delete set too.
+
+    Nothing but the mangled name failing to resolve saved it. Read the names
+    properly and the branch must be excluded on its merits.
+    """
+    bare = _bare_repo(tmp_path)
+    _git(bare, "config", "color.ui", "always")
+    _git(bare, "worktree", "add", "-q", str(tmp_path / "ws" / "community"), "-b", "featA", "master")
+
+    cmd_prune(_make_config())
+
+    assert "featA" in _branches(bare)
+    assert "featA" not in capsys.readouterr().out
+
+
+def test_prune_reports_only_the_branches_it_actually_deleted(tmp_path, capsys, xdg):
+    """A refused delete must not be reported as a deletion.
+
+    Making refs/heads read-only is the cheapest real refusal: git cannot
+    take the ref lock, exits non-zero, and the branch survives. Reporting it
+    as gone sends the user looking for work that is still there.
+    """
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "orphanbr", "master")
+
+    refs_heads = bare / "refs" / "heads"
+    refs_heads.chmod(0o555)
+    try:
+        cmd_prune(_make_config())
+    finally:
+        refs_heads.chmod(0o755)
+
+    out = capsys.readouterr().out
+    assert "orphanbr" in _branches(bare)
+    assert "deleted orphaned branches" not in out
