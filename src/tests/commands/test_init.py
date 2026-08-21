@@ -485,6 +485,27 @@ def test_init_keeps_going_when_only_some_repos_fail(tmp_path, monkeypatch, capsy
     assert "created with errors" in captured.out
 
 
+def test_init_leaves_workspace_visible_when_template_fails(tmp_path, monkeypatch, capsys, config_with_remotes):
+    """A Jinja error in apply_templates must not cost the user the workspace."""
+    monkeypatch.chdir(tmp_path)
+
+    with (
+        _tty(False),
+        _questionary_answers(),
+        patch("ow.commands.init.ensure_workspace_materialized", return_value=(tmp_path, set(), {})),
+        patch("ow.commands.init.apply_templates", side_effect=RuntimeError("jinja boom")),
+        pytest.raises(SystemExit) as exc,
+    ):
+        cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+
+    assert exc.value.code == 1
+    assert (tmp_path / ".ow" / "config.toml").exists()
+    assert index.known_workspaces() == [tmp_path.resolve()]
+    captured = capsys.readouterr()
+    assert "jinja boom" in captured.err
+    assert "created with errors" in captured.out
+
+
 def test_init_exits_non_zero_when_any_repo_failed(tmp_path, monkeypatch, capsys, config_full):
     """Same convention as ow apply and ow rebase: any failure is a failure."""
     monkeypatch.chdir(tmp_path)

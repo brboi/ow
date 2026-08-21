@@ -349,14 +349,19 @@ def cmd_init(
         for alias, err in errors.items():
             print(f"  {alias}: {err}", file=sys.stderr)
 
-    apply_templates(ws, config, ws_dir)
-
     write_workspace_config(ow_config_path, ws)
 
     # The config file is the truth; the index only remembers where to find it,
     # so it is written the moment the truth exists — nothing after this point
     # may cost the user a workspace that is already on disk.
     index.remember(ws_dir)
+
+    template_error = None
+    try:
+        apply_templates(ws, config, ws_dir)
+    except Exception as exc:
+        template_error = exc
+        print(f"\nWarning: template rendering failed: {exc}", file=sys.stderr)
 
     mise_toml = ws_dir / "mise.toml"
     if mise_toml.exists():
@@ -366,7 +371,7 @@ def cmd_init(
             print(f"\nWarning: could not trust {mise_toml}: {e}", file=sys.stderr)
             print(f"  Run it yourself when mise is happy: mise trust {mise_toml}", file=sys.stderr)
 
-    if errors:
+    if errors or template_error:
         print(f"\nWorkspace '{ws_dir.name}' created with errors. Fix issues and run: ow apply")
     else:
         print(f"\nWorkspace '{ws_dir.name}' created. To install dependencies:")
@@ -377,5 +382,5 @@ def cmd_init(
     # The workspace is complete and the user is told everything they would
     # have been told anyway; only the status code says a repo went wrong, so
     # a script that chains on `ow init` notices. Same rule as apply and rebase.
-    if errors:
+    if errors or template_error:
         sys.exit(1)
