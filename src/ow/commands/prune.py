@@ -6,11 +6,37 @@ from ow.utils import index, paths
 from ow.utils.git import _run, parallel_per_repo
 
 
-class _PruneResult(NamedTuple):
+class _PrunePlan(NamedTuple):
+    """What prune would do to one bare repo. Observation only, nothing applied.
+
+    Deciding first and acting second is what makes --dry-run truthful and
+    the confirmation worth answering: both show the very list that the
+    apply step then works from, rather than a guess at it.
+    """
+
     alias: str
+    repo: Path
     stale_worktrees: list[str]
-    deleted_branches: list[str]
-    kept_branches: list[str]
+    to_delete: list[str]
+    kept: list[str]
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.stale_worktrees or self.to_delete or self.kept)
+
+    @property
+    def commands(self) -> list[list[str]]:
+        argv: list[list[str]] = []
+        if self.stale_worktrees:
+            argv.append(["worktree", "prune"])
+        argv.extend(["branch", "-D", branch] for branch in self.to_delete)
+        return argv
+
+
+class _PruneOutcome(NamedTuple):
+    alias: str
+    deleted: list[str]
+    failed: list[str]
 
 
 def _survey_worktrees(bare_repo: Path) -> tuple[set[str], list[str]]:
@@ -89,20 +115,13 @@ def _is_pushed(bare_repo: Path, branch: str) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
-    """Prune a single bare repo: clean worktrees and delete orphaned branches."""
-    alias = bare_repo.stem
-    deleted: list[str] = []
+def _survey_bare_repo(bare_repo: Path) -> _PrunePlan:
+    """Work out what would go from one bare repo, without touching it."""
+    used_branches, stale = _survey_worktrees(bare_repo)
+
+    to_delete: list[str] = []
     kept: list[str] = []
 
-    # 1. Look before pruning — afterwards there is nothing left to report on.
-    used_branches, stale = _survey_worktrees(bare_repo)
-    _run(
-        ["git", "-C", str(bare_repo), "worktree", "prune"],
-        capture_output=True, text=True,
-    )
-
-    # 2. Delete local branches not attached to any worktree
     # for-each-ref, not `branch --list`: the latter is a porcelain command and
     # honours color.ui=always, which paints every name with escape codes that
     # no prefix-stripping removes. A branch name is an identifier we hand back
@@ -117,25 +136,40 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
             # "Orphaned" describes the worktree that is gone, not the work
             # that may still be on the branch. Only the former is ours to
             # throw away.
-            if not _is_pushed(bare_repo, branch):
-                kept.append(branch)
-                continue
-            # Only a delete git confirmed. Claiming a refusal as a deletion
-            # sends the user looking elsewhere for work that is still here.
-            if _run(
-                ["git", "-C", str(bare_repo), "branch", "-D", branch],
-                capture_output=True, text=True,
-            ).returncode == 0:
-                deleted.append(branch)
+            target = to_delete if _is_pushed(bare_repo, branch) else kept
+            target.append(branch)
 
-    return _PruneResult(
-        alias=alias, stale_worktrees=stale,
-        deleted_branches=deleted, kept_branches=kept,
+    return _PrunePlan(
+        alias=bare_repo.stem, repo=bare_repo,
+        stale_worktrees=stale, to_delete=to_delete, kept=kept,
     )
 
 
-def _prune_index() -> None:
-    """Drop dead workspace-index entries and report how many disappeared.
+def _apply(plan: _PrunePlan) -> _PruneOutcome:
+    """Run exactly what the plan showed, and report exactly what took."""
+    deleted: list[str] = []
+    failed: list[str] = []
+
+    if plan.stale_worktrees:
+        _run(
+            ["git", "-C", str(plan.repo), "worktree", "prune"],
+            capture_output=True, text=True,
+        )
+
+    for branch in plan.to_delete:
+        # Only a delete git confirmed. Claiming a refusal as a deletion
+        # sends the user looking elsewhere for work that is still here.
+        ok = _run(
+            ["git", "-C", str(plan.repo), "branch", "-D", branch],
+            capture_output=True, text=True,
+        ).returncode == 0
+        (deleted if ok else failed).append(branch)
+
+    return _PruneOutcome(alias=plan.alias, deleted=deleted, failed=failed)
+
+
+def _dead_index_entries() -> int:
+    """How many index lines name a workspace that is gone. Reads only.
 
     known_workspaces() prunes on read for two unrelated reasons: a line
     whose workspace no longer exists, and a duplicate of a line already
@@ -165,61 +199,111 @@ def _prune_index() -> None:
             if not (candidate / index.MARKER).exists():
                 dropped += 1
 
-    index.known_workspaces()
-    if dropped > 0:
-        noun = "entry" if dropped == 1 else "entries"
-        print(f"Dropped {dropped} dead index {noun}.")
+    return dropped
 
 
-def cmd_prune(config: Config) -> None:
-    """Clean up stale worktree references, orphaned branches, and dead index entries."""
-    _prune_index()
+def _index_line(dropped: int, verb: str) -> str:
+    noun = "entry" if dropped == 1 else "entries"
+    return f"{verb} {dropped} dead index {noun}."
+
+
+def _confirm() -> bool:
+    """Default is no. A destructive command must not proceed unasked."""
+    try:
+        answer = input("\nProceed? [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _display_plan(plans: list[_PrunePlan]) -> None:
+    """The whole report, in the imperative: nothing here has happened yet."""
+    for plan in plans:
+        if plan.stale_worktrees:
+            noun = "worktree" if len(plan.stale_worktrees) == 1 else "worktrees"
+            print(
+                f"  [{plan.alias}] prune {len(plan.stale_worktrees)} stale {noun}: "
+                f"{', '.join(plan.stale_worktrees)}"
+            )
+        if plan.to_delete:
+            noun = "branch" if len(plan.to_delete) == 1 else "branches"
+            print(
+                f"  [{plan.alias}] delete {len(plan.to_delete)} orphaned {noun}: "
+                f"{', '.join(plan.to_delete)}"
+            )
+        if plan.kept:
+            noun = "branch" if len(plan.kept) == 1 else "branches"
+            print(
+                f"  [{plan.alias}] keep {len(plan.kept)} {noun} with unpushed commits: "
+                f"{', '.join(plan.kept)}"
+            )
+
+    if any(plan.kept for plan in plans):
+        print("\nKept branches hold commits no remote has. Push them, or delete one by hand:")
+        for plan in plans:
+            for branch in plan.kept:
+                print(f"  git -C {plan.repo} branch -D {branch}")
+
+
+def _display_dry_run(plans: list[_PrunePlan]) -> None:
+    print("\nWould run:")
+    for plan in plans:
+        for argv in plan.commands:
+            print(f"  [{plan.alias}] git {' '.join(argv)}")
+
+
+def cmd_prune(config: Config, *, dry_run: bool = False, yes: bool = False) -> None:
+    """Clean up stale worktree references, orphaned branches, and dead index entries.
+
+    Survey first, then act. --dry-run stops after the survey; otherwise the
+    branch deletions — the only step that can lose work — are confirmed
+    first, defaulting to no, exactly as `ow rebase` does. Answering no
+    leaves everything untouched, the index included.
+    """
+    dropped = _dead_index_entries()
 
     bare_repos_dir = paths.repos_dir()
-    if not bare_repos_dir.exists():
-        print("No bare repos found.")
-        return
-
-    bare_repos = sorted(bare_repos_dir.glob("*.git"))
+    bare_repos = sorted(bare_repos_dir.glob("*.git")) if bare_repos_dir.exists() else []
     if not bare_repos:
         print("No bare repos found.")
+
+    surveyed = parallel_per_repo({
+        repo.stem: (lambda r=repo: _survey_bare_repo(r))
+        for repo in bare_repos
+    })
+    plans = [
+        surveyed[repo.stem]
+        for repo in bare_repos
+        if not isinstance(surveyed.get(repo.stem), Exception)
+    ]
+
+    _display_plan(plans)
+    if bare_repos and all(plan.is_empty for plan in plans):
+        print("All bare repos are clean.")
+
+    if dry_run:
+        if any(plan.commands for plan in plans):
+            _display_dry_run(plans)
+        if dropped:
+            print(_index_line(dropped, "Would drop"))
         return
 
-    prune_tasks = {
-        repo.stem: (lambda r=repo: _prune_bare_repo(r))
-        for repo in bare_repos
-    }
-    prune_results = parallel_per_repo(prune_tasks)
+    if any(plan.to_delete for plan in plans) and not yes and not _confirm():
+        print("Aborted.")
+        return
 
-    cleaned = False
-    kept_any = False
-    for repo in bare_repos:
-        alias = repo.stem
-        result = prune_results.get(alias)
-        if isinstance(result, Exception):
+    outcomes = parallel_per_repo({
+        plan.alias: (lambda p=plan: _apply(p))
+        for plan in plans
+        if not plan.is_empty
+    })
+    for plan in plans:
+        outcome = outcomes.get(plan.alias)
+        if isinstance(outcome, Exception) or outcome is None:
             continue
-        if result.stale_worktrees:
-            noun = "worktree" if len(result.stale_worktrees) == 1 else "worktrees"
-            print(
-                f"  [{alias}] pruned {len(result.stale_worktrees)} stale {noun}: "
-                f"{', '.join(result.stale_worktrees)}"
-            )
-            cleaned = True
-        if result.deleted_branches:
-            print(f"  [{alias}] deleted orphaned branches: {', '.join(result.deleted_branches)}")
-            cleaned = True
-        if result.kept_branches:
-            noun = "branch" if len(result.kept_branches) == 1 else "branches"
-            print(
-                f"  [{alias}] kept {len(result.kept_branches)} {noun} with unpushed commits: "
-                f"{', '.join(result.kept_branches)}"
-            )
-            cleaned = True
-            kept_any = True
+        if outcome.failed:
+            print(f"  [{plan.alias}] could not delete: {', '.join(outcome.failed)}")
 
-    if kept_any:
-        print("\nKept branches hold commits no remote has. Push them, or delete one by hand:")
-        print(f"  git -C {bare_repos_dir}/<alias>.git branch -D <branch>")
-
-    if not cleaned:
-        print("All bare repos are clean.")
+    if dropped:
+        index.known_workspaces()
+        print(_index_line(dropped, "Dropped"))

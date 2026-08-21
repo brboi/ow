@@ -1,11 +1,9 @@
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from ow.commands.prune import _prune_bare_repo
-
 from ow.commands.status import _gather_repo_status
 from ow.commands.apply import cmd_apply
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
@@ -95,25 +93,3 @@ class TestCmdApplyExtended:
         captured = capsys.readouterr()
         assert "Warning" not in captured.err
         assert "Warning" not in captured.out
-
-
-# ---------------------------------------------------------------------------
-# prune — edge case: no git command works
-# ---------------------------------------------------------------------------
-
-class TestPruneExtended:
-    def test_prune_bare_repo_with_no_prunes_needed(self, tmp_path):
-        bare_repo = tmp_path / "community.git"
-        bare_repo.mkdir()
-        wt_result = MagicMock(returncode=0)
-        wt_result.stdout = ""
-        branch_result = MagicMock(returncode=0)
-        branch_result.stdout = ""
-        with patch("ow.commands.prune._run") as mock_run:
-            mock_run.side_effect = [
-                MagicMock(returncode=0),
-                wt_result, branch_result,
-                MagicMock(returncode=0, stdout="", stderr="")
-            ]
-            result = _prune_bare_repo(bare_repo)
-        assert result.deleted_branches == []

@@ -1,7 +1,6 @@
 import shutil
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 from ow.commands import cmd_prune
 from ow.utils.config import Config
@@ -26,24 +25,19 @@ def test_cmd_prune_no_bare_repos(tmp_path, capsys, xdg):
     assert "No bare repos found" in captured.out
 
 
-def test_cmd_prune_cleans_repos(tmp_path, capsys, xdg):
-    config = _make_config()
-    bare_dir = paths.repos_dir()
-    bare_dir.mkdir(parents=True)
-    (bare_dir / "community.git").mkdir()
-    (bare_dir / "enterprise.git").mkdir()
+def test_cmd_prune_visits_every_bare_repo(tmp_path, capsys, xdg):
+    bare_a = _bare_repo(tmp_path, "community")
+    bare_b = _bare_repo(tmp_path, "enterprise")
+    _git(bare_a, "branch", "spent-a", "refs/remotes/origin/master")
+    _git(bare_b, "branch", "spent-b", "refs/remotes/origin/master")
 
-    with patch("ow.commands.prune._run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        cmd_prune(config)
+    cmd_prune(_make_config(), yes=True)
 
-    assert mock_run.call_count >= 6
-    calls = mock_run.call_args_list
-    all_args = " ".join(str(c) for c in calls)
-    assert "community" in all_args
-    assert "enterprise" in all_args
-    prune_calls = [c for c in calls if c[0][0][3:5] == ["worktree", "prune"]]
-    assert len(prune_calls) == 2
+    assert "spent-a" not in _branches(bare_a)
+    assert "spent-b" not in _branches(bare_b)
+    out = capsys.readouterr().out
+    assert "[community]" in out
+    assert "[enterprise]" in out
 
 
 def _make_indexed_workspace(tmp_path, name: str):
@@ -198,7 +192,7 @@ def test_prune_reads_branch_names_uncolorized(tmp_path, capsys, xdg):
     _git(bare, "config", "color.ui", "always")
     _git(bare, "branch", "orphanbr", "master")
 
-    cmd_prune(_make_config())
+    cmd_prune(_make_config(), yes=True)
 
     out = capsys.readouterr().out
     assert "\x1b[" not in out
@@ -215,7 +209,7 @@ def test_prune_does_not_delete_a_branch_held_by_a_live_worktree(tmp_path, capsys
     _git(bare, "config", "color.ui", "always")
     _git(bare, "worktree", "add", "-q", str(tmp_path / "ws" / "community"), "-b", "featA", "master")
 
-    cmd_prune(_make_config())
+    cmd_prune(_make_config(), yes=True)
 
     assert "featA" in _branches(bare)
     assert "featA" not in capsys.readouterr().out
@@ -230,17 +224,18 @@ def test_prune_reports_only_the_branches_it_actually_deleted(tmp_path, capsys, x
     """
     bare = _bare_repo(tmp_path)
     _git(bare, "branch", "orphanbr", "master")
+    _git(bare, "branch", "-D", "master")
 
     refs_heads = bare / "refs" / "heads"
     refs_heads.chmod(0o555)
     try:
-        cmd_prune(_make_config())
+        cmd_prune(_make_config(), yes=True)
     finally:
         refs_heads.chmod(0o755)
 
     out = capsys.readouterr().out
     assert "orphanbr" in _branches(bare)
-    assert "deleted orphaned branches" not in out
+    assert "could not delete: orphanbr" in out
 
 
 def _commit_on_branch(bare: Path, tmp_path: Path, branch: str, name: str) -> str:
@@ -266,7 +261,7 @@ def test_prune_keeps_a_branch_whose_commits_exist_nowhere_else(tmp_path, capsys,
     bare = _bare_repo(tmp_path)
     sha = _commit_on_branch(bare, tmp_path, "featA", "work")
 
-    cmd_prune(_make_config())
+    cmd_prune(_make_config(), yes=True)
 
     assert "featA" in _branches(bare)
     assert _git(bare, "rev-parse", "featA") == sha
@@ -280,13 +275,13 @@ def test_prune_deletes_a_branch_already_contained_in_a_remote_ref(tmp_path, caps
     """
     bare = _bare_repo(tmp_path)
     _git(bare, "branch", "spent", "refs/remotes/origin/master")
+    _git(bare, "branch", "-D", "master")
 
-    cmd_prune(_make_config())
+    cmd_prune(_make_config(), yes=True)
 
     assert "spent" not in _branches(bare)
     out = capsys.readouterr().out
-    assert "deleted orphaned branches" in out
-    assert "spent" in out
+    assert "delete 1 orphaned branch: spent" in out
 
 
 def test_prune_says_which_branches_it_refused_and_why(tmp_path, capsys, xdg):
@@ -298,7 +293,7 @@ def test_prune_says_which_branches_it_refused_and_why(tmp_path, capsys, xdg):
     bare = _bare_repo(tmp_path)
     _commit_on_branch(bare, tmp_path, "featA", "work")
 
-    cmd_prune(_make_config())
+    cmd_prune(_make_config(), yes=True)
 
     out = capsys.readouterr().out
     assert "featA" in out
@@ -324,7 +319,7 @@ def test_moving_a_workspace_directory_does_not_destroy_its_unpushed_commits(tmp_
 
     (tmp_path / "wsA").rename(tmp_path / "wsA-moved")
 
-    cmd_prune(_make_config())
+    cmd_prune(_make_config(), yes=True)
 
     assert "featA" in _branches(bare)
     assert _git(bare, "rev-parse", "featA") == sha
@@ -351,7 +346,7 @@ def test_prune_reports_the_stale_worktrees_it_unregistered(tmp_path, capsys, xdg
     _git(bare, "worktree", "add", "-q", str(ws), "-b", "featA", "master")
     shutil.rmtree(tmp_path / "wsA")
 
-    cmd_prune(_make_config())
+    cmd_prune(_make_config(), yes=True)
 
     out = capsys.readouterr().out
     assert "stale worktree" in out
@@ -370,3 +365,147 @@ def test_prune_says_nothing_about_worktrees_when_none_are_stale(tmp_path, capsys
     out = capsys.readouterr().out
     assert "stale worktree" not in out
     assert "All bare repos are clean." in out
+
+
+# ---------------------------------------------------------------------------
+# --dry-run and the confirmation
+#
+# Wired at the cmd_prune level; the Typer options belong to __main__.py.
+# ---------------------------------------------------------------------------
+
+def _refuse_input(monkeypatch, reason: str = "prune must not prompt here"):
+    def _boom(prompt: str = "") -> str:
+        raise AssertionError(reason)
+    monkeypatch.setattr("builtins.input", _boom)
+
+
+def _answer(monkeypatch, reply: str):
+    monkeypatch.setattr("builtins.input", lambda prompt="": reply)
+
+
+def _dirty_repo(tmp_path) -> Path:
+    """A bare repo with all three kinds of work pending: stale worktree, dead branch, live one."""
+    bare = _bare_repo(tmp_path)
+    ws = tmp_path / "wsA" / "community"
+    _git(bare, "worktree", "add", "-q", str(ws), "-b", "featA", "master")
+    shutil.rmtree(tmp_path / "wsA")
+    _git(bare, "branch", "spent", "refs/remotes/origin/master")
+    return bare
+
+
+def test_prune_dry_run_changes_nothing(tmp_path, capsys, xdg, monkeypatch):
+    """Seeing what would go must not be a way to make it go."""
+    _refuse_input(monkeypatch, "--dry-run must not prompt")
+    bare = _dirty_repo(tmp_path)
+    dead = _make_indexed_workspace(tmp_path, "dead")
+    shutil.rmtree(dead)
+    before = paths.index_file().read_text()
+
+    cmd_prune(_make_config(), dry_run=True)
+
+    assert "spent" in _branches(bare)
+    assert str(tmp_path / "wsA" / "community") in _registered_worktrees(bare)
+    assert paths.index_file().read_text() == before
+
+
+def test_prune_dry_run_names_the_commands_it_would_run(tmp_path, capsys, xdg, monkeypatch):
+    _refuse_input(monkeypatch, "--dry-run must not prompt")
+    _dirty_repo(tmp_path)
+    dead = _make_indexed_workspace(tmp_path, "dead")
+    shutil.rmtree(dead)
+
+    cmd_prune(_make_config(), dry_run=True)
+
+    out = capsys.readouterr().out
+    assert "Would run:" in out
+    assert "git branch -D spent" in out
+    assert "git worktree prune" in out
+    assert "Would drop 1 dead index entry" in out
+
+
+def test_prune_asks_before_deleting_and_a_no_changes_nothing(tmp_path, capsys, xdg, monkeypatch):
+    """`ow rebase` already defaults to no. The command that deletes refs cannot ask for less."""
+    _answer(monkeypatch, "n")
+    bare = _dirty_repo(tmp_path)
+    dead = _make_indexed_workspace(tmp_path, "dead")
+    shutil.rmtree(dead)
+    before = paths.index_file().read_text()
+
+    cmd_prune(_make_config())
+
+    out = capsys.readouterr().out
+    assert "Aborted." in out
+    assert "spent" in _branches(bare)
+    assert str(tmp_path / "wsA" / "community") in _registered_worktrees(bare)
+    assert paths.index_file().read_text() == before
+
+
+def test_prune_treats_eof_as_no(tmp_path, capsys, xdg, monkeypatch):
+    """A pipe with nothing on it is not consent."""
+    def _eof(prompt: str = "") -> str:
+        raise EOFError
+    monkeypatch.setattr("builtins.input", _eof)
+    bare = _dirty_repo(tmp_path)
+
+    cmd_prune(_make_config())
+
+    assert "Aborted." in capsys.readouterr().out
+    assert "spent" in _branches(bare)
+
+
+def test_prune_proceeds_when_the_answer_is_yes(tmp_path, capsys, xdg, monkeypatch):
+    _answer(monkeypatch, "y")
+    bare = _dirty_repo(tmp_path)
+
+    cmd_prune(_make_config())
+
+    assert "spent" not in _branches(bare)
+    assert "Aborted." not in capsys.readouterr().out
+
+
+def test_prune_shows_what_is_at_stake_before_asking(tmp_path, capsys, xdg, monkeypatch):
+    """The prompt is worthless if the branch names come after the answer."""
+    seen: list[str] = []
+
+    def _record(prompt: str = "") -> str:
+        seen.append(capsys.readouterr().out)
+        return "n"
+
+    monkeypatch.setattr("builtins.input", _record)
+    _dirty_repo(tmp_path)
+
+    cmd_prune(_make_config())
+
+    assert seen and "spent" in seen[0]
+
+
+def test_prune_yes_skips_the_prompt(tmp_path, capsys, xdg, monkeypatch):
+    _refuse_input(monkeypatch, "yes=True must not prompt")
+    bare = _dirty_repo(tmp_path)
+
+    cmd_prune(_make_config(), yes=True)
+
+    assert "spent" not in _branches(bare)
+
+
+def test_prune_does_not_ask_when_no_branch_would_be_deleted(tmp_path, capsys, xdg, monkeypatch):
+    """Unregistering a worktree whose directory is already gone destroys nothing.
+
+    The prompt guards ref deletion, which is the only step that can lose
+    work; making the harmless half interactive would just teach the habit of
+    answering y without reading.
+    """
+    _refuse_input(monkeypatch, "nothing deletable — prune must not prompt")
+    bare = _bare_repo(tmp_path)
+    ws = tmp_path / "wsA" / "community"
+    _git(bare, "worktree", "add", "-q", str(ws), "-b", "featA", "master")
+    (ws / "work.txt").write_text("work")
+    _git(ws, "add", "-A")
+    _git(ws, "commit", "-qm", "work")
+    _git(bare, "branch", "-D", "master")
+    shutil.rmtree(tmp_path / "wsA")
+
+    cmd_prune(_make_config())
+
+    assert str(ws) not in _registered_worktrees(bare)
+    assert "featA" in _branches(bare)
