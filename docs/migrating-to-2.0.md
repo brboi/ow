@@ -184,15 +184,11 @@ workspace is re-applied.
 
 ## Services
 
-`services/compose.yml` is packaged inside ow now, but no ow command reads it.
-If you were running the stack, keep your copy and go on starting it by hand.
-`~/.config/ow/services/` is the conventional place for it:
-
-```sh
-mkdir -p ~/.config/ow
-cp -r "$OLD/services" ~/.config/ow/
-docker compose -f ~/.config/ow/services/compose.yml up -d
-```
+`services/compose.yml` is packaged inside ow and rendered automatically: `ow init` and `ow apply`
+write it to `~/.config/ow/services/compose.yml` with the container volume path baked in. The
+generated `mise.toml` exports `COMPOSE_FILE`, so `docker compose up` works from inside any
+workspace. If you were running the old stack, your existing copy still works — or delete it and
+let `ow apply` render a fresh one.
 
 ## `ow rebase` changed
 
@@ -296,3 +292,24 @@ a real workspace, worktrees and all — moving it out from under `$OLD` is
 optional, not required, and one you leave in place is still live and in use,
 not inert. Only delete `$OLD/workspaces/` once every workspace under it has
 been moved out or is one you no longer need.
+
+## What changed in 2.0.0
+
+If you were already on ow 2.0-dev or 2.0.0-rc, these are the final 2.0.0 changes:
+
+- **`ow status` is offline by default.** It reads local refs without fetching. Pass `-f`/`--fetch`
+  to fetch first, then show status.
+- **`--only` removed from `apply` and `status`.** Kept on `rebase` (where selective rebase is a
+  real workflow).
+- **Config schemas versioned.** Both `config.toml` and `.ow/config.toml` start with `version = 1`.
+  A file with a newer version is refused with an upgrade message. Existing files without the field
+  are treated as version 1 — no migration needed.
+- **Services compose file auto-rendered.** `ow init` and `ow apply` render `compose.yml` into
+  `~/.config/ow/services/` with the container volume path baked in. `mise.toml` exports
+  `COMPOSE_FILE`; `odoorc` sets `data_dir = <workspace>/.odoo`.
+- **Template `StrictUndefined`.** Undefined variables in Jinja2 templates raise at render time
+  instead of rendering empty. Use `{{ vars.key | default(fallback) }}` for optional values.
+- **`ow apply` no longer back-fills global vars** into `.ow/config.toml`. The render merge still
+  makes globals visible to templates; editing a global var now affects all workspaces.
+- **Orphan file check.** `ow apply` lists files from template bundles no longer in your config,
+  so you can remove stale IDE configs manually.
