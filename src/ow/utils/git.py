@@ -191,6 +191,50 @@ def _is_bare_repo(path: Path) -> bool:
         return False
 
 
+def _git_calls_it_a_repository(path: Path) -> bool:
+    """Whether git validates `path` itself as a git directory.
+
+    `rev-parse --resolve-git-dir` never walks upwards and never compares paths
+    — it inspects the directory it is handed — so it is an answer to the same
+    question by an independent route. That independence is the point: it is
+    used to veto destructive repairs, and a veto that shared _is_bare_repo's
+    machinery would share its mistakes.
+    """
+    if not path.is_dir():
+        return False
+    return _run(
+        ["git", "rev-parse", "--resolve-git-dir", str(path)],
+        capture_output=True, text=True,
+    ).returncode == 0
+
+
+def _refuse_to_displace_a_repository(bare_repo: Path) -> None:
+    """Stop before a repair can destroy a repository it failed to recognise.
+
+    Getting here means _is_bare_repo answered "not a repository", and the
+    repair that follows renames whatever is at the path to <name>.broken and
+    deletes whatever was already there. That is the user's work if the answer
+    was wrong, and one wrong answer — a bug like the symlink comparison, a git
+    that would not start, a directory that could not be read — must not be
+    enough to lose it. So ask git again by a route that shares nothing with
+    the first answer, and refuse rather than widen the retry: a false refusal
+    costs the user one message, a false repair costs them their commits.
+    """
+    if _git_calls_it_a_repository(bare_repo):
+        raise RuntimeError(
+            f"{bare_repo} is a git repository, but ow does not recognise it as "
+            f"the bare repo it expects there, so it will not move it aside.\n"
+            f"  Move it somewhere safe (or remove it) and run ow again."
+        )
+    broken = bare_repo.with_name(f"{bare_repo.name}.broken")
+    if bare_repo.exists() and _git_calls_it_a_repository(broken):
+        raise RuntimeError(
+            f"{broken} is a git repository left by an earlier repair, and ow "
+            f"would have to delete it to move {bare_repo.name} aside.\n"
+            f"  Move it somewhere safe (or remove it) and run ow again."
+        )
+
+
 def _clone_bare_into_place(alias: str, url: str, bare_repo: Path) -> None:
     """Clone into a sibling directory and move it into place once it is whole.
 
@@ -202,7 +246,12 @@ def _clone_bare_into_place(alias: str, url: str, bare_repo: Path) -> None:
     The staging path is derived from the alias rather than randomised, so a
     killed run leaves at most one leftover and the next one reuses the space
     instead of accumulating another copy.
+
+    Refuses before it clones if anything git recognises as a repository stands
+    where it would have to move or delete — see
+    _refuse_to_displace_a_repository.
     """
+    _refuse_to_displace_a_repository(bare_repo)
     staging = bare_repo.with_name(f"{bare_repo.name}.incoming")
     bare_repo.parent.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(staging, ignore_errors=True)

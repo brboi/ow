@@ -451,6 +451,47 @@ def test_ensure_bare_repo_keeps_a_repository_reached_through_a_symlink(tmp_path,
     ).stdout.strip() == unpushed
 
 
+def test_clone_bare_into_place_refuses_to_displace_a_real_repository(tmp_path, xdg, git_lab):
+    """Defence in depth for the rename above: _clone_bare_into_place is only
+    reached because a predicate said "not a repository", and one wrong answer
+    from it must not be enough to lose work. Ask git again, by a route that
+    does not compare paths at all, and stop rather than displace what it
+    recognises. A false refusal costs a message; a false repair costs commits.
+    """
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repo = bare_repos_dir / "community.git"
+    make_bare_repo(bare_repo)
+
+    with patch.object(git_mod, "_clone_bare", autospec=True) as mock_clone, \
+         pytest.raises(RuntimeError, match="is a git repository"):
+        git_mod._clone_bare_into_place("community", str(git_lab.path), bare_repo)
+
+    mock_clone.assert_not_called()
+    assert (bare_repo / "HEAD").exists()
+    assert not (bare_repos_dir / "community.git.broken").exists()
+
+
+def test_clone_bare_into_place_refuses_to_delete_a_repository_left_at_broken(tmp_path, xdg, git_lab):
+    """The .broken slot holds one directory and the next repair rmtree()s it.
+    A user repaired by an ow that had the symlink bug has their real repository
+    sitting there right now, so that rmtree is a delete of the user's only
+    copy. Refuse and say so; the user can move it out of the way in a second.
+    """
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repo = bare_repos_dir / "community.git"
+    bare_repo.mkdir(parents=True)
+    (bare_repo / "half-a-clone").write_text("junk")
+    make_bare_repo(bare_repos_dir / "community.git.broken")
+
+    with patch.object(git_mod, "_clone_bare", autospec=True) as mock_clone, \
+         pytest.raises(RuntimeError, match="community.git.broken"):
+        git_mod._clone_bare_into_place("community", str(git_lab.path), bare_repo)
+
+    mock_clone.assert_not_called()
+    assert (bare_repos_dir / "community.git.broken" / "HEAD").exists()
+    assert (bare_repo / "half-a-clone").read_text() == "junk"
+
+
 def test_ensure_bare_repo_leaves_nothing_at_the_final_path_when_a_clone_dies(tmp_path, xdg):
     """A clone that is killed partway must not leave a half-repo behind.
 
