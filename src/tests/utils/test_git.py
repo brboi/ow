@@ -307,6 +307,8 @@ def test_ensure_bare_repo_clones_when_missing(tmp_path):
          "git@github.com:odoo/odoo.git", str(bare_repos_dir / "community.git")],
         label="community",
         check=True,
+        capture_output=True,
+        text=True,
     )
     # Also turns on reflogs for the bare repo (needed for --fork-point).
     assert calls[1] == call(
@@ -347,6 +349,28 @@ def test_ensure_bare_repo_distinguishes_a_section_that_lacks_an_origin(tmp_path,
     assert "not defined in [remotes]" not in message
     assert "[remotes.ghost]" in message
     assert str(paths.config_file()) in message
+
+
+def test_ensure_bare_repo_reports_git_s_own_message_when_the_clone_fails(tmp_path, xdg, capsys):
+    """A failed clone must surface git's diagnosis, not Python's.
+
+    `check=True` alone raises CalledProcessError, whose str is
+    "Command '[...]' returned non-zero exit status 128" — the one sentence
+    that says nothing about what went wrong. git already said it.
+
+    The url is a path that does not exist, so this never leaves the machine.
+    """
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repos_dir.mkdir()
+    remotes = {"origin": RemoteConfig(url=str(tmp_path / "nowhere.git"))}
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ensure_bare_repo("community", remotes, bare_repos_dir)
+
+    message = str(excinfo.value)
+    assert "does not exist" in message
+    assert str(tmp_path / "nowhere.git") in message
+    assert "returned non-zero exit status" not in message
 
 
 def test_ensure_bare_repo_skips_clone_when_exists(tmp_path):

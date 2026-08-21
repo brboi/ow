@@ -6,6 +6,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from textwrap import indent
 from typing import Callable, TypeVar
 
 from ow.utils import paths
@@ -174,6 +175,39 @@ def _undefined_repo_message(alias: str, remotes: dict[str, RemoteConfig]) -> str
     )
 
 
+def _clone_bare(alias: str, url: str, destination: Path) -> None:
+    """Clone `url` into `destination`, failing with git's own diagnosis.
+
+    The output is captured only so that a failure can carry it: bare
+    CalledProcessError stringifies to "Command '[...]' returned non-zero exit
+    status 128", which tells the user nothing, while git has already said
+    "repository does not exist" or "Permission denied (publickey)". Several of
+    these run in parallel under a progress counter, where interleaved transfer
+    lines would be unreadable anyway.
+    """
+    try:
+        run_cmd(
+            [
+                "git", "clone", "--bare", "--filter=blob:none",
+                "--single-branch",
+                url, str(destination),
+            ],
+            label=alias,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        if detail:
+            raise RuntimeError(
+                f"cloning '{alias}' from {url} failed:\n" + indent(detail, "  ")
+            ) from exc
+        raise RuntimeError(
+            f"cloning '{alias}' from {url} failed with exit status {exc.returncode}"
+        ) from exc
+
+
 def ensure_bare_repo(
     alias: str,
     remotes: dict[str, RemoteConfig],
@@ -184,15 +218,7 @@ def ensure_bare_repo(
         origin = remotes.get("origin")
         if not origin:
             raise ValueError(_undefined_repo_message(alias, remotes))
-        run_cmd(
-            [
-                "git", "clone", "--bare", "--filter=blob:none",
-                "--single-branch",
-                origin.url, str(bare_repo),
-            ],
-            label=alias,
-            check=True,
-        )
+        _clone_bare(alias, origin.url, bare_repo)
 
     # Configure non-origin remotes (skip writes when values already match)
     current_config = _get_bare_config(bare_repo)
