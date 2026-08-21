@@ -15,6 +15,7 @@ from ow.commands.status import (
 )
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, parse_branch_spec, write_workspace_config
 from ow.utils.config import RemoteConfig
+from ow.utils.refs import FetchOutcome
 
 
 class TestGithubUrlFromRemote:
@@ -66,27 +67,6 @@ class TestDisplayDetachedStatus:
 
 
 class TestDisplayAttachedStatus:
-    def test_attached_with_remote_ref_found(self, tmp_path):
-        worktree = tmp_path / "community"
-        worktree.mkdir()
-        spec = BranchSpec("origin/master", "my-feature")
-        resolved = BranchSpec("origin/master", "my-feature")
-
-        with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value="origin/my-feature"),
-            patch("ow.commands.status.get_rev_list_count") as mock_count,
-        ):
-            mock_count.side_effect = [(1, 3), (0, 2)]
-            result = _display_attached_status(
-                "community", spec, resolved, worktree, 9,
-                refs={"origin/my-feature"},
-            )
-
-        assert "community" in result
-        assert "origin/my-feature" in result
-        assert "origin/master" in result
-        assert mock_count.call_count == 2
-
     def test_attached_with_upstream_not_base(self, tmp_path):
         """When no remote ref but upstream exists and differs from base, show upstream + base."""
         worktree = tmp_path / "community"
@@ -116,6 +96,7 @@ class TestDisplayAttachedStatus:
             patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(0, 1)),
+            patch("ow.commands.status.get_worktree_branch", return_value="my-feature"),
         ):
             result = _display_attached_status(
                 "community", spec, resolved, worktree, 9
@@ -218,11 +199,13 @@ class TestCmdStatusExtended:
             repos={"community": BranchSpec("origin/master")},
             templates=["common"],
         )
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
 
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
-            patch("ow.commands.status.fetch_workspace_refs", return_value=({"community": "origin/master"}, {}, {})),
+            patch("ow.commands.status.fetch_workspace_refs", return_value=FetchOutcome(
+                tracks={"community": "origin/master"}, upstreams={}, specs={}, upstream_before={},
+            )),
             patch("ow.commands.status.warn_if_drifted"),
         ):
             cmd_status(config)
@@ -234,3 +217,116 @@ class TestCmdStatusExtended:
 
 def _mock_parallel_exec(tasks):
     return {k: fn() for k, fn in tasks.items()}
+
+
+class TestAttachedStatusLabelsTheCheckedOutBranch:
+    """D4 — the counts come from HEAD, so the label must too.
+
+    Under drift the line read `community: feat (local) (origin/master ↓0 ↑1)`
+    while HEAD was on `sidetrack`: a commit that lives on sidetrack was
+    attributed to feat. The drift warning above is the only thing that saved
+    the user, and it scrolls off.
+    """
+
+    def test_a_drifted_worktree_is_not_labelled_with_the_configured_branch(self, tmp_path):
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        spec = resolved = BranchSpec("origin/master", "feat")
+
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value=None),
+            patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value="sidetrack"),
+        ):
+            result = _display_attached_status("community", spec, resolved, worktree, 9)
+
+        assert "sidetrack" in result
+        assert "feat" not in result.replace("sidetrack", "")
+
+    def test_the_upstream_equals_base_line_names_the_checked_out_branch(self, tmp_path):
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        spec = resolved = BranchSpec("origin/master", "feat")
+
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value="origin/master"),
+            patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value="sidetrack"),
+        ):
+            result = _display_attached_status("community", spec, resolved, worktree, 9)
+
+        assert "sidetrack" in result
+        assert "feat" not in result.replace("sidetrack", "")
+
+    def test_an_aligned_worktree_reads_as_before(self, tmp_path):
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        spec = resolved = BranchSpec("origin/master", "feat")
+
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value=None),
+            patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value="feat"),
+        ):
+            result = _display_attached_status("community", spec, resolved, worktree, 9)
+
+        assert "feat" in result
+
+    def test_a_detached_head_is_not_labelled_with_a_branch_at_all(self, tmp_path):
+        """Config says attached, HEAD is not. Naming any branch would lie."""
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        spec = resolved = BranchSpec("origin/master", "feat")
+
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value=None),
+            patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value=None),
+        ):
+            result = _display_attached_status("community", spec, resolved, worktree, 9)
+
+        assert "DETACHED" in result
+        assert "feat" not in result
+
+
+class TestRunbotLinkOnlyForOdoo:
+    """D5 — runbot only knows bundles for the odoo organisation's repos.
+
+    A workspace on a local `file://` remote still got a
+    `runbot: https://runbot.odoo.com/runbot/bundle/<branch>` line.
+    """
+
+    def _gather(self, tmp_path, remote_url):
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        bare = tmp_path / "community.git"
+        spec = resolved = BranchSpec("origin/master", "feat")
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value=None),
+            patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value="feat"),
+            patch("ow.commands.status.get_remote_url", return_value=remote_url),
+        ):
+            return _gather_repo_status("community", spec, resolved, worktree, bare, 9, set())
+
+    def test_a_local_file_remote_gets_no_runbot_bundle(self, tmp_path):
+        assert self._gather(tmp_path, "file:///srv/mirrors/odoo.git").first_attached_branch is None
+
+    def test_a_third_party_github_remote_gets_no_runbot_bundle(self, tmp_path):
+        assert self._gather(tmp_path, "git@github.com:acme/odoo.git").first_attached_branch is None
+
+    def test_a_missing_remote_url_gets_no_runbot_bundle(self, tmp_path):
+        assert self._gather(tmp_path, None).first_attached_branch is None
+
+    def test_an_odoo_remote_still_gets_its_bundle(self, tmp_path):
+        assert self._gather(tmp_path, "git@github.com:odoo/odoo.git").first_attached_branch == "feat"
+
+    def test_an_odoo_https_remote_still_gets_its_bundle(self, tmp_path):
+        assert self._gather(
+            tmp_path, "https://github.com/odoo/enterprise",
+        ).first_attached_branch == "feat"

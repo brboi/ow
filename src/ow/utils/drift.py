@@ -37,8 +37,8 @@ def check_drift(worktree_path, spec: BranchSpec, alias: str) -> DriftResult:
     return DriftResult(alias=alias, spec=spec, actual_branch=actual_branch)
 
 
-def warn_if_drifted(ws: WorkspaceConfig, ws_dir) -> None:
-    """Display warnings for drift; never exit."""
+def warn_if_drifted(ws: WorkspaceConfig, ws_dir) -> bool:
+    """Display warnings for drift; return True if any drifted. Never exits."""
     from typing import Any
 
     drift_tasks: dict[str, Any] = {}
@@ -49,7 +49,7 @@ def warn_if_drifted(ws: WorkspaceConfig, ws_dir) -> None:
         drift_tasks[alias] = (lambda w=worktree_path, s=spec, a=alias: check_drift(w, s, a))
 
     if not drift_tasks:
-        return
+        return False
 
     drift_results = parallel_per_repo(drift_tasks)
 
@@ -63,3 +63,6 @@ def warn_if_drifted(ws: WorkspaceConfig, ws_dir) -> None:
         print("Warning: drift detected between config and worktree state:", file=sys.stderr)
         for d in drifted:
             print(f"  {d.message}", file=sys.stderr)
+        print("  Run `ow apply` to realign the worktree(s) with the config.", file=sys.stderr)
+        return True
+    return False

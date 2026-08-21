@@ -4,16 +4,19 @@ from typing import Any, NamedTuple
 
 from ow.utils.display import console, counts
 from rich.text import Text
+from rich.markup import escape
 from ow.utils.drift import warn_if_drifted
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
 from ow.utils.config import BranchSpec, Config
+from ow.utils import paths
 from ow.utils.git import (
     get_all_remote_refs,
     get_remote_ref_for_branch,
     get_remote_url,
     get_rev_list_count,
     get_upstream,
+    get_worktree_branch,
     get_worktree_head,
     parallel_per_repo,
 )
@@ -32,6 +35,14 @@ def _github_url_from_remote(remote_url: str) -> str | None:
     if https_match:
         return f"https://github.com/{https_match.group(1)}/{https_match.group(2)}"
     return None
+
+
+def _is_odoo_remote(remote_url: str | None) -> bool:
+    """Runbot only knows bundles for the odoo organisation's repositories."""
+    if remote_url is None:
+        return False
+    github_base = _github_url_from_remote(remote_url)
+    return github_base is not None and github_base.startswith("https://github.com/odoo/")
 
 
 class _StatusResult(NamedTuple):
@@ -53,7 +64,7 @@ def _display_detached_status(
     short_hash, _ = get_worktree_head(worktree_path)
 
     status = f"[bold]{resolved.base_ref}[/] {counts(behind, ahead)} ([yellow]DETACHED[/]: {short_hash})"
-    return f"        {alias}:{padding}{status}"
+    return f"        {escape(alias)}:{padding}{status}"
 
 
 def _display_attached_status(
@@ -68,32 +79,25 @@ def _display_attached_status(
     """Format status line for an attached worktree."""
     padding = " " * (max_alias_len - len(alias) + 1)
 
-    remote_ref = get_remote_ref_for_branch(
-        worktree_path,
-        resolved.local_branch,
-        {},
-        exclude_ref=resolved.base_ref,
-        base_remote=resolved.remote,
-        refs=refs,
-    )
-    if remote_ref:
-        ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", remote_ref)
-        ahead_base, behind_base = get_rev_list_count(worktree_path, remote_ref, resolved.base_ref)
-        status = f"[bold]{remote_ref}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
-    else:
-        upstream = get_upstream(worktree_path)
-        if upstream:
-            ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
-            if upstream != resolved.base_ref:
-                ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, resolved.base_ref)
-                status = f"[bold]{upstream}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
-            else:
-                status = f"[bold]{resolved.local_branch}[/] [dim](local)[/] ([bold]{upstream}[/] {counts(behind_up, ahead_up)})"
-        else:
-            ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
-            status = f"[bold]{resolved.local_branch}[/] [dim](local)[/] ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
+    # Every count below is measured from HEAD. Labelling the line with the
+    # config's branch attributes those commits to a branch the user is not
+    # on — and the drift warning that would have caught it scrolls off.
+    actual_branch = get_worktree_branch(worktree_path)
+    head_label = actual_branch if actual_branch else "[yellow]DETACHED[/]"
 
-    return f"        {alias}:{padding}{status}"
+    upstream = get_upstream(worktree_path)
+    if upstream:
+        ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
+        if upstream != resolved.base_ref:
+            ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, resolved.base_ref)
+            status = f"[bold]{upstream}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
+        else:
+            status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{upstream}[/] {counts(behind_up, ahead_up)})"
+    else:
+        ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
+        status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
+
+    return f"        {escape(alias)}:{padding}{status}"
 
 
 def _gather_repo_status(
@@ -122,7 +126,8 @@ def _gather_repo_status(
             github_base = _github_url_from_remote(remote_url)
             if github_base:
                 link = (alias, f"{github_base}/tree/{resolved.local_branch}")
-        return _StatusResult(status_line, resolved.local_branch, link)
+        runbot_branch = resolved.local_branch if _is_odoo_remote(remote_url) else None
+        return _StatusResult(status_line, runbot_branch, link)
 
 
 # ---------------------------------------------------------------------------
@@ -132,12 +137,12 @@ def _gather_repo_status(
 
 def cmd_status(config: Config, workspace: str | None = None) -> None:
     """Show branch status for the current workspace."""
-    config, ws_dir, ws = resolve_workspace(config, name=workspace)
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    ws_dir, ws = resolve_workspace(name=workspace)
+    bare_repos_dir = paths.repos_dir()
 
     warn_if_drifted(ws, ws_dir)
 
-    _, _, resolved_specs = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
+    resolved_specs = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True).specs
 
     header = Text(f"[{ws_dir.name}]", style="bold cyan")
     console.print(header)
@@ -174,17 +179,17 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
         padding = " " * (max_alias_len - len(alias) + 1)
         worktree_path = ws_dir / alias
         if not worktree_path.exists():
-            console.print(f"        {alias}:{padding}[dim](not applied)[/]")
+            console.print(f"        {escape(alias)}:{padding}[dim](not applied)[/]")
             continue
 
         resolved = resolved_specs.get(alias)
         if resolved is None:
-            console.print(f"        {alias}:{padding}[red](error: could not resolve)[/]")
+            console.print(f"        {escape(alias)}:{padding}[red](error: could not resolve)[/]")
             continue
 
         result = status_results.get(alias)
         if isinstance(result, Exception):
-            console.print(f"        {alias}:{padding}[red](error)[/]")
+            console.print(f"        {escape(alias)}:{padding}[red](error)[/]")
             continue
 
         console.print(result.status_line)
@@ -193,12 +198,13 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
         if result.github_link:
             github_links.append(result.github_link)
 
-    console.print("    [dim]links[/]")
-    if first_attached_branch:
-        runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
-        console.print(f"        runbot: [link={runbot_url}]{first_attached_branch}[/]")
-    for link_alias, link_url in github_links:
-        link_padding = " " * (max_alias_len - len(link_alias) + 1)
-        console.print(f"        {link_alias}:{link_padding}[link={link_url}]{link_url}[/]")
+    if first_attached_branch or github_links:
+        console.print("    [dim]links[/]")
+        if first_attached_branch:
+            runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
+            console.print(f"        runbot: [link={runbot_url}]{first_attached_branch}[/]")
+        for link_alias, link_url in github_links:
+            link_padding = " " * (max_alias_len - len(link_alias) + 1)
+            console.print(f"        {escape(link_alias)}:{link_padding}[link={link_url}]{link_url}[/]")
 
     console.print()

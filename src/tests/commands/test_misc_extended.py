@@ -1,13 +1,11 @@
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from ow.commands.prune import _prune_bare_repo
-
 from ow.commands.status import _gather_repo_status
-from ow.commands.update import cmd_update
+from ow.commands.apply import cmd_apply
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
 
 
@@ -62,73 +60,38 @@ class TestStatusExtended:
 # update — error display
 # ---------------------------------------------------------------------------
 
-class TestCmdUpdateExtended:
+class TestCmdApplyExtended:
 
-    def test_cmd_update_shows_error_when_repo_fails(self, tmp_path, capsys, config_with_remotes):
+    def test_cmd_apply_shows_error_when_repo_fails(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         config = config_with_remotes
 
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, set(), {"community": "clone failed"})):
-                with patch("ow.commands.update.apply_templates"):
-                    cmd_update(config)
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {"community": "clone failed"})):
+                with patch("ow.commands.apply.apply_templates"):
+                    with pytest.raises(SystemExit) as exc:
+                        cmd_apply(config)
 
+        assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "Warning" in captured.err or "Warning" in captured.out
         assert "community" in (captured.err + captured.out)
 
-    def test_cmd_update_no_errors_no_warning(self, tmp_path, capsys, config_with_remotes):
+    def test_cmd_apply_no_errors_no_warning(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={}, templates=["common"])
-        write_workspace_config(ws_dir / ".ow" / "config", ws)
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         config = config_with_remotes
 
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.update.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
-                with patch("ow.commands.update.apply_templates"):
-                    cmd_update(config)
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
+                with patch("ow.commands.apply.apply_templates"):
+                    cmd_apply(config)
 
         captured = capsys.readouterr()
         assert "Warning" not in captured.err
         assert "Warning" not in captured.out
-
-
-# ---------------------------------------------------------------------------
-# __main__ — find_root, init via main
-# ---------------------------------------------------------------------------
-
-class TestMainExtended:
-    def test_main_init_path(self, tmp_path, monkeypatch, capsys):
-        from typer.testing import CliRunner
-        from ow.__main__ import app
-        runner = CliRunner()
-        monkeypatch.chdir(tmp_path)
-        result = runner.invoke(app, ["init"])
-        assert result.exit_code == 0
-        assert "Project initialized successfully" in result.output
-
-
-# ---------------------------------------------------------------------------
-# prune — edge case: no git command works
-# ---------------------------------------------------------------------------
-
-class TestPruneExtended:
-    def test_prune_bare_repo_with_no_prunes_needed(self, tmp_path):
-        bare_repo = tmp_path / "community.git"
-        bare_repo.mkdir()
-        wt_result = MagicMock(returncode=0)
-        wt_result.stdout = ""
-        branch_result = MagicMock(returncode=0)
-        branch_result.stdout = ""
-        with patch("ow.commands.prune.subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                MagicMock(returncode=0),
-                wt_result, branch_result,
-                MagicMock(returncode=0, stdout="", stderr="")
-            ]
-            result = _prune_bare_repo(bare_repo)
-        assert result.deleted_branches == []

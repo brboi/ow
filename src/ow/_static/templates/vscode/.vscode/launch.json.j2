@@ -1,6 +1,7 @@
 {
   "version": "0.2.0",
   "configurations": [
+{% if main_repo_alias %}
     {
       "name": "Run Instance With Debug",
       "type": "debugpy",
@@ -33,5 +34,6 @@
         "PYTHON_PATH": "${workspaceFolder}/{{ main_repo_alias }}"
       }
     }
+{% endif %}
   ]
 }

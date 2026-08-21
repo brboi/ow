@@ -1,10 +1,124 @@
+import os
+import shutil
+import signal
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from textwrap import indent
 from typing import Callable, TypeVar
 
+from ow.utils import paths
 from ow.utils.config import BranchSpec, RemoteConfig
+
+# Every git child is tracked here so an interrupt can kill it. An abandoned
+# `git fetch` holds a lock inside a bare repo that every workspace shares, so
+# the next plain `git fetch` blocks on it — issue #26.
+_children: set[subprocess.Popen] = set()
+_children_lock = threading.Lock()
+
+
+def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run, with the child in its own process group and tracked.
+
+    start_new_session detaches the child from our process group, so a Ctrl-C
+    typed at the terminal does not reach it directly — we decide when and how
+    it dies, rather than racing the signal.
+
+    Built on Popen.communicate rather than subprocess.run itself, so two
+    subprocess.run-only keywords need translating before they reach Popen:
+    `check` (Popen has no such concept) and `capture_output` (Popen has no
+    such keyword at all — it wants stdout=/stderr=PIPE instead).
+    """
+    check = kwargs.pop("check", False)
+    if kwargs.pop("capture_output", False):
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    # The lock spans Popen() itself, not just the registration after it: a
+    # child that exists between Popen() returning and the lock being taken
+    # would be invisible to a terminate_children() racing that window.
+    # Spawning is a few milliseconds and there are single-digit repos, so
+    # serialising it costs nothing measurable. The lock must not extend to
+    # communicate() below, or a parallel run would become sequential.
+    with _children_lock:
+        proc = subprocess.Popen(args, start_new_session=True, **kwargs)
+        _children.add(proc)
+    try:
+        stdout, stderr = proc.communicate()
+    except BaseException:
+        # Whatever went wrong here — a Ctrl-C landing in communicate() above
+        # all — the child must not outlive it. Its own session means the
+        # terminal's SIGINT never reached it, and the discard below takes it
+        # out of terminate_children()'s reach, so this is the last moment
+        # anything can still kill it.
+        _kill_group(proc)
+        raise
+    finally:
+        with _children_lock:
+            _children.discard(proc)
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, args, stdout, stderr)
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal the child's whole process group, tolerating its being gone.
+
+    The group, not the process: git drives helpers of its own (ssh, git-remote-*,
+    index-pack), and signalling only the parent leaves those behind.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _kill_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
+    """SIGTERM one child's group, SIGKILL it if it outlives `grace`, and reap it."""
+    _signal_group(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc, signal.SIGKILL)
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def live_children() -> int:
+    with _children_lock:
+        return len(_children)
+
+
+def terminate_children(grace: float = 2.0) -> int:
+    """SIGTERM every tracked child's group, SIGKILL whatever outlives `grace`.
+
+    Returns how many children were registered when called.
+    """
+    with _children_lock:
+        procs = list(_children)
+        _children.clear()
+
+    for proc in procs:
+        _signal_group(proc, signal.SIGTERM)
+
+    # One deadline shared by every child, rather than `grace` each: they were
+    # all signalled together, so they get their grace period together.
+    deadline = time.monotonic() + grace
+    for proc in procs:
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            _signal_group(proc, signal.SIGKILL)
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
+
+    return len(procs)
 
 
 def run_cmd(args: list[str], quiet: bool = False, label: str | None = None, **kwargs) -> subprocess.CompletedProcess:
@@ -16,7 +130,7 @@ def run_cmd(args: list[str], quiet: bool = False, label: str | None = None, **kw
             print(f"  [{label}] {' '.join(display_args)}", file=sys.stderr)
         else:
             print(f"    $ {' '.join(args)}", file=sys.stderr)
-    return subprocess.run(args, **kwargs)
+    return _run(args, **kwargs)
 
 
 def ordered_remotes(alias_remotes: dict[str, RemoteConfig]) -> list[str]:
@@ -29,7 +143,7 @@ def ordered_remotes(alias_remotes: dict[str, RemoteConfig]) -> list[str]:
 
 def _get_bare_config(bare_repo: Path) -> dict[str, str]:
     """Read all local git config as a dict via a single subprocess."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "config", "--list", "--local"],
         capture_output=True, text=True,
     )
@@ -43,28 +157,197 @@ def _get_bare_config(bare_repo: Path) -> dict[str, str]:
     return config
 
 
+def _is_bare_repo(path: Path) -> bool:
+    """True only if `path` is itself a git repository.
+
+    `--absolute-git-dir` rather than a bare `--git-dir` check: git discovers
+    repositories by walking upwards, so a plain directory that happens to sit
+    inside one would otherwise answer yes. Comparing what git resolved against
+    the path asked about pins the answer to this directory.
+
+    The comparison is samefile() and not `==`: git answers with every symlink
+    resolved, while `path` is built from XDG_DATA_HOME exactly as configured.
+    On a machine whose home traverses a symlink — /home -> /var/home is the
+    common one — two spellings of the same directory would not match as
+    strings, and ow answers "not a repository" by cloning over the top of the
+    user's work. Asking the filesystem whether they are the same object also
+    covers bind mounts and case-insensitive filesystems, where resolving the
+    strings still would not match.
+    """
+    if not path.is_dir():
+        return False
+    result = _run(
+        ["git", "-C", str(path), "rev-parse", "--absolute-git-dir"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return False
+    try:
+        return os.path.samefile(result.stdout.strip(), path)
+    except OSError:
+        # Both paths existed a moment ago; if one no longer does, or cannot be
+        # stat'd, "not a repository" is the answer already given everywhere
+        # else on this path.
+        return False
+
+
+def _git_calls_it_a_repository(path: Path) -> bool:
+    """Whether git validates `path` itself as a git directory.
+
+    `rev-parse --resolve-git-dir` never walks upwards and never compares paths
+    — it inspects the directory it is handed — so it is an answer to the same
+    question by an independent route. That independence is the point: it is
+    used to veto destructive repairs, and a veto that shared _is_bare_repo's
+    machinery would share its mistakes.
+    """
+    if not path.is_dir():
+        return False
+    return _run(
+        ["git", "rev-parse", "--resolve-git-dir", str(path)],
+        capture_output=True, text=True,
+    ).returncode == 0
+
+
+def _refuse_to_displace_a_repository(bare_repo: Path) -> None:
+    """Stop before a repair can destroy a repository it failed to recognise.
+
+    Getting here means _is_bare_repo answered "not a repository", and the
+    repair that follows renames whatever is at the path to <name>.broken and
+    deletes whatever was already there. That is the user's work if the answer
+    was wrong, and one wrong answer — a bug like the symlink comparison, a git
+    that would not start, a directory that could not be read — must not be
+    enough to lose it. So ask git again by a route that shares nothing with
+    the first answer, and refuse rather than widen the retry: a false refusal
+    costs the user one message, a false repair costs them their commits.
+    """
+    if _git_calls_it_a_repository(bare_repo):
+        raise RuntimeError(
+            f"{bare_repo} is a git repository, but ow does not recognise it as "
+            f"the bare repo it expects there, so it will not move it aside.\n"
+            f"  Move it somewhere safe (or remove it) and run ow again."
+        )
+    broken = bare_repo.with_name(f"{bare_repo.name}.broken")
+    if bare_repo.exists() and _git_calls_it_a_repository(broken):
+        raise RuntimeError(
+            f"{broken} is a git repository left by an earlier repair, and ow "
+            f"would have to delete it to move {bare_repo.name} aside.\n"
+            f"  Move it somewhere safe (or remove it) and run ow again."
+        )
+
+
+def _clone_bare_into_place(alias: str, url: str, bare_repo: Path) -> None:
+    """Clone into a sibling directory and move it into place once it is whole.
+
+    Nothing appears at the final path until there is a complete repository to
+    put there, so a clone that is interrupted — terminate_children() SIGKILLs
+    after a two-second grace, which an Odoo-sized clone will not always beat —
+    leaves no half-repo for the next run to trust.
+
+    The staging path is derived from the alias rather than randomised, so a
+    killed run leaves at most one leftover and the next one reuses the space
+    instead of accumulating another copy.
+
+    Refuses before it clones if anything git recognises as a repository stands
+    where it would have to move or delete — see
+    _refuse_to_displace_a_repository.
+    """
+    _refuse_to_displace_a_repository(bare_repo)
+    staging = bare_repo.with_name(f"{bare_repo.name}.incoming")
+    bare_repo.parent.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        _clone_bare(alias, url, staging)
+        if bare_repo.exists():
+            # Whatever is there is not a repository, but ow did not put it
+            # there and cannot know it holds nothing of the user's. One slot,
+            # so a repeatedly-repaired repo cannot fill the disk with copies.
+            broken = bare_repo.with_name(f"{bare_repo.name}.broken")
+            shutil.rmtree(broken, ignore_errors=True)
+            os.rename(bare_repo, broken)
+            print(f"  [{alias}] {bare_repo} was not a git repository; moved to {broken}",
+                  file=sys.stderr)
+        os.rename(staging, bare_repo)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _undefined_repo_message(alias: str, remotes: dict[str, RemoteConfig]) -> str:
+    """Why ow cannot clone `alias`, in the user's terms and with a file to open.
+
+    "No origin remote configured" names one of ow's own notions and points at
+    nothing; a workspace only ever names a repo, and the global config is where
+    that name has to be defined.
+    """
+    config_file = paths.config_file()
+    if remotes:
+        return (
+            f"repo '{alias}' has no origin remote\n"
+            f"  Add origin.url to [remotes.{alias}] in {config_file}"
+        )
+    return (
+        f"configuration references repo '{alias}' but it's not defined in [remotes]\n"
+        f"  Add a [remotes.{alias}] section with an origin.url to {config_file}"
+    )
+
+
+def _clone_bare(alias: str, url: str, destination: Path) -> None:
+    """Clone `url` into `destination`, failing with git's own diagnosis.
+
+    The output is captured only so that a failure can carry it: bare
+    CalledProcessError stringifies to "Command '[...]' returned non-zero exit
+    status 128", which tells the user nothing, while git has already said
+    "repository does not exist" or "Permission denied (publickey)". Several of
+    these run in parallel under a progress counter, where interleaved transfer
+    lines would be unreadable anyway.
+    """
+    try:
+        run_cmd(
+            [
+                "git", "clone", "--bare", "--filter=blob:none",
+                "--single-branch",
+                url, str(destination),
+            ],
+            label=alias,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        if detail:
+            raise RuntimeError(
+                f"cloning '{alias}' from {url} failed:\n" + indent(detail, "  ")
+            ) from exc
+        raise RuntimeError(
+            f"cloning '{alias}' from {url} failed with exit status {exc.returncode}"
+        ) from exc
+
+
 def ensure_bare_repo(
     alias: str,
     remotes: dict[str, RemoteConfig],
     bare_repos_dir: Path,
 ) -> None:
     bare_repo = bare_repos_dir / f"{alias}.git"
-    if not bare_repo.exists():
+    if not _is_bare_repo(bare_repo):
         origin = remotes.get("origin")
         if not origin:
-            raise ValueError(f"No origin remote configured for '{alias}'")
-        run_cmd(
-            [
-                "git", "clone", "--bare", "--filter=blob:none",
-                "--single-branch",
-                origin.url, str(bare_repo),
-            ],
-            label=alias,
-            check=True,
-        )
+            raise ValueError(_undefined_repo_message(alias, remotes))
+        _clone_bare_into_place(alias, origin.url, bare_repo)
 
     # Configure non-origin remotes (skip writes when values already match)
     current_config = _get_bare_config(bare_repo)
+
+    # Bare repos default core.logAllRefUpdates to false, so remote-tracking refs
+    # get no reflog and `git merge-base --fork-point` has nothing to walk. That
+    # reflog is how a force-push stays detectable after some other command
+    # (ow status, or a plain git fetch) has already absorbed it.
+    if current_config.get("core.logallrefupdates") != "true":
+        run_cmd(
+            ["git", "-C", str(bare_repo), "config", "core.logAllRefUpdates", "true"],
+            quiet=True, check=True, label=alias,
+        )
+
     for remote_name in ordered_remotes(remotes):
         remote_cfg = remotes[remote_name]
         desired: dict[str, str] = {}
@@ -84,7 +367,7 @@ def ensure_bare_repo(
 
 def ensure_ref(bare_repo: Path, remote: str, branch: str) -> None:
     ref = f"refs/remotes/{remote}/{branch}"
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
         capture_output=True,
     )
@@ -99,11 +382,11 @@ def ensure_ref(bare_repo: Path, remote: str, branch: str) -> None:
 def _ensure_base_ref_non_fatal(bare_repo: Path, spec: BranchSpec) -> None:
     """Ensure refs/remotes/spec.remote/spec.branch exists locally; non-fatal if it can't be fetched."""
     base_ref = f"refs/remotes/{spec.remote}/{spec.branch}"
-    if subprocess.run(
+    if _run(
         ["git", "-C", str(bare_repo), "rev-parse", "--verify", base_ref],
         capture_output=True,
     ).returncode != 0:
-        subprocess.run(
+        _run(
             ["git", "-C", str(bare_repo), "fetch", spec.remote,
              f"{spec.branch}:refs/remotes/{spec.remote}/{spec.branch}"],
             capture_output=True,
@@ -126,14 +409,14 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
     if spec.local_branch is not None:
         for remote in remotes_to_try:
             ref = f"refs/remotes/{remote}/{spec.local_branch}"
-            result = subprocess.run(
+            result = _run(
                 ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
                 capture_output=True,
             )
             if result.returncode == 0:
                 _ensure_base_ref_non_fatal(bare_repo, spec)
                 return BranchSpec(f"{remote}/{spec.local_branch}", spec.local_branch)
-            result = subprocess.run(
+            result = _run(
                 ["git", "-C", str(bare_repo), "fetch", remote,
                  f"{spec.local_branch}:refs/remotes/{remote}/{spec.local_branch}"],
                 capture_output=True,
@@ -145,13 +428,13 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
     # Fall through: find which remote has the base branch.
     for remote in remotes_to_try:
         ref = f"refs/remotes/{remote}/{spec.branch}"
-        result = subprocess.run(
+        result = _run(
             ["git", "-C", str(bare_repo), "rev-parse", "--verify", ref],
             capture_output=True,
         )
         if result.returncode == 0:
             return BranchSpec(f"{remote}/{spec.branch}", spec.local_branch)
-        result = subprocess.run(
+        result = _run(
             ["git", "-C", str(bare_repo), "fetch", remote,
              f"{spec.branch}:refs/remotes/{remote}/{spec.branch}"],
             capture_output=True,
@@ -165,7 +448,7 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
 def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
     if not worktree_path.exists():
         return False
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "worktree", "list"],
         capture_output=True, text=True, check=True,
     )
@@ -174,7 +457,7 @@ def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
 
 def get_all_remote_refs(bare_repo: Path) -> set[str]:
     """Return all remote refs as short names (e.g. 'origin/master') via a single subprocess."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "for-each-ref", "--format=%(refname:short)", "refs/remotes/"],
         capture_output=True, text=True,
     )
@@ -230,7 +513,7 @@ def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
             check=True,
         )
     else:
-        branch_exists = subprocess.run(
+        branch_exists = _run(
             ["git", "-C", str(bare_repo), "rev-parse", "--verify", f"refs/heads/{spec.local_branch}"],
             capture_output=True,
         ).returncode == 0
@@ -251,7 +534,7 @@ def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
 
 def get_rev_list_count(repo_path: Path, ref_a: str, ref_b: str) -> tuple[int, int]:
     """Return (ahead, behind): ref_a ahead of ref_b, ref_a behind ref_b."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(repo_path), "rev-list", "--left-right", "--count", f"{ref_a}...{ref_b}"],
         capture_output=True, text=True, check=True,
     )
@@ -261,7 +544,7 @@ def get_rev_list_count(repo_path: Path, ref_a: str, ref_b: str) -> tuple[int, in
 
 def get_worktree_head(worktree_path: Path) -> tuple[str, str]:
     """Return (short_hash, full_hash)."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
         capture_output=True, text=True, check=True,
     )
@@ -270,7 +553,7 @@ def get_worktree_head(worktree_path: Path) -> tuple[str, str]:
 
 
 def get_upstream(worktree_path: Path) -> str | None:
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
         capture_output=True, text=True,
     )
@@ -281,7 +564,7 @@ def get_upstream(worktree_path: Path) -> str | None:
 
 def worktree_is_detached(worktree_path: Path) -> bool:
     """True if HEAD is detached (no symbolic ref)."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree_path), "symbolic-ref", "--quiet", "HEAD"],
         capture_output=True,
     )
@@ -290,7 +573,7 @@ def worktree_is_detached(worktree_path: Path) -> bool:
 
 def get_worktree_branch(worktree_path: Path) -> str | None:
     """Return the current branch name, or None if HEAD is detached."""
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"],
         capture_output=True, text=True,
     )
@@ -303,7 +586,7 @@ def get_worktree_branch(worktree_path: Path) -> str | None:
 def attach_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> None:
     """Switch a detached worktree to a local branch tracking spec.base_ref."""
     alias = worktree_path.name
-    branch_exists = subprocess.run(
+    branch_exists = _run(
         ["git", "-C", str(bare_repo), "rev-parse", "--verify", f"refs/heads/{spec.local_branch}"],
         capture_output=True,
     ).returncode == 0
@@ -361,7 +644,7 @@ def get_remote_ref_for_branch(
 
 
 def get_remote_url(bare_repo: Path, remote: str) -> str | None:
-    result = subprocess.run(
+    result = _run(
         ["git", "-C", str(bare_repo), "remote", "get-url", remote],
         capture_output=True, text=True,
     )
@@ -370,7 +653,7 @@ def get_remote_url(bare_repo: Path, remote: str) -> str | None:
 
 def git(repo: Path, *args, quiet: bool = False, **kwargs) -> subprocess.CompletedProcess:
     """Central git wrapper with automatic -C."""
-    if repo.suffix == ".git" and repo.parent.name == ".bare-git-repos":
+    if repo.suffix == ".git" and repo.parent == paths.repos_dir():
         label = repo.stem
     else:
         label = repo.name
@@ -383,62 +666,151 @@ def git_fetch(repo: Path, remote: str, refspec: str, *, force: bool = False, **k
     git(repo, "fetch", remote, ref, **kwargs)
 
 
-def git_switch(worktree: Path, ref: str, *, detach: bool = False, create: bool = False, **kwargs) -> None:
-    """Unified switch with detach/create options."""
-    args = ["switch"]
-    if detach:
-        args.extend(["--detach", ref])
-    elif create:
-        args.extend(["-c", ref])
-    else:
-        args.append(ref)
-    git(worktree, *args, **kwargs)
+def _git_dir(worktree: Path) -> Path | None:
+    """Resolve the real .git directory.
+
+    Worktrees attached to a bare repo have a .git *file* pointing into
+    <bare>/worktrees/<name>, so `worktree / ".git"` is not a directory.
+    """
+    result = _run(
+        ["git", "-C", str(worktree), "rev-parse", "--absolute-git-dir"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return Path(result.stdout.strip())
 
 
-def git_rebase(worktree: Path, onto: str, **kwargs) -> subprocess.CompletedProcess:
-    """Rebase onto ref. Returns CompletedProcess for caller to check."""
-    return git(worktree, "rebase", onto, **kwargs)
+def rev_parse(repo: Path, ref: str) -> str | None:
+    """Resolve ref to a full SHA, or None if it does not exist."""
+    result = _run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() or None
 
 
-def git_merge_base_fork_point(worktree: Path, upstream: str, branch: str) -> str | None:
-    """Find fork-point between branch and upstream. None if upstream was rewritten."""
-    result = git(
-        worktree, "merge-base", "--fork-point", upstream, branch,
-        quiet=True, capture_output=True, text=True,
+def is_ancestor(repo: Path, a: str, b: str) -> bool:
+    """True if a is an ancestor of b (a commit is its own ancestor)."""
+    return _run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", a, b],
+        capture_output=True,
+    ).returncode == 0
+
+
+def merge_base(repo: Path, a: str, b: str) -> str | None:
+    result = _run(
+        ["git", "-C", str(repo), "merge-base", a, b],
+        capture_output=True, text=True,
     )
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
 
 
-def git_rev_list(repo: Path, commit_range: str, *, reverse: bool = False) -> list[str]:
-    """Return list of commit hashes in range. Empty list if range is invalid."""
-    args = ["rev-list"]
-    if reverse:
-        args.append("--reverse")
-    args.append(commit_range)
-    result = git(repo, *args, quiet=True, capture_output=True, text=True)
+def merge_base_fork_point(repo: Path, upstream: str, ref: str = "HEAD") -> str | None:
+    """The newest past value of `upstream` that `ref` is built on.
+
+    Walks the upstream ref's reflog newest-first and returns the first entry
+    that is an ancestor of `ref`. Returns None when the reflog is missing or
+    holds nothing usable — which is why the caller must treat it as one
+    candidate among several, never as the answer.
+    """
+    result = _run(
+        ["git", "-C", str(repo), "merge-base", "--fork-point", upstream, ref],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def count_commits(repo: Path, rev_range: str) -> int:
+    result = _run(
+        ["git", "-C", str(repo), "rev-list", "--count", rev_range],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return 0
+    return int(result.stdout.strip() or 0)
+
+
+def count_new_patches(worktree: Path, other: str) -> int:
+    """Commits in `other` whose patch HEAD does not already carry.
+
+    Plain commit counting is wrong here: after a rebase the original commits
+    are unreachable from HEAD under their old SHAs, so `HEAD..other` stays
+    positive forever and the caller would rebase onto a stale ref on every
+    run. --cherry-pick drops commits with an equivalent patch on the other
+    side, which is the same test git rebase applies internally.
+    """
+    result = _run(
+        ["git", "-C", str(worktree), "rev-list", "--count",
+         "--cherry-pick", "--right-only", "--no-merges", f"HEAD...{other}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return 0
+    return int(result.stdout.strip() or 0)
+
+
+def count_unpushed(worktree: Path, bound: str, other: str) -> int:
+    """Commits in bound..HEAD whose patch `other` does not already carry.
+
+    A plain `bound..HEAD` count is wrong for the same reason `count_new_patches`
+    exists: after a rebase, commits that are already on `other` get new SHAs
+    locally, so counting SHAs would report them as unpushed forever. And using
+    `other`'s own merge-base with HEAD instead of `bound` is wrong too — the
+    moment `other`'s history diverges from HEAD's (a colleague's push, a
+    squash), that merge-base slides behind `bound` and pulls the base branch's
+    own commits into the count.
+
+    `git cherry <other> HEAD <bound>` is built exactly for this: it walks
+    `bound..HEAD`, and for each commit checks whether `other` already carries
+    an equivalent patch ('-') or not ('+'). Only the '+' commits are genuinely
+    unpushed.
+    """
+    result = _run(
+        ["git", "-C", str(worktree), "cherry", other, "HEAD", bound],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return 0
+    return sum(1 for line in result.stdout.splitlines() if line.startswith("+"))
+
+
+# Ordered: rebase markers first, because an interactive rebase also writes a
+# sequencer directory and must not be reported as a cherry-pick.
+_IN_PROGRESS_MARKERS: tuple[tuple[str, str], ...] = (
+    ("rebase-merge", "rebase"),
+    ("rebase-apply", "rebase"),
+    ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("sequencer", "cherry-pick"),
+    ("REVERT_HEAD", "revert"),
+    ("MERGE_HEAD", "merge"),
+)
+
+
+def in_progress_operation(worktree: Path) -> tuple[str, str, str] | None:
+    """Return (operation, continue_command, abort_command), or None if idle."""
+    git_dir = _git_dir(worktree)
+    if git_dir is None:
+        return None
+    for marker, operation in _IN_PROGRESS_MARKERS:
+        if (git_dir / marker).exists():
+            return operation, f"git {operation} --continue", f"git {operation} --abort"
+    return None
+
+
+def dirty_files(worktree: Path) -> list[str]:
+    """Modified tracked files. Untracked files do not block a rebase."""
+    result = _run(
+        ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True,
+    )
     if result.returncode != 0:
         return []
-    return [h for h in result.stdout.strip().split("\n") if h]
-
-
-def git_log_oneline(repo: Path, commit: str) -> str:
-    """Return one-line log for a commit: 'hash message'."""
-    result = git(repo, "log", "-1", "--format=%h %s", commit, quiet=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        return commit[:7]
-    return result.stdout.strip()
-
-
-def git_cherry_pick(worktree: Path, commit: str) -> subprocess.CompletedProcess:
-    """Cherry-pick a commit. Returns CompletedProcess for caller to check."""
-    return git(worktree, "cherry-pick", commit)
-
-
-def git_reset_hard(worktree: Path, ref: str) -> None:
-    """Reset worktree to ref with --hard."""
-    git(worktree, "reset", "--hard", ref, check=True)
+    return [line[3:] for line in result.stdout.splitlines() if line.strip()]
 
 
 T = TypeVar("T")
@@ -446,21 +818,43 @@ T = TypeVar("T")
 
 def parallel_per_repo(
     tasks: dict[str, Callable[[], T]],
+    *,
+    on_done: Callable[[str], None] | None = None,
 ) -> dict[str, T | Exception]:
-    """Run callables in parallel per repo alias. Returns {alias: result_or_exception}."""
+    """Run callables in parallel per repo alias. Returns {alias: result_or_exception}.
+
+    Deliberately not a `with` block: ThreadPoolExecutor's context manager exits
+    through shutdown(wait=True), which swallows an interrupt into a join and
+    leaves the git children running. Collecting through as_completed gives the
+    interrupt somewhere to land, and gives callers a completion event to count.
+    """
     if not tasks:
         return {}
 
     results: dict[str, T | Exception] = {}
-
-    with ThreadPoolExecutor() as pool:
-        futures = {alias: pool.submit(fn) for alias, fn in tasks.items()}
-
-    for alias in tasks:
-        future = futures[alias]
-        try:
-            results[alias] = future.result()
-        except Exception as exc:
-            results[alias] = exc
+    pool = ThreadPoolExecutor()
+    try:
+        futures = {pool.submit(fn): alias for alias, fn in tasks.items()}
+        for future in as_completed(futures):
+            alias = futures[future]
+            try:
+                results[alias] = future.result()
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                results[alias] = exc
+            if on_done is not None:
+                on_done(alias)
+    except KeyboardInterrupt:
+        pool.shutdown(wait=False, cancel_futures=True)
+        terminate_children()
+        raise
+    except BaseException:
+        # Anything else reaching here came from on_done, a caller-supplied
+        # callback. It must not leak the pool on its way out.
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
 
     return results

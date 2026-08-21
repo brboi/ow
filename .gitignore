@@ -6,9 +6,6 @@
 *.egg-info
 __pycache__
 
-# Local documentation
-docs/
-
 # OW version
 src/ow/_version.py
 

@@ -7,6 +7,8 @@ import pytest
 
 from ow.commands import cmd_status
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, parse_branch_spec, write_workspace_config
+from ow.utils.refs import FetchOutcome
+from ow.utils import paths
 
 
 def write_ow_config(ws_dir: Path, templates: list[str], repos: dict[str, str], vars: dict | None = None) -> None:
@@ -15,7 +17,7 @@ def write_ow_config(ws_dir: Path, templates: list[str], repos: dict[str, str], v
         templates=templates,
         vars=vars or {},
     )
-    write_workspace_config(ws_dir / ".ow" / "config", ws)
+    write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
 
 
 def _mock_parallel_exec(tasks):
@@ -26,19 +28,21 @@ def _mock_parallel_exec(tasks):
 # cmd_status
 # ---------------------------------------------------------------------------
 
-def test_cmd_status_drift_warns(tmp_path, capsys):
+def test_cmd_status_drift_warns(tmp_path, capsys, xdg):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
-    (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
+    (paths.repos_dir() / "community.git").mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master..my-feature"})
     config = Config(
         vars={"http_port": 8069, "db_host": "localhost", "db_port": 5432},
         remotes={},
-        root_dir=tmp_path,
     )
 
     resolved_spec = BranchSpec("origin/master")
-    fetch_return = ({"community": "origin/master"}, {}, {"community": resolved_spec})
+    fetch_return = FetchOutcome(
+        tracks={"community": "origin/master"}, upstreams={},
+        specs={"community": resolved_spec}, upstream_before={},
+    )
 
     with (
         patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"),
@@ -56,15 +60,14 @@ def test_cmd_status_drift_warns(tmp_path, capsys):
     assert "Warning" in captured.err
 
 
-def test_cmd_status_fetches_before_display(tmp_path):
+def test_cmd_status_fetches_before_display(tmp_path, xdg):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
-    (tmp_path / ".bare-git-repos" / "community.git").mkdir(parents=True)
+    (paths.repos_dir() / "community.git").mkdir(parents=True)
     write_ow_config(ws_dir, ["common"], {"community": "master"})
     config = Config(
         vars={"http_port": 8069, "db_host": "localhost", "db_port": 5432},
         remotes={},
-        root_dir=tmp_path,
     )
 
     fetch_called = [False]
@@ -72,7 +75,10 @@ def test_cmd_status_fetches_before_display(tmp_path):
 
     def mock_fetch(*a, **kw):
         fetch_called[0] = True
-        return ({"community": "origin/master"}, {}, {"community": resolved_spec})
+        return FetchOutcome(
+            tracks={"community": "origin/master"}, upstreams={},
+            specs={"community": resolved_spec}, upstream_before={},
+        )
 
     with (
         patch("ow.utils.drift.get_worktree_branch", return_value=None),

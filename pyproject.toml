@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 dependencies = ["typer", "rich", "jinja2", "questionary", "tomli-w"]
 dynamic = ["version"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",

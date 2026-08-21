@@ -3,10 +3,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig
+from ow.utils.config import BranchSpec, WorkspaceConfig
+from ow.utils import paths
 from ow.utils.templates import (
     _get_packaged_templates,
-    _resolve_template_dir,
+    _packaged_bundle,
     available_templates,
     apply_templates,
     ensure_workspace_materialized,
@@ -22,49 +23,78 @@ class TestGetPackagedTemplates:
         assert "zed" in names
 
 
+class TestPackagedLookupFailures:
+    """A broken install must not masquerade as "ow ships no templates".
+
+    Swallowing every exception here turned an unreadable `_static/templates`
+    into `unknown template(s): common. Available: ` — a message that blames
+    the user's config for a broken package.
+    """
+
+    def test_an_unreadable_packaged_tree_names_the_cause(self, xdg, capsys):
+        (paths.templates_dir() / "mine").mkdir(parents=True)
+        with patch(
+            "ow.utils.templates._packaged_templates_dir",
+            autospec=True,
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            assert available_templates() == ["mine"]
+
+        err = capsys.readouterr().err
+        assert "Permission denied" in err
+        assert "packaged templates" in err
+
+    def test_a_broken_lookup_is_not_swallowed(self, xdg):
+        """Only unreadable files are survivable; a bug is not."""
+        with patch(
+            "ow.utils.templates._packaged_templates_dir",
+            autospec=True,
+            side_effect=ValueError("ow is not a package"),
+        ):
+            with pytest.raises(ValueError):
+                available_templates()
+
+    def test_a_bundle_lookup_does_not_swallow_a_broken_lookup(self, xdg):
+        with patch(
+            "ow.utils.templates._packaged_templates_dir",
+            autospec=True,
+            side_effect=ValueError("ow is not a package"),
+        ):
+            with pytest.raises(ValueError):
+                _packaged_bundle("common")
+
+    def test_a_bundle_ow_does_not_ship_is_none(self, xdg):
+        assert _packaged_bundle("nosuch-bundle") is None
+        assert _packaged_bundle("common") is not None
+
+
 class TestAvailableTemplates:
-    def test_returns_packaged_only(self, tmp_path):
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
-        names = available_templates(config)
+    def test_returns_packaged_only(self, xdg):
+        names = available_templates()
         assert "common" in names
         assert "vscode" in names
 
-    def test_merges_local_and_packaged(self, tmp_path):
-        local = tmp_path / "templates" / "my-custom"
+    def test_merges_local_and_packaged(self, xdg):
+        local = paths.templates_dir() / "my-custom"
         local.mkdir(parents=True)
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
-        names = available_templates(config)
+        names = available_templates()
         assert "my-custom" in names
         assert "common" in names
         assert "vscode" in names
 
-    def test_sorted_order(self, tmp_path):
+    def test_sorted_order(self, xdg):
         for name in ["my-custom"]:
-            d = tmp_path / "templates" / name
+            d = paths.templates_dir() / name
             d.mkdir(parents=True)
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
-        names = available_templates(config)
+        names = available_templates()
         assert names == sorted(names)
 
-
-class TestResolveTemplateDir:
-    def test_packaged_template(self, tmp_path):
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
-        result = _resolve_template_dir("common", config)
-        assert result.is_dir()
-
-    def test_local_template_takes_priority(self, tmp_path):
-        local = tmp_path / "templates" / "common"
+    def test_bundle_in_both_trees_listed_once(self, xdg):
+        """A name present in both packaged and local trees must not be duplicated."""
+        local = paths.templates_dir() / "common"
         local.mkdir(parents=True)
-        (local / "custom.txt").write_text("local")
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
-        result = _resolve_template_dir("common", config)
-        assert result == local
-
-    def test_missing_template_raises(self, tmp_path):
-        config = Config(vars={}, remotes={}, root_dir=tmp_path)
-        with pytest.raises(FileNotFoundError, match="not found"):
-            _resolve_template_dir("nonexistent-template", config)
+        names = available_templates()
+        assert names.count("common") == 1
 
 
 class TestIsOdooMainRepo:
@@ -139,6 +169,57 @@ class TestApplyTemplates:
         ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common", "vscode"])
         apply_templates(ws, config, ws_dir)
         assert (ws_dir / "odoorc").exists()
+
+    def test_missing_template_raises(self, tmp_path, config):
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["nonexistent-template"])
+        with pytest.raises(FileNotFoundError, match="not found"):
+            apply_templates(ws, config, ws_dir)
+
+    def test_empty_local_bundle_raises_accurate_message(self, tmp_path, config):
+        """The bundle directory exists (and is listed by available_templates) but holds no files."""
+        local = paths.templates_dir() / "empty-bundle"
+        local.mkdir(parents=True)
+
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["empty-bundle"])
+        with pytest.raises(FileNotFoundError, match="empty") as exc_info:
+            apply_templates(ws, config, ws_dir)
+        assert str(local) in str(exc_info.value)
+        assert "not found" not in str(exc_info.value)
+
+    def test_local_override_can_include_packaged_sibling(self, tmp_path, config):
+        """A loader-less environment cannot resolve {% include %} — this must work."""
+        local = paths.templates_dir() / "common"
+        local.mkdir(parents=True)
+        (local / "pyrightconfig.json.j2").write_text("{% include 'requirements-dev.txt' %}")
+
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["common"])
+        apply_templates(ws, config, ws_dir)
+
+        # The include pulls the packaged sibling's content.
+        assert (ws_dir / "pyrightconfig.json").read_text() == "inotify\n"
+
+    def test_partial_local_bundle_does_not_hide_packaged_siblings(self, tmp_path, config):
+        """Owning one file of a bundle must not fork the whole bundle."""
+        local = paths.templates_dir() / "common"
+        local.mkdir(parents=True)
+        (local / "odoorc.j2").write_text("[options]\ncustom = true\n")
+
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["common"])
+        apply_templates(ws, config, ws_dir)
+
+        # The customised file comes from the local override.
+        assert (ws_dir / "odoorc").read_text() == "[options]\ncustom = true\n"
+        # Its packaged siblings are still materialized.
+        assert (ws_dir / "pyrightconfig.json").exists()
+        assert (ws_dir / "requirements-dev.txt").exists()
 
 
 class TestEnsureWorkspaceMaterialized:

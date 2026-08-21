@@ -1,16 +1,20 @@
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, FileSystemLoader
 
-from ow.utils.display import console, print_git_result
+from ow.utils.display import print_git_result, task_progress
 from ow.utils.config import Config, WorkspaceConfig
+from ow.utils import paths
 from ow.utils.git import (
     attach_worktree,
     create_worktree,
     detach_worktree,
     ensure_bare_repo,
+    in_progress_operation,
     parallel_per_repo,
     resolve_spec,
     run_cmd,
@@ -98,23 +102,37 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
 # ---------------------------------------------------------------------------
 
 
+def _packaged_templates_dir() -> Path:
+    """The template tree shipped inside the ow distribution."""
+    from importlib.resources import files
+
+    return files("ow") / "_static" / "templates"  # type: ignore[return-value]
+
+
 def _get_packaged_templates() -> list[str]:
-    """Return list of packaged template names from ow/_static/templates/."""
+    """Names of the bundles ow ships.
+
+    An unreadable tree means a broken install, not an ow that ships nothing:
+    say so, then carry on with whatever the user has locally. Anything other
+    than an OSError is a bug and travels on.
+    """
     try:
-        from importlib.resources import files
-        pkg_templates = files("ow") / "_static" / "templates"
-        return sorted(d.name for d in pkg_templates.iterdir() if d.is_dir())
-    except Exception:
+        return sorted(d.name for d in _packaged_templates_dir().iterdir() if d.is_dir())
+    except OSError as exc:
+        print(
+            f"Warning: ow's packaged templates are unreadable ({exc}); "
+            "only your own templates are available.",
+            file=sys.stderr,
+        )
         return []
 
 
-def available_templates(config: Config) -> list[str]:
+def available_templates() -> list[str]:
     """Return sorted list of available template names (local + packaged).
 
-    Local templates (./templates/) take priority and can override packaged ones.
-    Packaged templates are used as fallback.
+    Local templates take priority and can override packaged ones per file.
     """
-    local_templates_dir = config.root_dir / "templates"
+    local_templates_dir = paths.templates_dir()
     local_names = set()
     if local_templates_dir.exists():
         local_names = set(d.name for d in local_templates_dir.iterdir() if d.is_dir())
@@ -124,25 +142,43 @@ def available_templates(config: Config) -> list[str]:
     return sorted(local_names | packaged_names)
 
 
-def _resolve_template_dir(template_name: str, config: Config) -> Path:
-    """Resolve template directory: local first, fallback to packaged."""
-    local_dir = config.root_dir / "templates" / template_name
-    if local_dir.exists():
-        return local_dir
+def _packaged_bundle(bundle: str) -> Path | None:
+    """The packaged directory for `bundle`, or None if ow does not ship it."""
+    path = _packaged_templates_dir() / bundle
+    return path if path.is_dir() else None
 
-    try:
-        from importlib.resources import files
-        pkg_dir = files("ow") / "_static" / "templates" / template_name
-        if pkg_dir.is_dir():
-            return pkg_dir
-    except Exception:
-        pass
 
-    raise FileNotFoundError(f"Template '{template_name}' not found in local or packaged templates")
+def _files_under(root: Path | None) -> dict[Path, Path]:
+    """Every file found by walking `root`, keyed by its path relative to root."""
+    if root is None or not root.is_dir():
+        return {}
+    return {
+        src.relative_to(root): src for src in sorted(root.rglob("*")) if src.is_file()
+    }
+
+
+def packaged_files(bundle: str) -> dict[str, Path]:
+    """Every file the packaged bundle ships, keyed by its relative posix path."""
+    return {
+        rel.as_posix(): src for rel, src in _files_under(_packaged_bundle(bundle)).items()
+    }
+
+
+def resolve_template_files(bundle: str) -> dict[Path, Path]:
+    """Every file of a bundle, local copy winning per file.
+
+    Per file, not per bundle: taking one file must not silently drop the
+    others. That is the difference between owning a file and forking a
+    bundle.
+    """
+    files: dict[Path, Path] = {}
+    for root in (_packaged_bundle(bundle), paths.templates_dir() / bundle):
+        files.update(_files_under(root))
+    return files
 
 
 # ---------------------------------------------------------------------------
-# Template application helpers (shared between cmd_create and cmd_update)
+# Template application helpers (shared between cmd_init and cmd_apply)
 # ---------------------------------------------------------------------------
 
 
@@ -151,29 +187,47 @@ def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
     context = build_template_context(ws, config, ws_dir)
 
     for template_name in ws.templates:
-        template_dir = _resolve_template_dir(template_name, config)
+        files = resolve_template_files(template_name)
+        local_dir = paths.templates_dir() / template_name
+        if not files:
+            packaged_dir = _packaged_bundle(template_name)
+            existing_dir = next(
+                (d for d in (local_dir, packaged_dir) if d is not None and d.is_dir()),
+                None,
+            )
+            if existing_dir is not None:
+                raise FileNotFoundError(
+                    f"Template '{template_name}' found in {existing_dir} but it is empty"
+                )
+            raise FileNotFoundError(
+                f"Template '{template_name}' not found in local or packaged templates"
+            )
 
+        # Local wins per file, but an include/extends/import inside a local
+        # file must still be able to reach a packaged sibling. A search-path
+        # loader (local first) resolves that per file, exactly like
+        # resolve_template_files does for the non-Jinja operations below.
+        search_path = [local_dir]
+        packaged_dir = _packaged_bundle(template_name)
+        if packaged_dir is not None:
+            search_path.append(packaged_dir)
         env = Environment(
-            loader=FileSystemLoader(str(template_dir)),
+            loader=FileSystemLoader(search_path),
             keep_trailing_newline=True,
             trim_blocks=True,
             lstrip_blocks=True,
         )
 
-        paths = template_dir.rglob("*")
-        file_paths = [p for p in paths if p.is_file()]
-
-        for path in sorted(file_paths):
-            rel = path.relative_to(template_dir)
-            if path.suffix == ".j2":
+        for rel, src in sorted(files.items()):
+            if src.suffix == ".j2":
                 out_path = ws_dir / rel.with_suffix("")
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(env.get_template(str(rel)).render(context))
-                out_path.chmod(path.stat().st_mode)
+                out_path.write_text(env.get_template(rel.as_posix()).render(context))
+                out_path.chmod(src.stat().st_mode)
             else:
                 out_path = ws_dir / rel
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, out_path)
+                shutil.copy2(src, out_path)
 
 
 def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> tuple[Path, set[str], dict[str, str]]:
@@ -181,7 +235,7 @@ def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: P
 
     Returns (workspace directory path, set of successfully materialized aliases, dict of alias -> error message for failures).
     """
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    bare_repos_dir = paths.repos_dir()
     ws_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_specs: dict[str, Any] = {}
@@ -195,8 +249,8 @@ def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: P
 
     tasks = {alias: (lambda a=alias, s=spec: _setup_alias(a, s)) for alias, spec in ws.repos.items()}
 
-    with console.status(f"Setting up {len(tasks)} repo(s)", spinner="dots"):
-        results = parallel_per_repo(tasks)
+    with task_progress("Setting up repo(s)", len(tasks)) as advance:
+        results = parallel_per_repo(tasks, on_done=lambda _alias: advance())
 
     for alias in ws.repos:
         result = results[alias]
@@ -211,21 +265,33 @@ def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: P
     for alias, resolved in resolved_specs.items():
         bare_repo = bare_repos_dir / f"{alias}.git"
         worktree_path = ws_dir / alias
-        if not worktree_exists(bare_repo, worktree_path):
-            run_cmd(["git", "-C", str(bare_repo), "worktree", "prune"], check=True, label=alias)
-            create_worktree(bare_repo, worktree_path, resolved)
-        else:
-            currently_detached = worktree_is_detached(worktree_path)
-            if currently_detached and not resolved.is_detached:
-                attach_worktree(bare_repo, worktree_path, resolved)
-            elif not currently_detached and resolved.is_detached:
-                detach_worktree(worktree_path, resolved.base_ref)
-            elif not resolved.is_detached:
-                set_branch_upstream(
-                    bare_repo,
-                    resolved.local_branch,
-                    resolved.remote,
-                    resolved.branch,
+        try:
+            if not worktree_exists(bare_repo, worktree_path):
+                run_cmd(["git", "-C", str(bare_repo), "worktree", "prune"], check=True, label=alias)
+                create_worktree(bare_repo, worktree_path, resolved)
+            else:
+                currently_detached = worktree_is_detached(worktree_path)
+                if currently_detached and not resolved.is_detached:
+                    attach_worktree(bare_repo, worktree_path, resolved)
+                elif not currently_detached and resolved.is_detached:
+                    detach_worktree(worktree_path, resolved.base_ref)
+                elif not resolved.is_detached:
+                    set_branch_upstream(
+                        bare_repo,
+                        resolved.local_branch,
+                        resolved.remote,
+                        resolved.branch,
+                    )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            successful.discard(alias)
+            busy = in_progress_operation(worktree_path)
+            if busy is not None:
+                operation, continue_cmd, abort_cmd = busy
+                errors[alias] = (
+                    f"{operation} in progress; finish with `{continue_cmd}` or abort with `{abort_cmd}`"
                 )
+            else:
+                errors[alias] = str(exc)
+            print_git_result(alias, "reconcile", [], False, errors[alias])
 
     return ws_dir, successful, errors

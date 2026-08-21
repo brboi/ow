@@ -9,10 +9,13 @@ from ow.utils.config import (
     WorkspaceConfig,
     find_project_root,
     load_config,
+    load_global_config,
+    select_aliases,
     load_workspace_config,
     parse_branch_spec,
     write_workspace_config,
 )
+from ow.utils import paths
 
 # ---------------------------------------------------------------------------
 # parse_branch_spec
@@ -102,7 +105,7 @@ def test_load_config():
         config = load_config(path)
 
     assert config.vars == {"http_port": 8069, "db_host": "localhost"}
-    assert config.root_dir == Path(tmpdir)
+    assert not hasattr(config, "root_dir")
 
     assert "community" in config.remotes
     assert config.remotes["community"]["origin"].url == "git@github.com:odoo/odoo.git"
@@ -124,6 +127,54 @@ def test_load_config_vars_empty():
 
 
 # ---------------------------------------------------------------------------
+# load_global_config
+# ---------------------------------------------------------------------------
+
+def test_load_global_config_reads_the_config_file(xdg):
+    paths.config_home().mkdir(parents=True, exist_ok=True)
+    paths.config_file().write_text(SAMPLE_TOML)
+
+    config = load_global_config()
+
+    assert config.vars == {"http_port": 8069, "db_host": "localhost"}
+    assert config.remotes["community"]["origin"].url == "git@github.com:odoo/odoo.git"
+
+
+def test_load_global_config_bootstraps_when_missing(xdg, capsys):
+    path = paths.config_file()
+    assert not path.exists()
+
+    config = load_global_config()
+
+    assert path.exists()
+    content = path.read_text()
+    assert content.startswith("# ow configuration")
+    assert "community" in config.remotes
+
+    err = capsys.readouterr().err
+    assert "Created" in err
+    assert str(path) in err
+
+
+def test_load_global_config_bootstraps_only_once(xdg):
+    load_global_config()
+    path = paths.config_file()
+    first_mtime = path.stat().st_mtime_ns
+
+    load_global_config()
+
+    assert path.stat().st_mtime_ns == first_mtime
+
+
+def test_load_global_config_creates_the_parent_directory(xdg):
+    assert not paths.config_home().exists()
+
+    load_global_config()
+
+    assert paths.config_home().exists()
+
+
+# ---------------------------------------------------------------------------
 # load_workspace_config
 # ---------------------------------------------------------------------------
 
@@ -141,7 +192,7 @@ http_port = 8067
 
 def test_load_workspace_config():
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(SAMPLE_WS_CONFIG)
         ws = load_workspace_config(config_path)
@@ -160,7 +211,7 @@ def test_load_workspace_config_no_vars():
         community = "master"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(toml)
         ws = load_workspace_config(config_path)
@@ -174,7 +225,7 @@ def test_load_workspace_config_missing_templates():
         community = "master"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(toml)
         with pytest.raises(ValueError, match="missing required 'templates'"):
@@ -190,7 +241,7 @@ def test_load_workspace_config_empty_templates():
         community = "master"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(toml)
         ws = load_workspace_config(config_path)
@@ -205,7 +256,7 @@ def test_load_workspace_config_templates_not_list():
         community = "master"
     """)
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(toml)
         with pytest.raises(ValueError, match="must be a list"):
@@ -226,7 +277,7 @@ def test_write_workspace_config_round_trip():
         vars={"http_port": 8067},
     )
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         write_workspace_config(config_path, ws)
         ws2 = load_workspace_config(config_path)
 
@@ -241,7 +292,7 @@ def test_write_workspace_config_no_vars():
         templates=["common"],
     )
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         write_workspace_config(config_path, ws)
         content = config_path.read_text()
         ws2 = load_workspace_config(config_path)
@@ -258,7 +309,7 @@ def test_write_workspace_config_detached():
         templates=["common"],
     )
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         write_workspace_config(config_path, ws)
         ws2 = load_workspace_config(config_path)
 
@@ -272,7 +323,7 @@ def test_write_workspace_config_non_origin_remote():
         templates=["common"],
     )
     with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = Path(tmpdir) / ".ow" / "config"
+        config_path = Path(tmpdir) / ".ow" / "config.toml"
         write_workspace_config(config_path, ws)
         ws2 = load_workspace_config(config_path)
 
@@ -307,3 +358,33 @@ class TestFindProjectRoot:
         inner.mkdir()
         (inner / "ow.toml").write_text("[remotes]\n")
         assert find_project_root(inner) == inner
+
+
+class TestSelectAliases:
+    """Shared by every --only flag; lives in config.py beside the repo aliases it filters."""
+    def test_none_selects_everything(self):
+        assert select_aliases(["a", "b"], None) == ["a", "b"]
+
+    def test_only_filters_and_preserves_config_order(self):
+        assert select_aliases(["a", "b", "c"], "c,a") == ["a", "c"]
+
+    def test_only_tolerates_spaces(self):
+        assert select_aliases(["a", "b"], " a , b ") == ["a", "b"]
+
+    def test_unknown_alias_raises_and_lists_the_valid_ones(self):
+        import typer
+        with pytest.raises(typer.BadParameter) as exc:
+            select_aliases(["a", "b"], "nope")
+        assert "nope" in str(exc.value)
+        assert "a, b" in str(exc.value)
+
+    @pytest.mark.parametrize("only", ["", ",", " ", " , "])
+    def test_an_only_that_names_nothing_is_a_user_error(self, only):
+        """`ow apply --only ''` used to materialize nothing and print
+        "applied." — an explicit --only that selects no repo is a mistake,
+        not a request to do nothing."""
+        import typer
+        with pytest.raises(typer.BadParameter) as exc:
+            select_aliases(["a", "b"], only)
+        assert repr(only) in str(exc.value)
+        assert "a, b" in str(exc.value)

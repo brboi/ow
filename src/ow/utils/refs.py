@@ -2,12 +2,15 @@ import subprocess
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from ow.utils.display import console, print_git_result
+from ow.utils.display import print_git_result, task_progress
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
+from ow.utils import paths
 from ow.utils.git import (
+    _run,
     get_upstream,
     parallel_per_repo,
     resolve_spec_local,
+    rev_parse,
 )
 
 
@@ -19,12 +22,34 @@ class _FetchJob(NamedTuple):
 
 
 @dataclass
+class FetchOutcome:
+    """What fetch_workspace_refs learned, per alias.
+
+    upstream_before holds each upstream ref's SHA as read *before* the fetch.
+    It is the whole basis of force-push detection: comparing it to the SHA
+    after the fetch needs no reflog, so it does not depend on
+    core.logAllRefUpdates being set on the bare repo.
+
+    `failed` holds the aliases whose refs are not what the remote says they
+    are — a fetch that failed, or a resolve that never got as far as one.
+    Printing the ✗ is not enough: a caller that goes on to rebase does so
+    against the stale cached ref, and would report success for it.
+    """
+    tracks: dict[str, str]
+    upstreams: dict[str, str]
+    specs: dict[str, BranchSpec]
+    upstream_before: dict[str, str]
+    failed: frozenset[str] = frozenset()
+
+
+@dataclass
 class _ResolveResult:
     """Result of resolving specs for one alias."""
     track_ref: str
     upstream_ref: str | None
     fetch_jobs: list[_FetchJob]
     resolved_spec: BranchSpec | None = None
+    upstream_before: str | None = None
 
 
 def fetch_workspace_refs(
@@ -35,20 +60,22 @@ def fetch_workspace_refs(
     fetch_upstreams: bool = False,
     resolve_fn=resolve_spec_local,
     spinner_prefix: str = "Checking",
-) -> tuple[dict[str, str], dict[str, str], dict[str, BranchSpec]]:
+) -> FetchOutcome:
     """Fetch refs for all workspace repos into their bare repos.
 
-    Returns (resolved_tracks, resolved_upstreams, resolved_specs) dicts.
+    Returns a FetchOutcome.
 
     Three-phase pipeline:
     1. Resolve specs per repo (parallel) — determines what to fetch
     2. Execute all fetches flat (parallel) — one thread per fetch, not per repo
     3. Print results (sequential)
     """
-    bare_repos_dir = config.root_dir / ".bare-git-repos"
+    bare_repos_dir = paths.repos_dir()
     resolved_tracks: dict[str, str] = {}
     resolved_upstreams: dict[str, str] = {}
     resolved_specs: dict[str, BranchSpec] = {}
+    upstream_before: dict[str, str] = {}
+    failed: set[str] = set()
 
     # -- Phase 1: resolve specs per repo ----------------------------------
 
@@ -58,7 +85,7 @@ def fetch_workspace_refs(
         bare_repo_path = bare_repos_dir / f"{alias}.git"
         if not bare_repo_path.exists():
             raise RuntimeError(
-                f"no bare repo at {bare_repo_path}; run `ow update` to materialize it"
+                f"no bare repo at {bare_repo_path}; run `ow apply` to materialize it"
             )
         bare_repo = str(bare_repo_path)
         track_spec = BranchSpec(spec.base_ref)
@@ -71,11 +98,15 @@ def fetch_workspace_refs(
         resolved_spec = resolve_fn(bare_repo_path, spec, alias_remotes)
 
         upstream_ref = None
+        upstream_before = None
         if fetch_upstreams and not spec.is_detached:
             if resolved_spec.base_ref != resolved_track.base_ref:
                 full_refspec = f"{resolved_spec.branch}:refs/remotes/{resolved_spec.remote}/{resolved_spec.branch}"
                 jobs.append(_FetchJob(bare_repo, resolved_spec.remote, full_refspec, force=True))
                 upstream_ref = resolved_spec.base_ref
+                # Read before phase 2 rewrites the ref — this is the only
+                # moment the previous value is still observable.
+                upstream_before = rev_parse(bare_repo_path, f"refs/remotes/{upstream_ref}")
             else:
                 upstream = get_upstream(worktree_path)
                 if upstream:
@@ -91,6 +122,7 @@ def fetch_workspace_refs(
             upstream_ref=upstream_ref,
             fetch_jobs=jobs,
             resolved_spec=resolved_spec,
+            upstream_before=upstream_before,
         )
 
     resolve_tasks = {}
@@ -102,8 +134,10 @@ def fetch_workspace_refs(
         resolve_tasks[alias] = (lambda a=alias, s=spec: _resolve_alias(a, s))
 
     if resolve_tasks:
-        with console.status(f"{spinner_prefix} {len(resolve_tasks)} repo(s)", spinner="dots"):
-            resolve_results = parallel_per_repo(resolve_tasks)
+        with task_progress(f"{spinner_prefix} repo(s)", len(resolve_tasks)) as advance:
+            resolve_results = parallel_per_repo(
+                resolve_tasks, on_done=lambda _alias: advance()
+            )
     else:
         resolve_results = {}
 
@@ -117,6 +151,7 @@ def fetch_workspace_refs(
         if isinstance(result, Exception):
             print_git_result(alias, "resolve", [], False, str(result))
             resolved_tracks[alias] = ws.repos[alias].base_ref
+            failed.add(alias)
             continue
         alias_resolve[alias] = result
         for i, job in enumerate(result.fetch_jobs):
@@ -130,12 +165,14 @@ def fetch_workspace_refs(
         if job.force:
             args.append("-f")
         args.extend([job.remote, job.refspec])
-        return subprocess.run(args, capture_output=True)
+        return _run(args, capture_output=True)
 
     if fetch_tasks:
         fetch_callables = {key: (lambda j=job: _do_fetch(j)) for key, job in fetch_tasks.items()}
-        with console.status(f"Fetching {len(fetch_callables)} ref(s)", spinner="dots"):
-            fetch_results = parallel_per_repo(fetch_callables)
+        with task_progress("Fetching ref(s)", len(fetch_callables)) as advance:
+            fetch_results = parallel_per_repo(
+                fetch_callables, on_done=lambda _key: advance()
+            )
     else:
         fetch_results = {}
 
@@ -148,6 +185,8 @@ def fetch_workspace_refs(
         resolved_tracks[alias] = resolve.track_ref
         if resolve.upstream_ref:
             resolved_upstreams[alias] = resolve.upstream_ref
+        if resolve.upstream_before:
+            upstream_before[alias] = resolve.upstream_before
         if resolve.resolved_spec:
             resolved_specs[alias] = resolve.resolved_spec
 
@@ -156,10 +195,18 @@ def fetch_workspace_refs(
             fetch_result = fetch_results[key]
             if isinstance(fetch_result, Exception):
                 print_git_result(alias, "fetch", [job.remote, job.refspec], False, str(fetch_result))
+                failed.add(alias)
             elif fetch_result.returncode != 0:
                 err = fetch_result.stderr.decode().strip() if fetch_result.stderr else "unknown"
                 print_git_result(alias, "fetch", [job.remote, job.refspec], False, err)
+                failed.add(alias)
             else:
                 print_git_result(alias, "fetch", [job.remote, job.refspec], True)
 
-    return resolved_tracks, resolved_upstreams, resolved_specs
+    return FetchOutcome(
+        tracks=resolved_tracks,
+        upstreams=resolved_upstreams,
+        specs=resolved_specs,
+        upstream_before=upstream_before,
+        failed=frozenset(failed),
+    )

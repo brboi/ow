@@ -1,122 +1,119 @@
+"""Locating the workspace a command should act on.
+
+Configuration is global, so there is no longer a project that owns a set of
+workspaces. What is left is a single question — which directory? — answered
+by exactly one of four forms, each with its own failure. None of them falls
+back to another: a bare name that the index does not know is an error, not
+an invitation to try the same string as a relative path.
+"""
+
 import os
 import sys
 from pathlib import Path
+from typing import NoReturn
 
-from ow.utils.config import (
-    Config,
-    WorkspaceConfig,
-    find_project_root,
-    load_config,
-    load_workspace_config,
-)
-from ow.utils.display import err_console
+from ow.utils import index
+from ow.utils.config import WorkspaceConfig, load_workspace_config
+
+MARKER = Path(".ow") / "config.toml"
 
 
-def _find_ow_config(start: Path) -> Path | None:
-    """Walk up from start looking for .ow/config."""
-    for parent in [start] + list(start.parents):
-        candidate = parent / ".ow" / "config"
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def _fail(*lines: str) -> None:
+def _fail(*lines: str) -> NoReturn:
     for line in lines:
         print(line, file=sys.stderr)
     sys.exit(1)
 
 
 def _looks_like_path(value: str) -> bool:
-    """Tell `OW_WORKSPACE=quattromori` (a name) from `OW_WORKSPACE=~/odoo/w/q` (a path)."""
+    """Tell `ow status quattromori` (a name) from `ow status ./quattromori`."""
     seps = [os.sep] + ([os.altsep] if os.altsep else [])
     return value.startswith("~") or value in (".", "..") or any(s in value for s in seps)
 
 
-def _project_for(ws_dir: Path, config: Config, source: str) -> Config:
-    """Return the config of the project owning ws_dir.
+def _load(ws_dir: Path) -> tuple[Path, WorkspaceConfig]:
+    """Read a directory known to be a workspace, and remember it."""
+    try:
+        ws = load_workspace_config(ws_dir / MARKER)
+    except (OSError, ValueError) as exc:
+        # `ow init` signs off with "Edit it to customize vars", so people
+        # do. A fumbled quote deserves the same one-liner the global config
+        # gets, not eight frames of tomllib. TOMLDecodeError is a
+        # ValueError, and so is the missing-'templates' complaint.
+        _fail(f"Error: could not load {ws_dir / MARKER}: {exc}")
+    # Only a workspace ow can actually read is worth remembering: an entry
+    # that fails to load would fail the same way on every later `ow ls`.
+    index.remember(ws_dir)
+    return ws_dir, ws
 
-    A workspace inside the current project is already covered by `config`.
-    Only when it lies outside do we go looking for its own ow.toml — mixing
-    one project's remotes and bare repos with another's workspace silently
-    produces nonsense.
-    """
-    if ws_dir.is_relative_to(config.root_dir.resolve()):
-        return config
 
-    root = find_project_root(ws_dir)
-    toml_path = root / "ow.toml" if root else None
-    if toml_path is None or not toml_path.exists():
+def _from_path(value: str) -> tuple[Path, WorkspaceConfig]:
+    ws_dir = Path(value).expanduser().resolve()
+    if not (ws_dir / MARKER).exists():
+        extra: list[str] = []
+        if (ws_dir / ".ow" / "config").exists():
+            from ow.utils.legacy import HINT_RENAME
+            extra = [
+                f"       {HINT_RENAME}",
+                "       see https://github.com/brboi/ow/blob/main/docs/migrating-to-2.0.md to migrate",
+            ]
         _fail(
-            f"Error: no ow.toml above {ws_dir}",
-            "       a workspace must live inside an ow project",
+            f"Error: {ws_dir} is not a workspace",
+            f"       missing {ws_dir / MARKER}",
+            *extra,
         )
-    err_console.print(f"Using project {root} (from {source})")
-    return load_config(toml_path)
+    return _load(ws_dir)
 
 
-def _by_name(config: Config, name: str) -> tuple[Path, WorkspaceConfig]:
-    """Positional `ow status <name>` — always relative to the current project."""
-    ws_dir = config.root_dir / "workspaces" / name
-    if not ws_dir.exists():
-        _fail(f"Workspace '{name}' not found")
-    config_file = ws_dir / ".ow" / "config"
-    if not config_file.exists():
-        _fail(f"Workspace '{name}' is not a valid workspace (missing .ow/config)")
-    return ws_dir.resolve(), load_workspace_config(config_file)
+def _from_name(name: str) -> tuple[Path, WorkspaceConfig]:
+    matches = index.find_by_name(name)
+    if not matches:
+        _fail(
+            f"Error: no workspace named {name!r}",
+            "       run `ow ls` to see the workspaces ow knows about,",
+            f"       or pass a path, e.g. `./{name}`",
+        )
+    if len(matches) > 1:
+        _fail(
+            f"Error: {name!r} matches {len(matches)} workspaces:",
+            *(f"         {candidate}" for candidate in matches),
+            "       pass the path of the one you mean",
+        )
+    return _load(matches[0])
 
 
-def resolve_workspace(
-    config: Config, name: str | None = None
-) -> tuple[Config, Path, WorkspaceConfig]:
-    """Resolve the workspace *and* the project that owns it.
+def _from_env(value: str) -> tuple[Path, WorkspaceConfig]:
+    # One form only. Accepting a name here would resurrect the guess this
+    # rewrite removes, and accepting "~" or a relative path would make the
+    # variable's meaning depend on the shell that exported it and on cwd.
+    if not Path(value).is_absolute():
+        _fail(
+            f"Error: OW_WORKSPACE={value!r} is not an absolute path",
+            "       OW_WORKSPACE takes one form: an absolute path to a workspace",
+            "       '~' is not expanded here; export the full path instead",
+        )
+    return _from_path(value)
 
-    Returns (project_config, workspace_dir, workspace_config). The config
-    returned is the one passed in, unless the workspace lives in another
-    project — then it is that project's, so remotes and bare repos come from
-    the same place as the workspace.
 
-    Each form has exactly one meaning and one failure; none falls back to
-    another:
-      - `name`                  -> <current project>/workspaces/<name>
-      - OW_WORKSPACE=<name>     -> <current project>/workspaces/<name>
-      - OW_WORKSPACE=<path>     -> that path, project found by walking up
-      - neither                 -> walk up from cwd for .ow/config
-    """
+def _from_cwd() -> tuple[Path, WorkspaceConfig]:
+    start = Path.cwd().resolve()
+    for candidate in [start, *start.parents]:
+        if (candidate / MARKER).exists():
+            return _load(candidate)
+    _fail(
+        "Error: no workspace found here",
+        "       run from inside a workspace, pass a path, or see `ow ls`",
+    )
+
+
+def resolve_workspace(name: str | None = None) -> tuple[Path, WorkspaceConfig]:
+    """Locate a workspace. One rule, four branches, no fallbacks between them."""
     if name is not None:
-        return (config, *_by_name(config, name))
+        return _from_path(name) if _looks_like_path(name) else _from_name(name)
 
     env_val = os.environ.get("OW_WORKSPACE")
+    # An empty value means unset, same treatment as the XDG variables in
+    # ow.utils.paths._base: absence, not a fifth form to resolve against.
     if env_val:
-        if _looks_like_path(env_val):
-            ws_dir = Path(env_val).expanduser().resolve()
-            config_file = ws_dir / ".ow" / "config"
-            if not config_file.exists():
-                _fail(
-                    f"Error: OW_WORKSPACE={env_val!r} is not a workspace",
-                    f"       missing {config_file}",
-                )
-            return (
-                _project_for(ws_dir, config, "OW_WORKSPACE"),
-                ws_dir,
-                load_workspace_config(config_file),
-            )
+        return _from_env(env_val)
 
-        ws_dir = (config.root_dir / "workspaces" / env_val).resolve()
-        config_file = ws_dir / ".ow" / "config"
-        if not config_file.exists():
-            _fail(
-                f"Error: OW_WORKSPACE={env_val!r} not found",
-                f"       looked in {config.root_dir / 'workspaces'}",
-            )
-        return config, ws_dir, load_workspace_config(config_file)
-
-    config_file = _find_ow_config(Path.cwd())
-    if config_file is None:
-        _fail("No workspace found. Run from a workspace or pass a path.")
-    ws_dir = config_file.parent.parent.resolve()
-    return (
-        _project_for(ws_dir, config, "workspace path"),
-        ws_dir,
-        load_workspace_config(config_file),
-    )
+    return _from_cwd()

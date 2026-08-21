@@ -4,6 +4,10 @@ from pathlib import Path
 from typing import Any
 
 import tomli_w
+import typer
+
+from ow.utils import paths
+from ow.utils.display import err_console
 
 
 @dataclass
@@ -65,11 +69,10 @@ class WorkspaceConfig:
 class Config:
     vars: dict[str, Any]
     remotes: dict[str, dict[str, RemoteConfig]]  # alias -> remote_name -> cfg
-    root_dir: Path
 
 
 def load_workspace_config(path: Path) -> WorkspaceConfig:
-    """Read a .ow/config TOML file from an individual workspace."""
+    """Read the .ow/config.toml file from an individual workspace."""
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
@@ -91,7 +94,7 @@ def load_workspace_config(path: Path) -> WorkspaceConfig:
 
 
 def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
-    """Write a .ow/config TOML file for an individual workspace."""
+    """Write the .ow/config.toml file for an individual workspace."""
     data: dict[str, Any] = {
         "templates": ws.templates,
         "repos": {alias: spec.to_spec_str() for alias, spec in ws.repos.items()},
@@ -102,6 +105,35 @@ def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         tomli_w.dump(data, f)
+
+
+def select_aliases(available: list[str], only: str | None) -> list[str]:
+    """Filter repo aliases by --only, preserving the order of the config.
+
+    Shared by every command whose --only narrows a workspace-wide operation
+    down to specific repos (`ow rebase`, `ow apply`). typer.BadParameter is
+    deliberate: Typer renders it as a usage error and exit code 2, where a
+    bare SystemExit would look like the operation itself had failed.
+    """
+    if only is None:
+        return list(available)
+    wanted = [a.strip() for a in only.split(",") if a.strip()]
+    if not wanted:
+        # --only '' , --only ',' and --only ' ' all land here. Narrowing to
+        # nothing is a mistake, not a request to do nothing: without this the
+        # command materializes or rebases no repo at all and still reports
+        # success.
+        raise typer.BadParameter(
+            f"--only names no repo (got {only!r}). "
+            f"Available: {', '.join(available)}"
+        )
+    unknown = [a for a in wanted if a not in available]
+    if unknown:
+        raise typer.BadParameter(
+            f"unknown repo alias(es): {', '.join(unknown)}. "
+            f"Available: {', '.join(available)}"
+        )
+    return [a for a in available if a in wanted]
 
 
 def find_project_root(start: Path) -> Path | None:
@@ -132,5 +164,44 @@ def load_config(path: Path) -> Config:
     return Config(
         vars=vars,
         remotes=remotes,
-        root_dir=path.parent,
     )
+
+
+_DEFAULT_CONFIG = '''\
+# ow configuration. Everything here is optional except at least one remote.
+
+[vars]
+http_port = 8069
+db_host = "localhost"
+db_port = 5432
+db_user = "odoo"
+db_password = "odoo"
+admin_passwd = "Password"
+# smtp_server = "mailpit"
+# smtp_port = 1025
+
+[remotes.community]
+origin.url = "git@github.com:odoo/odoo.git"
+# dev.url = "git@github.com:odoo-dev/odoo.git"
+# dev.pushurl = "git@github.com:odoo-dev/odoo.git"
+# dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
+
+# [remotes.enterprise]
+# origin.url = "git@github.com:odoo/enterprise.git"
+'''
+
+
+def load_global_config() -> Config:
+    """Read the user's config, creating a commented default on first use.
+
+    Written on first run rather than at install time: pip must not create
+    files outside site-packages, post-install hooks are skipped for wheels
+    and isolated by pipx, and a package that writes into someone's home when
+    installed is a behaviour people rightly complain about.
+    """
+    path = paths.config_file()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_DEFAULT_CONFIG)
+        err_console.print(f"Created {path} — edit it to add your remotes.")
+    return load_config(path)
