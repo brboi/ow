@@ -91,10 +91,14 @@ for repo in ~/.local/share/ow/repos/*.git; do
 done
 ```
 
-Do this before running any ow command. `ow apply` will not do it for you: seen
-from the bare repo, the worktree still looks present — `git worktree list`
-lists it, because that side of the link was never broken — so ow finds nothing
-missing to recreate and leaves the dead `.git` file alone.
+Do this before running any ow command. Skipping it does not fail cleanly:
+`ow apply` reconciles each worktree's attached/detached state by running git
+commands inside it, and the broken `.git` file makes those fail. You get a
+Python traceback ending in `CalledProcessError: ... 'switch' ... returned
+non-zero exit status 128`, with `fatal: not a git repository: (null)` printed
+above it. `ow status` on the same workspace prints `community: (error)` and
+moves on, no traceback. Neither is a bug report waiting to happen — the fix is
+the `git worktree repair` above, run once per bare repo.
 
 ### 4. Rename each workspace config
 
@@ -136,12 +140,28 @@ Templates now ship inside ow. Do not copy `$OLD/templates/` across wholesale —
 that turns every packaged file into a frozen copy of your own, which stops
 receiving ow's improvements.
 
-List what ow ships and take only the files you actually modified:
+`ow templates` lists every file ow ships and its state, but that state
+describes your new setup, not `$OLD` — it has no way to tell you which files
+you modified back then. Diff each one yourself: `--take` gets you a pristine
+copy of the packaged version to diff against.
 
 ```sh
 ow templates                              # every file, with its state
-ow templates --take common/odoorc.j2      # take one file
+ow templates --take common/odoorc.j2      # pristine copy, to diff against
+diff "$OLD/templates/common/odoorc.j2" ~/.config/ow/templates/common/odoorc.j2
 ```
+
+No difference: you never touched that file. Delete both copies `--take` wrote
+— `~/.config/ow/templates/common/odoorc.j2` and its baseline at
+`~/.local/state/ow/template-base/common/odoorc.j2` — and let it come from the
+package again. A difference: keep the taken file, but overwrite it with your
+`$OLD` version, so the customization survives:
+
+```sh
+cp "$OLD/templates/common/odoorc.j2" ~/.config/ow/templates/common/odoorc.j2
+```
+
+Repeat for every file under `$OLD/templates/` you suspect you touched.
 
 `--take` writes two copies: yours at
 `~/.config/ow/templates/<bundle>/<path>`, which you edit, and a pristine
@@ -155,6 +175,10 @@ is never reported as stale. That is the cost of skipping `--take`.
 
 Overrides are per file, not per bundle: taking `common/odoorc.j2` leaves the
 rest of `common/` packaged and up to date.
+
+Once you've restored a customization, run `ow apply` on each workspace that
+uses it — taking a file changes nothing already materialized until the
+workspace is re-applied.
 
 ## Services
 
@@ -207,8 +231,19 @@ Nothing is ever pushed, then or now.
 
 `ow init` now behaves like `git init`: it creates a workspace in the current
 directory, or in `./NAME` if you pass a name. The old `-n/--name` option is
-gone — the name is the argument. `-t/--template`, `-r/--repo` and
-`-c/--configuration` are unchanged.
+gone — the name is the argument.
+
+`-c/--configuration` is unchanged. `-t/--template` and `-r/--repo` changed shape:
+
+| Flag | 1.x | 2.0 |
+|---|---|---|
+| `-t/--template` | one `-t`, a space-separated list: `-t common vscode` | one template per `-t`, repeated: `-t common -t vscode` |
+| `-r/--repo` | one `-r`, two words: `-r community master..x` | one `-r ALIAS:SPEC`, repeated for more: `-r community:master..x` |
+
+Old habits fail loudly rather than silently doing the wrong thing:
+`ow init newone -t common vscode` now errors with
+`Got unexpected extra argument (vscode)`, and `ow init -r community master..x`
+now errors with `--repo expects ALIAS:SPEC (got 'community')`.
 
 ## `OW_WORKSPACE`
 
@@ -242,3 +277,16 @@ will not flag it — see the templates section above. Either add the line by
 hand, or move your copy aside, run `ow templates --take common/mise.toml.j2`,
 and re-apply your edits on top. The second way also gives you the baseline you
 were missing.
+
+## What's left in `$OLD`
+
+Once the above is done, `$OLD/mise.toml` and `$OLD/templates/` are dead —
+nothing reads either any more — and safe to delete. `$OLD/ow.toml` is covered
+above: keep it or delete it, ow no longer looks for it once the global config
+exists.
+
+`$OLD/workspaces/` is only dead once it's empty. Each subdirectory under it is
+a real workspace, worktrees and all — moving it out from under `$OLD` is
+optional, not required, and one you leave in place is still live and in use,
+not inert. Only delete `$OLD/workspaces/` once every workspace under it has
+been moved out or is one you no longer need.

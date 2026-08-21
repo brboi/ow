@@ -37,9 +37,10 @@ pip install odoo-workspaces    # or in an active venv
 ## Quick Start
 
 ```sh
-$EDITOR ~/.config/ow/config.toml   # add your remotes (created with a commented
-                                   # default the first time an ow command needs
-                                   # it, if you skip this)
+mkdir -p ~/.config/ow              # ow does not create this on its own
+$EDITOR ~/.config/ow/config.toml   # add your remotes (or skip both lines and
+                                   # let `ow init` below write a commented
+                                   # default first)
 mkdir my_work && cd my_work
 ow init                            # interactive form: templates, repos, branch specs
 mise install
@@ -115,6 +116,10 @@ Fetches latest refs and displays branch status with color-coded behind/ahead cou
     branches
         community:  dev/master-canary ↓0 ↑0 (origin/master ↓34 ↑0)
         enterprise: dev/master-canary ↓1 ↑1 (origin/master ↓12 ↑0)
+    links
+        runbot: master-canary
+        community:  https://github.com/odoo-dev/odoo/tree/master-canary
+        enterprise: https://github.com/odoo-dev/enterprise/tree/master-canary
 ```
 
 ### `ow rebase`
@@ -275,18 +280,25 @@ Then select it during `ow init`, or add it to `templates` in an existing workspa
 
 `ow` packages a Docker Compose stack (postgres, pgweb, mailpit) for local development, but no
 `ow` command starts, stops, or otherwise reads it — you drive it yourself with plain `docker
-compose`. Copy it out of the installed package into `$XDG_CONFIG_HOME/ow/services/` — the
-conventional spot — and run it from there:
+compose`. Fetch it into `$XDG_CONFIG_HOME/ow/services/` — the conventional spot — and run it
+from there:
 
 ```sh
 mkdir -p ~/.config/ow/services
-cp "$(python -c 'import ow, pathlib; print(pathlib.Path(ow.__file__).parent / "_static/services/compose.yml")')" \
-   ~/.config/ow/services/
+curl -fsSL https://raw.githubusercontent.com/brboi/ow/main/src/ow/_static/services/compose.yml \
+    -o ~/.config/ow/services/compose.yml
 docker compose -f ~/.config/ow/services/compose.yml up -d
 ```
 
 It is also readable in the
-[repo](https://github.com/brboi/ow/blob/main/src/ow/_static/services/compose.yml).
+[repo](https://github.com/brboi/ow/blob/main/src/ow/_static/services/compose.yml). If you
+installed with `pip install` into an active venv rather than `pipx` (which puts `ow` in its own
+venv, unreachable from the system `python`), that venv's `python` can get you the same file:
+
+```sh
+cp "$(python -c 'import ow, pathlib; print(pathlib.Path(ow.__file__).parent / "_static/services/compose.yml")')" \
+   ~/.config/ow/services/
+```
 
 | Service | Port | Description |
 |---------|------|-------------|
