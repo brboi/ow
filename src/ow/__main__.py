@@ -134,7 +134,7 @@ def complete_workspace_name(ctx: typer.Context, incomplete: str) -> list[str]:
     resolve would be worse than offering nothing.
     """
     try:
-        names = sorted({p.name for p in index.known_workspaces()})
+        names = sorted({p.name for p in index.list_workspaces()})
     except Exception:
         # Completion must never crash the shell, whatever state the index is in.
         return []

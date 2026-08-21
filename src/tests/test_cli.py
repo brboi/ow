@@ -1,4 +1,5 @@
 import re
+import shutil
 import tomllib
 from unittest.mock import patch
 
@@ -518,6 +519,28 @@ def test_complete_workspace_name_with_no_index_creates_nothing(xdg):
     assert _complete(["status"], "") == []
     assert not paths.index_file().exists()
     assert not paths.config_file().exists()
+
+
+
+
+def test_complete_workspace_name_does_not_mutate_index(xdg, tmp_path):
+    """Completion runs on every keystroke and must not prune or rewrite."""
+    from ow.utils import index
+
+    live = tmp_path / "workspaces" / "live"
+    (live / ".ow").mkdir(parents=True)
+    (live / ".ow" / "config.toml").write_text("")
+    index.remember(live)
+
+    dead = tmp_path / "workspaces" / "dead"
+    (dead / ".ow").mkdir(parents=True)
+    (dead / ".ow" / "config.toml").write_text("")
+    index.remember(dead)
+    shutil.rmtree(dead)
+
+    before = paths.index_file().read_text()
+    _complete(["status"], "")
+    assert paths.index_file().read_text() == before
 
 
 class TestRebaseFlags:

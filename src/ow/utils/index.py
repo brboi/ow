@@ -134,6 +134,26 @@ def _read() -> tuple[list[Path], bool]:
     return seen, pruned
 
 
+def list_workspaces() -> list[Path]:
+    """A read-only snapshot of the index file.
+
+    For callers that must not mutate state, such as shell completion.
+    """
+    target = paths.index_file()
+    if not target.exists():
+        return []
+    seen: list[Path] = []
+    for line in target.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        candidate = Path(line)
+        if candidate in seen:
+            continue
+        seen.append(candidate)
+    return seen
+
+
 def known_workspaces() -> list[Path]:
     """Every remembered workspace that still exists, pruning as it reads."""
     seen, pruned = _read()
