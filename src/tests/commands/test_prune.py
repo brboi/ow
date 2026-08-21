@@ -509,3 +509,100 @@ def test_prune_does_not_ask_when_no_branch_would_be_deleted(tmp_path, capsys, xd
 
     assert str(ws) not in _registered_worktrees(bare)
     assert "featA" in _branches(bare)
+
+
+# ---------------------------------------------------------------------------
+# Mutation holes: assertions that could not distinguish a working prune from
+# a deleted one.
+# ---------------------------------------------------------------------------
+
+def test_prune_rewrites_the_index_file_itself(tmp_path, capsys, xdg):
+    """Assert on the file, not on known_workspaces().
+
+    known_workspaces() prunes as it reads. Calling it to check prune's work
+    performs that work, so the assertion passes whether or not prune ever
+    rewrote anything — deleting the call from prune left the suite green.
+    """
+    live = _make_indexed_workspace(tmp_path, "live")
+    dead = _make_indexed_workspace(tmp_path, "dead")
+    shutil.rmtree(dead)
+
+    cmd_prune(_make_config())
+
+    assert paths.index_file().read_text().splitlines() == [str(live.resolve())]
+
+
+def test_prune_counts_a_duplicated_dead_entry_once(tmp_path, capsys, xdg):
+    """The dedup has to be doing the deduplicating.
+
+    Duplicating a *live* entry counts zero either way, so it cannot tell a
+    working `if candidate in seen: continue` from a missing one. A
+    duplicated dead entry can: without the skip it is counted twice.
+    """
+    dead = _make_indexed_workspace(tmp_path, "dead")
+    shutil.rmtree(dead)
+    paths.index_file().write_text(f"{dead.resolve()}\n{dead.resolve()}\n")
+
+    cmd_prune(_make_config())
+
+    assert "Dropped 1 dead index entry" in capsys.readouterr().out
+
+
+def test_prune_is_not_clean_when_it_deleted_something(tmp_path, capsys, xdg):
+    """"All bare repos are clean." after a deletion contradicts the line above it."""
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "spent", "refs/remotes/origin/master")
+
+    cmd_prune(_make_config(), yes=True)
+
+    assert "All bare repos are clean." not in capsys.readouterr().out
+
+
+def test_prune_ignores_directories_that_are_not_bare_repos(tmp_path, capsys, xdg):
+    """repos_dir() is ow's, but it is a directory on someone's disk.
+
+    A stray file or checkout beside the bare repos must not be handed to
+    git as one — glob("*") would, and every test in this file would still
+    have passed.
+    """
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "-D", "master")
+
+    # A real repo, so glob("*") would not merely name it — it would survey it
+    # and delete a branch out of a checkout that is none of ow's business.
+    stray = paths.repos_dir() / "notes"
+    stray.mkdir()
+    _git_init(stray)
+    (stray / "n.txt").write_text("n")
+    _git(stray, "add", "-A")
+    _git(stray, "commit", "-qm", "N")
+    _git(stray, "update-ref", "refs/remotes/origin/master", "refs/heads/master")
+    _git(stray, "branch", "scratch", "master")
+    (paths.repos_dir() / "README").write_text("not a repo")
+
+    cmd_prune(_make_config(), yes=True)
+
+    out = capsys.readouterr().out
+    assert "notes" not in out
+    assert "README" not in out
+    assert "scratch" in _branches(stray)
+    assert "All bare repos are clean." in out
+
+
+def test_prune_lists_branches_in_a_stable_order(tmp_path, capsys, xdg):
+    """The orphan set is a set; reporting it unsorted reorders run to run.
+
+    Eight names make an accidentally-sorted iteration order a 1-in-40320
+    coincidence, and PYTHONHASHSEED randomisation redraws it every run.
+    """
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "-D", "master")
+    names = ["delta", "alpha", "golf", "charlie", "echo", "bravo", "hotel", "foxtrot"]
+    for name in names:
+        _git(bare, "branch", name, "refs/remotes/origin/master")
+
+    cmd_prune(_make_config(), dry_run=True)
+
+    out = capsys.readouterr().out
+    listed = out.split("orphaned branches: ", 1)[1].split("\n", 1)[0].split(", ")
+    assert listed == sorted(names)
