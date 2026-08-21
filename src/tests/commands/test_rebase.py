@@ -114,6 +114,22 @@ class TestConfirmation:
         assert mock_git.call_count == 1
 
 
+def test_dry_run_survives_brackets_in_alias_and_args(tmp_path, capsys):
+    """Git filenames and branch names may contain square brackets.
+    Rich must not swallow them or raise MarkupError."""
+    from ow.commands.rebase import _display_dry_run
+    plan = RebasePlan(
+        alias="[draft]x",
+        base="origin/master",
+        steps=(GitStep(("rebase", "origin/[/]weird"), "origin/[/]weird"),),
+        replay_count=1,
+    )
+    _display_dry_run([plan], tmp_path)
+    out = capsys.readouterr().out
+    assert "[draft]x" in out
+    assert "origin/[/]weird" in out
+
+
 class TestDryRun:
     def test_prints_the_commands_and_runs_nothing(self, tmp_path, capsys):
         config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})

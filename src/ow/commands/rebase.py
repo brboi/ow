@@ -160,28 +160,27 @@ def _display_dry_run(plans: list[RebasePlan], ws_dir: Path) -> None:
 
     console.print("\n[dim]Would run:[/]")
     for plan in actionable:
-        tag = escape(f"[{plan.alias}]")
-        console.print(f"  {tag} cd {ws_dir / plan.alias}")
+        console.print(f"  [{plan.alias}] cd {ws_dir / plan.alias}", markup=False)
         for step in plan.steps:
-            console.print(f"  {tag} git {' '.join(step.args)}")
+            console.print(f"  [{plan.alias}] git {' '.join(step.args)}", markup=False)
 
 
 def _report_skip(plan: RebasePlan) -> None:
-    err_console.print(f"  Skipping {plan.alias}: {plan.skip_reason}")
+    err_console.print(f"  Skipping {plan.alias}: {plan.skip_reason}", markup=False)
     if plan.resume:
         cont, abort = plan.resume
-        err_console.print(f"    resume with: {cont}")
-        err_console.print(f"    or abort:    {abort}")
+        err_console.print(f"    resume with: {cont}", markup=False)
+        err_console.print(f"    or abort:    {abort}", markup=False)
 
 
 def _report_conflict(alias: str, worktree: Path, onto: str) -> None:
-    err_console.print(f"\n  [red]CONFLICT[/] in [bold]{alias}[/] rebasing onto {onto}")
+    err_console.print(f"\n  [red]CONFLICT[/] in [bold]{escape(alias)}[/] rebasing onto {escape(onto)}")
     err_console.print("    resolve conflicts, then:")
-    err_console.print(f"      cd {worktree}")
+    err_console.print(f"      cd {worktree}", markup=False)
     err_console.print("      git rebase --continue")
     err_console.print("    or abort:")
     err_console.print("      git rebase --abort")
-    err_console.print(f"    then re-run: ow rebase --only {alias}\n")
+    err_console.print(f"    then re-run: ow rebase --only {escape(alias)}\n")
 
 
 def _report_failure(alias: str, worktree: Path, onto: str) -> None:
@@ -190,16 +189,16 @@ def _report_failure(alias: str, worktree: Path, onto: str) -> None:
     No identity configured, a hook that said no, a full disk: prescribing
     `git rebase --continue` here would only produce a second error.
     """
-    err_console.print(f"\n  [red]Error[/] in [bold]{alias}[/]: rebase onto {onto} failed")
+    err_console.print(f"\n  [red]Error[/] in [bold]{escape(alias)}[/]: rebase onto {escape(onto)} failed")
     err_console.print("    git's output above says why; no rebase is in progress")
-    err_console.print(f"    cd {worktree}")
-    err_console.print(f"    then re-run: ow rebase --only {alias}\n")
+    err_console.print(f"    cd {worktree}", markup=False)
+    err_console.print(f"    then re-run: ow rebase --only {escape(alias)}\n")
 
 
 def _report_switch_failure(alias: str, worktree: Path, ref: str) -> None:
-    err_console.print(f"\n  [red]Error[/] in [bold]{alias}[/]: could not switch to {ref}")
-    err_console.print(f"    cd {worktree}")
-    err_console.print(f"    then re-run: ow rebase --only {alias}\n")
+    err_console.print(f"\n  [red]Error[/] in [bold]{escape(alias)}[/]: could not switch to {escape(ref)}")
+    err_console.print(f"    cd {worktree}", markup=False)
+    err_console.print(f"    then re-run: ow rebase --only {escape(alias)}\n")
 
 
 def _confirm() -> bool:
@@ -213,7 +212,7 @@ def _confirm() -> bool:
 
 def _execute(plan: RebasePlan, worktree: Path) -> bool:
     """Run a plan's steps. Returns True on success."""
-    console.print(f"  {plan.alias}:")
+    console.print(f"  {plan.alias}:", markup=False)
     for step in plan.steps:
         result = git(worktree, *step.args)
         if result.returncode != 0:
@@ -258,12 +257,12 @@ def cmd_rebase(
     for alias in aliases:
         worktree = ws_dir / alias
         if not worktree.exists():
-            err_console.print(f"  Skipping {alias}: worktree not found at {worktree}")
+            err_console.print(f"  Skipping {alias}: worktree not found at {worktree}", markup=False)
             failed = True
             continue
         # Rebasing onto the stale cached ref would look like a success.
         if alias in fetched.failed:
-            err_console.print(f"  Skipping {alias}: fetch failed, refs are stale")
+            err_console.print(f"  Skipping {alias}: fetch failed, refs are stale", markup=False)
             failed = True
             continue
         tasks[alias] = (
@@ -287,7 +286,7 @@ def cmd_rebase(
             continue
         result = results[alias]
         if isinstance(result, Exception):
-            err_console.print(f"  Skipping {alias}: could not analyse — {result}")
+            err_console.print(f"  Skipping {alias}: could not analyse — {result}", markup=False)
             failed = True
             continue
         plans.append(plan_for(result, autostash=autostash))
