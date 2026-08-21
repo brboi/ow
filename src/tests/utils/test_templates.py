@@ -225,6 +225,23 @@ def test_build_template_context_no_main_repo(tmp_path, config):
     assert ctx["main_repo_alias"] is None
 
 
+
+def test_build_template_context_has_services_keys(tmp_path, config, xdg):
+    """build_template_context exposes ws_dir, services_compose, volumes_dir."""
+    from ow.utils import paths
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config(["community"])
+    ctx = build_template_context(ws, config, ws_dir)
+
+    assert "ws_dir" in ctx
+    assert ctx["ws_dir"] == str(ws_dir)
+    assert "services_compose" in ctx
+    assert ctx["services_compose"] == str(paths.services_dir() / "compose.yml")
+    assert "volumes_dir" in ctx
+    assert ctx["volumes_dir"] == str(paths.volumes_dir())
+
 # ---------------------------------------------------------------------------
 # Template rendering - odoorc
 # ---------------------------------------------------------------------------
