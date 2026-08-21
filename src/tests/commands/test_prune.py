@@ -3,15 +3,7 @@ import subprocess
 from pathlib import Path
 
 from ow.commands import cmd_prune
-from ow.utils.config import Config
 from ow.utils import index, paths
-
-
-def _make_config(vars=None, remotes=None) -> Config:
-    return Config(
-        vars=vars if vars is not None else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
-        remotes=remotes or {},
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -19,8 +11,7 @@ def _make_config(vars=None, remotes=None) -> Config:
 # ---------------------------------------------------------------------------
 
 def test_cmd_prune_no_bare_repos(tmp_path, capsys, xdg):
-    config = _make_config()
-    cmd_prune(config)
+    cmd_prune()
     captured = capsys.readouterr()
     assert "No bare repos found" in captured.out
 
@@ -31,7 +22,7 @@ def test_cmd_prune_visits_every_bare_repo(tmp_path, capsys, xdg):
     _git(bare_a, "branch", "spent-a", "refs/remotes/origin/master")
     _git(bare_b, "branch", "spent-b", "refs/remotes/origin/master")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     assert "spent-a" not in _branches(bare_a)
     assert "spent-b" not in _branches(bare_b)
@@ -50,7 +41,6 @@ def _make_indexed_workspace(tmp_path, name: str):
 
 
 def test_cmd_prune_drops_dead_index_entries(tmp_path, capsys, xdg):
-    config = _make_config()
 
     live = _make_indexed_workspace(tmp_path, "live")
     dead1 = _make_indexed_workspace(tmp_path, "dead1")
@@ -62,7 +52,7 @@ def test_cmd_prune_drops_dead_index_entries(tmp_path, capsys, xdg):
     shutil.rmtree(dead1)
     shutil.rmtree(dead2)
 
-    cmd_prune(config)
+    cmd_prune()
 
     captured = capsys.readouterr()
     assert "Dropped 2 dead index entries" in captured.out
@@ -70,10 +60,9 @@ def test_cmd_prune_drops_dead_index_entries(tmp_path, capsys, xdg):
 
 
 def test_cmd_prune_reports_nothing_when_index_is_clean(tmp_path, capsys, xdg):
-    config = _make_config()
     _make_indexed_workspace(tmp_path, "live")
 
-    cmd_prune(config)
+    cmd_prune()
 
     captured = capsys.readouterr()
     assert "index" not in captured.out
@@ -87,13 +76,12 @@ def test_cmd_prune_reports_nothing_for_a_duplicated_live_entry(tmp_path, capsys,
     twice. Deduplicating that is not "dropping a dead entry" and must not be
     reported as one.
     """
-    config = _make_config()
     live = _make_indexed_workspace(tmp_path, "live")
 
     target = paths.index_file()
     target.write_text(target.read_text() + f"{live.resolve()}\n")
 
-    cmd_prune(config)
+    cmd_prune()
 
     captured = capsys.readouterr()
     assert "index" not in captured.out
@@ -108,7 +96,6 @@ def test_cmd_prune_counts_only_workspaces_that_vanished(tmp_path, capsys, xdg):
     entries and one duplicate of a live entry, the correct count is 2, not
     3 (line-count subtraction) and not 1 (subtracting only one duplicate).
     """
-    config = _make_config()
     live = _make_indexed_workspace(tmp_path, "live")
     dead1 = _make_indexed_workspace(tmp_path, "dead1")
     dead2 = _make_indexed_workspace(tmp_path, "dead2")
@@ -118,7 +105,7 @@ def test_cmd_prune_counts_only_workspaces_that_vanished(tmp_path, capsys, xdg):
     target = paths.index_file()
     target.write_text(target.read_text() + f"{live.resolve()}\n")
 
-    cmd_prune(config)
+    cmd_prune()
 
     captured = capsys.readouterr()
     assert "Dropped 2 dead index entries" in captured.out
@@ -192,7 +179,7 @@ def test_prune_reads_branch_names_uncolorized(tmp_path, capsys, xdg):
     _git(bare, "config", "color.ui", "always")
     _git(bare, "branch", "orphanbr", "master")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     out = capsys.readouterr().out
     assert "\x1b[" not in out
@@ -209,7 +196,7 @@ def test_prune_does_not_delete_a_branch_held_by_a_live_worktree(tmp_path, capsys
     _git(bare, "config", "color.ui", "always")
     _git(bare, "worktree", "add", "-q", str(tmp_path / "ws" / "community"), "-b", "featA", "master")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     assert "featA" in _branches(bare)
     assert "featA" not in capsys.readouterr().out
@@ -229,7 +216,7 @@ def test_prune_reports_only_the_branches_it_actually_deleted(tmp_path, capsys, x
     refs_heads = bare / "refs" / "heads"
     refs_heads.chmod(0o555)
     try:
-        cmd_prune(_make_config(), yes=True)
+        cmd_prune(yes=True)
     finally:
         refs_heads.chmod(0o755)
 
@@ -262,7 +249,7 @@ def test_prune_keeps_a_branch_whose_commits_exist_nowhere_else(tmp_path, capsys,
     bare = _bare_repo(tmp_path)
     sha = _commit_on_branch(bare, tmp_path, "featA", "work")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     assert "featA" in _branches(bare)
     assert _git(bare, "rev-parse", "featA") == sha
@@ -278,7 +265,7 @@ def test_prune_deletes_a_branch_already_contained_in_a_remote_ref(tmp_path, caps
     _git(bare, "branch", "spent", "refs/remotes/origin/master")
     _git(bare, "branch", "-D", "master")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     assert "spent" not in _branches(bare)
     out = capsys.readouterr().out
@@ -294,7 +281,7 @@ def test_prune_says_which_branches_it_refused_and_why(tmp_path, capsys, xdg):
     bare = _bare_repo(tmp_path)
     _commit_on_branch(bare, tmp_path, "featA", "work")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     out = capsys.readouterr().out
     assert "featA" in out
@@ -320,7 +307,7 @@ def test_moving_a_workspace_directory_does_not_destroy_its_unpushed_commits(tmp_
 
     (tmp_path / "wsA").rename(tmp_path / "wsA-moved")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     assert "featA" in _branches(bare)
     assert _git(bare, "rev-parse", "featA") == sha
@@ -347,7 +334,7 @@ def test_prune_reports_the_stale_worktrees_it_unregistered(tmp_path, capsys, xdg
     _git(bare, "worktree", "add", "-q", str(ws), "-b", "featA", "master")
     shutil.rmtree(tmp_path / "wsA")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     out = capsys.readouterr().out
     assert "stale worktree" in out
@@ -361,7 +348,7 @@ def test_prune_says_nothing_about_worktrees_when_none_are_stale(tmp_path, capsys
     _git(bare, "worktree", "add", "-q", str(tmp_path / "wsA" / "community"), "-b", "featA", "master")
     _git(bare, "branch", "-D", "master")
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     out = capsys.readouterr().out
     assert "stale worktree" not in out
@@ -402,7 +389,7 @@ def test_prune_dry_run_changes_nothing(tmp_path, capsys, xdg, monkeypatch):
     shutil.rmtree(dead)
     before = paths.index_file().read_text()
 
-    cmd_prune(_make_config(), dry_run=True)
+    cmd_prune(dry_run=True)
 
     assert "spent" in _branches(bare)
     assert str(tmp_path / "wsA" / "community") in _registered_worktrees(bare)
@@ -415,7 +402,7 @@ def test_prune_dry_run_names_the_commands_it_would_run(tmp_path, capsys, xdg, mo
     dead = _make_indexed_workspace(tmp_path, "dead")
     shutil.rmtree(dead)
 
-    cmd_prune(_make_config(), dry_run=True)
+    cmd_prune(dry_run=True)
 
     out = capsys.readouterr().out
     assert "Would run:" in out
@@ -432,7 +419,7 @@ def test_prune_asks_before_deleting_and_a_no_changes_nothing(tmp_path, capsys, x
     shutil.rmtree(dead)
     before = paths.index_file().read_text()
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     out = capsys.readouterr().out
     assert "Aborted." in out
@@ -448,7 +435,7 @@ def test_prune_treats_eof_as_no(tmp_path, capsys, xdg, monkeypatch):
     monkeypatch.setattr("builtins.input", _eof)
     bare = _dirty_repo(tmp_path)
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     assert "Aborted." in capsys.readouterr().out
     assert "spent" in _branches(bare)
@@ -458,7 +445,7 @@ def test_prune_proceeds_when_the_answer_is_yes(tmp_path, capsys, xdg, monkeypatc
     _answer(monkeypatch, "y")
     bare = _dirty_repo(tmp_path)
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     assert "spent" not in _branches(bare)
     assert "Aborted." not in capsys.readouterr().out
@@ -475,7 +462,7 @@ def test_prune_shows_what_is_at_stake_before_asking(tmp_path, capsys, xdg, monke
     monkeypatch.setattr("builtins.input", _record)
     _dirty_repo(tmp_path)
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     assert seen and "spent" in seen[0]
 
@@ -484,7 +471,7 @@ def test_prune_yes_skips_the_prompt(tmp_path, capsys, xdg, monkeypatch):
     _refuse_input(monkeypatch, "yes=True must not prompt")
     bare = _dirty_repo(tmp_path)
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     assert "spent" not in _branches(bare)
 
@@ -506,7 +493,7 @@ def test_prune_does_not_ask_when_no_branch_would_be_deleted(tmp_path, capsys, xd
     _git(bare, "branch", "-D", "master")
     shutil.rmtree(tmp_path / "wsA")
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     assert str(ws) not in _registered_worktrees(bare)
     assert "featA" in _branches(bare)
@@ -528,7 +515,7 @@ def test_prune_rewrites_the_index_file_itself(tmp_path, capsys, xdg):
     dead = _make_indexed_workspace(tmp_path, "dead")
     shutil.rmtree(dead)
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     assert paths.index_file().read_text().splitlines() == [str(live.resolve())]
 
@@ -544,7 +531,7 @@ def test_prune_counts_a_duplicated_dead_entry_once(tmp_path, capsys, xdg):
     shutil.rmtree(dead)
     paths.index_file().write_text(f"{dead.resolve()}\n{dead.resolve()}\n")
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     assert "Dropped 1 dead index entry" in capsys.readouterr().out
 
@@ -554,7 +541,7 @@ def test_prune_is_not_clean_when_it_deleted_something(tmp_path, capsys, xdg):
     bare = _bare_repo(tmp_path)
     _git(bare, "branch", "spent", "refs/remotes/origin/master")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     assert "All bare repos are clean." not in capsys.readouterr().out
 
@@ -581,7 +568,7 @@ def test_prune_ignores_directories_that_are_not_bare_repos(tmp_path, capsys, xdg
     _git(stray, "branch", "scratch", "master")
     (paths.repos_dir() / "README").write_text("not a repo")
 
-    cmd_prune(_make_config(), yes=True)
+    cmd_prune(yes=True)
 
     out = capsys.readouterr().out
     assert "notes" not in out
@@ -602,7 +589,7 @@ def test_prune_lists_branches_in_a_stable_order(tmp_path, capsys, xdg):
     for name in names:
         _git(bare, "branch", name, "refs/remotes/origin/master")
 
-    cmd_prune(_make_config(), dry_run=True)
+    cmd_prune(dry_run=True)
 
     out = capsys.readouterr().out
     listed = out.split("orphaned branches: ", 1)[1].split("\n", 1)[0].split(", ")
@@ -619,7 +606,7 @@ def test_prune_says_when_it_has_finished(tmp_path, capsys, xdg, monkeypatch):
     bare = _bare_repo(tmp_path)
     _git(bare, "branch", "spent", "refs/remotes/origin/master")
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     assert "Done." in capsys.readouterr().out
 
@@ -628,7 +615,7 @@ def test_prune_does_not_claim_to_be_done_when_it_did_nothing(tmp_path, capsys, x
     bare = _bare_repo(tmp_path)
     _git(bare, "branch", "-D", "master")
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     out = capsys.readouterr().out
     assert "All bare repos are clean." in out
@@ -641,7 +628,7 @@ def test_prune_does_not_claim_to_be_done_when_it_only_refused(tmp_path, capsys, 
     _commit_on_branch(bare, tmp_path, "featA", "work")
     _git(bare, "branch", "-D", "master")
 
-    cmd_prune(_make_config())
+    cmd_prune()
 
     out = capsys.readouterr().out
     assert "keep 1 branch with unpushed commits: featA" in out

@@ -12,6 +12,21 @@ from ow.utils.config import BranchSpec, WorkspaceConfig, write_workspace_config
 runner = CliRunner()
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _unwrap(help_text: str) -> str:
+    """Flatten Rich's help panel so a help string can be matched whole.
+
+    Rich boxes and wraps --help, so a one-line help string arrives split
+    across rows with colour codes and border glyphs in between. Strip both,
+    then collapse the whitespace.
+    """
+    plain = _ANSI.sub("", help_text)
+    plain = re.sub(r"[│┃╭╮╰╯─━]", " ", plain)
+    return " ".join(plain.split())
+
+
 def test_no_args_shows_help():
     """ow without args shows help (no_args_is_help=True)."""
     result = runner.invoke(app, [])
@@ -232,6 +247,68 @@ def test_prune(xdg):
 
     assert result.exit_code == 0
     mock_prune.assert_called_once()
+    assert mock_prune.call_args.kwargs == {"dry_run": False, "yes": False}
+
+
+def test_prune_dry_run(xdg):
+    """--dry-run reaches cmd_prune, or the survey-only stop is unreachable."""
+    with patch("ow.__main__.cmd_prune", autospec=True) as mock_prune:
+        result = runner.invoke(app, ["prune", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert mock_prune.call_args.kwargs["dry_run"] is True
+
+
+@pytest.mark.parametrize("flag", ["--yes", "-y"])
+def test_prune_yes(xdg, flag):
+    """Both spellings rebase accepts, so the two commands read the same."""
+    with patch("ow.__main__.cmd_prune", autospec=True) as mock_prune:
+        result = runner.invoke(app, ["prune", flag])
+
+    assert result.exit_code == 0
+    assert mock_prune.call_args.kwargs["yes"] is True
+
+
+def test_prune_options_read_the_same_as_rebase(xdg):
+    """--dry-run and -y/--yes are the same options on both commands."""
+    prune_help = runner.invoke(app, ["prune", "--help"]).output
+    rebase_help = runner.invoke(app, ["rebase", "--help"]).output
+
+    for phrase in (
+        "Show the git commands without running them",
+        "Skip the confirmation prompt",
+    ):
+        assert phrase in _unwrap(rebase_help)
+        assert phrase in _unwrap(prune_help)
+
+
+def test_prune_help_mentions_dead_index_entries(xdg):
+    """The one-liner described a command that no longer exists."""
+    help_text = _unwrap(runner.invoke(app, ["prune", "--help"]).output)
+    assert "dead index entries" in help_text
+
+
+def test_prune_does_not_bootstrap_the_global_config(xdg):
+    """cmd_prune reads no Config, so prune must not create one to hand it."""
+    assert not paths.config_file().exists()
+
+    with patch("ow.__main__.cmd_prune", autospec=True):
+        result = runner.invoke(app, ["prune"])
+
+    assert result.exit_code == 0
+    assert not paths.config_file().exists()
+
+
+def test_prune_still_gates_on_the_legacy_layout(xdg, tmp_path):
+    """Dropping _load_config() must not drop the migration pointer with it."""
+    (tmp_path / "ow.toml").write_text("")
+
+    with patch("ow.__main__.cmd_prune", autospec=True) as mock_prune:
+        result = runner.invoke(app, ["prune"])
+
+    assert result.exit_code == 1
+    assert "ow.toml" in result.output
+    mock_prune.assert_not_called()
 
 
 def test_ls(xdg):
@@ -257,8 +334,8 @@ def test_creates_config_if_missing(xdg):
     """If the global config doesn't exist yet, it is bootstrapped with default content."""
     assert not paths.config_file().exists()
 
-    with patch("ow.__main__.cmd_prune", autospec=True):
-        result = runner.invoke(app, ["prune"])
+    with patch("ow.__main__.cmd_status", autospec=True):
+        result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
     assert paths.config_file().exists()

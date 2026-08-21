@@ -1,7 +1,6 @@
 from pathlib import Path
 from typing import NamedTuple
 
-from ow.utils.config import Config
 from ow.utils.display import err_console
 from ow.utils import index, paths
 from ow.utils.git import _run, parallel_per_repo
@@ -253,7 +252,7 @@ def _display_dry_run(plans: list[_PrunePlan]) -> None:
             print(f"  [{plan.alias}] git {' '.join(argv)}")
 
 
-def cmd_prune(config: Config, *, dry_run: bool = False, yes: bool = False) -> None:
+def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
     """Clean up stale worktree references, orphaned branches, and dead index entries.
 
     Survey first, then act. --dry-run stops after the survey; otherwise the

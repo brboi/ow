@@ -55,7 +55,7 @@ code .                             # open in your IDE and enjoy
 | `ow apply` | `[workspace]`, `--only` | Re-render templates and materialize worktrees |
 | `ow status` | `[workspace]` | Show branch status with behind/ahead counts |
 | `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
-| `ow prune` | — | Clean up stale worktree references, orphaned branches, and dead index entries |
+| `ow prune` | `--dry-run`, `-y/--yes` | Clean up stale worktree references, orphaned branches, and dead index entries |
 | `ow ls` | — | List every known workspace, its path, and its repos |
 | `ow templates` | `--take`, `--diff` | List template files and their state, take one, or diff the stale ones |
 
@@ -163,6 +163,11 @@ directory:
 rm -rf ~/wherever/my-workspace
 ow prune
 ```
+
+Deleting a branch is the one step that can lose work, so it is confirmed first,
+defaulting to no; `-y/--yes` skips the prompt and `--dry-run` stops after the
+survey. A branch holding commits no remote has is never deleted — it is listed,
+with the command to delete it by hand.
 
 ### `ow ls`
 

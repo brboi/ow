@@ -205,10 +205,16 @@ def ls() -> None:
 
 
 @app.command()
-def prune() -> None:
-    """Clean up stale worktree references and orphaned branches."""
-    config = _load_config()
-    cmd_prune(config)
+def prune(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+) -> None:
+    """Clean up stale worktree references, orphaned branches, and dead index entries."""
+    # Not _load_config(): prune reads no global config, and bootstrapping one
+    # here would write a default config.toml for a command that never opens
+    # it. The legacy gate is the only part of that path prune needs.
+    check_legacy_layout()
+    cmd_prune(dry_run=dry_run, yes=yes)
 
 
 @app.command()

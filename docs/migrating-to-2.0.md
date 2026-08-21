@@ -54,11 +54,11 @@ and workspaces was derived from where `ow.toml` sat, and each of those is now
 resolved on its own.
 
 To start clean instead, skip the copy and run `ow init`, `ow apply`,
-`ow status`, `ow rebase` or `ow prune` **from outside `$OLD`**: ow writes a
+`ow status` or `ow rebase` **from outside `$OLD`**: ow writes a
 commented default with the community remote and tells you where it put it.
 Inside `$OLD` the check above fires first — ow sees the old `ow.toml` and
-stops, which is the one thing that would leave you going in circles. `ow ls`
-and `ow templates` need no configuration, so they never create it.
+stops, which is the one thing that would leave you going in circles. `ow ls`,
+`ow prune` and `ow templates` need no configuration, so they never create it.
 
 You can leave the old `ow.toml` in place. Once `~/.config/ow/config.toml`
 exists, ow stops looking for it.
