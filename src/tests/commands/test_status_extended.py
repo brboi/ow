@@ -312,3 +312,42 @@ class TestAttachedStatusLabelsTheCheckedOutBranch:
 
         assert "DETACHED" in result
         assert "feat" not in result
+
+
+class TestRunbotLinkOnlyForOdoo:
+    """D5 — runbot only knows bundles for the odoo organisation's repos.
+
+    A workspace on a local `file://` remote still got a
+    `runbot: https://runbot.odoo.com/runbot/bundle/<branch>` line.
+    """
+
+    def _gather(self, tmp_path, remote_url):
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        bare = tmp_path / "community.git"
+        spec = resolved = BranchSpec("origin/master", "feat")
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value=None),
+            patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value="feat"),
+            patch("ow.commands.status.get_remote_url", return_value=remote_url),
+        ):
+            return _gather_repo_status("community", spec, resolved, worktree, bare, 9, set())
+
+    def test_a_local_file_remote_gets_no_runbot_bundle(self, tmp_path):
+        assert self._gather(tmp_path, "file:///srv/mirrors/odoo.git").first_attached_branch is None
+
+    def test_a_third_party_github_remote_gets_no_runbot_bundle(self, tmp_path):
+        assert self._gather(tmp_path, "git@github.com:acme/odoo.git").first_attached_branch is None
+
+    def test_a_missing_remote_url_gets_no_runbot_bundle(self, tmp_path):
+        assert self._gather(tmp_path, None).first_attached_branch is None
+
+    def test_an_odoo_remote_still_gets_its_bundle(self, tmp_path):
+        assert self._gather(tmp_path, "git@github.com:odoo/odoo.git").first_attached_branch == "feat"
+
+    def test_an_odoo_https_remote_still_gets_its_bundle(self, tmp_path):
+        assert self._gather(
+            tmp_path, "https://github.com/odoo/enterprise",
+        ).first_attached_branch == "feat"

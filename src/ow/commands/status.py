@@ -36,6 +36,14 @@ def _github_url_from_remote(remote_url: str) -> str | None:
     return None
 
 
+def _is_odoo_remote(remote_url: str | None) -> bool:
+    """Runbot only knows bundles for the odoo organisation's repositories."""
+    if remote_url is None:
+        return False
+    github_base = _github_url_from_remote(remote_url)
+    return github_base is not None and github_base.startswith("https://github.com/odoo/")
+
+
 class _StatusResult(NamedTuple):
     status_line: str
     first_attached_branch: str | None
@@ -130,7 +138,8 @@ def _gather_repo_status(
             github_base = _github_url_from_remote(remote_url)
             if github_base:
                 link = (alias, f"{github_base}/tree/{resolved.local_branch}")
-        return _StatusResult(status_line, resolved.local_branch, link)
+        runbot_branch = resolved.local_branch if _is_odoo_remote(remote_url) else None
+        return _StatusResult(status_line, runbot_branch, link)
 
 
 # ---------------------------------------------------------------------------

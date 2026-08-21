@@ -153,10 +153,13 @@ def _display_summary(ws_name: str, plans: list[RebasePlan]) -> None:
 
 
 def _display_dry_run(plans: list[RebasePlan], ws_dir: Path) -> None:
+    actionable = [p for p in plans if not p.is_skipped and not p.is_noop]
+    if not actionable:
+        console.print("\n[dim]Would run: nothing to do[/]")
+        return
+
     console.print("\n[dim]Would run:[/]")
-    for plan in plans:
-        if plan.is_skipped or plan.is_noop:
-            continue
+    for plan in actionable:
         tag = escape(f"[{plan.alias}]")
         console.print(f"  {tag} cd {ws_dir / plan.alias}")
         for step in plan.steps:

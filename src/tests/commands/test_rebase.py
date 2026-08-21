@@ -417,3 +417,25 @@ class TestNonConflictFailures:
         assert "CONFLICT" in err
         assert "git rebase --continue" in err
         assert "git rebase --abort" in err
+
+
+class TestDryRunWithNothingToDo:
+    """D5 — a bare `Would run:` header with nothing under it."""
+
+    def test_says_nothing_to_do_when_every_repo_is_up_to_date(self, tmp_path, capsys):
+        def _noop_facts(worktree, alias, base, up, up_before, is_detached):
+            return RepoFacts(alias=alias, base=base, bound="BOUND", base_merged=True)
+
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.gather_facts", side_effect=_noop_facts),
+            patch("ow.commands.rebase.git") as mock_git,
+        ):
+            cmd_rebase(config, workspace=None, dry_run=True)
+        out = capsys.readouterr().out
+        assert "nothing to do" in out
+        assert mock_git.call_count == 0
