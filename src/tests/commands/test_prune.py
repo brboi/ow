@@ -558,7 +558,8 @@ def test_prune_asks_before_deleting_and_a_no_changes_nothing(tmp_path, capsys, x
     shutil.rmtree(dead)
     before = paths.index_file().read_text()
 
-    cmd_prune()
+    with pytest.raises(SystemExit):
+        cmd_prune()
 
     out = capsys.readouterr().out
     assert "Aborted." in out
@@ -574,8 +575,23 @@ def test_prune_treats_eof_as_no(tmp_path, capsys, xdg, monkeypatch):
     monkeypatch.setattr("builtins.input", _eof)
     bare = _dirty_repo(tmp_path)
 
-    cmd_prune()
+    with pytest.raises(SystemExit):
+        cmd_prune()
 
+    assert "Aborted." in capsys.readouterr().out
+    assert "spent" in _branches(bare)
+
+
+def test_prune_abort_exits_nonzero(tmp_path, capsys, xdg, monkeypatch):
+    """A non-interactive abort (EOFError) must exit non-zero, not silently succeed."""
+    def _eof(prompt: str = "") -> str:
+        raise EOFError
+    monkeypatch.setattr("builtins.input", _eof)
+    bare = _dirty_repo(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_prune()
+    assert exc_info.value.code != 0
     assert "Aborted." in capsys.readouterr().out
     assert "spent" in _branches(bare)
 
@@ -601,7 +617,8 @@ def test_prune_shows_what_is_at_stake_before_asking(tmp_path, capsys, xdg, monke
     monkeypatch.setattr("builtins.input", _record)
     _dirty_repo(tmp_path)
 
-    cmd_prune()
+    with pytest.raises(SystemExit):
+        cmd_prune()
 
     assert seen and "spent" in seen[0]
 

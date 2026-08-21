@@ -312,9 +312,7 @@ def cmd_rebase(
 
     if actionable and not yes and not _confirm():
         console.print("Aborted.")
-        if failed:
-            sys.exit(1)
-        return
+        sys.exit(2)
 
     for plan in plans:
         if plan.is_skipped:
