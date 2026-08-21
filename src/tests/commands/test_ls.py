@@ -20,8 +20,9 @@ from unittest.mock import patch
 import pytest
 import typer
 from rich.console import Console
+from rich.text import Text
 
-from ow.commands.ls import cmd_ls
+from ow.commands.ls import _repos_cell, cmd_ls
 from ow.utils import index
 from ow.utils.config import WorkspaceConfig, parse_branch_spec, write_workspace_config
 
@@ -305,3 +306,42 @@ def test_a_long_path_folds_rather_than_truncating(tmp_path, capsys, xdg, monkeyp
     # back up before looking for it.
     compact = re.sub(r"\s+", "", re.sub(r"\x1b\[[0-9;]*m", "", out))
     assert "~/dev/very/long/path/indeed/myws" in compact
+
+
+# ---------------------------------------------------------------------------
+# 8. The REPOS cell itself — both branches of _repos_cell.
+# ---------------------------------------------------------------------------
+
+def test_repos_cell_renders_alias_spec_pairs(tmp_path, capsys, xdg, monkeypatch):
+    """The cell is `alias:spec`, comma-separated, in config order — the whole
+    reason to run ls rather than `ls ~/dev`."""
+    monkeypatch.setattr("ow.commands.ls.console", Console(highlight=False, soft_wrap=True, width=300))
+    _make_ws(tmp_path, "alpha", {"community": "master", "enterprise": "master..fix"})
+
+    cmd_ls()
+
+    out = capsys.readouterr().out
+    assert "community:master, enterprise:master..fix" in out
+
+
+def test_repos_cell_marks_an_unreadable_config_without_aborting(tmp_path, capsys, xdg, monkeypatch):
+    """The error goes in the cell, in red, and the rest of the table survives."""
+    monkeypatch.setattr("ow.commands.ls.console", Console(highlight=False, soft_wrap=True, width=300))
+    good = _make_ws(tmp_path, "good", {"community": "master"})
+    broken = tmp_path / "broken"
+    (broken / ".ow").mkdir(parents=True)
+    (broken / ".ow" / "config.toml").write_text("this is [ not valid toml")
+    index.remember(broken)
+
+    cell = _repos_cell(broken)
+    assert isinstance(cell, Text)
+    assert cell.plain.startswith("(error:")
+    assert cell.style == "red"
+
+    cmd_ls()
+
+    out = capsys.readouterr().out
+    assert "(error:" in out
+    # The healthy neighbour still renders its own cell in full.
+    assert "community:master" in out
+    assert good.exists()
