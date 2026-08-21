@@ -61,8 +61,10 @@ def test_outside_any_workspace_fails_and_suggests_ow_ls(
     barren.mkdir(parents=True)
     monkeypatch.chdir(barren)
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace()
+
+    assert exc.value.code == 1
 
     err = capsys.readouterr().err
     assert "no workspace" in err.lower()
@@ -91,8 +93,10 @@ def test_unique_name_resolves_through_the_index(
 def test_unknown_name_fails_and_suggests_ow_ls(
     xdg: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace(name="quattromori")
+
+    assert exc.value.code == 1
 
     err = capsys.readouterr().err
     assert "quattromori" in err
@@ -107,8 +111,10 @@ def test_ambiguous_name_lists_every_candidate_and_picks_none(
     index.remember(left)
     index.remember(right)
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace(name="twin")
+
+    assert exc.value.code == 1
 
     err = capsys.readouterr().err
     assert "twin" in err
@@ -124,8 +130,10 @@ def test_a_name_never_falls_back_to_a_relative_path(
     monkeypatch.chdir(decoy.parent)
     assert index.find_by_name("ghost") == []
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace(name="ghost")
+
+    assert exc.value.code == 1
 
     err = capsys.readouterr().err
     assert "ghost" in err
@@ -203,8 +211,10 @@ def test_path_that_is_not_a_workspace_names_the_missing_config(
     stray = xdg / "not-a-workspace"
     stray.mkdir()
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace(name=str(stray))
+
+    assert exc.value.code == 1
 
     err = capsys.readouterr().err
     assert str(stray.resolve() / ".ow" / "config.toml") in err
@@ -270,8 +280,10 @@ def test_ow_workspace_as_a_bare_name_fails_even_when_the_index_knows_it(
     assert index.find_by_name("env-name") == [ws_dir.resolve()]
     monkeypatch.setenv("OW_WORKSPACE", "env-name")
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace()
+
+    assert exc.value.code == 1
 
     err = capsys.readouterr().err
     assert "OW_WORKSPACE" in err
@@ -286,8 +298,10 @@ def test_ow_workspace_as_a_relative_path_fails(
     monkeypatch.chdir(ws_dir.parent)
     monkeypatch.setenv("OW_WORKSPACE", "./rel-env")
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace()
+
+    assert exc.value.code == 1
 
     err = capsys.readouterr().err
     assert "OW_WORKSPACE" in err
@@ -304,8 +318,10 @@ def test_ow_workspace_as_a_tilde_path_fails(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("OW_WORKSPACE", "~/tilde-env")
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace()
+
+    assert exc.value.code == 1
 
     err = capsys.readouterr().err
     assert "OW_WORKSPACE" in err
@@ -322,8 +338,10 @@ def test_ow_workspace_absolute_path_that_is_not_a_workspace_fails(
     stray.mkdir()
     monkeypatch.setenv("OW_WORKSPACE", str(stray))
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace()
+
+    assert exc.value.code == 1
 
     err = capsys.readouterr().err
     assert str(stray.resolve() / ".ow" / "config.toml") in err
@@ -406,8 +424,10 @@ def test_a_failed_resolution_is_not_remembered(
     stray.mkdir()
     monkeypatch.chdir(stray)
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace(name=str(stray))
+
+    assert exc.value.code == 1
 
     assert index.known_workspaces() == []
 
@@ -465,7 +485,30 @@ def test_a_workspace_that_will_not_load_is_not_remembered(xdg: Path) -> None:
     (ws_dir / ".ow").mkdir(parents=True)
     (ws_dir / ".ow" / "config.toml").write_text("templates = [\n")
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         resolve_workspace(name=str(ws_dir))
 
+    assert exc.value.code == 1
+
     assert index.known_workspaces() == []
+
+
+def test_a_bare_tilde_is_a_path_not_a_name(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`~` on its own carries no separator, so only the explicit `~` test in
+    _looks_like_path tells it from a bare name. Drop that test and
+    `ow status ~` stops meaning the home directory and starts meaning "a
+    workspace the index calls '~'", which is nothing at all."""
+    home = xdg / "home"
+    write_workspace_config(
+        home / ".ow" / "config.toml",
+        WorkspaceConfig(repos={}, templates=["tilde-home"], vars={}),
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(xdg)
+
+    resolved_dir, ws = resolve_workspace(name="~")
+
+    assert resolved_dir == home.resolve()
+    assert ws.templates == ["tilde-home"]
