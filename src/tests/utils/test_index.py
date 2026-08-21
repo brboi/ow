@@ -231,6 +231,29 @@ def test_remember_appends_keeping_insertion_order(xdg: Path) -> None:
     assert index.known_workspaces() == [first.resolve(), second.resolve(), third.resolve()]
 
 
+
+
+def test_stale_lock_is_broken_and_unlinked(xdg: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A killed writer leaves a lockfile behind.  The next call must not
+    wait the full timeout every time — it must break the lock, warn on
+    stderr, and proceed.
+    """
+    ws = _make_workspace(xdg, "alpha")
+    lock = paths.index_file().with_name("workspaces.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("")
+
+    monkeypatch.setattr(index, "_LOCK_TIMEOUT", 0.1)
+    monkeypatch.setattr(index, "_LOCK_RETRY", 0.001)
+
+    index.remember(ws)
+
+    assert not lock.exists()
+    captured = capsys.readouterr()
+    assert "stale" in captured.err.lower() or "lock" in captured.err.lower()
+    assert paths.index_file().read_text().splitlines() == [str(ws.resolve())]
+
+
 def test_concurrent_remembers_do_not_lose_entries(xdg: Path) -> None:
     """`ow init` in one terminal must not erase what another just wrote.
 

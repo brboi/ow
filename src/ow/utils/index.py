@@ -9,6 +9,7 @@ the path back.
 
 import contextlib
 import os
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -45,6 +46,13 @@ def _locked() -> Iterator[None]:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
             if time.monotonic() >= deadline:
+                # The lock outlived the timeout: a previous writer crashed.
+                # Break it so every later call does not pay the full timeout.
+                # The lock outlived the timeout: a previous writer crashed.
+                # Break it so every later call does not pay the full timeout.
+                print(f"Breaking stale lock: {lock}", file=sys.stderr)
+                with contextlib.suppress(OSError):
+                    lock.unlink()
                 break
             time.sleep(_LOCK_RETRY)
             continue
