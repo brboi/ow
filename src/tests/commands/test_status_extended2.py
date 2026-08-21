@@ -48,7 +48,7 @@ class TestCmdStatusErrorPaths:
             patch("ow.commands.status.parallel_per_repo", side_effect=mock_exec),
             patch("ow.commands.status.warn_if_drifted"),
         ):
-            cmd_status(config)
+            cmd_status(config, fetch=True)
         captured = capsys.readouterr()
         assert "(error)" in captured.out
 
@@ -74,7 +74,7 @@ class TestCmdStatusErrorPaths:
             patch("ow.commands.status.get_remote_url", return_value="git@github.com:odoo/odoo.git"),
             patch("ow.commands.status.warn_if_drifted"),
         ):
-            cmd_status(config)
+            cmd_status(config, fetch=True)
         captured = capsys.readouterr()
         assert "github.com" in captured.out
         # runbot only for attached, check github link displayed

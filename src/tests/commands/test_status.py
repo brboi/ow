@@ -88,7 +88,7 @@ def test_cmd_status_fetches_before_display(tmp_path, xdg):
         )),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
-        cmd_status(config)
+        cmd_status(config, fetch=True)
 
     assert fetch_called[0]
 
@@ -120,7 +120,52 @@ def test_cmd_status_marks_fetch_failure(tmp_path, capsys, xdg):
         )),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
-        cmd_status(config)
+        cmd_status(config, fetch=True)
 
     captured = capsys.readouterr()
     assert "fetch failed" in captured.out
+
+
+def test_status_offline_does_not_fetch(tmp_path, xdg, monkeypatch):
+    """When fetch=False (default), fetch_workspace_refs is NOT called."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    (ws_dir / "community").mkdir(parents=True)
+    (paths.repos_dir() / "community.git").mkdir(parents=True)
+    write_ow_config(ws_dir, ["common"], {"community": "master"})
+    config = Config(vars={}, remotes={})
+
+    fetch_called = []
+    monkeypatch.setattr(
+        "ow.commands.status.fetch_workspace_refs",
+        lambda *a, **kw: fetch_called.append(True),
+    )
+    monkeypatch.setattr("ow.commands.status.warn_if_drifted", lambda *a, **kw: None)
+    monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+
+    cmd_status(config)  # no fetch=True
+    assert not fetch_called, "status fetched without --fetch"
+
+
+def test_status_fetch_calls_fetch(tmp_path, xdg, monkeypatch):
+    """When fetch=True, fetch_workspace_refs IS called."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    (ws_dir / "community").mkdir(parents=True)
+    (paths.repos_dir() / "community.git").mkdir(parents=True)
+    write_ow_config(ws_dir, ["common"], {"community": "master"})
+    config = Config(vars={}, remotes={})
+
+    fetch_called = []
+    def mock_fetch(*a, **kw):
+        fetch_called.append(True)
+        return FetchOutcome(
+            tracks={}, upstreams={}, specs={}, upstream_before={},
+        )
+    monkeypatch.setattr(
+        "ow.commands.status.fetch_workspace_refs",
+        mock_fetch,
+    )
+    monkeypatch.setattr("ow.commands.status.warn_if_drifted", lambda *a, **kw: None)
+    monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+
+    cmd_status(config, fetch=True)
+    assert fetch_called

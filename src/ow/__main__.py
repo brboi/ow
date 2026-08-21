@@ -176,10 +176,11 @@ def apply(
 @app.command()
 def status(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    fetch: bool = typer.Option(False, "--fetch", "-f", help="Fetch refs before showing status."),
 ) -> None:
     """Show workspace status."""
     config = _load_config()
-    cmd_status(config, workspace=workspace)
+    cmd_status(config, workspace=workspace, fetch=fetch)
 
 
 @app.command()
