@@ -198,3 +198,43 @@ def test_an_entry_whose_stat_errors_without_permissions_is_kept(xdg: Path) -> No
 
     assert index.known_workspaces() == [alive.resolve(), too_long]
     assert str(too_long) in target.read_text()
+
+
+def test_find_by_name_is_exact_not_a_prefix(xdg: Path) -> None:
+    """A name is a whole name. The other fixtures here — canary, other,
+    dupe — are not substrings of one another, so a substring match passed
+    every one of them. This is what the resolver's name branch feeds, and
+    it feeds `ow rebase`: `ow rebase my` quietly acting on `my-workspace`
+    is a destructive command aimed at the wrong tree."""
+    index.remember(_make_workspace(xdg, "my-workspace"))
+
+    assert index.find_by_name("my") == []
+    assert index.find_by_name("workspace") == []
+    assert index.find_by_name("my-workspace") == [(xdg / "my-workspace").resolve()]
+
+
+def test_blank_lines_are_cleaned_out_of_the_file(xdg: Path) -> None:
+    """Ignoring a blank line on read is not enough — a read that leaves it
+    behind re-reads it forever. Pruning on read is how this file stays
+    honest, and a blank line is as much rubbish as a dead entry."""
+    ws = _make_workspace(xdg, "alpha")
+    target = paths.index_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"\n   \n{ws.resolve()}\n\t\n")
+
+    assert index.known_workspaces() == [ws.resolve()]
+    assert target.read_text() == f"{ws.resolve()}\n"
+
+
+def test_remember_appends_keeping_insertion_order(xdg: Path) -> None:
+    """`ow ls` prints the index in file order, so the order is user-visible:
+    workspaces appear in the order they were first seen. Prepending would
+    reverse that listing without a single test noticing."""
+    first = _make_workspace(xdg, "first")
+    second = _make_workspace(xdg, "second")
+    third = _make_workspace(xdg, "third")
+
+    for ws in (first, second, third):
+        index.remember(ws)
+
+    assert index.known_workspaces() == [first.resolve(), second.resolve(), third.resolve()]
