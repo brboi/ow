@@ -47,8 +47,11 @@ class TestCmdApply:
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={}, templates=["common"])
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as exc:
             cmd_apply(config, workspace="nonexistent")
+        # Not just "it stopped": sys.exit(0) here would report success for a
+        # workspace that was never found.
+        assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "no workspace named 'nonexistent'" in err
         assert "ow ls" in err
@@ -153,9 +156,10 @@ class TestCmdApplyFailedRepos:
                 return_value=(ws_dir, {"community"}, {"enterprise": "unreachable"}),
             ):
                 with patch("ow.commands.apply.apply_templates"):
-                    with pytest.raises(SystemExit):
+                    with pytest.raises(SystemExit) as exc:
                         cmd_apply(config_with_remotes)
 
+        assert exc.value.code == 1
         out = capsys.readouterr().out
         assert f"Workspace '{ws_dir.name}' applied." not in out
         assert "1 repo failed" in out
