@@ -210,12 +210,13 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
         if result.github_link:
             github_links.append(result.github_link)
 
-    console.print("    [dim]links[/]")
-    if first_attached_branch:
-        runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
-        console.print(f"        runbot: [link={runbot_url}]{first_attached_branch}[/]")
-    for link_alias, link_url in github_links:
-        link_padding = " " * (max_alias_len - len(link_alias) + 1)
-        console.print(f"        {link_alias}:{link_padding}[link={link_url}]{link_url}[/]")
+    if first_attached_branch or github_links:
+        console.print("    [dim]links[/]")
+        if first_attached_branch:
+            runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
+            console.print(f"        runbot: [link={runbot_url}]{first_attached_branch}[/]")
+        for link_alias, link_url in github_links:
+            link_padding = " " * (max_alias_len - len(link_alias) + 1)
+            console.print(f"        {link_alias}:{link_padding}[link={link_url}]{link_url}[/]")
 
     console.print()
