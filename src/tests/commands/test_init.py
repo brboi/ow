@@ -612,6 +612,24 @@ def test_init_rejects_a_duplicate_branch(tmp_path, monkeypatch, capsys, config_w
     assert "master-parrot" in err
 
 
+def test_init_duplicate_branch_error_names_the_override_flag(tmp_path, monkeypatch, capsys, config_with_remotes):
+    """A non-interactive -c refusal must name the way out: -r alias:spec."""
+    _remembered_workspace(tmp_path / "parrot", "community", "master..master-parrot")
+    monkeypatch.chdir(tmp_path)
+
+    with _tty(False), _questionary_answers(), pytest.raises(SystemExit) as exc:
+        cmd_init(
+            config_with_remotes,
+            name="new-ws",
+            templates=["common"],
+            repos={"community": BranchSpec("origin/master", "master-parrot")},
+        )
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "-r community:" in err
+
+
 def test_init_accepts_a_different_branch(tmp_path, monkeypatch, config_with_remotes):
     _remembered_workspace(tmp_path / "parrot", "community", "master..master-parrot")
     monkeypatch.chdir(tmp_path)

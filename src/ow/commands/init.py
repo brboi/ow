@@ -272,6 +272,7 @@ def _check_duplicate_branches(new_repos: dict[str, BranchSpec]) -> None:
             if new_target and existing_target and new_target == existing_target:
                 print(f"Error: workspace '{existing_ws_dir.name}' already uses {alias}:{existing_spec.to_spec_str()}", file=sys.stderr)
                 print(f"  Target branch '{new_target}' is already in use. Each target branch must be unique.", file=sys.stderr)
+                print(f"  Use -r {alias}:SPEC to override the duplicated repo.", file=sys.stderr)
                 sys.exit(1)
 
 
