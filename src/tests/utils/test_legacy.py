@@ -115,3 +115,44 @@ def test_old_workspace_config_is_not_flagged_once_migrated(xdg: Path, tmp_path: 
     monkeypatch.chdir(ws)
 
     check_legacy_layout()  # must not raise
+
+
+def test_silent_with_a_global_config_beside_an_old_ow_toml(
+    xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "already migrated" guard, with something for it to guard against.
+
+    test_silent_when_global_config_already_exists is silent because there
+    is no ow.toml anywhere above its cwd — it would pass with the guard
+    deleted. Put a stray ow.toml above cwd and the guard is the only thing
+    standing between an already-migrated user and a hard exit 1 on every
+    single ow command.
+    """
+    paths.config_home().mkdir(parents=True, exist_ok=True)
+    paths.config_file().write_text("")
+    (tmp_path / "ow.toml").write_text("")
+    monkeypatch.chdir(tmp_path)
+
+    check_legacy_layout()  # must not raise
+
+
+def test_detects_an_old_workspace_config_from_a_subdirectory(
+    xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Someone hits this from wherever they happen to be working — inside
+    `community/addons`, not politely standing at the workspace root. Every
+    other test of this branch runs from the workspace itself, so the
+    walk-up over `current.parents` was never exercised."""
+    ws = tmp_path / "myws"
+    old_config = ws / ".ow" / "config"
+    old_config.parent.mkdir(parents=True)
+    old_config.write_text("")
+    deep = ws / "community" / "addons"
+    deep.mkdir(parents=True)
+    monkeypatch.chdir(deep)
+
+    with pytest.raises(typer.Exit) as exc:
+        check_legacy_layout()
+
+    assert exc.value.exit_code == 1
+    assert str(old_config) in capsys.readouterr().err
