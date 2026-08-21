@@ -37,10 +37,8 @@ pip install odoo-workspaces    # or in an active venv
 ## Quick Start
 
 ```sh
-mkdir -p ~/.config/ow              # ow does not create this on its own
-$EDITOR ~/.config/ow/config.toml   # add your remotes (or skip both lines and
-                                   # let `ow init` below write a commented
-                                   # default first)
+mkdir -p ~/.config/ow              # optional: ow writes a commented default
+$EDITOR ~/.config/ow/config.toml   # here on first use if you skip both lines
 mkdir my_work && cd my_work
 ow init                            # interactive form: templates, repos, branch specs
 mise install

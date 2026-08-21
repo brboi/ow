@@ -29,9 +29,11 @@ and `XDG_STATE_HOME`; if you set any of them, substitute accordingly.
 | `OW_WORKSPACE=<name>` or a path | an absolute path only |
 | project root | gone |
 
-Until you migrate, ow refuses to run and points back here. It detects two
-things: an old `ow.toml` at or above the current directory while no global
-config exists yet, and a `.ow/config` with no `.ow/config.toml` beside it.
+Until you migrate, ow points back here. It detects two things: an old
+`ow.toml` at or above the current directory while no global config exists yet,
+and a `.ow/config` with no `.ow/config.toml` beside it. Every command refuses to
+run on either — except `ow ls`, which prints the same pointer and then lists
+whatever it already knows, since it reads nothing but its own index.
 
 ## Migrate
 
