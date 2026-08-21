@@ -1,3 +1,4 @@
+import re
 import tomllib
 from unittest.mock import patch
 
@@ -169,6 +170,29 @@ def test_apply_only_is_really_wired_to_cmd_apply(tmp_path, xdg, monkeypatch):
     assert "nope" in result.output
     assert "community" in result.output
     materialize.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["apply", "status", "rebase"])
+def test_workspace_argument_help_names_every_form(command):
+    """[WORKSPACE] accepts four forms; the help has to name all four.
+
+    Someone whose workspace is not in the index yet — exactly the state
+    right after migrating — reads a help line that says "Workspace name",
+    tries the name, and is told to pass a path: a form the help never
+    mentioned. This text freezes at 2.0, so it says the whole rule.
+    """
+    result = runner.invoke(app, [command, "--help"])
+
+    assert result.exit_code == 0
+    # Rich wraps the help inside a coloured box, so a phrase can be split
+    # across two lines with a border between the halves. Drop the escape
+    # sequences and the box, then collapse the wrapping, before matching.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    text = " ".join(re.sub(r"[\u2500-\u257f]", " ", plain).split())
+    assert "ow ls" in text          # form 1: a name the index knows
+    assert "./" in text             # form 2: a path
+    assert "OW_WORKSPACE" in text   # form 3: the environment variable
+    assert "current directory" in text  # form 4: the cwd walk-up
 
 
 def test_status_with_workspace(xdg):

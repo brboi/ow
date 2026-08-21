@@ -141,6 +141,16 @@ def complete_workspace_name(ctx: typer.Context, incomplete: str) -> list[str]:
     return [name for name in names if name.startswith(incomplete)]
 
 
+# The four forms resolve_workspace() accepts, in the order it tries them.
+# Naming only the first two is how someone fresh out of the migration — with
+# workspaces on disk that the index has never seen — reads "Workspace name",
+# tries the name, and gets told to pass a path the help never mentioned.
+WORKSPACE_HELP = (
+    "Workspace to act on: a name ow ls knows, or a path such as ./myws "
+    "(default: $OW_WORKSPACE, else the workspace holding the current directory)"
+)
+
+
 @app.command()
 def init(
     name: Optional[str] = typer.Argument(None, help="Workspace directory to create under the current one (default: the current directory itself)"),
@@ -155,7 +165,7 @@ def init(
 
 @app.command()
 def apply(
-    workspace: Optional[str] = typer.Argument(None, help="Workspace name (default: resolve from cwd)", autocompletion=complete_workspace_name),
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to materialize (default: all); templates still render from the whole config, so addons_path may reference repos not yet materialized"),
 ) -> None:
     """Re-render templates and materialize worktrees."""
@@ -165,7 +175,7 @@ def apply(
 
 @app.command()
 def status(
-    workspace: Optional[str] = typer.Argument(None, help="Workspace name (default: resolve from cwd)", autocompletion=complete_workspace_name),
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
 ) -> None:
     """Show workspace status."""
     config = _load_config()
@@ -174,7 +184,7 @@ def status(
 
 @app.command()
 def rebase(
-    workspace: Optional[str] = typer.Argument(None, help="Workspace name (default: resolve from cwd)", autocompletion=complete_workspace_name),
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to rebase (default: all)"),
     autostash: bool = typer.Option(False, "--autostash", help="Stash and restore uncommitted changes around each rebase"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
