@@ -1,3 +1,4 @@
+import subprocess
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -659,3 +660,62 @@ def test_init_survives_an_indexed_workspace_with_a_corrupt_config(tmp_path, monk
         )
 
     assert (tmp_path / "new-ws" / ".ow" / "config.toml").exists()
+
+
+# ---------------------------------------------------------------------------
+# mise trust is a convenience, not a condition of the workspace existing
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _workspace_with_a_mise_toml(ws_dir, trust_raises):
+    """A workspace whose mise.toml exists and whose `mise trust` fails."""
+    ws_dir.mkdir(parents=True, exist_ok=True)
+    (ws_dir / "mise.toml").write_text("[tools]\n")
+    with (
+        patch("ow.commands.init.ensure_workspace_materialized", return_value=(ws_dir, set(), {})),
+        patch("ow.commands.init.apply_templates"),
+        patch("ow.commands.init.run_cmd", side_effect=trust_raises),
+    ):
+        yield
+
+
+def test_init_keeps_the_workspace_when_mise_trust_fails(tmp_path, monkeypatch, capsys, config_with_remotes):
+    """The workspace is on disk by then; an unhappy mise must not cost it."""
+    ws_dir = tmp_path / "parrot"
+    monkeypatch.chdir(tmp_path)
+    failure = subprocess.CalledProcessError(1, ["mise", "trust"])
+
+    with _tty(False), _questionary_answers(), _workspace_with_a_mise_toml(ws_dir, failure):
+        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+
+    assert index.known_workspaces() == [ws_dir.resolve()]
+    err = capsys.readouterr().err
+    assert str(ws_dir / "mise.toml") in err
+    assert "mise trust" in err
+
+
+def test_init_survives_mise_not_being_installed(tmp_path, monkeypatch, capsys, config_with_remotes):
+    ws_dir = tmp_path / "parrot"
+    monkeypatch.chdir(tmp_path)
+
+    with _tty(False), _questionary_answers(), _workspace_with_a_mise_toml(ws_dir, FileNotFoundError("mise")):
+        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+
+    assert index.known_workspaces() == [ws_dir.resolve()]
+    assert "mise trust" in capsys.readouterr().err
+
+
+def test_init_remembers_the_workspace_before_it_reaches_mise(tmp_path, monkeypatch, config_with_remotes):
+    """Ctrl-C during `mise trust` still leaves a workspace ow can find by name."""
+    ws_dir = tmp_path / "parrot"
+    monkeypatch.chdir(tmp_path)
+
+    with (
+        _tty(False),
+        _questionary_answers(),
+        _workspace_with_a_mise_toml(ws_dir, KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+
+    assert index.known_workspaces() == [ws_dir.resolve()]

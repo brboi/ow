@@ -8,6 +8,7 @@ because there is none.
 
 import re
 import shutil
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -346,12 +347,18 @@ def cmd_init(
 
     write_workspace_config(ow_config_path, ws)
 
+    # The config file is the truth; the index only remembers where to find it,
+    # so it is written the moment the truth exists — nothing after this point
+    # may cost the user a workspace that is already on disk.
+    index.remember(ws_dir)
+
     mise_toml = ws_dir / "mise.toml"
     if mise_toml.exists():
-        run_cmd(["mise", "trust", str(mise_toml)], check=True)
-
-    # The config file is the truth; the index only remembers where to find it.
-    index.remember(ws_dir)
+        try:
+            run_cmd(["mise", "trust", str(mise_toml)], check=True)
+        except (OSError, subprocess.CalledProcessError) as e:
+            print(f"\nWarning: could not trust {mise_toml}: {e}", file=sys.stderr)
+            print(f"  Run it yourself when mise is happy: mise trust {mise_toml}", file=sys.stderr)
 
     if errors:
         print(f"\nWorkspace '{ws_dir.name}' created with errors. Fix issues and run: ow apply")
