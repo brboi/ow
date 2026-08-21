@@ -367,3 +367,9 @@ def cmd_init(
         print(f"    cd {ws_dir} && mise install")
     print(f"\nWorkspace config: {ow_config_path}")
     print("Edit it to customize vars, then run: ow apply")
+
+    # The workspace is complete and the user is told everything they would
+    # have been told anyway; only the status code says a repo went wrong, so
+    # a script that chains on `ow init` notices. Same rule as apply and rebase.
+    if errors:
+        sys.exit(1)

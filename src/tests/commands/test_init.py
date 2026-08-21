@@ -450,6 +450,7 @@ def test_init_removes_the_directory_it_created_when_every_repo_fails(tmp_path, m
 
 
 def test_init_keeps_going_when_only_some_repos_fail(tmp_path, monkeypatch, capsys, config_full):
+    """A repo that failed does not stop the rest of the workspace being built."""
     monkeypatch.chdir(tmp_path)
     config_full.remotes["enterprise"] = {"origin": MagicMock(url="git@github.com:odoo/enterprise.git")}
     repos = {
@@ -457,11 +458,39 @@ def test_init_keeps_going_when_only_some_repos_fail(tmp_path, monkeypatch, capsy
         "enterprise": BranchSpec("origin/master", "b-branch"),
     }
 
-    with _tty(False), _questionary_answers(), _no_git(tmp_path, errors={"community": "boom"}):
+    with (
+        _tty(False),
+        _questionary_answers(),
+        _no_git(tmp_path, errors={"community": "boom"}),
+        pytest.raises(SystemExit),
+    ):
         cmd_init(config_full, templates=["common"], repos=repos)
 
     assert (tmp_path / ".ow" / "config.toml").exists()
-    assert "some repos failed" in capsys.readouterr().err
+    assert index.known_workspaces() == [tmp_path.resolve()]
+    captured = capsys.readouterr()
+    assert "some repos failed" in captured.err
+    assert "created with errors" in captured.out
+
+
+def test_init_exits_non_zero_when_any_repo_failed(tmp_path, monkeypatch, capsys, config_full):
+    """Same convention as ow apply and ow rebase: any failure is a failure."""
+    monkeypatch.chdir(tmp_path)
+    config_full.remotes["enterprise"] = {"origin": MagicMock(url="git@github.com:odoo/enterprise.git")}
+    repos = {
+        "community": BranchSpec("origin/master", "a-branch"),
+        "enterprise": BranchSpec("origin/master", "b-branch"),
+    }
+
+    with (
+        _tty(False),
+        _questionary_answers(),
+        _no_git(tmp_path, errors={"community": "boom"}),
+        pytest.raises(SystemExit) as exc,
+    ):
+        cmd_init(config_full, templates=["common"], repos=repos)
+
+    assert exc.value.code == 1
 
 
 # ---------------------------------------------------------------------------
