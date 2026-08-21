@@ -47,7 +47,6 @@ class TestCmdStatusErrorPaths:
             patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
             patch("ow.commands.status.parallel_per_repo", side_effect=mock_exec),
             patch("ow.commands.status.warn_if_drifted"),
-            patch("ow.commands.status.get_all_remote_refs", return_value={"origin/master"}),
         ):
             cmd_status(config)
         captured = capsys.readouterr()
@@ -70,7 +69,6 @@ class TestCmdStatusErrorPaths:
             patch("ow.utils.drift.get_worktree_branch", return_value=None),
             patch("ow.utils.drift.parallel_per_repo", side_effect=lambda t: {k: fn() for k, fn in t.items()}),
             patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
-            patch("ow.commands.status.get_all_remote_refs", return_value={"origin/master"}),
             patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
             patch("ow.commands.status.get_worktree_head", return_value=("abc123", "")),
             patch("ow.commands.status.get_remote_url", return_value="git@github.com:odoo/odoo.git"),
@@ -99,7 +97,6 @@ class TestCmdStatusErrorPaths:
             patch("ow.utils.drift.get_worktree_branch", return_value=None),
             patch("ow.utils.drift.parallel_per_repo", side_effect=lambda t: {k: fn() for k, fn in t.items()}),
             patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
-            patch("ow.commands.status.get_all_remote_refs", return_value={"origin/master"}),
             patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
             patch("ow.commands.status.get_worktree_head", return_value=("abc123", "")),
             # A non-GitHub remote produces no links at all.

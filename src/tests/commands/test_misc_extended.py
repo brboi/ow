@@ -23,13 +23,12 @@ class TestStatusExtended:
         resolved = BranchSpec("origin/master", "feature")
 
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
             patch("ow.commands.status.get_remote_url", return_value="https://gitlab.example.com/odoo.git"),
         ):
             result = _gather_repo_status(
-                "community", spec, resolved, worktree, bare_repo, 9, set()
+                "community", spec, resolved, worktree, bare_repo, 9
             )
 
         assert result.github_link is None
@@ -43,13 +42,12 @@ class TestStatusExtended:
         resolved = BranchSpec("origin/master", "feature")
 
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
             patch("ow.commands.status.get_remote_url", return_value="git@github.com:odoo/odoo.git"),
         ):
             result = _gather_repo_status(
-                "community", spec, resolved, worktree, bare_repo, 9, set()
+                "community", spec, resolved, worktree, bare_repo, 9
             )
 
         assert result.github_link is not None

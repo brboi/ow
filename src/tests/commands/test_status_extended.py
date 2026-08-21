@@ -74,7 +74,6 @@ class TestDisplayAttachedStatus:
         spec = BranchSpec("origin/master", "my-feature")
         resolved = BranchSpec("origin/master", "my-feature")
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value="origin/my-feature"),
             patch("ow.commands.status.get_rev_list_count") as mock_count,
         ):
@@ -93,7 +92,6 @@ class TestDisplayAttachedStatus:
         resolved = BranchSpec("origin/master", "my-feature")
 
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(0, 1)),
             patch("ow.commands.status.get_worktree_branch", return_value="my-feature"),
@@ -121,7 +119,7 @@ class TestGatherRepoStatus:
             patch("ow.commands.status.get_remote_url", return_value="git@github.com:odoo/odoo.git"),
         ):
             result = _gather_repo_status(
-                "community", spec, spec, worktree, bare_repo, 9, set()
+                "community", spec, spec, worktree, bare_repo, 9
             )
 
         assert isinstance(result, _StatusResult)
@@ -140,13 +138,12 @@ class TestGatherRepoStatus:
         resolved = BranchSpec("origin/master", "feature")
 
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
             patch("ow.commands.status.get_remote_url", return_value="git@github.com:odoo/odoo.git"),
         ):
             result = _gather_repo_status(
-                "community", spec, resolved, worktree, bare_repo, 9, set()
+                "community", spec, resolved, worktree, bare_repo, 9
             )
 
         assert isinstance(result, _StatusResult)
@@ -167,7 +164,7 @@ class TestGatherRepoStatus:
             patch("ow.commands.status.get_remote_url", return_value="https://gitlab.server.com/odoo.git"),
         ):
             result = _gather_repo_status(
-                "community", spec, spec, worktree, bare_repo, 9, set()
+                "community", spec, spec, worktree, bare_repo, 9
             )
 
         assert result.github_link is None
@@ -185,7 +182,7 @@ class TestGatherRepoStatus:
             patch("ow.commands.status.get_remote_url", return_value=None),
         ):
             result = _gather_repo_status(
-                "community", spec, spec, worktree, bare_repo, 9, set()
+                "community", spec, spec, worktree, bare_repo, 9
             )
 
         assert result.github_link is None
@@ -234,7 +231,6 @@ class TestAttachedStatusLabelsTheCheckedOutBranch:
         spec = resolved = BranchSpec("origin/master", "feat")
 
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
             patch("ow.commands.status.get_worktree_branch", return_value="sidetrack"),
@@ -250,7 +246,6 @@ class TestAttachedStatusLabelsTheCheckedOutBranch:
         spec = resolved = BranchSpec("origin/master", "feat")
 
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value="origin/master"),
             patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
             patch("ow.commands.status.get_worktree_branch", return_value="sidetrack"),
@@ -266,7 +261,6 @@ class TestAttachedStatusLabelsTheCheckedOutBranch:
         spec = resolved = BranchSpec("origin/master", "feat")
 
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
             patch("ow.commands.status.get_worktree_branch", return_value="feat"),
@@ -282,7 +276,6 @@ class TestAttachedStatusLabelsTheCheckedOutBranch:
         spec = resolved = BranchSpec("origin/master", "feat")
 
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
             patch("ow.commands.status.get_worktree_branch", return_value=None),
@@ -306,13 +299,12 @@ class TestRunbotLinkOnlyForOdoo:
         bare = tmp_path / "community.git"
         spec = resolved = BranchSpec("origin/master", "feat")
         with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
             patch("ow.commands.status.get_worktree_branch", return_value="feat"),
             patch("ow.commands.status.get_remote_url", return_value=remote_url),
         ):
-            return _gather_repo_status("community", spec, resolved, worktree, bare, 9, set())
+            return _gather_repo_status("community", spec, resolved, worktree, bare, 9)
 
     def test_a_local_file_remote_gets_no_runbot_bundle(self, tmp_path):
         assert self._gather(tmp_path, "file:///srv/mirrors/odoo.git").first_attached_branch is None
