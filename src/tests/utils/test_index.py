@@ -6,6 +6,8 @@ way — pruning on read, deduplication, atomic writes, and (crucially) that a
 read which prunes nothing does not touch the file.
 """
 
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -227,3 +229,41 @@ def test_remember_appends_keeping_insertion_order(xdg: Path) -> None:
         index.remember(ws)
 
     assert index.known_workspaces() == [first.resolve(), second.resolve(), third.resolve()]
+
+
+def test_concurrent_remembers_do_not_lose_entries(xdg: Path) -> None:
+    """`ow init` in one terminal must not erase what another just wrote.
+
+    remember() is a read-modify-write, and known_workspaces() rewrites on
+    *read* too — so a tab-completion or an `ow ls` can clobber a concurrent
+    `ow init`. The file is a hint and it self-heals, but silently dropping
+    a workspace someone just created is a hint that lies, and the fix is a
+    lockfile beside the temp file _write already makes.
+    """
+    workers, per_worker = 8, 8
+    plots = [
+        [_make_workspace(xdg, f"ws-{w}-{i}") for i in range(per_worker)]
+        for w in range(workers)
+    ]
+
+    # Fork rather than thread: two `ow` invocations are two processes, and a
+    # lock that only excluded threads would prove nothing about them.
+    go = xdg / "go"
+    pids = []
+    for row in plots:
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - the child never reports coverage
+            try:
+                while not go.exists():
+                    time.sleep(0.001)
+                for ws in row:
+                    index.remember(ws)
+            finally:
+                os._exit(0)
+        pids.append(pid)
+    go.write_text("")
+    for pid in pids:
+        os.waitpid(pid, 0)
+
+    expected = {ws.resolve() for row in plots for ws in row}
+    assert set(index.known_workspaces()) == expected

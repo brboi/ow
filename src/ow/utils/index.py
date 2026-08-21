@@ -7,12 +7,58 @@ name lookup fails with a message, and the next successful resolution puts
 the path back.
 """
 
+import contextlib
 import os
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from ow.utils import paths
 
 MARKER = Path(".ow") / "config.toml"
+
+# Long enough that no honest writer is still holding the lock, short enough
+# that a crashed one does not make `ow ls` feel hung.
+_LOCK_TIMEOUT = 5.0
+_LOCK_RETRY = 0.002
+
+
+@contextlib.contextmanager
+def _locked() -> Iterator[None]:
+    """Serialise a read-modify-write of the index, best effort.
+
+    An O_EXCL lockfile beside the index — no dependency, and the same
+    directory _write already writes its temp file into. Best effort in both
+    directions: if the lock cannot be taken at all (a read-only directory,
+    a filesystem without O_EXCL semantics) or is still held after the
+    timeout (a writer that crashed before unlinking), carry on unlocked.
+    Losing an entry to a race is bad; refusing to run `ow ls` because of a
+    stale lockfile would be worse, and this file self-heals either way.
+    """
+    target = paths.index_file()
+    lock = target.with_name(f"{target.name}.lock")
+    fd = None
+    deadline = time.monotonic() + _LOCK_TIMEOUT
+    while True:
+        try:
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_LOCK_RETRY)
+            continue
+        except OSError:
+            break
+        break
+
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+            with contextlib.suppress(OSError):
+                lock.unlink()
 
 
 def _still_there(candidate: Path) -> bool:
@@ -45,11 +91,11 @@ def _write(entries: list[Path]) -> None:
     os.replace(tmp, target)
 
 
-def known_workspaces() -> list[Path]:
-    """Every remembered workspace that still exists, pruning as it reads."""
+def _read() -> tuple[list[Path], bool]:
+    """The entries worth keeping, and whether the file still says otherwise."""
     target = paths.index_file()
     if not target.exists():
-        return []
+        return [], False
 
     seen: list[Path] = []
     pruned = False
@@ -66,17 +112,38 @@ def known_workspaces() -> list[Path]:
             pruned = True
             continue
         seen.append(candidate)
+    return seen, pruned
 
-    if pruned:
-        _write(seen)
+
+def known_workspaces() -> list[Path]:
+    """Every remembered workspace that still exists, pruning as it reads."""
+    seen, pruned = _read()
+    if not pruned:
+        # The overwhelmingly common case, and the one that must stay cheap:
+        # no write, so no lock, so `ow ls` never waits on anyone.
+        return seen
+
+    with _locked():
+        seen, pruned = _read()
+        if pruned:
+            _write(seen)
     return seen
 
 
 def remember(ws_dir: Path) -> None:
     resolved = ws_dir.resolve()
-    entries = known_workspaces()
-    if resolved not in entries:
-        _write([*entries, resolved])
+    entries, pruned = _read()
+    if resolved in entries and not pruned:
+        return
+
+    # Everything below writes, so re-read inside the lock: the entries read
+    # above may already be stale, and writing them back is exactly how a
+    # concurrent `ow init` loses its workspace.
+    with _locked():
+        entries, _ = _read()
+        if resolved not in entries:
+            entries = [*entries, resolved]
+        _write(entries)
 
 
 def find_by_name(name: str) -> list[Path]:
