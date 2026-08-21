@@ -314,7 +314,7 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
 
     if any(plan.to_delete for plan in plans) and not yes and not _confirm():
         print("Aborted.")
-        return
+        sys.exit(2)
 
     sys.stdout.flush()
     outcomes = parallel_per_repo({

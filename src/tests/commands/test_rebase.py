@@ -81,7 +81,8 @@ class TestConfirmation:
             patch("ow.commands.rebase.git") as mock_git,
             patch("builtins.input", side_effect=EOFError),
         ):
-            cmd_rebase(config, workspace=None)
+            with pytest.raises(SystemExit):
+                cmd_rebase(config, workspace=None)
         assert mock_git.call_count == 0
         assert "Aborted" in capsys.readouterr().out
 
@@ -96,7 +97,8 @@ class TestConfirmation:
             patch("ow.commands.rebase.git") as mock_git,
             patch("builtins.input", return_value=""),
         ):
-            cmd_rebase(config, workspace=None)
+            with pytest.raises(SystemExit):
+                cmd_rebase(config, workspace=None)
         assert mock_git.call_count == 0
 
     def test_yes_flag_skips_the_prompt(self, tmp_path):
@@ -112,6 +114,24 @@ class TestConfirmation:
         ):
             cmd_rebase(config, workspace=None, yes=True)
         assert mock_git.call_count == 1
+
+    def test_abort_exits_nonzero(self, tmp_path, capsys):
+        """A non-interactive abort (EOFError) must exit non-zero, not silently succeed."""
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git") as mock_git,
+            patch("builtins.input", side_effect=EOFError),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_rebase(config, workspace=None)
+        assert exc_info.value.code != 0
+        assert mock_git.call_count == 0
+        assert "Aborted" in capsys.readouterr().out
 
 
 def test_dry_run_survives_brackets_in_alias_and_args(tmp_path, capsys):
