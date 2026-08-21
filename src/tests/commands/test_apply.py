@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import subprocess
 
 from ow.commands import cmd_apply
 from ow.utils import index
@@ -247,3 +248,79 @@ class TestCmdApplyVarBackfill:
             self._apply(ws_dir, config_with_remotes)
 
         write.assert_not_called()
+
+
+class TestCmdApplyMiseTrust:
+    """mise trust is a convenience, not a condition of the command succeeding."""
+
+    def _workspace(self, tmp_path):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(
+            repos={"community": BranchSpec("origin/master")},
+            templates=["common"],
+        )
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+        (ws_dir / "mise.toml").write_text("[tools]\n")
+        return ws_dir
+
+    def test_mise_trust_failure_warns_and_still_exits_non_zero_on_repo_error(
+        self, tmp_path, capsys, config_with_remotes
+    ):
+        ws_dir = self._workspace(tmp_path)
+        failure = subprocess.CalledProcessError(1, ["mise", "trust"])
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, set(), {"community": "clone failed"}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    with patch(
+                        "ow.commands.apply.run_cmd", side_effect=failure
+                    ):
+                        with pytest.raises(SystemExit) as exc:
+                            cmd_apply(config_with_remotes)
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert str(ws_dir / "mise.toml") in err
+        assert "mise trust" in err
+
+    def test_mise_trust_failure_warns_and_still_reports_success_when_no_errors(
+        self, tmp_path, capsys, config_with_remotes
+    ):
+        ws_dir = self._workspace(tmp_path)
+        failure = subprocess.CalledProcessError(1, ["mise", "trust"])
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community"}, {}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    with patch(
+                        "ow.commands.apply.run_cmd", side_effect=failure
+                    ):
+                        cmd_apply(config_with_remotes)
+
+        captured = capsys.readouterr()
+        assert "Workspace 'ws' applied." in captured.out
+        assert str(ws_dir / "mise.toml") in captured.err
+        assert "mise trust" in captured.err
+
+    def test_mise_not_installed_warns_and_carries_on(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community"}, {}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    with patch(
+                        "ow.commands.apply.run_cmd", side_effect=FileNotFoundError("mise")
+                    ):
+                        cmd_apply(config_with_remotes)
+
+        assert "mise trust" in capsys.readouterr().err

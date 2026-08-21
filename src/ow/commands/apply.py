@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from dataclasses import replace
 
@@ -36,7 +37,11 @@ def cmd_apply(config: Config, workspace: str | None = None, *, only: str | None 
 
     mise_toml = ws_dir / "mise.toml"
     if mise_toml.exists():
-        run_cmd(["mise", "trust", str(mise_toml)], check=True)
+        try:
+            run_cmd(["mise", "trust", str(mise_toml)], check=True)
+        except (OSError, subprocess.CalledProcessError) as e:
+            print(f"\nWarning: could not trust {mise_toml}: {e}", file=sys.stderr)
+            print(f"  Run it yourself when mise is happy: mise trust {mise_toml}", file=sys.stderr)
 
     outdated = outdated_templates()
     if outdated:
