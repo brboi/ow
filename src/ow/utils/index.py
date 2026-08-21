@@ -23,6 +23,8 @@ MARKER = Path(".ow") / "config.toml"
 _LOCK_TIMEOUT = 5.0
 _LOCK_RETRY = 0.002
 
+_warned_readonly = False
+
 
 @contextlib.contextmanager
 def _locked() -> Iterator[None]:
@@ -89,14 +91,23 @@ def _still_there(candidate: Path) -> bool:
 
 def _write(entries: list[Path]) -> None:
     target = paths.index_file()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # A per-process suffix avoids two concurrent writers interleaving on the
-    # same temp name; with_name (not with_suffix) appends rather than
-    # replacing, so it doesn't collide if the index were ever renamed to
-    # something containing a dot.
-    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-    tmp.write_text("".join(f"{p}\n" for p in entries))
-    os.replace(tmp, target)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # A per-process suffix avoids two concurrent writers interleaving on the
+        # same temp name; with_name (not with_suffix) appends rather than
+        # replacing, so it doesn't collide if the index were ever renamed to
+        # something containing a dot.
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        tmp.write_text("".join(f"{p}\n" for p in entries))
+        os.replace(tmp, target)
+    except OSError as exc:
+        global _warned_readonly
+        if not _warned_readonly:
+            _warned_readonly = True
+            print(
+                f"Warning: cannot write workspace index ({exc}); continuing without cache.",
+                file=sys.stderr,
+            )
 
 
 def _read() -> tuple[list[Path], bool]:

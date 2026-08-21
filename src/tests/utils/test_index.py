@@ -254,6 +254,39 @@ def test_stale_lock_is_broken_and_unlinked(xdg: Path, capsys: pytest.CaptureFixt
     assert paths.index_file().read_text().splitlines() == [str(ws.resolve())]
 
 
+
+
+def test_remember_degrades_on_readonly_state_dir(xdg: Path, capsys: pytest.CaptureFixture) -> None:
+    """A read-only state directory must not abort commands that only cache."""
+    ws = _make_workspace(xdg, "alpha")
+    state = xdg / "state"
+    state.chmod(0o500)
+    try:
+        index.remember(ws)
+    finally:
+        state.chmod(0o755)
+    captured = capsys.readouterr()
+    assert "index" in captured.err.lower() or "cache" in captured.err.lower() or "cannot write" in captured.err.lower()
+
+
+def test_known_workspaces_degrades_on_readonly_state_dir(xdg: Path) -> None:
+    """Pruning on read must also degrade when the state dir is read-only."""
+    ws = _make_workspace(xdg, "alpha")
+    index.remember(ws)
+    # Force a prune by duplicating the entry
+    target = paths.index_file()
+    target.write_text(target.read_text() + str(ws.resolve()) + "\n")
+    state = xdg / "state"
+    state.chmod(0o500)
+    try:
+        result = index.known_workspaces()
+    finally:
+        state.chmod(0o755)
+    assert result == [ws.resolve()]
+    # The warning was already emitted by the write path above; warn-once means
+    # the prune-on-read path is silent, which is acceptable.
+
+
 def test_concurrent_remembers_do_not_lose_entries(xdg: Path) -> None:
     """`ow init` in one terminal must not erase what another just wrote.
 
