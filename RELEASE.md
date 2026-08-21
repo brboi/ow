@@ -5,8 +5,8 @@ Version is auto-generated from Git tags using [setuptools-scm](https://setuptool
 ## Creating a Release
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
 That's it. The `release.yml` GitHub Actions workflow triggers automatically and:
@@ -19,8 +19,8 @@ That's it. The `release.yml` GitHub Actions workflow triggers automatically and:
 
 ## Version Format
 
-- Development: `0.1.dev46+gabc123`
-- Release: `0.2.0` (from tag `v0.2.0`)
+- Development: `2.0.0.devN+g<sha>`
+- Release: `2.0.0` (from tag `v2.0.0`)
 
 ## Check Version
 
