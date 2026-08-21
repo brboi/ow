@@ -748,3 +748,21 @@ def test_init_remembers_the_workspace_before_it_reaches_mise(tmp_path, monkeypat
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [ws_dir.resolve()]
+
+
+# ---------------------------------------------------------------------------
+# The confirmation screen
+# ---------------------------------------------------------------------------
+
+def test_init_lists_the_vars_one_per_line(tmp_path, monkeypatch, capsys, config_with_remotes):
+    """A dict repr is not what someone about to type `y` should be reading."""
+    config_with_remotes.vars = {"http_port": 8069, "db_host": "localhost"}
+    monkeypatch.chdir(tmp_path)
+
+    with _tty(False), _questionary_answers(), _no_git(tmp_path / "parrot"):
+        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+
+    out = capsys.readouterr().out
+    assert "  http_port: 8069" in out
+    assert "  db_host: localhost" in out
+    assert "{" not in out

@@ -311,8 +311,8 @@ def cmd_init(
     print(f"  Templates: {', '.join(ws.templates)}")
     for alias, spec in ws.repos.items():
         print(f"  {alias}: {spec.to_spec_str()}")
-    if ws.vars:
-        print(f"  Vars: {ws.vars}")
+    for name, value in ws.vars.items():
+        print(f"  {name}: {value}")
 
     if interactive:
         try:
