@@ -8,9 +8,61 @@ from ow.utils.git import _run, parallel_per_repo
 
 class _PruneResult(NamedTuple):
     alias: str
-    pruned_worktrees: bool
+    stale_worktrees: list[str]
     deleted_branches: list[str]
     kept_branches: list[str]
+
+
+def _survey_worktrees(bare_repo: Path) -> tuple[set[str], list[str]]:
+    """One porcelain listing, read before pruning: (branches in use, stale paths).
+
+    Before, not after: `git worktree prune` writes nothing to stdout without
+    --verbose (and writes to stderr even with it), so asking it what it
+    removed never got an answer. The listing marks a registered worktree
+    whose directory has gone as `prunable`, which is the same judgement
+    prune is about to act on — so read it while the evidence is still there.
+
+    A prunable worktree's branch is deliberately not counted as in use: it
+    is about to stop being attached to anything, and the branch pass has to
+    see the repo as it will be, not as it was.
+    """
+    result = _run(
+        ["git", "-C", str(bare_repo), "worktree", "list", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    used: set[str] = set()
+    stale: list[str] = []
+    if result.returncode != 0:
+        return used, stale
+
+    path: str | None = None
+    branch: str | None = None
+    prunable = False
+
+    def close_block() -> None:
+        nonlocal path, branch, prunable
+        if path is not None:
+            if prunable:
+                stale.append(path)
+            elif branch is not None:
+                used.add(branch)
+        path, branch, prunable = None, None, False
+
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            close_block()
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            close_block()
+            path = value
+        elif key == "branch" and value.startswith("refs/heads/"):
+            branch = value[len("refs/heads/"):]
+        elif key == "prunable":
+            prunable = True
+    close_block()
+
+    return used, stale
 
 
 def _is_pushed(bare_repo: Path, branch: str) -> bool:
@@ -40,31 +92,17 @@ def _is_pushed(bare_repo: Path, branch: str) -> bool:
 def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
     """Prune a single bare repo: clean worktrees and delete orphaned branches."""
     alias = bare_repo.stem
-    pruned = False
     deleted: list[str] = []
     kept: list[str] = []
 
-    # 1. Worktree prune
-    result = _run(
+    # 1. Look before pruning — afterwards there is nothing left to report on.
+    used_branches, stale = _survey_worktrees(bare_repo)
+    _run(
         ["git", "-C", str(bare_repo), "worktree", "prune"],
         capture_output=True, text=True,
     )
-    if result.returncode == 0 and result.stdout.strip():
-        pruned = True
 
     # 2. Delete local branches not attached to any worktree
-    wt_result = _run(
-        ["git", "-C", str(bare_repo), "worktree", "list", "--porcelain"],
-        capture_output=True, text=True,
-    )
-    used_branches: set[str] = set()
-    if wt_result.returncode == 0:
-        for line in wt_result.stdout.splitlines():
-            if line.startswith("branch "):
-                branch_ref = line.split(" ", 1)[1]
-                if branch_ref.startswith("refs/heads/"):
-                    used_branches.add(branch_ref[len("refs/heads/"):])
-
     # for-each-ref, not `branch --list`: the latter is a porcelain command and
     # honours color.ui=always, which paints every name with escape codes that
     # no prefix-stripping removes. A branch name is an identifier we hand back
@@ -91,7 +129,7 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
                 deleted.append(branch)
 
     return _PruneResult(
-        alias=alias, pruned_worktrees=pruned,
+        alias=alias, stale_worktrees=stale,
         deleted_branches=deleted, kept_branches=kept,
     )
 
@@ -160,8 +198,12 @@ def cmd_prune(config: Config) -> None:
         result = prune_results.get(alias)
         if isinstance(result, Exception):
             continue
-        if result.pruned_worktrees:
-            print(f"  [{alias}] pruned stale worktrees")
+        if result.stale_worktrees:
+            noun = "worktree" if len(result.stale_worktrees) == 1 else "worktrees"
+            print(
+                f"  [{alias}] pruned {len(result.stale_worktrees)} stale {noun}: "
+                f"{', '.join(result.stale_worktrees)}"
+            )
             cleaned = True
         if result.deleted_branches:
             print(f"  [{alias}] deleted orphaned branches: {', '.join(result.deleted_branches)}")

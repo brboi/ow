@@ -328,3 +328,45 @@ def test_moving_a_workspace_directory_does_not_destroy_its_unpushed_commits(tmp_
 
     assert "featA" in _branches(bare)
     assert _git(bare, "rev-parse", "featA") == sha
+
+
+def _registered_worktrees(bare: Path) -> list[str]:
+    out = _git(bare, "worktree", "list", "--porcelain")
+    return [
+        line.split(" ", 1)[1]
+        for line in out.splitlines()
+        if line.startswith("worktree ")
+    ]
+
+
+def test_prune_reports_the_stale_worktrees_it_unregistered(tmp_path, capsys, xdg):
+    """`git worktree prune` writes nothing to stdout without --verbose.
+
+    So the old check — "did prune print anything?" — was never true and the
+    line could not be reached: prune would unregister a stale worktree and
+    then say nothing at all about having done it.
+    """
+    bare = _bare_repo(tmp_path)
+    ws = tmp_path / "wsA" / "community"
+    _git(bare, "worktree", "add", "-q", str(ws), "-b", "featA", "master")
+    shutil.rmtree(tmp_path / "wsA")
+
+    cmd_prune(_make_config())
+
+    out = capsys.readouterr().out
+    assert "stale worktree" in out
+    assert str(ws) in out
+    assert str(ws) not in _registered_worktrees(bare)
+
+
+def test_prune_says_nothing_about_worktrees_when_none_are_stale(tmp_path, capsys, xdg):
+    """A live worktree is not something prune removed, and must not be claimed."""
+    bare = _bare_repo(tmp_path)
+    _git(bare, "worktree", "add", "-q", str(tmp_path / "wsA" / "community"), "-b", "featA", "master")
+    _git(bare, "branch", "-D", "master")
+
+    cmd_prune(_make_config())
+
+    out = capsys.readouterr().out
+    assert "stale worktree" not in out
+    assert "All bare repos are clean." in out
