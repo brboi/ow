@@ -315,6 +315,40 @@ def test_ensure_bare_repo_clones_when_missing(tmp_path):
     )
 
 
+def test_ensure_bare_repo_names_the_config_file_when_the_repo_is_undefined(tmp_path, xdg):
+    """The user's mistake is a missing [remotes.<alias>] section, so say that,
+    and say which file it is missing from. "No origin remote configured" names
+    an internal notion of ow's and points at nothing the user can open."""
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repos_dir.mkdir()
+
+    with pytest.raises(ValueError) as excinfo:
+        ensure_bare_repo("ghost", {}, bare_repos_dir)
+
+    message = str(excinfo.value)
+    assert "references repo 'ghost' but it's not defined in [remotes]" in message
+    assert "[remotes.ghost]" in message
+    assert str(paths.config_file()) in message
+
+
+def test_ensure_bare_repo_distinguishes_a_section_that_lacks_an_origin(tmp_path, xdg):
+    """A [remotes.ghost] that only defines a fork is a different mistake from
+    no section at all, and telling the user to add the section they can already
+    see would send them looking in the wrong place."""
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repos_dir.mkdir()
+    remotes = {"dev": RemoteConfig(url="git@github.com:odoo-dev/odoo.git")}
+
+    with pytest.raises(ValueError) as excinfo:
+        ensure_bare_repo("ghost", remotes, bare_repos_dir)
+
+    message = str(excinfo.value)
+    assert "has no origin remote" in message
+    assert "not defined in [remotes]" not in message
+    assert "[remotes.ghost]" in message
+    assert str(paths.config_file()) in message
+
+
 def test_ensure_bare_repo_skips_clone_when_exists(tmp_path):
     bare_repos_dir = tmp_path / "bare-repos"
     bare_repo = bare_repos_dir / "community.git"

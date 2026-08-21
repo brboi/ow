@@ -155,6 +155,25 @@ def _get_bare_config(bare_repo: Path) -> dict[str, str]:
     return config
 
 
+def _undefined_repo_message(alias: str, remotes: dict[str, RemoteConfig]) -> str:
+    """Why ow cannot clone `alias`, in the user's terms and with a file to open.
+
+    "No origin remote configured" names one of ow's own notions and points at
+    nothing; a workspace only ever names a repo, and the global config is where
+    that name has to be defined.
+    """
+    config_file = paths.config_file()
+    if remotes:
+        return (
+            f"repo '{alias}' has no origin remote\n"
+            f"  Add origin.url to [remotes.{alias}] in {config_file}"
+        )
+    return (
+        f"configuration references repo '{alias}' but it's not defined in [remotes]\n"
+        f"  Add a [remotes.{alias}] section with an origin.url to {config_file}"
+    )
+
+
 def ensure_bare_repo(
     alias: str,
     remotes: dict[str, RemoteConfig],
@@ -164,7 +183,7 @@ def ensure_bare_repo(
     if not bare_repo.exists():
         origin = remotes.get("origin")
         if not origin:
-            raise ValueError(f"No origin remote configured for '{alias}'")
+            raise ValueError(_undefined_repo_message(alias, remotes))
         run_cmd(
             [
                 "git", "clone", "--bare", "--filter=blob:none",
