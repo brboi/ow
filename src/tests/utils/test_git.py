@@ -255,6 +255,7 @@ def test_ensure_bare_repo_skips_writes_when_config_matches(tmp_path):
     }
 
     existing_config = {
+        "remote.origin.url": "git@github.com:odoo/odoo.git",
         "remote.dev.url": "git@github.com:odoo-dev/odoo.git",
         "remote.dev.pushurl": "git@github.com:odoo-dev/odoo.git",
         "remote.dev.fetch": "+refs/heads/*:refs/remotes/dev/*",
@@ -283,6 +284,7 @@ def test_ensure_bare_repo_writes_only_changed_values(tmp_path):
     }
 
     existing_config = {
+        "remote.origin.url": "git@github.com:odoo/odoo.git",
         "remote.dev.url": "git@github.com:odoo-dev/odoo.git",
         "remote.dev.pushurl": "git@github.com:OLD-pushurl/odoo.git",
         "remote.dev.fetch": "+refs/heads/*:refs/remotes/dev/*",
@@ -297,6 +299,33 @@ def test_ensure_bare_repo_writes_only_changed_values(tmp_path):
     assert mock_run_cmd.call_count == 1
     assert "remote.dev.pushurl" in mock_run_cmd.call_args_list[0].args[0]
 
+
+
+def test_ensure_bare_repo_updates_origin_url_when_it_drifts(tmp_path):
+    """When the user changes origin.url in their config, the bare repo must be
+    updated to match — not left pointing at the old URL."""
+    bare_repos_dir = tmp_path / "bare-repos"
+    bare_repo = make_bare_repo(bare_repos_dir / "community.git")
+
+    remotes = {
+        "origin": RemoteConfig(url="git@github.com:NEW-fork/odoo.git"),
+    }
+
+    existing_config = {
+        "remote.origin.url": "git@github.com:OLD-fork/odoo.git",
+        "core.logallrefupdates": "true",
+    }
+
+    with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
+         patch("ow.utils.git._get_bare_config", return_value=existing_config):
+        ensure_bare_repo("community", remotes, bare_repos_dir)
+
+    origin_url_writes = [
+        c for c in mock_run_cmd.call_args_list
+        if "remote.origin.url" in str(c)
+    ]
+    assert len(origin_url_writes) == 1
+    assert "git@github.com:NEW-fork/odoo.git" in origin_url_writes[0].args[0]
 
 # ---------------------------------------------------------------------------
 # ensure_bare_repo
@@ -579,10 +608,14 @@ def test_ensure_bare_repo_skips_clone_when_exists(tmp_path):
     with patch("ow.utils.git.run_cmd") as mock_run_cmd, \
          patch("ow.utils.git._get_bare_config", return_value={}):
         ensure_bare_repo("community", remotes, bare_repos_dir)
-
-    # No clone, no remote config to write — but reflogs still get turned on.
-    mock_run_cmd.assert_called_once_with(
+    # No clone, but origin.url and reflogs still get configured.
+    assert mock_run_cmd.call_count == 2
+    assert mock_run_cmd.call_args_list[0] == call(
         ["git", "-C", str(bare_repo), "config", "core.logAllRefUpdates", "true"],
+        quiet=True, check=True, label="community",
+    )
+    assert mock_run_cmd.call_args_list[1] == call(
+        ["git", "-C", str(bare_repo), "config", "remote.origin.url", "git@github.com:odoo/odoo.git"],
         quiet=True, check=True, label="community",
     )
 
@@ -605,27 +638,31 @@ def test_ensure_bare_repo_configures_extra_remotes(tmp_path):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     calls = mock_run_cmd.call_args_list
-    assert len(calls) == 4
+    assert len(calls) == 5
     assert calls[0] == call(
         ["git", "-C", str(bare_repo), "config", "core.logAllRefUpdates", "true"],
         quiet=True, check=True, label="community",
     )
     assert calls[1] == call(
-        ["git", "-C", str(bare_repo), "config", "remote.dev.url", "git@github.com:odoo-dev/odoo.git"],
+        ["git", "-C", str(bare_repo), "config", "remote.origin.url", "git@github.com:odoo/odoo.git"],
         quiet=True, check=True, label="community",
     )
     assert calls[2] == call(
-        ["git", "-C", str(bare_repo), "config", "remote.dev.pushurl", "git@github.com:odoo-dev/odoo.git"],
+        ["git", "-C", str(bare_repo), "config", "remote.dev.url", "git@github.com:odoo-dev/odoo.git"],
         quiet=True, check=True, label="community",
     )
     assert calls[3] == call(
+        ["git", "-C", str(bare_repo), "config", "remote.dev.pushurl", "git@github.com:odoo-dev/odoo.git"],
+        quiet=True, check=True, label="community",
+    )
+    assert calls[4] == call(
         ["git", "-C", str(bare_repo), "config", "remote.dev.fetch", "+refs/heads/*:refs/remotes/dev/*"],
         quiet=True, check=True, label="community",
     )
 
 
 def test_ensure_bare_repo_configures_origin_pushurl_and_fetch(tmp_path):
-    """Origin url is set by git clone, but pushurl and fetch must still be configured."""
+    """Origin pushurl and fetch must be configured alongside the url."""
     bare_repos_dir = tmp_path / "bare-repos"
     bare_repo = make_bare_repo(bare_repos_dir / "community.git")
 
@@ -642,25 +679,27 @@ def test_ensure_bare_repo_configures_origin_pushurl_and_fetch(tmp_path):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     calls = mock_run_cmd.call_args_list
-    # url should NOT be set (already done by git clone --bare)
-    assert not any("remote.origin.url" in str(c) for c in calls)
-    # pushurl and fetch SHOULD be set, after the reflog config write
+    # url, pushurl and fetch SHOULD be set, after the reflog config write
     assert calls[0] == call(
         ["git", "-C", str(bare_repo), "config", "core.logAllRefUpdates", "true"],
         quiet=True, check=True, label="community",
     )
     assert calls[1] == call(
-        ["git", "-C", str(bare_repo), "config", "remote.origin.pushurl", "git@github.com:my-fork/odoo.git"],
+        ["git", "-C", str(bare_repo), "config", "remote.origin.url", "git@github.com:odoo/odoo.git"],
         quiet=True, check=True, label="community",
     )
     assert calls[2] == call(
+        ["git", "-C", str(bare_repo), "config", "remote.origin.pushurl", "git@github.com:my-fork/odoo.git"],
+        quiet=True, check=True, label="community",
+    )
+    assert calls[3] == call(
         ["git", "-C", str(bare_repo), "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
         quiet=True, check=True, label="community",
     )
 
 
 def test_ensure_bare_repo_ordered_remotes(tmp_path):
-    """Non-origin remotes are configured in alphabetical order."""
+    """Remotes are configured in alphabetical order, origin first."""
     bare_repos_dir = tmp_path / "bare-repos"
     bare_repo = make_bare_repo(bare_repos_dir / "community.git")
 
@@ -675,11 +714,12 @@ def test_ensure_bare_repo_ordered_remotes(tmp_path):
         ensure_bare_repo("community", remotes, bare_repos_dir)
 
     calls = mock_run_cmd.call_args_list
-    assert len(calls) == 3
-    # reflog config first, then alpha before zebra
+    assert len(calls) == 4
+    # reflog config first, then origin, then alpha before zebra
     assert "core.logAllRefUpdates" in calls[0].args[0][-2]
-    assert "remote.alpha.url" in calls[1].args[0][-2]
-    assert "remote.zebra.url" in calls[2].args[0][-2]
+    assert "remote.origin.url" in calls[1].args[0][-2]
+    assert "remote.alpha.url" in calls[2].args[0][-2]
+    assert "remote.zebra.url" in calls[3].args[0][-2]
 
 
 # ---------------------------------------------------------------------------
