@@ -138,7 +138,13 @@ class TestConcurrentTracking:
 
         thread = threading.Thread(target=worker)
         thread.start()
-        time.sleep(0.1)
+        # Wait on the condition, not the clock: slow machines may need longer
+        # than a fixed sleep for Popen() + registry add to complete.
+        deadline = time.monotonic() + 2.0
+        while live_children() == 0:
+            if time.monotonic() > deadline:
+                pytest.fail("child never appeared in registry")
+            time.sleep(0.01)
         seen_while_running["count"] = live_children()
         thread.join()
 
@@ -150,26 +156,30 @@ class TestConcurrentTracking:
 
         If it held across communicate() too, every parallel git call would run
         one at a time — a severe, easily-missed regression. Run several slow
-        children concurrently and check the wall-clock is well under their sum.
+        children concurrently and assert they are all tracked at the same
+        time, which is only possible if communicate() is not behind the lock.
         """
         n = 5
-        per_call = 0.5
 
         def worker():
             _run(
-                [sys.executable, "-c", f"import time; time.sleep({per_call})"],
+                [sys.executable, "-c", "import time; time.sleep(0.5)"],
                 capture_output=True,
             )
 
         threads = [threading.Thread(target=worker) for _ in range(n)]
-        start = time.monotonic()
         for thread in threads:
             thread.start()
+        # Wait on the condition that all children entered communicate()
+        # concurrently, not on a wall-clock threshold.
+        deadline = time.monotonic() + 5.0
+        while live_children() < n:
+            if time.monotonic() > deadline:
+                pytest.fail("not all children were tracked concurrently — lock may be serialising")
+            time.sleep(0.01)
         for thread in threads:
             thread.join()
-        elapsed = time.monotonic() - start
 
-        assert elapsed < per_call * n / 2
         assert live_children() == 0
 
 
