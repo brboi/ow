@@ -1,3 +1,5 @@
+import subprocess
+
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils import paths
@@ -138,3 +140,82 @@ def test_fetch_jobs_stay_routed_through_tracked_run(tmp_path, monkeypatch, xdg):
     refs_mod.fetch_workspace_refs(ws, ws_dir, config, resolve_fn=fake_resolve)
 
     assert mock_run.called
+
+
+class TestFetchFailureIsReported:
+    """D2 — printing ✗ is not a signal a caller can act on.
+
+    `ow rebase` planned and executed against stale cached refs after a fetch
+    failed, and exited 0. Worse than a plain stale rebase: the upstream ref
+    never moved, so force_pushed stayed False and even the `rewritten` marker
+    was suppressed.
+    """
+
+    def _drive(self, tmp_path, monkeypatch, run_result):
+        """Run one real fetch job whose `_run` yields `run_result`.
+
+        An Exception instance stands for a `_run` that raises — what
+        parallel_per_repo hands back as the job's result.
+        """
+        from ow.utils import refs as refs_mod
+
+        ws_dir = tmp_path / "ws"
+        (ws_dir / "community").mkdir(parents=True)
+        (paths.repos_dir() / "community.git").mkdir(parents=True)
+
+        config = Config(vars={}, remotes={"community": {}})
+        ws = WorkspaceConfig(
+            repos={"community": BranchSpec("origin/master")}, templates=[],
+        )
+
+        def fake_run(*a, **k):
+            if isinstance(run_result, Exception):
+                raise run_result
+            return run_result
+
+        monkeypatch.setattr(refs_mod, "_run", fake_run)
+        monkeypatch.setattr(
+            refs_mod, "parallel_per_repo",
+            lambda tasks, on_done=None: {k: _collect(fn) for k, fn in tasks.items()},
+        )
+
+        return refs_mod.fetch_workspace_refs(
+            ws, ws_dir, config,
+            resolve_fn=lambda bare, spec, remotes: BranchSpec("origin/master"),
+        )
+
+    def test_a_nonzero_fetch_marks_the_alias_failed(self, tmp_path, monkeypatch, capsys, xdg):
+        outcome = self._drive(
+            tmp_path, monkeypatch,
+            subprocess.CompletedProcess([], 1, b"", b"fatal: unreachable"),
+        )
+
+        assert "community" in outcome.failed
+
+    def test_a_raising_fetch_marks_the_alias_failed(self, tmp_path, monkeypatch, capsys, xdg):
+        outcome = self._drive(tmp_path, monkeypatch, OSError("no such host"))
+
+        assert "community" in outcome.failed
+
+    def test_a_successful_fetch_marks_nothing(self, tmp_path, monkeypatch, capsys, xdg):
+        outcome = self._drive(
+            tmp_path, monkeypatch, subprocess.CompletedProcess([], 0, b"", b""),
+        )
+
+        assert outcome.failed == frozenset()
+
+    def test_a_missing_bare_repo_counts_as_a_failure(self, tmp_path, capsys, xdg):
+        """Resolution never got far enough to fetch anything."""
+        config, ws, ws_dir = _workspace(tmp_path)
+
+        outcome = fetch_workspace_refs(ws, ws_dir, config)
+
+        assert "community" in outcome.failed
+
+
+def _collect(fn):
+    """parallel_per_repo's contract: a raising task becomes its exception."""
+    try:
+        return fn()
+    except Exception as exc:
+        return exc

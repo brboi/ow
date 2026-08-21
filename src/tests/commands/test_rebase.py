@@ -30,12 +30,15 @@ def _ws(ws_dir: Path) -> WorkspaceConfig:
     return load_workspace_config(ws_dir / ".ow" / "config.toml")
 
 
-def fetch_returning(tracks: dict[str, str]) -> FetchOutcome:
+def fetch_returning(
+    tracks: dict[str, str], failed: frozenset[str] = frozenset()
+) -> FetchOutcome:
     return FetchOutcome(
         tracks=tracks,
         upstreams={},
         specs={a: BranchSpec(t) for a, t in tracks.items()},
         upstream_before={},
+        failed=failed,
     )
 
 
@@ -314,3 +317,54 @@ class TestObservedShape:
         err = capsys.readouterr().err
         assert "Skipping community" in err
         assert "ow apply" in err
+
+
+class TestFailedFetch:
+    """D2 — a failed fetch left ow rebasing onto the stale cached ref.
+
+    It exited 0, and because the upstream ref had not moved, force_pushed
+    stayed False and the `rewritten` marker was suppressed too: less warning
+    than a normal run, not more.
+    """
+
+    def test_an_alias_whose_fetch_failed_is_not_rebased(self, tmp_path, capsys):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning(
+                      {"community": "origin/master"}, frozenset({"community"}),
+                  )),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work) as mock_gather,
+            patch("ow.commands.rebase.git") as mock_git,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert exc.value.code == 1
+        mock_gather.assert_not_called()
+        assert mock_git.call_count == 0
+        err = capsys.readouterr().err
+        assert "community" in err and "fetch failed" in err
+
+    def test_the_other_repos_are_still_rebased(self, tmp_path):
+        config, ws_dir = make_workspace(tmp_path, {
+            "community": "master..work",
+            "enterprise": "master..work",
+        })
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning(
+                      {"community": "origin/master", "enterprise": "origin/master"},
+                      frozenset({"community"}),
+                  )),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git", return_value=_ok()) as mock_git,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert exc.value.code == 1
+        touched = {call.args[0] for call in mock_git.call_args_list}
+        assert touched == {ws_dir / "enterprise"}

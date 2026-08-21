@@ -29,11 +29,17 @@ class FetchOutcome:
     It is the whole basis of force-push detection: comparing it to the SHA
     after the fetch needs no reflog, so it does not depend on
     core.logAllRefUpdates being set on the bare repo.
+
+    `failed` holds the aliases whose refs are not what the remote says they
+    are — a fetch that failed, or a resolve that never got as far as one.
+    Printing the ✗ is not enough: a caller that goes on to rebase does so
+    against the stale cached ref, and would report success for it.
     """
     tracks: dict[str, str]
     upstreams: dict[str, str]
     specs: dict[str, BranchSpec]
     upstream_before: dict[str, str]
+    failed: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -69,6 +75,7 @@ def fetch_workspace_refs(
     resolved_upstreams: dict[str, str] = {}
     resolved_specs: dict[str, BranchSpec] = {}
     upstream_before: dict[str, str] = {}
+    failed: set[str] = set()
 
     # -- Phase 1: resolve specs per repo ----------------------------------
 
@@ -144,6 +151,7 @@ def fetch_workspace_refs(
         if isinstance(result, Exception):
             print_git_result(alias, "resolve", [], False, str(result))
             resolved_tracks[alias] = ws.repos[alias].base_ref
+            failed.add(alias)
             continue
         alias_resolve[alias] = result
         for i, job in enumerate(result.fetch_jobs):
@@ -187,9 +195,11 @@ def fetch_workspace_refs(
             fetch_result = fetch_results[key]
             if isinstance(fetch_result, Exception):
                 print_git_result(alias, "fetch", [job.remote, job.refspec], False, str(fetch_result))
+                failed.add(alias)
             elif fetch_result.returncode != 0:
                 err = fetch_result.stderr.decode().strip() if fetch_result.stderr else "unknown"
                 print_git_result(alias, "fetch", [job.remote, job.refspec], False, err)
+                failed.add(alias)
             else:
                 print_git_result(alias, "fetch", [job.remote, job.refspec], True)
 
@@ -198,4 +208,5 @@ def fetch_workspace_refs(
         upstreams=resolved_upstreams,
         specs=resolved_specs,
         upstream_before=upstream_before,
+        failed=frozenset(failed),
     )

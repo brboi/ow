@@ -244,6 +244,11 @@ def cmd_rebase(
             err_console.print(f"  Skipping {alias}: worktree not found at {worktree}")
             failed = True
             continue
+        # Rebasing onto the stale cached ref would look like a success.
+        if alias in fetched.failed:
+            err_console.print(f"  Skipping {alias}: fetch failed, refs are stale")
+            failed = True
+            continue
         tasks[alias] = (
             lambda w=worktree, a=alias,
                    b=fetched.tracks.get(alias, ws.repos[alias].base_ref),
