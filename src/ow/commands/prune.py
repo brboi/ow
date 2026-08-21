@@ -271,14 +271,20 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
         repo.stem: (lambda r=repo: _survey_bare_repo(r))
         for repo in bare_repos
     })
-    plans = [
-        surveyed[repo.stem]
-        for repo in bare_repos
-        if not isinstance(surveyed.get(repo.stem), Exception)
-    ]
+    plans: list[_PrunePlan] = []
+    survey_errors: dict[str, Exception] = {}
+    for repo in bare_repos:
+        result = surveyed.get(repo.stem)
+        if isinstance(result, Exception):
+            survey_errors[repo.stem] = result
+        else:
+            plans.append(result)
+
+    for alias, exc in survey_errors.items():
+        err_console.print(f"  [{alias}] survey failed: {exc}", markup=False)
 
     _display_plan(plans)
-    if bare_repos and all(plan.is_empty for plan in plans):
+    if bare_repos and not survey_errors and all(plan.is_empty for plan in plans):
         print("All bare repos are clean.")
 
     if dry_run:

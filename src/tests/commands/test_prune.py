@@ -256,6 +256,29 @@ def test_prune_reports_only_the_branches_it_actually_deleted(tmp_path, capsys, x
     assert "could not delete" not in captured.out
 
 
+def test_prune_reports_survey_failures_and_does_not_claim_clean(tmp_path, capsys, xdg, monkeypatch):
+    """With git off PATH every survey fails.  The command must not say
+    everything is clean and must report why each repo could not be surveyed.
+    """
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "spent", "refs/remotes/origin/master")
+    _git(bare, "branch", "-D", "master")
+
+    def _no_git(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr("ow.commands.prune._run", _no_git)
+
+    cmd_prune(yes=True)
+
+    captured = capsys.readouterr()
+    assert "All bare repos are clean." not in captured.out
+    assert "survey failed" in captured.err
+    assert "community" in captured.err
+
+
+
+
 def _commit_on_branch(bare: Path, tmp_path: Path, branch: str, name: str) -> str:
     """Create <branch> off master with one commit on it, reachable from nowhere else."""
     scratch = tmp_path / "scratch"
