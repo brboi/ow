@@ -40,21 +40,58 @@ def is_odoo_main_repo(repo_dir: Path) -> bool:
 def find_addon_paths(path: Path) -> list[Path]:
     """Return addons_path directories found under path.
 
-    Descends level by level. Stops descending into a directory once it
-    is identified as an addons_path (has children with __manifest__.py).
+    Uses an iterative walk with a visited inode set to break symlink cycles.
+    Prunes .git, node_modules, and __pycache__ directories.
+    An addons_path is a directory whose immediate children include addon
+    directories (directories containing __manifest__.py, __openerp__.py, or
+    __init__.py). Stops descending once an addons_path is identified.
     Returns [] if path is not a directory or contains no addons.
     """
     if not path.is_dir():
         return []
 
-    children = [p for p in path.iterdir() if p.is_dir()]
-
-    if any((child / "__manifest__.py").exists() for child in children):
-        return [path]
-
     result: list[Path] = []
-    for child in children:
-        result.extend(find_addon_paths(child))
+    seen: set[int] = set()
+    stack = [path]
+
+    while stack:
+        current = stack.pop()
+        try:
+            st = current.stat()
+        except OSError:
+            continue
+
+        inode = st.st_ino
+        if inode in seen:
+            continue
+        seen.add(inode)
+
+        if not current.is_dir():
+            continue
+
+        # Prune noise directories
+        if current.name in (".git", "node_modules", "__pycache__"):
+            continue
+
+        # Get directory children
+        try:
+            children = [p for p in current.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+
+        # Check if this is an addons_path (children have manifests)
+        has_manifest = any(
+            (child / m).exists()
+            for child in children
+            for m in ("__manifest__.py", "__openerp__.py", "__init__.py")
+        )
+
+        if has_manifest:
+            result.append(current)
+            continue  # don't descend into addon dirs
+
+        # Descend into children
+        stack.extend(children)
 
     return sorted(result)
 
@@ -83,8 +120,9 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
                 f"{alias}/odoo/addons",
             ]
         else:
-            addons_paths.extend(str(p) for p in find_addon_paths(repo_dir))
-            for p in find_addon_paths(repo_dir):
+            found = find_addon_paths(repo_dir)
+            addons_paths.extend(str(p) for p in found)
+            for p in found:
                 odools_path_items.append(str(p.relative_to(ws_dir)))
 
     return {

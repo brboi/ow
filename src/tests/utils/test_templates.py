@@ -113,6 +113,33 @@ def test_find_addon_paths_mixed_depths(tmp_path):
         ]
     )
 
+def test_find_addon_paths_handles_symlink_cycle(tmp_path):
+    """A symlink cycle must not raise RecursionError."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "addons").mkdir()
+    (root / "addons" / "cycle").symlink_to(root / "addons")
+    # Should not raise RecursionError
+    result = find_addon_paths(root)
+    assert isinstance(result, list)
+
+
+def test_find_addon_paths_prunes_noise_dirs(tmp_path):
+    """.git, node_modules, __pycache__ are skipped even if they contain addons."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    # Create noise directories with addon structures inside
+    for noise in (".git", "node_modules", "__pycache__"):
+        d = root / noise / "addons" / "fake_addon"
+        d.mkdir(parents=True)
+        (d / "__manifest__.py").touch()
+    # Create a real addons directory
+    (root / "real_addons" / "real_addon").mkdir(parents=True)
+    (root / "real_addons" / "real_addon" / "__manifest__.py").touch()
+    result = find_addon_paths(root)
+    # Should find root/real_addons but not root/.git/addons, etc.
+    assert result == [root / "real_addons"]
+
 
 # ---------------------------------------------------------------------------
 # build_template_context
