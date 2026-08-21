@@ -6,7 +6,7 @@ from ow.utils.drift import warn_if_drifted
 from ow.utils.config import Config
 from ow.utils.git import run_cmd
 from ow.utils.resolver import resolve_workspace
-from ow.utils.templates import apply_templates, ensure_workspace_materialized
+from ow.utils.templates import apply_templates, ensure_services_compose, ensure_workspace_materialized
 
 
 def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = False) -> None:
@@ -41,6 +41,7 @@ def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = Fal
         return
 
     _, successful, errors = ensure_workspace_materialized(ws, config, ws_dir)
+    ensure_services_compose()
     apply_templates(ws, config, ws_dir)
 
     if errors:

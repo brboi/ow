@@ -949,3 +949,30 @@ class TestEnsureWorkspaceMaterializedReconcileErrors:
         assert "community" in errors
         assert "community" not in successful
         assert "enterprise" in successful
+
+
+# ---------------------------------------------------------------------------
+# ensure_services_compose
+# ---------------------------------------------------------------------------
+
+def test_ensure_services_compose_materializes_file(xdg):
+    from ow.utils import paths
+    from ow.utils.templates import ensure_services_compose
+    path = ensure_services_compose()
+    assert path == paths.services_dir() / "compose.yml"
+    assert path.exists()
+    content = path.read_text()
+    # volumes_dir should be resolved (not a Jinja template)
+    assert "{{" not in content
+    assert str(paths.volumes_dir()) in content
+
+
+def test_ensure_services_compose_is_idempotent(xdg):
+    from ow.utils import paths
+    from ow.utils.templates import ensure_services_compose
+    path = ensure_services_compose()
+    first_mtime = path.stat().st_mtime_ns
+    path2 = ensure_services_compose()
+    assert path == path2
+    # Should not rewrite if unchanged
+    assert path2.stat().st_mtime_ns == first_mtime

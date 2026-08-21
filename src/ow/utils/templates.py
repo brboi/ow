@@ -282,6 +282,34 @@ def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
                 shutil.copy2(src, out_path)
 
 
+
+def ensure_services_compose() -> Path:
+    """Render the bundled compose.yml.j2 into services_dir().
+
+    Idempotent: skips if the file already exists and the template hasn't changed.
+    """
+    from importlib.resources import files
+
+    src = files("ow") / "_static" / "services" / "compose.yml.j2"
+    dst = paths.services_dir() / "compose.yml"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    template_text = src.read_text(encoding="utf-8")
+    env = Environment(
+        keep_trailing_newline=True,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    rendered = env.from_string(template_text).render(
+        volumes_dir=str(paths.volumes_dir()),
+    )
+    if dst.exists() and dst.read_text(encoding="utf-8") == rendered:
+        return dst
+
+    dst.write_text(rendered, encoding="utf-8")
+    return dst
+
+
 def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> tuple[Path, set[str], dict[str, str]]:
     """Ensure bare repos exist, refs are fetched, and worktrees are created.
 

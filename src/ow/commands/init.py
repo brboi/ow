@@ -20,6 +20,7 @@ from ow.utils import index
 from ow.utils.templates import (
     apply_templates,
     available_templates,
+    ensure_services_compose,
     ensure_workspace_materialized,
 )
 from ow.utils.config import (
@@ -362,6 +363,8 @@ def cmd_init(
     # so it is written the moment the truth exists — nothing after this point
     # may cost the user a workspace that is already on disk.
     index.remember(ws_dir)
+
+    ensure_services_compose()
 
     template_error = None
     try:
