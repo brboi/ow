@@ -1,3 +1,4 @@
+import pytest
 import json
 import re
 import subprocess
@@ -1003,3 +1004,25 @@ def test_ensure_services_compose_is_idempotent(xdg):
     assert path == path2
     # Should not rewrite if unchanged
     assert path2.stat().st_mtime_ns == first_mtime
+
+
+# ---------------------------------------------------------------------------
+# StrictUndefined — missing variables must raise, not render empty
+# ---------------------------------------------------------------------------
+
+def test_undefined_var_raises_at_render(xdg, tmp_path, config):
+    """A local template referencing an unknown variable must raise UndefinedError."""
+    from jinja2 import UndefinedError
+    from ow.utils import paths
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    ws_dir.mkdir(parents=True)
+
+    # Create a local "common" template that references an undefined variable.
+    local_dir = paths.templates_dir() / "common"
+    local_dir.mkdir(parents=True)
+    (local_dir / "odoorc.j2").write_text("data_dir = {{ undefined_var }}\n")
+
+    ws = WorkspaceConfig(repos={}, templates=["common"])
+    with pytest.raises(UndefinedError):
+        apply_templates(ws, config, ws_dir)

@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from ow.utils.display import print_git_result, task_progress
 from ow.utils.config import Config, WorkspaceConfig
@@ -254,6 +254,7 @@ def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
             search_path.append(packaged_dir)
         env = Environment(
             loader=FileSystemLoader(search_path),
+            undefined=StrictUndefined,
             keep_trailing_newline=True,
             trim_blocks=True,
             lstrip_blocks=True,
