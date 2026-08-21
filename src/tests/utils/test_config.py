@@ -57,6 +57,12 @@ def test_parse_18_0():
     assert spec.branch == "18.0"
 
 
+@pytest.mark.parametrize("spec", ["", "master..", "..feat", "a..b..c", "master ..feat"])
+def test_parse_branch_spec_rejects_degenerate(spec):
+    with pytest.raises(ValueError, match="invalid branch spec"):
+        parse_branch_spec(spec)
+
+
 # ---------------------------------------------------------------------------
 # to_spec_str round-trips
 # ---------------------------------------------------------------------------
