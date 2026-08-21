@@ -49,16 +49,52 @@ def _make_ws(base: Path, name: str, repos: dict[str, str] | None = None) -> Path
 
 def test_detects_legacy_layout(tmp_path, capsys, xdg):
     """An old-layout ow.toml with no global config yet must point at the
-    migration guide, not print "No known workspaces"."""
+    migration guide — but as a warning: ls is where a migrating user goes to
+    see what ow has picked up so far, so it must still list."""
     (tmp_path / "ow.toml").write_text("")
+    _make_ws(tmp_path, "alpha", {"community": "master"})
+
+    cmd_ls()  # must not raise
+
+    out, err = capsys.readouterr()
+    assert "docs/migrating-to-2.0.md" in err
+    assert "alpha" in out
+
+
+def test_a_stray_legacy_workspace_config_in_cwd_does_not_block_the_listing(
+    tmp_path, capsys, xdg, monkeypatch
+):
+    """The one command a migrating user needs is the one they were running
+    from inside the very workspaces they are migrating."""
+    listed = _make_ws(tmp_path / "known", "alpha", {"community": "master"})
+
+    cwd = tmp_path / "legacy-ws"
+    (cwd / ".ow").mkdir(parents=True)
+    (cwd / ".ow" / "config").write_text("")
+    monkeypatch.chdir(cwd)
+
+    cmd_ls()  # must not raise
+
+    out, err = capsys.readouterr()
+    assert "alpha" in out
+    assert str(cwd / ".ow" / "config") in err
+    assert "mv .ow/config .ow/config.toml" in err
+    assert listed.exists()
+
+
+def test_other_commands_still_exit_on_a_legacy_workspace_config(tmp_path, capsys, xdg, monkeypatch):
+    """Only ls is exempt: everything else writes, so it still stops."""
+    from ow.utils.legacy import check_legacy_layout
+
+    cwd = tmp_path / "legacy-ws"
+    (cwd / ".ow").mkdir(parents=True)
+    (cwd / ".ow" / "config").write_text("")
+    monkeypatch.chdir(cwd)
 
     with pytest.raises(typer.Exit) as exc:
-        cmd_ls()
+        check_legacy_layout()
 
     assert exc.value.exit_code == 1
-    out, err = capsys.readouterr()
-    assert "No known workspaces" not in out
-    assert "docs/migrating-to-2.0.md" in err
 
 
 # ---------------------------------------------------------------------------

@@ -23,13 +23,20 @@ _GUIDE = (
 )
 
 
-def check_legacy_layout() -> None:
+def check_legacy_layout(*, fatal: bool = True) -> None:
     """Detect the pre-2.0 layout and point at the migration guide.
 
     Must run before load_global_config(): that function bootstraps a
     default config.toml on first use, which would erase the "no global
     config yet" condition the first form below depends on before this
     check ever ran.
+
+    fatal=False reports and returns instead of exiting. It is for `ow ls`
+    alone: ls reads only the discovery index — not the global config, not
+    the cwd — and writes nothing, so there is nothing here to protect it
+    from, and stopping it would take away the one command that shows a
+    migrating user what ow has picked up so far, from inside the very
+    workspaces they are migrating.
     """
     if not paths.config_file().exists():
         old_root = find_project_root(Path.cwd())
@@ -39,7 +46,9 @@ def check_legacy_layout() -> None:
                 f"Error: found an old project layout at {old_root} ({marker})", markup=False
             )
             err_console.print(f"       {marker} is no longer used — {_GUIDE}")
-            raise typer.Exit(1)
+            if fatal:
+                raise typer.Exit(1)
+            return
 
     current = Path.cwd().resolve()
     for candidate in [current, *current.parents]:
@@ -48,5 +57,10 @@ def check_legacy_layout() -> None:
             err_console.print(
                 f"Error: found an old workspace config at {old_config}", markup=False
             )
-            err_console.print(f"       expected .ow/config.toml instead — {_GUIDE}")
-            raise typer.Exit(1)
+            # The whole fix, spelled out: this one is a rename, and sending
+            # someone to a web page to read a single mv is a poor trade.
+            err_console.print("       expected .ow/config.toml instead: mv .ow/config .ow/config.toml")
+            err_console.print(f"       {_GUIDE}")
+            if fatal:
+                raise typer.Exit(1)
+            return

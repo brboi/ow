@@ -156,3 +156,63 @@ def test_detects_an_old_workspace_config_from_a_subdirectory(
 
     assert exc.value.exit_code == 1
     assert str(old_config) in capsys.readouterr().err
+
+
+def test_the_workspace_config_message_names_the_fix(
+    xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A one-line rename should not cost the reader a trip to a web page."""
+    ws = tmp_path / "myws"
+    (ws / ".ow").mkdir(parents=True)
+    (ws / ".ow" / "config").write_text("")
+    monkeypatch.chdir(ws)
+
+    with pytest.raises(typer.Exit):
+        check_legacy_layout()
+
+    assert "mv .ow/config .ow/config.toml" in capsys.readouterr().err
+
+
+def test_fatal_false_warns_about_an_old_workspace_config_and_returns(
+    xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """`ow ls` is read-only, so a stray legacy config must not block it."""
+    ws = tmp_path / "myws"
+    (ws / ".ow").mkdir(parents=True)
+    old_config = ws / ".ow" / "config"
+    old_config.write_text("")
+    monkeypatch.chdir(ws)
+
+    check_legacy_layout(fatal=False)  # must not raise
+
+    err = capsys.readouterr().err
+    assert str(old_config) in err
+    assert "docs/migrating-to-2.0.md" in err
+
+
+def test_fatal_false_warns_about_an_old_project_root_and_returns(
+    xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "ow.toml").write_text("")
+    monkeypatch.chdir(project)
+
+    check_legacy_layout(fatal=False)  # must not raise
+
+    err = capsys.readouterr().err
+    assert str(project) in err
+    assert "docs/migrating-to-2.0.md" in err
+
+
+def test_fatal_false_is_still_silent_on_a_migrated_setup(
+    xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Warning instead of exiting must not turn into warning unconditionally."""
+    paths.config_home().mkdir(parents=True, exist_ok=True)
+    paths.config_file().write_text("")
+    monkeypatch.chdir(tmp_path)
+
+    check_legacy_layout(fatal=False)
+
+    assert capsys.readouterr().err == ""

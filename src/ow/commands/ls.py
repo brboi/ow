@@ -53,7 +53,10 @@ def _repos_cell(ws_dir: Path) -> str | Text:
 
 def cmd_ls() -> None:
     """List every known workspace: its name, path, and repos."""
-    check_legacy_layout()
+    # A warning, not a stop: see check_legacy_layout's own docstring. ls is
+    # read-only and index-only, and it is where the other commands' error
+    # messages send a lost user.
+    check_legacy_layout(fatal=False)
 
     workspaces = index.known_workspaces()
     if not workspaces:
