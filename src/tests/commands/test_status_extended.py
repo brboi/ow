@@ -117,6 +117,7 @@ class TestDisplayAttachedStatus:
             patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
             patch("ow.commands.status.get_upstream", return_value=None),
             patch("ow.commands.status.get_rev_list_count", return_value=(0, 1)),
+            patch("ow.commands.status.get_worktree_branch", return_value="my-feature"),
         ):
             result = _display_attached_status(
                 "community", spec, resolved, worktree, 9
@@ -237,3 +238,77 @@ class TestCmdStatusExtended:
 
 def _mock_parallel_exec(tasks):
     return {k: fn() for k, fn in tasks.items()}
+
+
+class TestAttachedStatusLabelsTheCheckedOutBranch:
+    """D4 — the counts come from HEAD, so the label must too.
+
+    Under drift the line read `community: feat (local) (origin/master ↓0 ↑1)`
+    while HEAD was on `sidetrack`: a commit that lives on sidetrack was
+    attributed to feat. The drift warning above is the only thing that saved
+    the user, and it scrolls off.
+    """
+
+    def test_a_drifted_worktree_is_not_labelled_with_the_configured_branch(self, tmp_path):
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        spec = resolved = BranchSpec("origin/master", "feat")
+
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value=None),
+            patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value="sidetrack"),
+        ):
+            result = _display_attached_status("community", spec, resolved, worktree, 9)
+
+        assert "sidetrack" in result
+        assert "feat" not in result.replace("sidetrack", "")
+
+    def test_the_upstream_equals_base_line_names_the_checked_out_branch(self, tmp_path):
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        spec = resolved = BranchSpec("origin/master", "feat")
+
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value="origin/master"),
+            patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value="sidetrack"),
+        ):
+            result = _display_attached_status("community", spec, resolved, worktree, 9)
+
+        assert "sidetrack" in result
+        assert "feat" not in result.replace("sidetrack", "")
+
+    def test_an_aligned_worktree_reads_as_before(self, tmp_path):
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        spec = resolved = BranchSpec("origin/master", "feat")
+
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value=None),
+            patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value="feat"),
+        ):
+            result = _display_attached_status("community", spec, resolved, worktree, 9)
+
+        assert "feat" in result
+
+    def test_a_detached_head_is_not_labelled_with_a_branch_at_all(self, tmp_path):
+        """Config says attached, HEAD is not. Naming any branch would lie."""
+        worktree = tmp_path / "community"
+        worktree.mkdir()
+        spec = resolved = BranchSpec("origin/master", "feat")
+
+        with (
+            patch("ow.commands.status.get_remote_ref_for_branch", return_value=None),
+            patch("ow.commands.status.get_upstream", return_value=None),
+            patch("ow.commands.status.get_rev_list_count", return_value=(1, 0)),
+            patch("ow.commands.status.get_worktree_branch", return_value=None),
+        ):
+            result = _display_attached_status("community", spec, resolved, worktree, 9)
+
+        assert "DETACHED" in result
+        assert "feat" not in result

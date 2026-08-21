@@ -15,6 +15,7 @@ from ow.utils.git import (
     get_remote_url,
     get_rev_list_count,
     get_upstream,
+    get_worktree_branch,
     get_worktree_head,
     parallel_per_repo,
 )
@@ -69,6 +70,12 @@ def _display_attached_status(
     """Format status line for an attached worktree."""
     padding = " " * (max_alias_len - len(alias) + 1)
 
+    # Every count below is measured from HEAD. Labelling the line with the
+    # config's branch attributes those commits to a branch the user is not
+    # on — and the drift warning that would have caught it scrolls off.
+    actual_branch = get_worktree_branch(worktree_path)
+    head_label = actual_branch if actual_branch else "[yellow]DETACHED[/]"
+
     remote_ref = get_remote_ref_for_branch(
         worktree_path,
         resolved.local_branch,
@@ -89,10 +96,10 @@ def _display_attached_status(
                 ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, resolved.base_ref)
                 status = f"[bold]{upstream}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
             else:
-                status = f"[bold]{resolved.local_branch}[/] [dim](local)[/] ([bold]{upstream}[/] {counts(behind_up, ahead_up)})"
+                status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{upstream}[/] {counts(behind_up, ahead_up)})"
         else:
             ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
-            status = f"[bold]{resolved.local_branch}[/] [dim](local)[/] ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
+            status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
 
     return f"        {alias}:{padding}{status}"
 

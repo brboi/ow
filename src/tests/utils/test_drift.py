@@ -155,3 +155,18 @@ def test_warn_if_drifted_skips_unapplied_repos(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert "Warning" not in captured.err
+
+
+def test_warn_if_drifted_names_the_command_that_fixes_it(tmp_path, capsys):
+    """D4 — the warning named the problem and stopped there."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    (ws_dir / "community").mkdir(parents=True)
+    ws = WorkspaceConfig(
+        repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
+    )
+
+    with patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"):
+        warn_if_drifted(ws, ws_dir)
+
+    assert "ow apply" in capsys.readouterr().err

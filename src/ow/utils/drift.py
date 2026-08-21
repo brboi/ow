@@ -63,3 +63,4 @@ def warn_if_drifted(ws: WorkspaceConfig, ws_dir) -> None:
         print("Warning: drift detected between config and worktree state:", file=sys.stderr)
         for d in drifted:
             print(f"  {d.message}", file=sys.stderr)
+        print("  Run `ow apply` to realign the worktree(s) with the config.", file=sys.stderr)
