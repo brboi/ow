@@ -2,6 +2,7 @@ import subprocess
 
 from ow.utils.git import (
     _git_dir,
+    _is_bare_repo,
     count_commits,
     count_new_patches,
     count_unpushed,
@@ -241,3 +242,64 @@ class TestDirtyFiles:
         """git rebase only refuses on modified tracked files."""
         (git_lab.path / "scratch.txt").write_text("junk")
         assert dirty_files(git_lab.path) == []
+
+
+class TestIsBareRepo:
+    """The predicate that decides whether a repository needs re-cloning.
+
+    A wrong "no" here is not a cosmetic bug: ensure_bare_repo answers it by
+    renaming the user's repository to <name>.broken and cloning over the top.
+    """
+
+    def test_recognises_a_bare_repository(self, tmp_path):
+        bare = tmp_path / "community.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+        assert _is_bare_repo(bare) is True
+
+    def test_recognises_a_repository_reached_through_a_symlink(self, tmp_path):
+        """`git rev-parse --absolute-git-dir` answers with symlinks resolved,
+        while the path ow asks about is built from XDG_DATA_HOME as configured.
+        Comparing the two as strings makes a healthy repository invisible on
+        every machine whose home traverses a symlink (/home -> /var/home is the
+        common one), and ow answers that by re-cloning over the top of it.
+        """
+        real = tmp_path / "real"
+        bare = real / "community.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+
+        assert _is_bare_repo(link / "community.git") is True
+
+    def test_rejects_a_plain_directory_inside_a_repository(self, tmp_path):
+        """git discovers repositories by walking upwards, which is why the
+        answer is pinned to this directory: anyone keeping their home in git
+        would otherwise have every empty directory called a repository."""
+        enclosing = tmp_path / "home"
+        enclosing.mkdir()
+        subprocess.run(["git", "init", "-q", str(enclosing)], check=True)
+        plain = enclosing / "repos" / "community.git"
+        plain.mkdir(parents=True)
+
+        assert _is_bare_repo(plain) is False
+
+    def test_rejects_a_plain_directory_inside_a_repository_reached_through_a_symlink(self, tmp_path):
+        """The symlink fix must not be a blanket "close enough": the enclosing
+        repository's git dir and the directory asked about are still two
+        different objects, however the path was spelled."""
+        enclosing = tmp_path / "home"
+        enclosing.mkdir()
+        subprocess.run(["git", "init", "-q", str(enclosing)], check=True)
+        (enclosing / "repos" / "community.git").mkdir(parents=True)
+        link = tmp_path / "link"
+        link.symlink_to(enclosing, target_is_directory=True)
+
+        assert _is_bare_repo(link / "repos" / "community.git") is False
+
+    def test_rejects_a_directory_that_is_not_a_repository(self, tmp_path):
+        plain = tmp_path / "community.git"
+        plain.mkdir()
+        assert _is_bare_repo(plain) is False
+
+    def test_rejects_a_path_that_does_not_exist(self, tmp_path):
+        assert _is_bare_repo(tmp_path / "missing.git") is False

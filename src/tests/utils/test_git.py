@@ -420,6 +420,37 @@ def test_ensure_bare_repo_is_not_fooled_by_an_enclosing_repository(tmp_path, xdg
     ).stdout.strip() == str(bare_repo)
 
 
+def test_ensure_bare_repo_keeps_a_repository_reached_through_a_symlink(tmp_path, xdg, git_lab):
+    """The repos directory is built from XDG_DATA_HOME, which is not resolved,
+    while git answers with symlinks resolved. On any machine whose home
+    traverses a symlink (/home -> /var/home) a healthy repository would be
+    called "not a repository", re-cloned over, and the copy holding the user's
+    unpushed commits renamed to .broken — then deleted by the run after that.
+    """
+    real = tmp_path / "real"
+    bare_repos_dir = real / "bare-repos"
+    bare_repo = bare_repos_dir / "community.git"
+    make_bare_repo(bare_repo)
+    subprocess.run(
+        ["git", "-C", str(bare_repo), "fetch", "-q", str(git_lab.path), "master:refs/heads/work"],
+        check=True,
+    )
+    unpushed = git_lab.sha("master")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    remotes = {"origin": RemoteConfig(url=str(git_lab.path))}
+
+    with patch.object(git_mod, "_clone_bare", autospec=True) as mock_clone:
+        ensure_bare_repo("community", remotes, link / "bare-repos")
+
+    mock_clone.assert_not_called()
+    assert not (bare_repos_dir / "community.git.broken").exists()
+    assert subprocess.run(
+        ["git", "-C", str(bare_repo), "rev-parse", "refs/heads/work"],
+        capture_output=True, text=True,
+    ).stdout.strip() == unpushed
+
+
 def test_ensure_bare_repo_leaves_nothing_at_the_final_path_when_a_clone_dies(tmp_path, xdg):
     """A clone that is killed partway must not leave a half-repo behind.
 

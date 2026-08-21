@@ -164,6 +164,15 @@ def _is_bare_repo(path: Path) -> bool:
     repositories by walking upwards, so a plain directory that happens to sit
     inside one would otherwise answer yes. Comparing what git resolved against
     the path asked about pins the answer to this directory.
+
+    The comparison is samefile() and not `==`: git answers with every symlink
+    resolved, while `path` is built from XDG_DATA_HOME exactly as configured.
+    On a machine whose home traverses a symlink — /home -> /var/home is the
+    common one — two spellings of the same directory would not match as
+    strings, and ow answers "not a repository" by cloning over the top of the
+    user's work. Asking the filesystem whether they are the same object also
+    covers bind mounts and case-insensitive filesystems, where resolving the
+    strings still would not match.
     """
     if not path.is_dir():
         return False
@@ -173,7 +182,13 @@ def _is_bare_repo(path: Path) -> bool:
     )
     if result.returncode != 0:
         return False
-    return Path(result.stdout.strip()) == path
+    try:
+        return os.path.samefile(result.stdout.strip(), path)
+    except OSError:
+        # Both paths existed a moment ago; if one no longer does, or cannot be
+        # stat'd, "not a repository" is the answer already given everywhere
+        # else on this path.
+        return False
 
 
 def _clone_bare_into_place(alias: str, url: str, bare_repo: Path) -> None:
