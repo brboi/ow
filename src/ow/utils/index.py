@@ -50,8 +50,6 @@ def _locked() -> Iterator[None]:
             if time.monotonic() >= deadline:
                 # The lock outlived the timeout: a previous writer crashed.
                 # Break it so every later call does not pay the full timeout.
-                # The lock outlived the timeout: a previous writer crashed.
-                # Break it so every later call does not pay the full timeout.
                 print(f"Breaking stale lock: {lock}", file=sys.stderr)
                 with contextlib.suppress(OSError):
                     lock.unlink()
@@ -98,7 +96,7 @@ def _write(entries: list[Path]) -> None:
         # replacing, so it doesn't collide if the index were ever renamed to
         # something containing a dot.
         tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-        tmp.write_text("".join(f"{p}\n" for p in entries))
+        tmp.write_text("".join(f"{p}\n" for p in entries), encoding="utf-8")
         os.replace(tmp, target)
     except OSError as exc:
         global _warned_readonly
@@ -118,7 +116,7 @@ def _read() -> tuple[list[Path], bool]:
 
     seen: list[Path] = []
     pruned = False
-    for line in target.read_text().splitlines():
+    for line in target.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             pruned = True

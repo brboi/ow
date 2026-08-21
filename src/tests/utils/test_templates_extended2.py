@@ -123,3 +123,40 @@ class TestApplyTemplatesExtended:
         out = ws_dir / "mise.toml"
         assert out.stat().st_mode == (packaged / "mise.toml.j2").stat().st_mode
         assert not out.stat().st_mode & 0o111
+
+class TestApplyTemplatesCollision:
+    """n5: a bundle containing both `foo` and `foo.j2` would write to the same output path."""
+
+    def test_collision_between_plain_and_j2_raises(self, tmp_path, config):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["collider"])
+
+        # Two source files that resolve to the same output path.
+        plain = tmp_path / "foo"
+        plain.write_text("plain\n")
+        j2 = tmp_path / "foo.j2"
+        j2.write_text("j2\n")
+        files = {Path("foo"): plain, Path("foo.j2"): j2}
+
+        with patch("ow.utils.templates.resolve_template_files", return_value=files):
+            with pytest.raises(ValueError, match="collision"):
+                apply_templates(ws, config, ws_dir)
+
+    def test_no_collision_when_outputs_differ(self, tmp_path, config):
+        """Two distinct output paths must not raise, even if the inputs look similar."""
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["safe"])
+
+        a = tmp_path / "a"
+        a.write_text("a\n")
+        b = tmp_path / "b.j2"
+        b.write_text("b\n")
+        files = {Path("a"): a, Path("b.j2"): b}
+
+        with patch("ow.utils.templates.resolve_template_files", return_value=files):
+            with patch("ow.utils.templates.Environment") as mock_env:
+                mock_env.return_value.get_template.return_value.render.return_value = "rendered"
+                # Must not raise — outputs are distinct.
+                apply_templates(ws, config, ws_dir)

@@ -133,7 +133,10 @@ def _summary_line(plan: RebasePlan, width: int) -> str:
     elif plan.detaches:
         state = "[dim]detach[/]"
     else:
-        state = f"{plan.replay_count} commit(s) to replay"
+        if plan.replay_count == 0:
+            state = f"[dim]fast-forward to {plan.base}[/]"
+        else:
+            state = f"{plan.replay_count} commit(s) to replay"
 
     markers = []
     if plan.force_pushed:

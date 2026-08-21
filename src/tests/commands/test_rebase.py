@@ -534,6 +534,18 @@ class TestSummaryLine:
         )
         assert "←" not in _summary_line(plan, 9)
 
+    def test_a_fast_forward_plan_says_fast_forward_not_zero_commits(self):
+        """replay_count == 0 with steps is a fast-forward, not '0 commit(s) to replay'."""
+        plan = RebasePlan(
+            alias="community", base="origin/master",
+            steps=(GitStep(("rebase", "origin/master"), "origin/master"),),
+            replay_count=0,
+        )
+        line = _summary_line(plan, 9)
+        assert "fast-forward" in line
+        assert "0 commit(s) to replay" not in line
+        assert "origin/master" in line
+
 
 def _facts_detached(worktree, alias, base, up, up_before, is_detached):
     return RepoFacts(alias=alias, base=base, is_detached=True, bound="BOUND", base_merged=True)

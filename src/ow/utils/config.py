@@ -215,6 +215,6 @@ def load_global_config() -> Config:
     path = paths.config_file()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_DEFAULT_CONFIG)
+        path.write_text(_DEFAULT_CONFIG, encoding="utf-8")
         err_console.print(f"Created {path} — edit it to add your remotes.")
     return load_config(path)

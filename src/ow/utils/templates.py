@@ -256,11 +256,22 @@ def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
             lstrip_blocks=True,
         )
 
+        # Detect output-path collisions before rendering.
+        seen_outputs: dict[Path, str] = {}
+        for rel, src in sorted(files.items()):
+            out_rel = rel.with_suffix("") if src.suffix == ".j2" else rel
+            if out_rel in seen_outputs:
+                raise ValueError(
+                    f"Template output collision: {rel} and {seen_outputs[out_rel]} "
+                    f"both write to {out_rel}"
+                )
+            seen_outputs[out_rel] = str(rel)
+
         for rel, src in sorted(files.items()):
             if src.suffix == ".j2":
                 out_path = ws_dir / rel.with_suffix("")
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(env.get_template(rel.as_posix()).render(context))
+                out_path.write_text(env.get_template(rel.as_posix()).render(context), encoding="utf-8")
                 out_path.chmod(src.stat().st_mode)
             else:
                 out_path = ws_dir / rel
