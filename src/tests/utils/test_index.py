@@ -59,7 +59,7 @@ def test_known_workspaces_prunes_vanished_entries_and_rewrites(xdg: Path) -> Non
     index.remember(alive)
     index.remember(gone)
 
-    # The workspace disappears without going through forget().
+    # The workspace disappears behind the index's back.
     (gone / ".ow" / "config.toml").unlink()
 
     result = index.known_workspaces()
@@ -133,17 +133,6 @@ def test_find_by_name_multiple_matches(xdg: Path) -> None:
     result = index.find_by_name("dupe")
 
     assert sorted(result) == sorted([first.resolve(), second.resolve()])
-
-
-def test_forget_removes_entry_and_keeps_others(xdg: Path) -> None:
-    alpha = _make_workspace(xdg, "alpha")
-    beta = _make_workspace(xdg, "beta")
-    index.remember(alpha)
-    index.remember(beta)
-
-    index.forget(alpha)
-
-    assert index.known_workspaces() == [beta.resolve()]
 
 
 def test_blank_and_whitespace_lines_are_ignored(xdg: Path) -> None:

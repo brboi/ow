@@ -79,11 +79,5 @@ def remember(ws_dir: Path) -> None:
         _write([*entries, resolved])
 
 
-def forget(ws_dir: Path) -> None:
-    resolved = ws_dir.resolve()
-    entries = [p for p in known_workspaces() if p != resolved]
-    _write(entries)
-
-
 def find_by_name(name: str) -> list[Path]:
     return [p for p in known_workspaces() if p.name == name]
