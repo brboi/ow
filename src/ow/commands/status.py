@@ -6,7 +6,7 @@ from ow.utils.display import console, counts
 from rich.text import Text
 from rich.markup import escape
 from ow.utils.drift import warn_if_drifted
-from ow.utils.refs import fetch_workspace_refs
+from ow.utils.refs import fetch_workspace_refs, FetchOutcome
 from ow.utils.resolver import resolve_workspace
 from ow.utils.config import BranchSpec, Config
 from ow.utils import paths
@@ -17,6 +17,7 @@ from ow.utils.git import (
     get_worktree_branch,
     get_worktree_head,
     parallel_per_repo,
+    resolve_spec_local,
 )
 
 # ---------------------------------------------------------------------------
@@ -130,14 +131,38 @@ def _gather_repo_status(
 # ---------------------------------------------------------------------------
 
 
-def cmd_status(config: Config, workspace: str | None = None) -> None:
+def cmd_status(config: Config, workspace: str | None = None, *, fetch: bool = False) -> None:
     """Show branch status for the current workspace."""
     ws_dir, ws = resolve_workspace(name=workspace)
     bare_repos_dir = paths.repos_dir()
 
     warn_if_drifted(ws, ws_dir)
 
-    fetched = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
+    if fetch:
+        fetched = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
+    else:
+        # Offline mode: resolve specs from local bare repos without fetching
+        resolved_specs: dict[str, BranchSpec] = {}
+        for alias, spec in ws.repos.items():
+            if not (ws_dir / alias).exists():
+                continue
+            bare_repo_path = bare_repos_dir / f"{alias}.git"
+            if not bare_repo_path.exists():
+                continue
+            alias_remotes = config.remotes.get(alias, {})
+            try:
+                resolved = resolve_spec_local(bare_repo_path, spec, alias_remotes)
+                resolved_specs[alias] = resolved
+            except RuntimeError:
+                # If we can't resolve locally, skip this repo
+                pass
+        fetched = FetchOutcome(
+            tracks={},
+            upstreams={},
+            specs=resolved_specs,
+            upstream_before={},
+            failed=frozenset(),
+        )
     resolved_specs = fetched.specs
 
     header = Text(f"[{ws_dir.name}]", style="bold cyan")
