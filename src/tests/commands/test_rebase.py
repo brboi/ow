@@ -5,9 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from ow.commands.rebase import cmd_rebase
+from ow.commands.rebase import _summary_line, cmd_rebase
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
-from ow.utils.rebase_plan import RepoFacts
+from ow.utils.rebase_plan import GitStep, RebasePlan, RepoFacts
 from ow.utils.refs import FetchOutcome
 
 
@@ -439,3 +439,61 @@ class TestDryRunWithNothingToDo:
         out = capsys.readouterr().out
         assert "nothing to do" in out
         assert mock_git.call_count == 0
+
+
+class TestSummaryLine:
+    """The screen the user reads before typing `y` on a destructive command.
+
+    Nothing asserted a single word of it: `commit(s) to replay`, the
+    `rewritten` and `unpushed` markers, the step-1 target and the skip
+    reason were all invisible to the suite, so the whole unpushed-count fix
+    could have been reverted with the suite still green.
+    """
+
+    def test_summary_line_reports_the_work_and_the_markers(self):
+        plan = RebasePlan(
+            alias="community", base="origin/master",
+            steps=(GitStep(("rebase", "origin/master"), "origin/master"),),
+            step1_target="dev/work", replay_count=3, unpushed=2, force_pushed=True,
+        )
+        line = _summary_line(plan, 9)
+        assert "3 commit(s) to replay" in line and "2 unpushed" in line
+        assert "rewritten" in line and "dev/work" in line
+
+    def test_summary_line_names_the_skip_reason(self):
+        plan = RebasePlan(
+            alias="c", base="origin/master", skip_reason="uncommitted changes: a.py",
+        )
+        assert "uncommitted changes: a.py" in _summary_line(plan, 1)
+
+    def test_a_repo_with_no_steps_reads_as_up_to_date(self):
+        plan = RebasePlan(alias="community", base="origin/master")
+        line = _summary_line(plan, 9)
+        assert "up to date" in line
+        assert "detach" not in line
+
+    def test_a_detaching_plan_reads_as_a_detach(self):
+        plan = RebasePlan(
+            alias="community", base="origin/master",
+            steps=(GitStep(("switch", "--detach", "origin/master"), "origin/master"),),
+        )
+        line = _summary_line(plan, 9)
+        assert "detach" in line
+        assert "up to date" not in line
+
+    def test_a_clean_plan_carries_no_markers(self):
+        plan = RebasePlan(
+            alias="community", base="origin/master",
+            steps=(GitStep(("rebase", "origin/master"), "origin/master"),),
+            replay_count=1,
+        )
+        line = _summary_line(plan, 9)
+        assert "rewritten" not in line and "unpushed" not in line
+
+    def test_a_single_step_plan_names_only_the_base(self):
+        plan = RebasePlan(
+            alias="community", base="origin/master",
+            steps=(GitStep(("rebase", "origin/master"), "origin/master"),),
+            replay_count=1,
+        )
+        assert "←" not in _summary_line(plan, 9)
