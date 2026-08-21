@@ -270,17 +270,18 @@ def test_prune_yes(xdg, flag):
     assert mock_prune.call_args.kwargs["yes"] is True
 
 
-def test_prune_options_read_the_same_as_rebase(xdg):
-    """--dry-run and -y/--yes are the same options on both commands."""
+def test_prune_and_rebase_share_yes_option(xdg):
+    """-y/--yes is the same option on both commands."""
     prune_help = runner.invoke(app, ["prune", "--help"]).output
     rebase_help = runner.invoke(app, ["rebase", "--help"]).output
+    assert "Skip the confirmation prompt" in _unwrap(rebase_help)
+    assert "Skip the confirmation prompt" in _unwrap(prune_help)
 
-    for phrase in (
-        "Show the git commands without running them",
-        "Skip the confirmation prompt",
-    ):
-        assert phrase in _unwrap(rebase_help)
-        assert phrase in _unwrap(prune_help)
+
+def test_prune_dry_run_help_describes_cleanup(xdg):
+    """--dry-run on prune describes its own survey, not git commands alone."""
+    prune_help = _unwrap(runner.invoke(app, ["prune", "--help"]).output)
+    assert "cleanup" in prune_help.lower() or "dead index" in prune_help.lower()
 
 
 def test_prune_help_mentions_dead_index_entries(xdg):

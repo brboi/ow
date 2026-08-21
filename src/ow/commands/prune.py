@@ -297,6 +297,7 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
         else:
             plans.append(result)
 
+    sys.stdout.flush()
     for alias, exc in survey_errors.items():
         err_console.print(f"  [{alias}] survey failed: {exc}", markup=False)
 
@@ -315,6 +316,7 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
         print("Aborted.")
         return
 
+    sys.stdout.flush()
     outcomes = parallel_per_repo({
         plan.alias: (lambda p=plan: _apply(p))
         for plan in plans

@@ -206,7 +206,7 @@ def ls() -> None:
 
 @app.command()
 def prune(
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the cleanup plan and dead index entries without making any changes"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
 ) -> None:
     """Clean up stale worktree references, orphaned branches, and dead index entries."""

@@ -1,6 +1,7 @@
 import pytest
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from ow.commands import cmd_prune
@@ -320,6 +321,42 @@ def _commit_on_branch(bare: Path, tmp_path: Path, branch: str, name: str) -> str
     sha = _git(scratch, "rev-parse", "HEAD")
     _git(bare, "worktree", "remove", "--force", str(scratch))
     return sha
+
+
+
+
+def test_prune_flushes_stdout_before_stderr_failures(tmp_path, xdg, monkeypatch):
+    """When output is piped, buffered stdout must not reorder behind stderr."""
+    from ow.utils.display import err_console
+
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "orphanbr", "master")
+    _git(bare, "branch", "-D", "master")
+
+    order: list[str] = []
+    orig_flush = sys.stdout.flush
+    def _flush():
+        order.append("flush")
+        orig_flush()
+    monkeypatch.setattr(sys.stdout, "flush", _flush)
+
+    orig_err_print = err_console.print
+    def _err_print(*args, **kwargs):
+        order.append("err")
+        orig_err_print(*args, **kwargs)
+    monkeypatch.setattr(err_console, "print", _err_print)
+
+    lock = bare / "refs" / "heads" / "orphanbr.lock"
+    lock.write_text("")
+    try:
+        with pytest.raises(SystemExit):
+            cmd_prune(yes=True)
+    finally:
+        lock.unlink()
+
+    assert "flush" in order
+    assert "err" in order
+    assert order.index("flush") < order.index("err")
 
 
 def test_prune_keeps_a_branch_whose_commits_exist_nowhere_else(tmp_path, capsys, xdg):
