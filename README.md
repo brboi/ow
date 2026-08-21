@@ -92,7 +92,8 @@ given, must be alphanumeric plus `-`/`_`.
 After confirmation, `ow` sets up each repo's bare clone and required refs, creates (or
 reconciles) its worktree, applies templates, writes `.ow/config.toml`, trusts `mise.toml` if the
 templates produced one, and remembers the workspace in the discovery index. A repo that fails to
-set up is reported; the workspace is still created as long as at least one repo succeeded.
+set up is reported; the workspace is still created as long as at least one repo succeeded, and
+the command exits non-zero — the workspace exists, but it is not the one you asked for.
 
 ### `ow apply`
 
@@ -106,6 +107,9 @@ whole config, since `addons_path` is built from every repo regardless.
 
 If any template file you took has since changed upstream, `ow apply` lists it and points at
 `ow templates --diff`.
+
+Like `ow init` and `ow rebase`, `ow apply` exits non-zero when any repo failed, even though
+everything else — templates, vars, the repos that worked — is applied.
 
 ### `ow status`
 
