@@ -84,30 +84,17 @@ def _display_attached_status(
     actual_branch = get_worktree_branch(worktree_path)
     head_label = actual_branch if actual_branch else "[yellow]DETACHED[/]"
 
-    remote_ref = get_remote_ref_for_branch(
-        worktree_path,
-        resolved.local_branch,
-        {},
-        exclude_ref=resolved.base_ref,
-        base_remote=resolved.remote,
-        refs=refs,
-    )
-    if remote_ref:
-        ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", remote_ref)
-        ahead_base, behind_base = get_rev_list_count(worktree_path, remote_ref, resolved.base_ref)
-        status = f"[bold]{remote_ref}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
-    else:
-        upstream = get_upstream(worktree_path)
-        if upstream:
-            ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
-            if upstream != resolved.base_ref:
-                ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, resolved.base_ref)
-                status = f"[bold]{upstream}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
-            else:
-                status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{upstream}[/] {counts(behind_up, ahead_up)})"
+    upstream = get_upstream(worktree_path)
+    if upstream:
+        ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
+        if upstream != resolved.base_ref:
+            ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, resolved.base_ref)
+            status = f"[bold]{upstream}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
         else:
-            ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
-            status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
+            status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{upstream}[/] {counts(behind_up, ahead_up)})"
+    else:
+        ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
+        status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
 
     return f"        {alias}:{padding}{status}"
 

@@ -67,27 +67,6 @@ class TestDisplayDetachedStatus:
 
 
 class TestDisplayAttachedStatus:
-    def test_attached_with_remote_ref_found(self, tmp_path):
-        worktree = tmp_path / "community"
-        worktree.mkdir()
-        spec = BranchSpec("origin/master", "my-feature")
-        resolved = BranchSpec("origin/master", "my-feature")
-
-        with (
-            patch("ow.commands.status.get_remote_ref_for_branch", return_value="origin/my-feature"),
-            patch("ow.commands.status.get_rev_list_count") as mock_count,
-        ):
-            mock_count.side_effect = [(1, 3), (0, 2)]
-            result = _display_attached_status(
-                "community", spec, resolved, worktree, 9,
-                refs={"origin/my-feature"},
-            )
-
-        assert "community" in result
-        assert "origin/my-feature" in result
-        assert "origin/master" in result
-        assert mock_count.call_count == 2
-
     def test_attached_with_upstream_not_base(self, tmp_path):
         """When no remote ref but upstream exists and differs from base, show upstream + base."""
         worktree = tmp_path / "community"
