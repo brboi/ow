@@ -224,8 +224,10 @@ def main() -> None:
     try:
         app()
     except KeyboardInterrupt:
-        # 130 is the conventional shell status for SIGINT. parallel_per_repo
-        # has already killed the git children by the time we get here.
+        # 130 is the conventional shell status for SIGINT. The git children
+        # are already gone, pool or no pool: each one runs in its own session
+        # so the terminal's SIGINT never reached it, and _run kills the child
+        # it was waiting on when the interrupt lands in communicate().
         print("Interrupted.", file=sys.stderr)
         raise SystemExit(130)
 
