@@ -41,14 +41,19 @@ def parse_branch_spec(spec: str) -> BranchSpec:
     "dev/master-phoenix..fix" → BranchSpec("dev/master-phoenix", "fix")
     "origin/master"           → BranchSpec("origin/master")
     """
-    if ".." in spec:
-        base, local = spec.split("..", 1)
-        if "/" not in base:
-            base = f"origin/{base}"
-        return BranchSpec(base, local)
-    if "/" in spec:
-        return BranchSpec(spec)
-    return BranchSpec(f"origin/{spec}")
+    spec = spec.strip()
+    if not spec:
+        raise ValueError("invalid branch spec: empty string")
+    if ".." not in spec:
+        if "/" in spec:
+            return BranchSpec(spec)
+        return BranchSpec(f"origin/{spec}")
+    base, local = spec.split("..", 1)
+    if not base or not local or ".." in local or " " in base or " " in local:
+        raise ValueError(f"invalid branch spec: {spec!r}")
+    if "/" not in base:
+        base = f"origin/{base}"
+    return BranchSpec(base, local)
 
 
 @dataclass
