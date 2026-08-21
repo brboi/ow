@@ -165,7 +165,12 @@ def test_init_refuses_a_named_directory_that_is_already_a_workspace(tmp_path, mo
     marker.parent.mkdir(parents=True)
     marker.write_text('templates = []\n')
 
-    with _tty(False), _questionary_answers(), pytest.raises(SystemExit) as exc:
+    with (
+        _tty(False),
+        _questionary_answers(),
+        _no_git(tmp_path / "parrot"),
+        pytest.raises(SystemExit) as exc,
+    ):
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
     assert exc.value.code == 1
@@ -180,7 +185,12 @@ def test_init_refuses_the_current_directory_when_it_is_already_a_workspace(tmp_p
     marker.parent.mkdir(parents=True)
     marker.write_text('templates = []\n')
 
-    with _tty(False), _questionary_answers(), pytest.raises(SystemExit) as exc:
+    with (
+        _tty(False),
+        _questionary_answers(),
+        _no_git(tmp_path),
+        pytest.raises(SystemExit) as exc,
+    ):
         cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
 
     assert exc.value.code == 1
