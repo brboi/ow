@@ -5,7 +5,13 @@ import pytest
 
 from ow.commands import cmd_apply
 from ow.utils import index
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
+from ow.utils.config import (
+    BranchSpec,
+    Config,
+    WorkspaceConfig,
+    load_workspace_config,
+    write_workspace_config,
+)
 
 
 class TestCmdApply:
@@ -175,3 +181,69 @@ class TestCmdApplyFailedRepos:
                     cmd_apply(config_with_remotes)
 
         assert f"Workspace '{ws_dir.name}' applied." in capsys.readouterr().out
+
+
+class TestCmdApplyVarBackfill:
+    """Global vars are copied into the workspace config, once, without clobbering.
+
+    A workspace config is meant to be self-contained — a template renders
+    from it alone — so a var only the global config knows has to land in
+    the file. That copy must never win over a value the workspace set for
+    itself, which is the whole point of a per-workspace override.
+    """
+
+    def _workspace(self, tmp_path, vars):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir(parents=True)
+        write_workspace_config(
+            ws_dir / ".ow" / "config.toml",
+            WorkspaceConfig(
+                repos={"community": BranchSpec("origin/master")},
+                templates=["common"],
+                vars=vars,
+            ),
+        )
+        return ws_dir
+
+    def _apply(self, ws_dir, config):
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community"}, {}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    cmd_apply(config)
+
+    def test_a_missing_global_var_is_written_into_the_workspace_config(
+        self, tmp_path, config_with_remotes
+    ):
+        ws_dir = self._workspace(tmp_path, {"http_port": 8069})
+
+        self._apply(ws_dir, config_with_remotes)
+
+        # Read back from disk: the point is what the file now holds, not
+        # what the in-memory object happened to be left holding.
+        written = load_workspace_config(ws_dir / ".ow" / "config.toml")
+        assert written.vars["db_host"] == "localhost"
+        assert written.vars["db_port"] == 5432
+
+    def test_a_var_the_workspace_sets_is_not_overwritten(self, tmp_path, config_with_remotes):
+        """The global value is a default, not an authority."""
+        ws_dir = self._workspace(tmp_path, {"http_port": 9999})
+
+        self._apply(ws_dir, config_with_remotes)
+
+        written = load_workspace_config(ws_dir / ".ow" / "config.toml")
+        assert written.vars["http_port"] == 9999
+
+    def test_nothing_is_written_when_nothing_is_missing(self, tmp_path, config_with_remotes):
+        """No missing var, no rewrite — an untouched config keeps its file
+        mtime and its formatting."""
+        ws_dir = self._workspace(
+            tmp_path, {"http_port": 8069, "db_host": "localhost", "db_port": 5432}
+        )
+
+        with patch("ow.commands.apply.write_workspace_config") as write:
+            self._apply(ws_dir, config_with_remotes)
+
+        write.assert_not_called()
