@@ -64,67 +64,6 @@ class TestCmdApply:
         assert "ow ls" in err
 
 
-class TestCmdApplyOnly:
-    """--only narrows which repos are materialised, and nothing else."""
-
-    def _workspace(self, tmp_path):
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(
-            repos={
-                "community": BranchSpec("origin/master"),
-                "enterprise": BranchSpec("origin/master"),
-            },
-            templates=["common"],
-        )
-        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-        return ws_dir
-
-    def test_only_materialises_just_the_named_repo(self, tmp_path, config_with_remotes):
-        ws_dir = self._workspace(tmp_path)
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})) as materialize:
-                with patch("ow.commands.apply.apply_templates"):
-                    cmd_apply(config_with_remotes, only="community")
-
-        narrowed = materialize.call_args.args[0]
-        assert narrowed.repos == {"community": BranchSpec("origin/master")}
-
-    def test_templates_still_see_every_repo(self, tmp_path, config_with_remotes):
-        """Rendering a partial config would silently break odoo.conf's addons_path."""
-        ws_dir = self._workspace(tmp_path)
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
-                with patch("ow.commands.apply.apply_templates") as templates:
-                    cmd_apply(config_with_remotes, only="community")
-
-        rendered = templates.call_args.args[0]
-        assert list(rendered.repos) == ["community", "enterprise"]
-
-    def test_unknown_alias_fails_and_lists_the_valid_ones(self, tmp_path, config_with_remotes):
-        import typer
-
-        ws_dir = self._workspace(tmp_path)
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.apply.ensure_workspace_materialized") as materialize:
-                with pytest.raises(typer.BadParameter) as exc:
-                    cmd_apply(config_with_remotes, only="nope")
-
-        assert "nope" in str(exc.value)
-        assert "community" in str(exc.value)
-        assert "enterprise" in str(exc.value)
-        materialize.assert_not_called()
-
-    def test_without_only_every_repo_is_materialised(self, tmp_path, config_with_remotes):
-        ws_dir = self._workspace(tmp_path)
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {})) as materialize:
-                with patch("ow.commands.apply.apply_templates"):
-                    cmd_apply(config_with_remotes)
-
-        assert list(materialize.call_args.args[0].repos) == ["community", "enterprise"]
-
-
 class TestCmdApplyFailedRepos:
     """A repo that failed to set up must not be reported as a clean run."""
 
