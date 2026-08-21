@@ -63,7 +63,7 @@ def _load_config() -> Config:
     check_legacy_layout()
     try:
         return load_global_config()
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
         err_console.print(f"Error: could not load {config_file()}: {exc}", markup=False)
         raise typer.Exit(1)
 

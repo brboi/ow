@@ -153,8 +153,16 @@ def load_config(path: Path) -> Config:
 
     remotes: dict[str, dict[str, RemoteConfig]] = {}
     for alias, remote_dict in data.get("remotes", {}).items():
+        if not isinstance(remote_dict, dict):
+            raise ValueError(
+                f"[remotes.{alias}] must be a table of remote entries"
+            )
         remotes[alias] = {}
         for remote_name, remote_cfg in remote_dict.items():
+            if not isinstance(remote_cfg, dict) or "url" not in remote_cfg:
+                raise ValueError(
+                    f"[remotes.{alias}.{remote_name}] must have a 'url' key"
+                )
             remotes[alias][remote_name] = RemoteConfig(
                 url=remote_cfg["url"],
                 pushurl=remote_cfg.get("pushurl"),
