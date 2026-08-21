@@ -185,12 +185,12 @@ class TestCmdApplyFailedRepos:
 
 
 class TestCmdApplyVarBackfill:
-    """Global vars are copied into the workspace config, once, without clobbering.
+    """Global vars must NOT be written into the workspace config.
 
-    A workspace config is meant to be self-contained — a template renders
-    from it alone — so a var only the global config knows has to land in
-    the file. That copy must never win over a value the workspace set for
-    itself, which is the whole point of a per-workspace override.
+    The render merge already makes globals visible to templates via
+    ``{**config.vars, **ws.vars}``, so persisting them into the workspace
+    file pins today's global values and prevents later global edits from
+    taking effect.
     """
 
     def _workspace(self, tmp_path, vars):
@@ -215,39 +215,20 @@ class TestCmdApplyVarBackfill:
                 with patch("ow.commands.apply.apply_templates"):
                     cmd_apply(config)
 
-    def test_a_missing_global_var_is_written_into_the_workspace_config(
-        self, tmp_path, config_with_remotes
-    ):
+    def test_apply_does_not_backfill_global_vars(self, tmp_path, config_with_remotes):
+        """A var only the global config knows must not land in the workspace file."""
         ws_dir = self._workspace(tmp_path, {"http_port": 8069})
 
         self._apply(ws_dir, config_with_remotes)
 
-        # Read back from disk: the point is what the file now holds, not
-        # what the in-memory object happened to be left holding.
         written = load_workspace_config(ws_dir / ".ow" / "config.toml")
-        assert written.vars["db_host"] == "localhost"
-        assert written.vars["db_port"] == 5432
+        # db_host and db_port are in config_with_remotes.vars but NOT in ws.vars;
+        # they must NOT be written into the workspace config file.
+        assert "db_host" not in written.vars
+        assert "db_port" not in written.vars
+        # The workspace's own var is untouched.
+        assert written.vars["http_port"] == 8069
 
-    def test_a_var_the_workspace_sets_is_not_overwritten(self, tmp_path, config_with_remotes):
-        """The global value is a default, not an authority."""
-        ws_dir = self._workspace(tmp_path, {"http_port": 9999})
-
-        self._apply(ws_dir, config_with_remotes)
-
-        written = load_workspace_config(ws_dir / ".ow" / "config.toml")
-        assert written.vars["http_port"] == 9999
-
-    def test_nothing_is_written_when_nothing_is_missing(self, tmp_path, config_with_remotes):
-        """No missing var, no rewrite — an untouched config keeps its file
-        mtime and its formatting."""
-        ws_dir = self._workspace(
-            tmp_path, {"http_port": 8069, "db_host": "localhost", "db_port": 5432}
-        )
-
-        with patch("ow.commands.apply.write_workspace_config") as write:
-            self._apply(ws_dir, config_with_remotes)
-
-        write.assert_not_called()
 
 
 class TestCmdApplyMiseTrust:

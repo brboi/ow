@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from ow.commands.templates import outdated_templates
 from ow.utils.drift import warn_if_drifted
-from ow.utils.config import Config, WorkspaceConfig, select_aliases, write_workspace_config
+from ow.utils.config import Config, WorkspaceConfig, select_aliases
 from ow.utils.git import run_cmd
 from ow.utils.resolver import resolve_workspace
 from ow.utils.templates import apply_templates, ensure_workspace_materialized
@@ -58,11 +58,6 @@ def cmd_apply(config: Config, workspace: str | None = None, *, only: str | None 
         for alias, err in errors.items():
             print(f"  {alias}: {err}", file=sys.stderr)
 
-    missing_vars = {k: v for k, v in config.vars.items() if k not in ws.vars}
-    if missing_vars:
-        ws.vars = {**ws.vars, **missing_vars}
-        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-
     mise_toml = ws_dir / "mise.toml"
     if mise_toml.exists():
         try:
@@ -79,9 +74,9 @@ def cmd_apply(config: Config, workspace: str | None = None, *, only: str | None 
         print("Run `ow templates --diff` to see what changed.")
 
     if errors:
-        # Everything above still ran — the templates are rendered, the vars
-        # are back-filled — but a workspace missing a repo is not applied,
-        # and a CI step that says so must go red rather than green.
+        # Everything above still ran — the templates are rendered — but a
+        # workspace missing a repo is not applied, and a CI step that says
+        # so must go red rather than green.
         noun = "repo" if len(errors) == 1 else "repos"
         print(f"\nWorkspace '{ws_dir.name}' partly applied: {len(errors)} {noun} failed.")
         sys.exit(1)
