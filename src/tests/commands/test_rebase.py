@@ -267,3 +267,50 @@ class TestMultiRepo:
         fetched_ws = mock_fetch.call_args.args[0]
         assert set(drifted_ws.repos) == {"community"}
         assert set(fetched_ws.repos) == {"community"}
+
+
+class TestObservedShape:
+    """D1 — the worktree's real shape, not the config's intent.
+
+    gather_facts is deliberately *not* patched here: the defect was that it
+    trusted the config, planned a two-step rebase against the wrong shape,
+    ran it on a detached HEAD and reported success with exit 0.
+    """
+
+    def _detached_worktree(self, tmp_path: Path) -> tuple[Config, Path]:
+        import subprocess
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..featA"})
+        repo = ws_dir / "community"
+        for args in (
+            ["init", "-q", "-b", "master"],
+            ["config", "user.email", "t@t"],
+            ["config", "user.name", "T"],
+        ):
+            subprocess.run(["git", "-C", str(repo), *args], check=True)
+        (repo / "a.txt").write_text("a")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "branch", "featA"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/master", "HEAD"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach", "HEAD"], check=True)
+        return config, ws_dir
+
+    def test_a_drifted_worktree_is_skipped_and_fails_the_run(self, tmp_path, capsys):
+        config, ws_dir = self._detached_worktree(tmp_path)
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.git") as mock_git,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert exc.value.code == 1
+        assert mock_git.call_count == 0
+        err = capsys.readouterr().err
+        assert "Skipping community" in err
+        assert "ow apply" in err

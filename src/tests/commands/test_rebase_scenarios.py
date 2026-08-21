@@ -304,3 +304,62 @@ class TestFactsFromState:
         assert facts.force_pushed is False
         assert facts.new_patches == 0
         assert facts.unpushed == 0
+
+
+class TestObservedShape:
+    """D1 — the config's `is_detached` is an intent, not an observation.
+
+    Planning against the config while the worktree has drifted rebases a
+    detached HEAD and reports success; the result is abandoned to the reflog
+    the moment anything switches back to the configured branch.
+    """
+
+    def test_a_detached_worktree_under_an_attached_config_is_skipped(self, git_lab):
+        build_pushed_branch(git_lab)
+        git_lab.git("checkout", "-q", "--detach", "HEAD")
+
+        facts = gather_facts(
+            git_lab.path, "community", "origin/master", None, None, is_detached=False,
+        )
+
+        assert facts.is_detached is True  # observed, not the config's False
+        assert facts.detached_drift is True
+        plan = plan_for(facts)
+        assert plan.is_skipped
+        assert plan.steps == ()
+        assert "ow apply" in plan.skip_reason
+
+    def test_an_attached_worktree_under_a_detached_config_is_skipped(self, git_lab):
+        build_pushed_branch(git_lab)
+
+        facts = gather_facts(
+            git_lab.path, "community", "origin/master", None, None, is_detached=True,
+        )
+
+        assert facts.is_detached is False
+        assert facts.detached_drift is True
+        assert plan_for(facts).is_skipped
+
+    def test_an_aligned_detached_worktree_still_plans_its_switch(self, git_lab):
+        build_pushed_branch(git_lab)
+        git_lab.git("checkout", "-q", "--detach", "HEAD")
+
+        facts = gather_facts(
+            git_lab.path, "community", "origin/master", None, None, is_detached=True,
+        )
+
+        assert facts.detached_drift is False
+        plan = plan_for(facts)
+        assert not plan.is_skipped
+        assert plan.detaches
+
+    def test_an_aligned_attached_worktree_is_unaffected(self, git_lab):
+        build_pushed_branch(git_lab)
+
+        facts = gather_facts(
+            git_lab.path, "community", "origin/master", "dev/work",
+            git_lab.sha("refs/remotes/dev/work"), is_detached=False,
+        )
+
+        assert facts.detached_drift is False
+        assert not plan_for(facts).is_skipped

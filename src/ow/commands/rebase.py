@@ -21,6 +21,7 @@ from ow.utils.git import (
     parallel_per_repo,
     resolve_spec,
     rev_parse,
+    worktree_is_detached,
 )
 from ow.utils.rebase_plan import RebasePlan, RepoFacts, plan_for
 from ow.utils.refs import fetch_workspace_refs
@@ -63,11 +64,26 @@ def gather_facts(
     up_before: str | None,
     is_detached: bool,
 ) -> RepoFacts:
-    """Observe one repo. No decisions are taken here."""
+    """Observe one repo. No decisions are taken here.
+
+    `is_detached` is what the *config* asks for. The worktree's real shape is
+    observed here, and a disagreement is itself a fact: planning against the
+    config while HEAD has drifted rebases the wrong thing.
+    """
+    observed_detached = worktree_is_detached(worktree)
+    detached_drift = observed_detached != is_detached
+
     busy = in_progress_operation(worktree)
     if busy is not None:
         return RepoFacts(
-            alias=alias, base=base, up=up, is_detached=is_detached, busy=busy,
+            alias=alias, base=base, up=up, is_detached=observed_detached,
+            detached_drift=detached_drift, busy=busy,
+        )
+
+    if detached_drift:
+        return RepoFacts(
+            alias=alias, base=base, up=up, is_detached=observed_detached,
+            detached_drift=True,
         )
 
     force_pushed = False
@@ -94,7 +110,7 @@ def gather_facts(
         alias=alias,
         base=base,
         up=up,
-        is_detached=is_detached,
+        is_detached=observed_detached,
         dirty_files=tuple(dirty_files(worktree)),
         force_pushed=force_pushed,
         new_patches=new_patches,

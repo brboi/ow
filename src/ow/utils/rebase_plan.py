@@ -17,7 +17,8 @@ class RepoFacts:
     alias: str
     base: str
     up: str | None = None
-    is_detached: bool = False
+    is_detached: bool = False  # observed from the worktree, not the config
+    detached_drift: bool = False  # observation disagrees with the config
     busy: tuple[str, str, str] | None = None  # (operation, continue, abort)
     dirty_files: tuple[str, ...] = ()
     force_pushed: bool = False
@@ -95,6 +96,21 @@ def plan_for(f: RepoFacts, *, autostash: bool = False) -> RebasePlan:
         return RebasePlan(
             skip_reason=f"{operation} in progress",
             resume=(cont, abort),
+            **carried,
+        )
+
+    # Planning against the config's shape while the worktree has drifted to
+    # the other one rebases something nobody will look at again: the result
+    # lives on a detached HEAD the next `ow apply` throws away, or on a
+    # branch the config does not name.
+    if f.detached_drift:
+        found = "a detached HEAD" if f.is_detached else "a branch"
+        expected = "a branch" if f.is_detached else "a detached HEAD"
+        return RebasePlan(
+            skip_reason=(
+                f"worktree is on {found}, config expects {expected}"
+                " — run `ow apply` to realign"
+            ),
             **carried,
         )
 
