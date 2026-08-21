@@ -233,9 +233,10 @@ def test_prune_reports_only_the_branches_it_actually_deleted(tmp_path, capsys, x
     finally:
         refs_heads.chmod(0o755)
 
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
     assert "orphanbr" in _branches(bare)
-    assert "could not delete: orphanbr" in out
+    assert "could not delete: orphanbr" in captured.err
+    assert "could not delete" not in captured.out
 
 
 def _commit_on_branch(bare: Path, tmp_path: Path, branch: str, name: str) -> str:
@@ -606,3 +607,42 @@ def test_prune_lists_branches_in_a_stable_order(tmp_path, capsys, xdg):
     out = capsys.readouterr().out
     listed = out.split("orphaned branches: ", 1)[1].split("\n", 1)[0].split(", ")
     assert listed == sorted(names)
+
+
+def test_prune_says_when_it_has_finished(tmp_path, capsys, xdg, monkeypatch):
+    """The plan is written in the imperative, so silence afterwards is ambiguous.
+
+    "delete 1 orphaned branch: spent" followed by nothing at all reads the
+    same whether the delete happened, was skipped, or fell over.
+    """
+    _answer(monkeypatch, "y")
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "spent", "refs/remotes/origin/master")
+
+    cmd_prune(_make_config())
+
+    assert "Done." in capsys.readouterr().out
+
+
+def test_prune_does_not_claim_to_be_done_when_it_did_nothing(tmp_path, capsys, xdg):
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "-D", "master")
+
+    cmd_prune(_make_config())
+
+    out = capsys.readouterr().out
+    assert "All bare repos are clean." in out
+    assert "Done." not in out
+
+
+def test_prune_does_not_claim_to_be_done_when_it_only_refused(tmp_path, capsys, xdg):
+    """Keeping every branch it looked at is not work performed."""
+    bare = _bare_repo(tmp_path)
+    _commit_on_branch(bare, tmp_path, "featA", "work")
+    _git(bare, "branch", "-D", "master")
+
+    cmd_prune(_make_config())
+
+    out = capsys.readouterr().out
+    assert "keep 1 branch with unpushed commits: featA" in out
+    assert "Done." not in out

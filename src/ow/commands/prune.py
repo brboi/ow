@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from ow.utils.config import Config
+from ow.utils.display import err_console
 from ow.utils import index, paths
 from ow.utils.git import _run, parallel_per_repo
 
@@ -295,15 +296,27 @@ def cmd_prune(config: Config, *, dry_run: bool = False, yes: bool = False) -> No
     outcomes = parallel_per_repo({
         plan.alias: (lambda p=plan: _apply(p))
         for plan in plans
-        if not plan.is_empty
+        if plan.commands
     })
+    acted = False
     for plan in plans:
         outcome = outcomes.get(plan.alias)
         if isinstance(outcome, Exception) or outcome is None:
             continue
+        acted = acted or bool(outcome.deleted) or bool(plan.stale_worktrees)
         if outcome.failed:
-            print(f"  [{plan.alias}] could not delete: {', '.join(outcome.failed)}")
+            # git's refusals are the user's problem to act on, so they belong
+            # on stderr where a pipeline can still see them.
+            err_console.print(
+                f"  [{plan.alias}] could not delete: {', '.join(outcome.failed)}",
+                markup=False,
+            )
 
     if dropped:
         index.known_workspaces()
         print(_index_line(dropped, "Dropped"))
+
+    if acted:
+        # The plan above is written in the imperative. Without this, silence
+        # is all that separates "done" from "gave up somewhere".
+        print("Done.")
