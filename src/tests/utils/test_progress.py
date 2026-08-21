@@ -14,13 +14,14 @@ def test_emits_nothing_when_redirected():
 
 
 def test_shows_the_label_and_a_count_on_a_terminal():
-    buf = io.StringIO()
-    console = _make_console(file=buf, force_terminal=True, width=120)
-    with task_progress("Fetching", 3, console=console) as advance:
-        advance()
-    out = buf.getvalue()
+    console = _make_console(force_terminal=True, width=120)
+    with console.capture() as capture:
+        with task_progress("Fetching", 3, console=console) as advance:
+            advance()
+    out = capture.get()
     assert "Fetching" in out
     assert "1/3" in out
+
 
 
 def test_runs_the_wrapped_work_regardless(self=None):
@@ -34,8 +35,8 @@ def test_runs_the_wrapped_work_regardless(self=None):
 
 
 def test_a_zero_total_does_not_divide_by_zero():
-    buf = io.StringIO()
-    console = _make_console(file=buf, force_terminal=True, width=120)
-    with task_progress("Nothing", 0, console=console):
-        pass
-    assert "Nothing" in buf.getvalue()
+    console = _make_console(force_terminal=True, width=120)
+    with console.capture() as capture:
+        with task_progress("Nothing", 0, console=console):
+            pass
+    assert "Nothing" in capture.get()
