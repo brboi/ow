@@ -50,8 +50,8 @@ code .                             # open in your IDE and enjoy
 | Command | Flags | Description |
 |---------|-------|-------------|
 | `ow init` | `[NAME]`, `-c/--configuration`, `-t/--template`, `-r/--repo` | Create a workspace here, or in `./NAME` |
-| `ow apply` | `[workspace]`, `--only` | Re-render templates and materialize worktrees |
-| `ow status` | `[workspace]` | Show branch status with behind/ahead counts |
+| `ow apply` | `[workspace]` | Re-render templates and materialize worktrees |
+| `ow status` | `[workspace]`, `-f/--fetch` | Show branch status with behind/ahead counts |
 | `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
 | `ow prune` | `--dry-run`, `-y/--yes` | Clean up stale worktree references, orphaned branches, and dead index entries |
 | `ow ls` | — | List every known workspace, its path, and its repos |
@@ -96,22 +96,19 @@ the command exits non-zero — the workspace exists, but it is not the one you a
 ### `ow apply`
 
 Re-renders templates and materializes worktrees for a workspace: creates any missing worktree,
-reconciles attached/detached state for existing ones, and tops up the workspace's `vars` with
-any global default not already overridden there. Useful after changing templates or the global
-config without recreating the workspace.
-
-`--only alias1,alias2` narrows which repos get materialized; templates still render against the
-whole config, since `addons_path` is built from every repo regardless.
+reconciles attached/detached state for existing ones, and renders the services compose file.
+Useful after changing templates or the global config without recreating the workspace.
 
 If any template file you took has since changed upstream, `ow apply` lists it and points at
 `ow templates --diff`.
-
+Files left over from a template bundle you've since removed from your config are listed as
+orphans — remove them manually if stale.
 Like `ow init` and `ow rebase`, `ow apply` exits non-zero when any repo failed, even though
 everything else — templates, vars, the repos that worked — is applied.
 
 ### `ow status`
 
-Fetches latest refs and displays branch status with color-coded behind/ahead counts:
+Shows local branch status with behind/ahead counts — no network by default, like `git status`:
 
 ```
 [canary]
@@ -123,6 +120,9 @@ Fetches latest refs and displays branch status with color-coded behind/ahead cou
         community:  https://github.com/odoo-dev/odoo/tree/master-canary
         enterprise: https://github.com/odoo-dev/enterprise/tree/master-canary
 ```
+
+Pass `-f`/`--fetch` to fetch latest refs before showing status. Behind/ahead counts are then
+relative to fresh remote-tracking refs; without it, they reflect the last fetch.
 
 ### `ow rebase`
 
@@ -200,14 +200,16 @@ packaged) for every outdated file. See [Template System](#template-system).
 |------|------|-------|
 | Global config | `$XDG_CONFIG_HOME/ow/config.toml` | `[vars]` + `[remotes]`; bootstrapped with a commented default the first time any command needs it |
 | Template overrides | `$XDG_CONFIG_HOME/ow/templates/` | populated one file at a time, by `ow templates --take` |
-| Services | `$XDG_CONFIG_HOME/ow/services/` | conventional place for your own copy of the packaged compose file; no `ow` command reads it |
+| Services | `$XDG_CONFIG_HOME/ow/services/` | rendered by `ow init` and `ow apply` from the packaged `compose.yml.j2` |
 | Bare repos | `$XDG_DATA_HOME/ow/repos/` | one `<alias>.git` per remote, shared by every workspace on the machine |
-| Container volumes | `$XDG_DATA_HOME/ow/volumes/` | defined for this purpose, but the packaged `compose.yml` uses `./volumes/`, relative to wherever you keep the file — not this directory |
+| Container volumes | `$XDG_DATA_HOME/ow/volumes/` | used by the rendered `compose.yml` for postgres and mailpit data |
 | Workspace index | `$XDG_STATE_HOME/ow/workspaces` | plain list of paths `ow ls` and name lookup read; self-healing, never the source of truth |
 | Template baselines | `$XDG_STATE_HOME/ow/template-base/` | pristine copies written by `ow templates --take`, used to detect `taken, outdated` |
 
 A workspace's own config lives inside it, at `.ow/config.toml` — it stores that workspace's
 `templates`, `repos`, and `vars`. Its name isn't stored there; it's the directory's own name.
+Both config files start with `version = 1`; a file with a newer version is refused with an
+upgrade message.
 
 ### Remotes
 
@@ -271,7 +273,8 @@ in by hand instead of through `--take` has no baseline, so it's never flagged as
 | `zed/.zed/` | `settings.json`, `debug.json` |
 | `bwrap/` | Sandbox scripts for AI coding assistants |
 
-Templates are Jinja2 (`.j2` extension); static files are copied as-is.
+Templates are Jinja2 (`.j2` extension); static files are copied as-is. Undefined variables
+raise at render time — use `{{ vars.key | default(fallback) }}` for optional values.
 
 To create a custom bundle:
 
@@ -285,26 +288,14 @@ Then select it during `ow init`, or add it to `templates` in an existing workspa
 
 ## Services
 
-`ow` packages a Docker Compose stack (postgres, pgweb, mailpit) for local development, but no
-`ow` command starts, stops, or otherwise reads it — you drive it yourself with plain `docker
-compose`. Fetch it into `$XDG_CONFIG_HOME/ow/services/` — the conventional spot — and run it
-from there:
+`ow` packages a Docker Compose stack (postgres, pgweb, mailpit) for local development.
+No `ow` command starts or stops it — you drive it with plain `docker compose` — but `ow init`
+and `ow apply` render the compose file into `$XDG_CONFIG_HOME/ow/services/compose.yml` for you,
+with the container volume path baked in. The generated `mise.toml` exports `COMPOSE_FILE` so
+`docker compose up` works from inside any workspace:
 
 ```sh
-mkdir -p ~/.config/ow/services
-curl -fsSL https://raw.githubusercontent.com/brboi/ow/main/src/ow/_static/services/compose.yml \
-    -o ~/.config/ow/services/compose.yml
-docker compose -f ~/.config/ow/services/compose.yml up -d
-```
-
-It is also readable in the
-[repo](https://github.com/brboi/ow/blob/main/src/ow/_static/services/compose.yml). If you
-installed with `pip install` into an active venv rather than `pipx` (which puts `ow` in its own
-venv, unreachable from the system `python`), that venv's `python` can get you the same file:
-
-```sh
-cp "$(python -c 'import ow, pathlib; print(pathlib.Path(ow.__file__).parent / "_static/services/compose.yml")')" \
-   ~/.config/ow/services/
+docker compose up -d      # from inside a workspace (COMPOSE_FILE is set)
 ```
 
 | Service | Port | Description |
@@ -312,8 +303,10 @@ cp "$(python -c 'import ow, pathlib; print(pathlib.Path(ow.__file__).parent / "_
 | postgres | 5432 | PostgreSQL 17 with pgvector |
 | pgweb | 8081 | Web-based PostgreSQL browser |
 | mailpit | 8025 / 1025 | Email testing (web UI / SMTP) |
-
-Point your workspaces at them via `[vars]`, either globally or per workspace:
+ 
+The generated `odoorc` sets `data_dir = <workspace>/.odoo`, so each workspace gets its own
+filestore — `rm -rf <workspace>` cleans it up. Point Odoo at the services via `[vars]`,
+either globally or per workspace:
 
 ```toml
 [vars]
