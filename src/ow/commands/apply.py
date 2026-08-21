@@ -3,15 +3,31 @@ import sys
 from dataclasses import replace
 
 from ow.commands.templates import outdated_templates
+from ow.utils.drift import warn_if_drifted
 from ow.utils.config import Config, WorkspaceConfig, select_aliases, write_workspace_config
 from ow.utils.git import run_cmd
 from ow.utils.resolver import resolve_workspace
 from ow.utils.templates import apply_templates, ensure_workspace_materialized
 
 
-def cmd_apply(config: Config, workspace: str | None = None, *, only: str | None = None) -> None:
+def cmd_apply(config: Config, workspace: str | None = None, *, only: str | None = None, check: bool = False) -> None:
     """Make the tree match .ow/config.toml: materialize worktrees, render templates."""
     ws_dir, ws = resolve_workspace(name=workspace)
+
+    if check:
+        # --check is read-only: it reports drift and stale templates
+        # without materializing, rendering, or trusting anything. Exit
+        # non-zero so a CI step or pre-flight script can gate on it.
+        drifted = warn_if_drifted(ws, ws_dir)
+        outdated = outdated_templates()
+        if outdated:
+            print("\nTemplate(s) ow has changed since you took them:")
+            for name in outdated:
+                print(f"  {name}")
+        if drifted or outdated:
+            sys.exit(1)
+        print(f"\nWorkspace '{ws_dir.name}' is up to date.")
+        return
 
     # --only narrows the git work, never the rendering. A template sees the
     # whole workspace by construction — odoo.conf's addons_path is built from

@@ -324,3 +324,55 @@ class TestCmdApplyMiseTrust:
                         cmd_apply(config_with_remotes)
 
         assert "mise trust" in capsys.readouterr().err
+
+
+class TestCmdApplyCheck:
+    """--check reports drift and stale templates without modifying anything."""
+
+    def _workspace(self, tmp_path):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(
+            repos={"community": BranchSpec("origin/master")},
+            templates=["common"],
+        )
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+        return ws_dir
+
+    def test_check_exits_non_zero_when_drifted(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.warn_if_drifted", return_value=True):
+                with patch("ow.commands.apply.outdated_templates", return_value=[]):
+                    with pytest.raises(SystemExit) as exc:
+                        cmd_apply(config_with_remotes, check=True)
+        assert exc.value.code == 1
+
+    def test_check_exits_zero_when_clean(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.warn_if_drifted", return_value=False):
+                with patch("ow.commands.apply.outdated_templates", return_value=[]):
+                    cmd_apply(config_with_remotes, check=True)
+        assert "up to date" in capsys.readouterr().out
+
+    def test_check_does_not_materialize_or_render(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.warn_if_drifted", return_value=False):
+                with patch("ow.commands.apply.outdated_templates", return_value=[]):
+                    with patch("ow.commands.apply.ensure_workspace_materialized") as mock_mat:
+                        with patch("ow.commands.apply.apply_templates") as mock_tpl:
+                            cmd_apply(config_with_remotes, check=True)
+        mock_mat.assert_not_called()
+        mock_tpl.assert_not_called()
+
+    def test_check_reports_outdated_templates(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.warn_if_drifted", return_value=False):
+                with patch("ow.commands.apply.outdated_templates", return_value=["common/odools.toml.j2"]):
+                    with pytest.raises(SystemExit) as exc:
+                        cmd_apply(config_with_remotes, check=True)
+        assert exc.value.code == 1
+        assert "common/odools.toml.j2" in capsys.readouterr().out
