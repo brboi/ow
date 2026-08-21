@@ -329,7 +329,7 @@ class TestCmdApplyMiseTrust:
 class TestCmdApplyCheck:
     """--check reports drift and stale templates without modifying anything."""
 
-    def _workspace(self, tmp_path):
+    def _workspace(self, tmp_path, *, create_worktrees=True):
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(
@@ -337,6 +337,9 @@ class TestCmdApplyCheck:
             templates=["common"],
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+        if create_worktrees:
+            for alias in ws.repos:
+                (ws_dir / alias).mkdir()
         return ws_dir
 
     def test_check_exits_non_zero_when_drifted(self, tmp_path, capsys, config_with_remotes):
@@ -376,3 +379,17 @@ class TestCmdApplyCheck:
                         cmd_apply(config_with_remotes, check=True)
         assert exc.value.code == 1
         assert "common/odools.toml.j2" in capsys.readouterr().out
+
+    def test_check_exits_nonzero_when_worktree_missing(self, tmp_path, capsys, config_with_remotes):
+        """--check exits 1 when a configured repo has no worktree directory."""
+        ws_dir = self._workspace(tmp_path, create_worktrees=False)
+        # Workspace has repos configured but no worktree directories exist
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.warn_if_drifted", return_value=False):
+                with patch("ow.commands.apply.outdated_templates", return_value=[]):
+                    with pytest.raises(SystemExit) as exc:
+                        cmd_apply(config_with_remotes, check=True)
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "missing" in err.lower()
+        assert "community" in err

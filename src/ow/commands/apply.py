@@ -19,6 +19,18 @@ def cmd_apply(config: Config, workspace: str | None = None, *, only: str | None 
         # without materializing, rendering, or trusting anything. Exit
         # non-zero so a CI step or pre-flight script can gate on it.
         drifted = warn_if_drifted(ws, ws_dir)
+        missing_worktrees = [
+            alias for alias in ws.repos
+            if not (ws_dir / alias).exists()
+        ]
+        if missing_worktrees:
+            print(
+                "Worktree(s) missing:",
+                file=sys.stderr,
+            )
+            for alias in missing_worktrees:
+                print(f"  {alias}", file=sys.stderr)
+            drifted = True
         outdated = outdated_templates()
         if outdated:
             print("\nTemplate(s) ow has changed since you took them:")
