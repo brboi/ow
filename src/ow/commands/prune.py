@@ -196,7 +196,7 @@ def _dead_index_entries() -> int:
             if candidate in seen:
                 continue
             seen.add(candidate)
-            if not (candidate / index.MARKER).exists():
+            if not index._still_there(candidate):
                 dropped += 1
 
     return dropped

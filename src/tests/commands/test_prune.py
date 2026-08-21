@@ -113,6 +113,34 @@ def test_cmd_prune_counts_only_workspaces_that_vanished(tmp_path, capsys, xdg):
 
 
 
+
+def test_cmd_prune_survives_an_unstattable_workspace(tmp_path, capsys, xdg):
+    """An indexed workspace under a directory that cannot be stat'd must not
+    crash prune — the index predicate was hardened for this exact case.
+    """
+    live = _make_indexed_workspace(tmp_path, "live")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    hidden = _make_indexed_workspace(vault, "hidden")
+    index.remember(live)
+    index.remember(hidden)
+
+    vault.chmod(0o000)
+    try:
+        cmd_prune()
+    finally:
+        vault.chmod(0o755)
+
+    # The hidden workspace could not be reached, so the index cannot tell
+    # whether it is alive.  It must not be counted as dead, and prune must
+    # not traceback.
+    captured = capsys.readouterr()
+    assert "index" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+
+
 # ---------------------------------------------------------------------------
 # Real bare repos
 #
