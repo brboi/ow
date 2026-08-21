@@ -45,12 +45,45 @@ def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
         _children.add(proc)
     try:
         stdout, stderr = proc.communicate()
+    except BaseException:
+        # Whatever went wrong here — a Ctrl-C landing in communicate() above
+        # all — the child must not outlive it. Its own session means the
+        # terminal's SIGINT never reached it, and the discard below takes it
+        # out of terminate_children()'s reach, so this is the last moment
+        # anything can still kill it.
+        _kill_group(proc)
+        raise
     finally:
         with _children_lock:
             _children.discard(proc)
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, args, stdout, stderr)
     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal the child's whole process group, tolerating its being gone.
+
+    The group, not the process: git drives helpers of its own (ssh, git-remote-*,
+    index-pack), and signalling only the parent leaves those behind.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _kill_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
+    """SIGTERM one child's group, SIGKILL it if it outlives `grace`, and reap it."""
+    _signal_group(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc, signal.SIGKILL)
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def live_children() -> int:
@@ -68,20 +101,16 @@ def terminate_children(grace: float = 2.0) -> int:
         _children.clear()
 
     for proc in procs:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+        _signal_group(proc, signal.SIGTERM)
 
+    # One deadline shared by every child, rather than `grace` each: they were
+    # all signalled together, so they get their grace period together.
     deadline = time.monotonic() + grace
     for proc in procs:
         try:
             proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
+            _signal_group(proc, signal.SIGKILL)
             try:
                 proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired:

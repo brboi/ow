@@ -56,6 +56,43 @@ class TestProcessGroup:
         assert result.returncode == 0
 
 
+class TestInterruptedRun:
+    """What happens to the child when the *waiting* is what gets interrupted.
+
+    start_new_session means the terminal's Ctrl-C never reaches the child, so
+    nothing kills it unless _run does. And _run drops the process from the
+    registry on its way out, which puts it beyond the reach of a later
+    terminate_children() too — a `git rebase` abandoned here would run to
+    completion and move the branch after ow said it had stopped.
+    """
+
+    @pytest.mark.parametrize("raised", [KeyboardInterrupt, OSError])
+    def test_the_abandoned_child_is_killed_before_the_exception_escapes(self, raised):
+        spawned: list[subprocess.Popen] = []
+
+        def interrupted(proc, *args, **kwargs):
+            spawned.append(proc)
+            raise raised
+
+        try:
+            with patch.object(
+                subprocess.Popen, "communicate", autospec=True, side_effect=interrupted,
+            ):
+                with pytest.raises(raised):
+                    _run([sys.executable, "-c", "import time; time.sleep(30)"])
+
+            assert len(spawned) == 1
+            # poll() only reports a status for a child that has exited and been
+            # reaped, so this is "dead", not merely "signalled".
+            assert spawned[0].poll() is not None
+            assert live_children() == 0
+        finally:
+            for proc in spawned:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+
 class TestTerminateChildren:
     def test_kills_a_running_child(self):
         proc = subprocess.Popen(
