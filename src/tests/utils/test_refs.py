@@ -328,3 +328,66 @@ class TestFetchJobShape:
         assert calls == []
         assert "community" not in outcome.tracks
         assert outcome.failed == frozenset()
+
+
+class TestFetchJobsSameRepoAreSequential:
+    """Two fetches targeting the same bare repo must not run concurrently.
+
+    git takes no repo-wide fetch lock; concurrent git-fetch processes
+    against the same bare repo race on loose-ref updates and can corrupt
+    them. Jobs for the same bare repo must be chained sequentially while
+    jobs for different repos remain parallel.
+    """
+
+    def test_no_concurrent_fetches_against_the_same_bare_repo(
+        self, tmp_path, monkeypatch, xdg,
+    ):
+        """A track fetch and a force-fetch upstream hit the same bare repo.
+        With a real thread pool they must not overlap."""
+        import threading
+        from ow.utils import refs as refs_mod
+
+        ws_dir = _bare_and_worktree(tmp_path)
+
+        # Barrier(2): if two fetches reach it concurrently the barrier
+        # trips and we flag a violation.  If they are chained, only one
+        # thread ever waits — the barrier times out alone.
+        barrier = threading.Barrier(2, timeout=1)
+        concurrent = threading.Event()
+
+        def fake_run(args, **kwargs):
+            try:
+                barrier.wait()
+                concurrent.set()
+            except (threading.BrokenBarrierError, threading.TimeoutError):
+                pass
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        monkeypatch.setattr(refs_mod, "_run", fake_run)
+        # Do NOT mock parallel_per_repo — the real ThreadPoolExecutor is
+        # the whole point of this test.
+        monkeypatch.setattr(refs_mod, "rev_parse", lambda repo, ref: "cafe" * 10)
+        monkeypatch.setattr(refs_mod, "get_upstream", lambda p: None)
+
+        def fake_resolve(bare, spec, remotes):
+            return (
+                BranchSpec("dev/work", "work")
+                if spec.local_branch
+                else BranchSpec("origin/master")
+            )
+
+        refs_mod.fetch_workspace_refs(
+            WorkspaceConfig(
+                repos={"community": BranchSpec("origin/master", "work")},
+                templates=[],
+            ),
+            ws_dir,
+            Config(vars={}, remotes={"community": {}}),
+            fetch_upstreams=True,
+            resolve_fn=fake_resolve,
+        )
+
+        assert not concurrent.is_set(), (
+            "two fetches hit the same bare repo concurrently"
+        )
+

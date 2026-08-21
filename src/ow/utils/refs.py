@@ -1,4 +1,5 @@
 import subprocess
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -67,7 +68,9 @@ def fetch_workspace_refs(
 
     Three-phase pipeline:
     1. Resolve specs per repo (parallel) — determines what to fetch
-    2. Execute all fetches flat (parallel) — one thread per fetch, not per repo
+    2. Execute fetches chained per bare repo (parallel across repos,
+       sequential within each repo) — git takes no repo-wide fetch lock,
+       so two fetches against the same bare repo must not overlap
     3. Print results (sequential)
     """
     bare_repos_dir = paths.repos_dir()
@@ -158,7 +161,12 @@ def fetch_workspace_refs(
             key = f"{alias}:{i}"
             fetch_tasks[key] = job
 
-    # -- Phase 2: execute all fetches flat --------------------------------
+    # -- Phase 2: execute fetches chained per bare repo -------------------
+    #
+    # git-fetch takes no repo-wide lock.  Two fetches against the same
+    # bare repo race on loose-ref updates and can corrupt them.  Group
+    # jobs by bare repo: chains run in parallel across repos, but jobs
+    # within each chain run one at a time.
 
     def _do_fetch(job: _FetchJob) -> subprocess.CompletedProcess:
         args = ["git", "-C", job.bare_repo, "fetch"]
@@ -168,11 +176,31 @@ def fetch_workspace_refs(
         return _run(args, capture_output=True)
 
     if fetch_tasks:
-        fetch_callables = {key: (lambda j=job: _do_fetch(j)) for key, job in fetch_tasks.items()}
-        with task_progress("Fetching ref(s)", len(fetch_callables)) as advance:
-            fetch_results = parallel_per_repo(
-                fetch_callables, on_done=lambda _key: advance()
+        repo_chains: dict[str, list[tuple[str, _FetchJob]]] = defaultdict(list)
+        for key, job in fetch_tasks.items():
+            repo_chains[job.bare_repo].append((key, job))
+
+        def _run_chain(items: list[tuple[str, _FetchJob]]) -> dict[str, subprocess.CompletedProcess]:
+            return {key: _do_fetch(job) for key, job in items}
+
+        chain_tasks = {
+            repo: (lambda chain=items: _run_chain(chain))
+            for repo, items in repo_chains.items()
+        }
+        with task_progress("Fetching ref(s)", len(chain_tasks)) as advance:
+            chain_results = parallel_per_repo(
+                chain_tasks,
+                on_done=lambda _repo: advance(),
             )
+        fetch_results: dict[str, subprocess.CompletedProcess | Exception] = {}
+        for result in chain_results.values():
+            if isinstance(result, Exception):
+                continue
+            fetch_results.update(result)
+        for repo, result in chain_results.items():
+            if isinstance(result, Exception):
+                for key, _job in repo_chains[repo]:
+                    fetch_results[key] = result
     else:
         fetch_results = {}
 
