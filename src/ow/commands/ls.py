@@ -65,10 +65,15 @@ def cmd_ls() -> None:
 
     table = Table(box=None)
     table.add_column("NAME")
-    table.add_column("PATH")
+    # Folded, not truncated: on a narrow terminal the path is the one thing
+    # the reader came for, and "~/dev/very/long/pa…" is not it.
+    table.add_column("PATH", overflow="fold")
     table.add_column("REPOS")
 
-    for ws_dir in workspaces:
+    # Index order is the order workspaces happened to be first resolved,
+    # which is arbitrary to everyone but the index. Path breaks the tie so
+    # two workspaces sharing a name still come out in a stable order.
+    for ws_dir in sorted(workspaces, key=lambda p: (p.name, str(p))):
         # NAME and PATH come straight from the filesystem: a directory named
         # something like "ws[/bad]" is data, not Rich markup, and must not
         # be parsed as such — Text() renders it literally.

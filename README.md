@@ -171,7 +171,7 @@ with the command to delete it by hand.
 
 ### `ow ls`
 
-Lists every workspace `ow` currently knows about — name, path (home-relative), and its repos
+Lists every workspace `ow` currently knows about, in name order — name, path (home-relative), and its repos
 with their branch specs — read from the discovery index and each workspace's own
 `.ow/config.toml`. No git, no network: this is local files only. A workspace config that fails
 to parse shows as an error in place of its repos rather than aborting the listing.

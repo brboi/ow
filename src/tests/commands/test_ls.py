@@ -12,6 +12,7 @@ Every test here reaches the index, so every test takes the `xdg` fixture.
 Without it a test writes into the developer's real XDG state directory.
 """
 
+import re
 import shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -256,3 +257,51 @@ def test_never_runs_git(tmp_path, capsys, xdg):
         cmd_ls()
 
     mock_popen.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 7. Ordering and column overflow.
+# ---------------------------------------------------------------------------
+
+def test_listing_is_sorted_by_name(tmp_path, capsys, xdg):
+    """Index order is the order workspaces happened to be first resolved,
+    which is nobody's idea of a listing."""
+    for name in ("zeta", "middle", "alpha"):
+        _make_ws(tmp_path, name)
+
+    cmd_ls()
+
+    out = capsys.readouterr().out
+    assert out.index("alpha") < out.index("middle") < out.index("zeta")
+
+
+def test_same_name_in_two_places_is_ordered_by_path(tmp_path, capsys, xdg, monkeypatch):
+    """Name alone is not a total order — two checkouts can share one."""
+    monkeypatch.setattr("ow.commands.ls.console", Console(highlight=False, soft_wrap=True, width=300))
+    _make_ws(tmp_path / "b-second", "dup")
+    _make_ws(tmp_path / "a-first", "dup")
+
+    cmd_ls()
+
+    out = capsys.readouterr().out
+    assert out.index("a-first") < out.index("b-second")
+
+
+def test_a_long_path_folds_rather_than_truncating(tmp_path, capsys, xdg, monkeypatch):
+    """The path is the one thing you came to ls for; ellipsizing it away
+    turns the answer into `~/dev/very/long/pa…`."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setattr("ow.commands.ls.console", Console(highlight=False, width=40))
+
+    _make_ws(fake_home / "dev" / "very" / "long" / "path" / "indeed", "myws")
+
+    cmd_ls()
+
+    out = capsys.readouterr().out
+    assert "…" not in out
+    # Folding splits the path mid-component across rows, so join the rows
+    # back up before looking for it.
+    compact = re.sub(r"\s+", "", re.sub(r"\x1b\[[0-9;]*m", "", out))
+    assert "~/dev/very/long/path/indeed/myws" in compact
