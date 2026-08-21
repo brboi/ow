@@ -205,20 +205,22 @@ def test_prune_does_not_delete_a_branch_held_by_a_live_worktree(tmp_path, capsys
 def test_prune_reports_only_the_branches_it_actually_deleted(tmp_path, capsys, xdg):
     """A refused delete must not be reported as a deletion.
 
-    Making refs/heads read-only is the cheapest real refusal: git cannot
-    take the ref lock, exits non-zero, and the branch survives. Reporting it
-    as gone sends the user looking for work that is still there.
+    A stale `.lock` beside the ref is the cheapest real refusal: git checks
+    for it before every ref update, exits non-zero, and the branch survives.
+    Reporting it as gone sends the user looking for work that is still there.
+    A read-only refs/heads would be simpler still, but permissions do not
+    stop root — and CI containers routinely run as root.
     """
     bare = _bare_repo(tmp_path)
     _git(bare, "branch", "orphanbr", "master")
     _git(bare, "branch", "-D", "master")
 
-    refs_heads = bare / "refs" / "heads"
-    refs_heads.chmod(0o555)
+    lock = bare / "refs" / "heads" / "orphanbr.lock"
+    lock.write_text("")
     try:
         cmd_prune(yes=True)
     finally:
-        refs_heads.chmod(0o755)
+        lock.unlink()
 
     captured = capsys.readouterr()
     assert "orphanbr" in _branches(bare)
