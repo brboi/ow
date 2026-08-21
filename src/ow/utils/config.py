@@ -118,6 +118,15 @@ def select_aliases(available: list[str], only: str | None) -> list[str]:
     if only is None:
         return list(available)
     wanted = [a.strip() for a in only.split(",") if a.strip()]
+    if not wanted:
+        # --only '' , --only ',' and --only ' ' all land here. Narrowing to
+        # nothing is a mistake, not a request to do nothing: without this the
+        # command materializes or rebases no repo at all and still reports
+        # success.
+        raise typer.BadParameter(
+            f"--only names no repo (got {only!r}). "
+            f"Available: {', '.join(available)}"
+        )
     unknown = [a for a in wanted if a not in available]
     if unknown:
         raise typer.BadParameter(
