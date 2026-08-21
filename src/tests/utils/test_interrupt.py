@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from ow.utils import git as git_mod
-from ow.utils.git import _run, live_children, terminate_children
+from ow.utils.git import _run, terminate_children
 
 
 class TestProcessGroup:
@@ -33,7 +33,7 @@ class TestProcessGroup:
 
     def test_registry_is_empty_once_a_child_has_finished(self):
         _run([sys.executable, "-c", "pass"], capture_output=True)
-        assert live_children() == 0
+        assert len(git_mod._children) == 0
 
     def test_check_raises_calledprocesserror_carrying_git_s_output(self):
         """`check=True` is what makes ensure_bare_repo, create_worktree,
@@ -85,7 +85,7 @@ class TestInterruptedRun:
             # poll() only reports a status for a child that has exited and been
             # reaped, so this is "dead", not merely "signalled".
             assert spawned[0].poll() is not None
-            assert live_children() == 0
+            assert len(git_mod._children) == 0
         finally:
             for proc in spawned:
                 if proc.poll() is None:
@@ -107,7 +107,7 @@ class TestTerminateChildren:
 
         assert killed == 1
         assert proc.poll() is not None
-        assert live_children() == 0
+        assert len(git_mod._children) == 0
 
     def test_is_a_no_op_with_nothing_running(self):
         assert terminate_children() == 0
@@ -120,11 +120,11 @@ class TestTerminateChildren:
             git_mod._children.add(proc)
 
         assert terminate_children() == 1
-        assert live_children() == 0
+        assert len(git_mod._children) == 0
 
 
 class TestConcurrentTracking:
-    def test_live_children_sees_a_child_spawned_from_another_thread(self):
+    def test_children_count_sees_a_child_spawned_from_another_thread(self):
         """parallel_per_repo drives every fetch job from a worker thread, so
         _run is called concurrently, not just from the main thread. This
         proves the registry a fetch job relies on actually holds the child
@@ -141,15 +141,15 @@ class TestConcurrentTracking:
         # Wait on the condition, not the clock: slow machines may need longer
         # than a fixed sleep for Popen() + registry add to complete.
         deadline = time.monotonic() + 2.0
-        while live_children() == 0:
+        while len(git_mod._children) == 0:
             if time.monotonic() > deadline:
                 pytest.fail("child never appeared in registry")
             time.sleep(0.01)
-        seen_while_running["count"] = live_children()
+        seen_while_running["count"] = len(git_mod._children)
         thread.join()
 
         assert seen_while_running["count"] == 1
-        assert live_children() == 0
+        assert len(git_mod._children) == 0
 
     def test_lock_does_not_serialise_concurrent_runs(self):
         """The lock in `_run` must span Popen() but release before communicate().
@@ -173,14 +173,14 @@ class TestConcurrentTracking:
         # Wait on the condition that all children entered communicate()
         # concurrently, not on a wall-clock threshold.
         deadline = time.monotonic() + 5.0
-        while live_children() < n:
+        while len(git_mod._children) < n:
             if time.monotonic() > deadline:
                 pytest.fail("not all children were tracked concurrently — lock may be serialising")
             time.sleep(0.01)
         for thread in threads:
             thread.join()
 
-        assert live_children() == 0
+        assert len(git_mod._children) == 0
 
 
 class TestParallelPerRepo:
@@ -225,7 +225,7 @@ class TestParallelPerRepo:
     def test_an_interrupt_kills_the_children_and_propagates(self):
         """The behaviour issue #26 is about: Ctrl-C must not leave git running."""
         import sys
-        from ow.utils.git import _run, live_children, parallel_per_repo
+        from ow.utils.git import _run, parallel_per_repo
 
         def slow():
             return _run([sys.executable, "-c", "import time; time.sleep(30)"],
@@ -237,7 +237,7 @@ class TestParallelPerRepo:
         with pytest.raises(KeyboardInterrupt):
             parallel_per_repo({"slow": slow, "boom": interrupt})
 
-        assert live_children() == 0
+        assert len(git_mod._children) == 0
 
     def test_an_on_done_callback_that_raises_propagates_and_does_not_hang(self):
         """A callback raising something other than KeyboardInterrupt (e.g. a bug
