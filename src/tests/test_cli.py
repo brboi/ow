@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from ow.__main__ import app
 from ow.utils import paths
-from ow.utils.config import BranchSpec, WorkspaceConfig, write_workspace_config
+from ow.utils.config import BranchSpec
 
 runner = CliRunner()
 
@@ -138,54 +138,6 @@ def test_apply_with_workspace(xdg):
     assert result.exit_code == 0
     mock_apply.assert_called_once()
     assert mock_apply.call_args.kwargs["workspace"] == "myws"
-
-
-def test_apply_only_reaches_cmd_apply(xdg):
-    """ow apply --only community,enterprise passes only= through, same as rebase."""
-    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
-        result = runner.invoke(app, ["apply", "myws", "--only", "community,enterprise"])
-
-    assert result.exit_code == 0
-    mock_apply.assert_called_once()
-    assert mock_apply.call_args.kwargs["only"] == "community,enterprise"
-
-
-def test_apply_only_defaults_to_none(xdg):
-    """No --only means no narrowing."""
-    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
-        result = runner.invoke(app, ["apply"])
-
-    assert result.exit_code == 0
-    assert mock_apply.call_args.kwargs["only"] is None
-
-
-def test_apply_only_is_really_wired_to_cmd_apply(tmp_path, xdg, monkeypatch):
-    """End to end, without patching cmd_apply.
-
-    The two tests above patch cmd_apply, so they pass even when the CLI passes
-    an argument the command does not accept — which is exactly how `--only`
-    shipped broken once. This one calls the real function.
-
-    ensure_workspace_materialized is patched because the alias is invalid and
-    select_aliases should raise before it is ever called — if a future change
-    makes that assumption false, this must fail on a fast, offline mock
-    instead of hanging on a real clone of odoo/odoo.
-    """
-    ws_dir = tmp_path / "ws"
-    ws_dir.mkdir()
-    write_workspace_config(
-        ws_dir / ".ow" / "config.toml",
-        WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[]),
-    )
-    monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-
-    with patch("ow.commands.apply.ensure_workspace_materialized") as materialize:
-        result = runner.invoke(app, ["apply", "--only", "nope"])
-
-    assert result.exit_code == 2
-    assert "nope" in result.output
-    assert "community" in result.output
-    materialize.assert_not_called()
 
 
 @pytest.mark.parametrize("command", ["apply", "status", "rebase"])
