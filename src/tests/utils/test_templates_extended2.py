@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -6,6 +8,7 @@ import pytest
 from ow.utils.config import BranchSpec, WorkspaceConfig
 from ow.utils.templates import (
     _get_packaged_templates,
+    _packaged_bundle,
     apply_templates,
     ensure_workspace_materialized,
     resolve_template_files,
@@ -85,3 +88,38 @@ class TestApplyTemplatesExtended:
         ws = WorkspaceConfig(repos={}, templates=["common", "bwrap"])
         apply_templates(ws, config, ws_dir)
         assert (ws_dir / "bwrap-opencode").exists()
+
+    def _apply_bwrap(self, tmp_path, config) -> Path:
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["common", "bwrap"])
+        apply_templates(ws, config, ws_dir)
+        return ws_dir
+
+    def test_a_rendered_script_keeps_the_packaged_file_mode(self, tmp_path, config):
+        """The bwrap wrappers are scripts, and rendering must not disarm them.
+
+        Jinja output goes through write_text, which creates a plain 0o644
+        file: without carrying the packaged mode across, `./bwrap-claude`
+        is not runnable at all.
+        """
+        ws_dir = self._apply_bwrap(tmp_path, config)
+        packaged = _packaged_bundle("bwrap")
+        assert packaged is not None
+
+        for name in ("bwrap-claude", "bwrap-opencode"):
+            out = ws_dir / name
+            src = packaged / f"{name}.j2"
+            assert out.stat().st_mode == src.stat().st_mode, f"{name} lost its mode"
+            assert out.stat().st_mode & stat.S_IXUSR, f"{name} is not executable"
+            assert os.access(out, os.X_OK)
+
+    def test_a_rendered_config_file_is_not_made_executable(self, tmp_path, config):
+        """The mode is copied, not invented: a config file stays a config file."""
+        ws_dir = self._apply_bwrap(tmp_path, config)
+        packaged = _packaged_bundle("common")
+        assert packaged is not None
+
+        out = ws_dir / "mise.toml"
+        assert out.stat().st_mode == (packaged / "mise.toml.j2").stat().st_mode
+        assert not out.stat().st_mode & 0o111
