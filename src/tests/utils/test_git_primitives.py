@@ -1,6 +1,7 @@
 import subprocess
 
 from ow.utils.git import (
+    _git_dir,
     count_commits,
     count_new_patches,
     count_unpushed,
@@ -204,6 +205,28 @@ class TestInProgressOperation:
         assert op is not None
         assert op[0] == "rebase"
         assert op[1] == "git rebase --continue"
+
+    def test_a_rebase_wins_over_a_sequencer_directory(self, git_lab):
+        """Marker order is load-bearing, not cosmetic: git has written a
+        top-level `sequencer` directory alongside `rebase-merge` for an
+        interactive rebase, and reporting that as a cherry-pick sends the user
+        `git cherry-pick --abort`, which cannot end a rebase.
+
+        The two markers are created directly rather than by driving git: the
+        git in this environment keeps interactive-rebase state entirely inside
+        rebase-merge, so the collision cannot be provoked here — while the
+        ordering that guards against it still has to hold.
+        """
+        git_dir = _git_dir(git_lab.path)
+        assert git_dir is not None
+        (git_dir / "rebase-merge").mkdir()
+        (git_dir / "sequencer").mkdir()
+
+        op = in_progress_operation(git_lab.path)
+
+        assert op is not None
+        assert op[0] == "rebase"
+        assert op[2] == "git rebase --abort"
 
 
 class TestDirtyFiles:

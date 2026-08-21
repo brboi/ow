@@ -854,6 +854,29 @@ def test_resolve_spec_local_found_on_fallback_remote(tmp_path):
     assert result.branch == "master-parrot"
 
 
+def test_resolve_spec_local_prefers_the_spec_remote_over_the_configured_order(tmp_path):
+    """When several remotes carry the branch, the one the spec names wins.
+
+    ordered_remotes puts origin first, so a spec of "dev/master" resolved
+    against a repo where both origin/master and dev/master exist would silently
+    become origin/master if the spec's own remote were not tried first — the
+    worktree would then track, and rebase onto, the wrong fork.
+    """
+    bare_repo = tmp_path / "community.git"
+    bare_repo.mkdir()
+    spec = BranchSpec("dev/master", None)
+    remotes = {
+        "origin": RemoteConfig(url="git@github.com:odoo/odoo.git"),
+        "dev": RemoteConfig(url="git@github.com:odoo-dev/odoo.git"),
+    }
+
+    refs = {"origin/master", "dev/master"}
+    result = resolve_spec_local(bare_repo, spec, remotes, refs=refs)
+
+    assert result.base_ref == "dev/master"
+    assert result.remote == "dev"
+
+
 def test_resolve_spec_local_raises_when_not_found(tmp_path):
     """RuntimeError raised when branch not found in any local refs (no fetch attempted)."""
     bare_repo = tmp_path / "community.git"
