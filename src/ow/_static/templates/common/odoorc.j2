@@ -1,6 +1,7 @@
 [options]
 http_port = {{ vars.http_port | default(8069) }}
 addons_path = {{ addons_paths | join(',') }}
+data_dir = {{ ws_dir }}/.odoo
 admin_passwd = {{ vars.admin_passwd | default() }}
 db_name = {{ ws_name }}
 dbfilter = ^{{ ws_name }}$
