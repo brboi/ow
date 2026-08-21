@@ -1,3 +1,4 @@
+import pytest
 import shutil
 import subprocess
 from pathlib import Path
@@ -246,13 +247,16 @@ def test_prune_reports_only_the_branches_it_actually_deleted(tmp_path, capsys, x
     lock = bare / "refs" / "heads" / "orphanbr.lock"
     lock.write_text("")
     try:
-        cmd_prune(yes=True)
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_prune(yes=True)
     finally:
         lock.unlink()
 
+    assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "orphanbr" in _branches(bare)
-    assert "could not delete: orphanbr" in captured.err
+    assert "could not delete orphanbr:" in captured.err
+    assert "Unable to create" in captured.err
     assert "could not delete" not in captured.out
 
 
@@ -269,13 +273,40 @@ def test_prune_reports_survey_failures_and_does_not_claim_clean(tmp_path, capsys
 
     monkeypatch.setattr("ow.commands.prune._run", _no_git)
 
-    cmd_prune(yes=True)
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_prune(yes=True)
 
+    assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "All bare repos are clean." not in captured.out
     assert "survey failed" in captured.err
     assert "community" in captured.err
 
+
+
+
+def test_prune_exits_non_zero_and_carries_git_reason_on_delete_failure(tmp_path, capsys, xdg):
+    """A stale ref lock makes git refuse the delete.  The command must exit
+    non-zero and the stderr line must name the branch *and* carry git's
+    reason so the user knows what to fix.
+    """
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "orphanbr", "master")
+    _git(bare, "branch", "-D", "master")
+
+    lock = bare / "refs" / "heads" / "orphanbr.lock"
+    lock.write_text("")
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_prune(yes=True)
+    finally:
+        lock.unlink()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "orphanbr" in _branches(bare)
+    assert "could not delete orphanbr:" in captured.err
+    assert "Unable to create" in captured.err
 
 
 

@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 from typing import NamedTuple
 
@@ -36,7 +37,7 @@ class _PrunePlan(NamedTuple):
 class _PruneOutcome(NamedTuple):
     alias: str
     deleted: list[str]
-    failed: list[str]
+    failed: list[tuple[str, str]]
 
 
 def _survey_worktrees(bare_repo: Path) -> tuple[set[str], list[str]]:
@@ -148,7 +149,7 @@ def _survey_bare_repo(bare_repo: Path) -> _PrunePlan:
 def _apply(plan: _PrunePlan) -> _PruneOutcome:
     """Run exactly what the plan showed, and report exactly what took."""
     deleted: list[str] = []
-    failed: list[str] = []
+    failed: list[tuple[str, str]] = []
 
     if plan.stale_worktrees:
         _run(
@@ -159,11 +160,15 @@ def _apply(plan: _PrunePlan) -> _PruneOutcome:
     for branch in plan.to_delete:
         # Only a delete git confirmed. Claiming a refusal as a deletion
         # sends the user looking elsewhere for work that is still here.
-        ok = _run(
+        result = _run(
             ["git", "-C", str(plan.repo), "branch", "-D", branch],
             capture_output=True, text=True,
-        ).returncode == 0
-        (deleted if ok else failed).append(branch)
+        )
+        if result.returncode == 0:
+            deleted.append(branch)
+        else:
+            reason = result.stderr.strip().splitlines()[0] if result.stderr else "git refused"
+            failed.append((branch, reason))
 
     return _PruneOutcome(alias=plan.alias, deleted=deleted, failed=failed)
 
@@ -304,18 +309,27 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
         if plan.commands
     })
     acted = False
+    failed = bool(survey_errors)
     for plan in plans:
         outcome = outcomes.get(plan.alias)
-        if isinstance(outcome, Exception) or outcome is None:
+        if isinstance(outcome, Exception):
+            err_console.print(
+                f"  [{plan.alias}] apply failed: {outcome}", markup=False,
+            )
+            failed = True
+            continue
+        if outcome is None:
             continue
         acted = acted or bool(outcome.deleted) or bool(plan.stale_worktrees)
         if outcome.failed:
             # git's refusals are the user's problem to act on, so they belong
             # on stderr where a pipeline can still see them.
-            err_console.print(
-                f"  [{plan.alias}] could not delete: {', '.join(outcome.failed)}",
-                markup=False,
-            )
+            for branch, reason in outcome.failed:
+                err_console.print(
+                    f"  [{plan.alias}] could not delete {branch}: {reason}",
+                    markup=False,
+                )
+            failed = True
 
     if dropped:
         index.known_workspaces()
@@ -325,3 +339,6 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
         # The plan above is written in the imperative. Without this, silence
         # is all that separates "done" from "gave up somewhere".
         print("Done.")
+
+    if failed:
+        sys.exit(1)
