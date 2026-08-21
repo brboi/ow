@@ -12,10 +12,14 @@ _APP = "ow"
 
 
 def _base(var: str, default: str) -> Path:
-    # XDG treats an unset variable and an empty one identically; an empty one
-    # would otherwise yield a relative path.
+    # The spec says a value that is not an absolute path must be ignored,
+    # and that an unset variable and an empty one are the same thing. Both
+    # rules exist for one reason: anything relative would make ow's
+    # locations depend on the directory the command was run from. "~" is a
+    # shell nicety, not a path — nothing expands it once it is in the
+    # environment, so it is relative too.
     value = os.environ.get(var)
-    if not value:
+    if not value or not Path(value).is_absolute():
         return Path.home() / default
     return Path(value)
 

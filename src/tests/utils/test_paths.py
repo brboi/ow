@@ -93,3 +93,42 @@ def test_no_function_creates_anything(xdg: Path, func) -> None:
     """Calling a path function must never create a file or directory."""
     result = func()
     assert not result.exists()
+
+
+@pytest.mark.parametrize(
+    "func,var,fallback",
+    [(f, "XDG_CONFIG_HOME", ".config") for f in CONFIG_FUNCS]
+    + [(f, "XDG_DATA_HOME", ".local/share") for f in DATA_FUNCS]
+    + [(f, "XDG_STATE_HOME", ".local/state") for f in STATE_FUNCS],
+)
+def test_relative_xdg_var_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, func, var, fallback
+) -> None:
+    """The spec: a value that is not an absolute path must be ignored.
+
+    Honouring `XDG_DATA_HOME=reldata` would make ow's bare repos, its
+    index and its config live wherever the shell happened to be when the
+    command ran — the same cwd-dependent trap as the empty string, just
+    harder to spot.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(var, "reldata")
+    result = func()
+    assert result.is_relative_to(tmp_path / fallback / "ow")
+
+
+@pytest.mark.parametrize("func", ALL_FUNCS)
+def test_dot_relative_xdg_var_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, func
+) -> None:
+    """`./here` and `~/there` are relative too — `~` is a shell nicety that
+    nothing expands once it is in the environment."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+        monkeypatch.setenv(var, "./here")
+    assert func().is_relative_to(tmp_path)
+
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+        monkeypatch.setenv(var, "~/there")
+    assert func().is_relative_to(tmp_path)
+    assert "~" not in str(func())
