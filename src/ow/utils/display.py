@@ -53,7 +53,6 @@ def task_progress(label: str, total: int, *, console: Console | None = None) -> 
         TextColumn("[progress.description]{task.description}"),
         TextColumn("{task.completed}/{task.total}"),
         console=target,
-        transient=True,
         disable=not target.is_terminal,
     )
     with progress:
