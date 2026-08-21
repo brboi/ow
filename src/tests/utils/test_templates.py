@@ -304,6 +304,18 @@ def test_render_odoorc_no_quotes_on_string_values(tmp_path, config):
     assert "db_host = localhost" in result
 
 
+def test_render_odoorc_with_data_dir(tmp_path, config):
+    """odoorc sets data_dir to <ws_dir>/.odoo."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config(["community"])
+    apply_templates(ws, config, ws_dir)
+    content = (ws_dir / "odoorc").read_text()
+    assert "data_dir" in content
+    assert str(ws_dir) + "/.odoo" in content
+
+
+
 # ---------------------------------------------------------------------------
 # Template rendering - odools.toml
 # ---------------------------------------------------------------------------
@@ -389,6 +401,21 @@ def test_render_mise_toml_exports_an_absolute_ow_workspace(tmp_path, config):
     exported = re.search(r'^OW_WORKSPACE = "(.*)"$', result, re.M)
     assert exported, "the common bundle must export OW_WORKSPACE"
     assert exported.group(1) == "{{config_root}}"
+
+
+def test_render_mise_toml_with_compose_file(tmp_path, config, xdg):
+    """mise.toml exports COMPOSE_FILE pointing at the services compose path."""
+    from ow.utils import paths
+    from ow.utils.templates import ensure_services_compose
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config(["community"])
+    ensure_services_compose()
+    apply_templates(ws, config, ws_dir)
+    content = (ws_dir / "mise.toml").read_text()
+    assert "COMPOSE_FILE" in content
+    assert str(paths.services_dir() / "compose.yml") in content
+
 
 
 # ---------------------------------------------------------------------------

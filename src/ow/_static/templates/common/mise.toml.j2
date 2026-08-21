@@ -11,6 +11,7 @@ postinstall = "python -m ensurepip --default-pip && pip install -r {% raw %}{{co
 [env]
 OW_WORKSPACE = "{% raw %}{{config_root}}{% endraw %}"
 ODOO_RC = "{% raw %}{{config_root}}{% endraw %}/odoorc"
+COMPOSE_FILE = "{{ services_compose }}"
 _.python.venv = { path = ".venv", create = true }
 {% if main_repo_alias %}
 _.path = ["{% raw %}{{config_root}}{% endraw %}", "{% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}"]
