@@ -316,8 +316,8 @@ def cmd_init(
         # without that, a var named like a repo alias is indistinguishable
         # from one on the screen someone reads before typing `y`.
         print("  Vars:")
-        for name, value in ws.vars.items():
-            print(f"    {name}: {value}")
+        for var_name, value in ws.vars.items():
+            print(f"    {var_name}: {value}")
 
     if interactive:
         try:

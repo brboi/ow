@@ -779,3 +779,50 @@ def test_init_lists_the_vars_one_per_line(tmp_path, monkeypatch, capsys, config_
     assert "    http_port: 8069" in out
     assert "    db_host: localhost" in out
     assert "{" not in out
+
+
+# ---------------------------------------------------------------------------
+# Shadowed-parameter guard
+# ---------------------------------------------------------------------------
+
+def test_cmd_init_does_not_shadow_its_name_parameter():
+    """A local `name` binding stops being harmless the moment someone later
+    edits the function and expects the parameter.
+    """
+    import ast
+    import inspect
+
+    from ow.commands.init import cmd_init
+
+    source = inspect.getsource(cmd_init)
+    tree = ast.parse(source)
+    func = tree.body[0]
+    param_names = {arg.arg for arg in func.args.args + func.args.kwonlyargs + func.args.posonlyargs}
+    if func.args.vararg:
+        param_names.add(func.args.vararg.arg)
+    if func.args.kwarg:
+        param_names.add(func.args.kwarg.arg)
+
+    class ShadowFinder(ast.NodeVisitor):
+        def __init__(self, targets):
+            self.targets = targets
+            self.shadowed = []
+
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Store) and node.id in self.targets:
+                self.shadowed.append(node.id)
+            self.generic_visit(node)
+
+        def visit_comprehension(self, node):
+            if isinstance(node.target, ast.Name):
+                if node.target.id in self.targets:
+                    self.shadowed.append(node.target.id)
+            elif isinstance(node.target, ast.Tuple):
+                for elt in node.target.elts:
+                    if isinstance(elt, ast.Name) and elt.id in self.targets:
+                        self.shadowed.append(elt.id)
+            self.generic_visit(node)
+
+    finder = ShadowFinder(param_names)
+    finder.visit(func)
+    assert finder.shadowed == []
