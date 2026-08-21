@@ -410,3 +410,62 @@ def test_a_failed_resolution_is_not_remembered(
         resolve_workspace(name=str(stray))
 
     assert index.known_workspaces() == []
+
+
+# ---------------------------------------------------------------------------
+# 12. A workspace config the user broke by hand
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_workspace_config_fails_cleanly(
+    xdg: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """`ow init` says "Edit it to customize vars" — so people edit it.
+
+    A fumbled quote must not answer with an eight-frame traceback ending in
+    TOMLDecodeError. The global config already gets a one-line message for
+    exactly this; the four resolver forms are the only place it was missing.
+    """
+    ws_dir = xdg / "broken"
+    (ws_dir / ".ow").mkdir(parents=True)
+    (ws_dir / ".ow" / "config.toml").write_text('templates = ["common\n')
+
+    with pytest.raises(SystemExit) as exc:
+        resolve_workspace(name=str(ws_dir))
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert str(ws_dir.resolve() / ".ow" / "config.toml") in err
+    assert "could not load" in err
+
+
+def test_workspace_config_missing_templates_fails_cleanly(
+    xdg: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """Valid TOML, missing a required key: a ValueError, not a decode error,
+    and just as much of a traceback before this."""
+    ws_dir = xdg / "keyless"
+    (ws_dir / ".ow").mkdir(parents=True)
+    (ws_dir / ".ow" / "config.toml").write_text("[repos]\n")
+
+    with pytest.raises(SystemExit) as exc:
+        resolve_workspace(name=str(ws_dir))
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert str(ws_dir.resolve() / ".ow" / "config.toml") in err
+    assert "templates" in err
+
+
+def test_a_workspace_that_will_not_load_is_not_remembered(xdg: Path) -> None:
+    """The index records where a workspace *is*, and a file ow cannot read
+    is not evidence of one — remembering it would hand `ow ls` an entry
+    that fails the same way on every listing."""
+    ws_dir = xdg / "unreadable"
+    (ws_dir / ".ow").mkdir(parents=True)
+    (ws_dir / ".ow" / "config.toml").write_text("templates = [\n")
+
+    with pytest.raises(SystemExit):
+        resolve_workspace(name=str(ws_dir))
+
+    assert index.known_workspaces() == []

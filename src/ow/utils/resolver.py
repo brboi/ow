@@ -32,7 +32,16 @@ def _looks_like_path(value: str) -> bool:
 
 def _load(ws_dir: Path) -> tuple[Path, WorkspaceConfig]:
     """Read a directory known to be a workspace, and remember it."""
-    ws = load_workspace_config(ws_dir / MARKER)
+    try:
+        ws = load_workspace_config(ws_dir / MARKER)
+    except (OSError, ValueError) as exc:
+        # `ow init` signs off with "Edit it to customize vars", so people
+        # do. A fumbled quote deserves the same one-liner the global config
+        # gets, not eight frames of tomllib. TOMLDecodeError is a
+        # ValueError, and so is the missing-'templates' complaint.
+        _fail(f"Error: could not load {ws_dir / MARKER}: {exc}")
+    # Only a workspace ow can actually read is worth remembering: an entry
+    # that fails to load would fail the same way on every later `ow ls`.
     index.remember(ws_dir)
     return ws_dir, ws
 
