@@ -219,3 +219,112 @@ def _collect(fn):
         return fn()
     except Exception as exc:
         return exc
+
+
+def _record_fetches(monkeypatch):
+    """Capture the argv of every fetch, and run resolution inline."""
+    from ow.utils import refs as refs_mod
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(refs_mod, "_run", fake_run)
+    monkeypatch.setattr(
+        refs_mod, "parallel_per_repo",
+        lambda tasks, on_done=None: {k: fn() for k, fn in tasks.items()},
+    )
+    return calls
+
+
+def _bare_and_worktree(tmp_path, *, with_worktree=True):
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir(parents=True, exist_ok=True)
+    if with_worktree:
+        (ws_dir / "community").mkdir()
+    (paths.repos_dir() / "community.git").mkdir(parents=True)
+    return ws_dir
+
+
+class TestFetchJobShape:
+    """What each fetch job is, and which ones are not created at all."""
+
+    def test_the_upstream_ref_is_fetched_with_force(self, tmp_path, monkeypatch, xdg):
+        """A colleague's force-push moves the upstream ref non-fast-forward.
+        Without -f that fetch is simply rejected, and ow then plans step 1
+        against the pre-force SHA."""
+        from ow.utils import refs as refs_mod
+
+        ws_dir = _bare_and_worktree(tmp_path)
+        calls = _record_fetches(monkeypatch)
+        monkeypatch.setattr(refs_mod, "rev_parse", lambda repo, ref: "cafe" * 10)
+        monkeypatch.setattr(refs_mod, "get_upstream", lambda p: None)
+
+        def fake_resolve(bare, spec, remotes):
+            return BranchSpec("dev/work", "work") if spec.local_branch else BranchSpec("origin/master")
+
+        refs_mod.fetch_workspace_refs(
+            WorkspaceConfig(repos={"community": BranchSpec("origin/master", "work")}, templates=[]),
+            ws_dir, Config(vars={}, remotes={"community": {}}),
+            fetch_upstreams=True, resolve_fn=fake_resolve,
+        )
+
+        upstream_call = [c for c in calls if "work:refs/remotes/dev/work" in c]
+        track_call = [c for c in calls if "master:refs/remotes/origin/master" in c]
+        assert len(upstream_call) == 1 and "-f" in upstream_call[0]
+        assert len(track_call) == 1 and "-f" not in track_call[0]
+
+    def test_an_upstream_the_track_fetch_already_covered_is_not_fetched_twice(
+        self, tmp_path, monkeypatch, xdg,
+    ):
+        from ow.utils import refs as refs_mod
+
+        ws_dir = _bare_and_worktree(tmp_path)
+        calls = _record_fetches(monkeypatch)
+        monkeypatch.setattr(refs_mod, "get_upstream", lambda p: "origin/master")
+
+        refs_mod.fetch_workspace_refs(
+            WorkspaceConfig(repos={"community": BranchSpec("origin/master", "master")}, templates=[]),
+            ws_dir, Config(vars={}, remotes={"community": {}}),
+            fetch_upstreams=True,
+            resolve_fn=lambda bare, spec, remotes: BranchSpec("origin/master"),
+        )
+
+        assert len(calls) == 1
+
+    def test_a_detached_repo_has_no_upstream_to_fetch(self, tmp_path, monkeypatch, xdg):
+        """A detached worktree tracks nothing; whatever @{u} reports is a
+        leftover, and fetching it is work nobody asked for."""
+        from ow.utils import refs as refs_mod
+
+        ws_dir = _bare_and_worktree(tmp_path)
+        calls = _record_fetches(monkeypatch)
+        monkeypatch.setattr(refs_mod, "get_upstream", lambda p: "dev/leftover")
+
+        refs_mod.fetch_workspace_refs(
+            WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[]),
+            ws_dir, Config(vars={}, remotes={"community": {}}),
+            fetch_upstreams=True,
+            resolve_fn=lambda bare, spec, remotes: BranchSpec("origin/master"),
+        )
+
+        assert len(calls) == 1
+        assert not any("leftover" in " ".join(c) for c in calls)
+
+    def test_a_repo_that_was_never_applied_is_not_fetched(self, tmp_path, monkeypatch, xdg):
+        from ow.utils import refs as refs_mod
+
+        ws_dir = _bare_and_worktree(tmp_path, with_worktree=False)
+        calls = _record_fetches(monkeypatch)
+
+        outcome = refs_mod.fetch_workspace_refs(
+            WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[]),
+            ws_dir, Config(vars={}, remotes={"community": {}}),
+            resolve_fn=lambda bare, spec, remotes: BranchSpec("origin/master"),
+        )
+
+        assert calls == []
+        assert "community" not in outcome.tracks
+        assert outcome.failed == frozenset()
