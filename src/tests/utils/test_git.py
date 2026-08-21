@@ -725,7 +725,8 @@ def test_worktree_exists_true(tmp_path):
     worktree_path.mkdir(parents=True)
 
     mock_result = MagicMock()
-    mock_result.stdout = f"{worktree_path} abc1234 [main]\n"
+    mock_result.returncode = 0
+    mock_result.stdout = f"worktree {worktree_path}\nHEAD abc1234\nbranch refs/heads/master\n"
 
     with patch("ow.utils.git._run", return_value=mock_result):
         assert worktree_exists(bare_repo, worktree_path) is True
@@ -738,7 +739,8 @@ def test_worktree_exists_false(tmp_path):
     worktree_path.mkdir(parents=True)
 
     mock_result = MagicMock()
-    mock_result.stdout = "/other/path abc1234 [main]\n"
+    mock_result.returncode = 0
+    mock_result.stdout = "worktree /other/path\nHEAD abc1234\nbranch refs/heads/master\n"
 
     with patch("ow.utils.git._run", return_value=mock_result):
         assert worktree_exists(bare_repo, worktree_path) is False
@@ -752,10 +754,42 @@ def test_worktree_exists_false_when_dir_missing_but_in_git_output(tmp_path):
     # worktree_path is NOT created on disk
 
     mock_result = MagicMock()
-    mock_result.stdout = f"{worktree_path} abc1234 [main]\n"
+    mock_result.returncode = 0
+    mock_result.stdout = f"worktree {worktree_path}\nHEAD abc1234\nbranch refs/heads/master\n"
 
     with patch("ow.utils.git._run", return_value=mock_result):
         assert worktree_exists(bare_repo, worktree_path) is False
+
+
+def test_worktree_exists_does_not_match_substring(tmp_path):
+    """Regression: 'community' must not match a worktree registered as 'community-old'."""
+    # Set up a real bare repo with one commit so worktree add works.
+    src_repo = tmp_path / "src"
+    src_repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "master", str(src_repo)], check=True)
+    subprocess.run(["git", "-C", str(src_repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src_repo), "config", "user.name", "T"], check=True)
+    (src_repo / "init.txt").write_text("init")
+    subprocess.run(["git", "-C", str(src_repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(src_repo), "commit", "-q", "-m", "init"], check=True)
+
+    bare_repo = tmp_path / "community.git"
+    subprocess.run(["git", "clone", "--bare", "-q", str(src_repo), str(bare_repo)], check=True)
+
+    # Add a worktree at community-old
+    wt_old = tmp_path / "community-old"
+    subprocess.run(
+        ["git", "-C", str(bare_repo), "worktree", "add", "--detach", str(wt_old), "master"],
+        check=True,
+    )
+
+    # Check that worktree_exists for 'community' (substring of 'community-old') returns False
+    wt_short = tmp_path / "community"
+    wt_short.mkdir()  # exists on disk so the early-return path doesn't trigger
+    assert worktree_exists(bare_repo, wt_short) is False
+
+    # Sanity: the actual path DOES exist
+    assert worktree_exists(bare_repo, wt_old) is True
 
 
 # ---------------------------------------------------------------------------
