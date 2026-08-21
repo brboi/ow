@@ -131,9 +131,21 @@ def _survey_bare_repo(bare_repo: Path) -> _PrunePlan:
         ["git", "-C", str(bare_repo), "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
         capture_output=True, text=True,
     )
+    head_result = _run(
+        ["git", "-C", str(bare_repo), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True,
+    )
+    head_branch = head_result.stdout.strip() if head_result.returncode == 0 else None
+    if head_branch == "HEAD":
+        head_branch = None
+
     if branch_result.returncode == 0:
         all_branches = {b.strip() for b in branch_result.stdout.splitlines() if b.strip()}
         for branch in sorted(all_branches - used_branches):
+            if branch == head_branch:
+                # Never delete the branch HEAD points at — a dangling HEAD
+                # confuses every subsequent git command and looks like data loss.
+                continue
             # "Orphaned" describes the worktree that is gone, not the work
             # that may still be on the branch. Only the former is ours to
             # throw away.

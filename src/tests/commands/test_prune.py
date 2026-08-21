@@ -339,6 +339,24 @@ def test_prune_keeps_a_branch_whose_commits_exist_nowhere_else(tmp_path, capsys,
     assert _git(bare, "rev-parse", "featA") == sha
 
 
+def test_prune_never_deletes_the_branch_head_points_at(tmp_path, capsys, xdg):
+    """A bare repo's HEAD is its default branch.  Deleting it leaves HEAD
+    dangling, which confuses every subsequent git command and looks like
+    data loss to a new user.
+    """
+    bare = _bare_repo(tmp_path)
+    # HEAD still points at master; no worktree holds it, so without the
+    # guard it would appear orphaned and pushed (it is contained in
+    # refs/remotes/origin/master).
+    _git(bare, "branch", "spent", "refs/remotes/origin/master")
+
+    cmd_prune(yes=True)
+
+    out = capsys.readouterr().out
+    assert "master" not in out  # must not be proposed for deletion
+    assert "spent" not in _branches(bare)  # the truly orphaned branch goes
+
+
 def test_prune_deletes_a_branch_already_contained_in_a_remote_ref(tmp_path, capsys, xdg):
     """Refusing everything would just be a broken command.
 
