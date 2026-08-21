@@ -15,8 +15,22 @@ from ow.utils import paths
 MARKER = Path(".ow") / "config.toml"
 
 
-def _is_workspace(candidate: Path) -> bool:
-    return (candidate / MARKER).exists()
+def _still_there(candidate: Path) -> bool:
+    """Does this entry still look like a workspace?
+
+    Only a clean answer from the filesystem — the marker is not there —
+    may cost an entry its place. A stat that *errors* means the index
+    cannot tell: an unreadable parent, a mount that went away, a stale NFS
+    handle. Path.exists() propagates exactly those rather than returning
+    False, which would otherwise take down `ow ls`, `ow prune` and every
+    name lookup with a traceback, and close the only recovery path. So
+    ignorance keeps the entry — a mount coming back must not have cost the
+    user their index.
+    """
+    try:
+        return (candidate / MARKER).exists()
+    except OSError:
+        return True
 
 
 def _write(entries: list[Path]) -> None:
@@ -48,7 +62,7 @@ def known_workspaces() -> list[Path]:
         if candidate in seen:
             pruned = True
             continue
-        if not _is_workspace(candidate):
+        if not _still_there(candidate):
             pruned = True
             continue
         seen.append(candidate)

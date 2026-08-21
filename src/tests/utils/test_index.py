@@ -153,3 +153,48 @@ def test_blank_and_whitespace_lines_are_ignored(xdg: Path) -> None:
     target.write_text(f"\n   \n{ws.resolve()}\n\t\n")
 
     assert index.known_workspaces() == [ws.resolve()]
+
+
+def test_an_unstattable_entry_is_kept_not_pruned(xdg: Path) -> None:
+    """A stat error is ignorance, not absence.
+
+    An indexed workspace can sit under a directory the user cannot stat
+    right now — a mount that went away, a parent someone chmod'd, a stale
+    NFS handle. Path.exists() propagates those rather than returning False,
+    so an unguarded read takes down `ow ls`, `ow prune` and every name
+    lookup with a traceback, and the designated cleanup command dies on the
+    same line. Neither may happen: the entry survives, because the index
+    cannot tell a dead workspace from an unreachable one.
+    """
+    reachable = _make_workspace(xdg, "reachable")
+    vault = xdg / "vault"
+    vault.mkdir()
+    hidden = _make_workspace(vault, "hidden")
+    index.remember(reachable)
+    index.remember(hidden)
+
+    vault.chmod(0o000)
+    try:
+        result = index.known_workspaces()
+    finally:
+        vault.chmod(0o755)  # so tmp_path cleanup can remove it
+
+    assert sorted(result) == sorted([reachable.resolve(), hidden.resolve()])
+    assert str(hidden.resolve()) in paths.index_file().read_text()
+
+
+def test_an_entry_whose_stat_errors_without_permissions_is_kept(xdg: Path) -> None:
+    """The same guarantee, provable as root.
+
+    The permission test above is a no-op for uid 0, which stats anything.
+    ENAMETOOLONG is refused by the kernel for everyone, so it pins the
+    behaviour down on any machine.
+    """
+    alive = _make_workspace(xdg, "alive")
+    index.remember(alive)
+    too_long = xdg / ("n" * 300) / "ws"
+    target = paths.index_file()
+    target.write_text(f"{alive.resolve()}\n{too_long}\n")
+
+    assert index.known_workspaces() == [alive.resolve(), too_long]
+    assert str(too_long) in target.read_text()
