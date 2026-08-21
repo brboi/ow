@@ -351,8 +351,7 @@ def ensure_bare_repo(
     for remote_name in ordered_remotes(remotes):
         remote_cfg = remotes[remote_name]
         desired: dict[str, str] = {}
-        if remote_name != "origin":
-            desired[f"remote.{remote_name}.url"] = remote_cfg.url
+        desired[f"remote.{remote_name}.url"] = remote_cfg.url
         if remote_cfg.pushurl:
             desired[f"remote.{remote_name}.pushurl"] = remote_cfg.pushurl
         if remote_cfg.fetch:
