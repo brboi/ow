@@ -226,7 +226,6 @@ def test_build_template_context_no_main_repo(tmp_path, config):
     assert ctx["main_repo_alias"] is None
 
 
-
 def test_build_template_context_has_services_keys(tmp_path, config, xdg):
     """build_template_context exposes ws_dir, services_compose, volumes_dir."""
     from ow.utils import paths
@@ -314,7 +313,6 @@ def test_render_odoorc_with_data_dir(tmp_path, config):
     content = (ws_dir / "odoorc").read_text()
     assert "data_dir" in content
     assert str(ws_dir) + "/.odoo" in content
-
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +414,6 @@ def test_render_mise_toml_with_compose_file(tmp_path, config, xdg):
     content = (ws_dir / "mise.toml").read_text()
     assert "COMPOSE_FILE" in content
     assert str(paths.services_dir() / "compose.yml") in content
-
 
 
 # ---------------------------------------------------------------------------

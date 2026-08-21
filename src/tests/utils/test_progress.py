@@ -23,7 +23,6 @@ def test_shows_the_label_and_a_count_on_a_terminal():
     assert "1/3" in out
 
 
-
 def test_runs_the_wrapped_work_regardless(self=None):
     buf = io.StringIO()
     console = _make_console(file=buf, force_terminal=False)

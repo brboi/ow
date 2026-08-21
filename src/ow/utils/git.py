@@ -88,8 +88,6 @@ def _kill_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
             pass
 
 
-
-
 def terminate_children(grace: float = 2.0) -> int:
     """SIGTERM every tracked child's group, SIGKILL whatever outlives `grace`.
 
@@ -332,7 +330,7 @@ def ensure_bare_repo(
             raise ValueError(_undefined_repo_message(alias, remotes))
         _clone_bare_into_place(alias, origin.url, bare_repo)
 
-    # Configure non-origin remotes (skip writes when values already match)
+    # Configure remotes (skip writes when values already match)
     current_config = _get_bare_config(bare_repo)
 
     # Bare repos default core.logAllRefUpdates to false, so remote-tracking refs
@@ -359,8 +357,6 @@ def ensure_bare_repo(
                     ["git", "-C", str(bare_repo), "config", key, value],
                     quiet=True, check=True, label=alias,
                 )
-
-
 
 
 def _ensure_base_ref_non_fatal(bare_repo: Path, spec: BranchSpec) -> None:
@@ -651,8 +647,6 @@ def git(repo: Path, *args, quiet: bool = False, **kwargs) -> subprocess.Complete
     else:
         label = repo.name
     return run_cmd(["git", "-C", str(repo)] + list(args), quiet=quiet, label=label, **kwargs)
-
-
 
 
 def _git_dir(worktree: Path) -> Path | None:
