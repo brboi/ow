@@ -101,7 +101,11 @@ def _take(name: str) -> None:
 
 
 def _diff() -> None:
-    for name in outdated_templates():
+    outdated = outdated_templates()
+    if not outdated:
+        print("No taken template is outdated.")
+        return
+    for name in outdated:
         bundle, _, rel = name.partition("/")
         baseline = paths.template_base_dir() / bundle / rel
         packaged = packaged_files(bundle)[rel]

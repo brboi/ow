@@ -224,6 +224,21 @@ class TestDiff:
         assert f"--- {NAME} (baseline)" in out
         assert f"+++ {NAME} (packaged)" in out
 
+    def test_diff_reports_that_nothing_is_outdated_instead_of_staying_silent(self, xdg, capsys):
+        """Silence is indistinguishable from a command that did not run.
+
+        `ow templates` answers its own empty case; --diff must too.
+        """
+        cmd_templates(show_diff=True)
+        out = capsys.readouterr().out
+        assert out.strip(), "--diff must say something when nothing is outdated"
+        assert "outdated" in out
+
+    def test_diff_still_reports_nothing_outdated_when_a_file_is_taken_and_current(self, xdg, capsys):
+        take_by_hand(working=b"my own edits\n", baseline=packaged_file().read_bytes())
+        cmd_templates(show_diff=True)
+        assert "outdated" in capsys.readouterr().out
+
     def test_diff_says_nothing_about_a_taken_file_that_is_still_current(self, xdg, capsys):
         take_by_hand(working=b"my own edits\n", baseline=packaged_file().read_bytes())
         cmd_templates(show_diff=True)
