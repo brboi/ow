@@ -22,6 +22,9 @@ _GUIDE = (
     "see https://github.com/brboi/ow/blob/main/docs/migrating-to-2.0.md to migrate"
 )
 
+# Shared with the resolver so the same hint is given from every entry point.
+HINT_RENAME = "expected .ow/config.toml instead: mv .ow/config .ow/config.toml"
+
 
 def check_legacy_layout(*, fatal: bool = True) -> None:
     """Detect the pre-2.0 layout and point at the migration guide.

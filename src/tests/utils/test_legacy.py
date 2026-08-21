@@ -216,3 +216,22 @@ def test_fatal_false_is_still_silent_on_a_migrated_setup(
     check_legacy_layout(fatal=False)
 
     assert capsys.readouterr().err == ""
+
+
+def test_resolver_hints_at_rename_when_old_config_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """When resolving a path that has .ow/config but not .ow/config.toml,
+    the resolver names the fix so the user doesn't have to hunt for it."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / ".ow").mkdir()
+    (ws / ".ow" / "config").write_text("")
+
+    from ow.utils.resolver import _from_path
+    with pytest.raises(SystemExit) as exc:
+        _from_path(str(ws))
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "mv .ow/config .ow/config.toml" in err

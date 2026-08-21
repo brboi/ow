@@ -49,9 +49,17 @@ def _load(ws_dir: Path) -> tuple[Path, WorkspaceConfig]:
 def _from_path(value: str) -> tuple[Path, WorkspaceConfig]:
     ws_dir = Path(value).expanduser().resolve()
     if not (ws_dir / MARKER).exists():
+        extra: list[str] = []
+        if (ws_dir / ".ow" / "config").exists():
+            from ow.utils.legacy import HINT_RENAME
+            extra = [
+                f"       {HINT_RENAME}",
+                "       see https://github.com/brboi/ow/blob/main/docs/migrating-to-2.0.md to migrate",
+            ]
         _fail(
             f"Error: {ws_dir} is not a workspace",
             f"       missing {ws_dir / MARKER}",
+            *extra,
         )
     return _load(ws_dir)
 
