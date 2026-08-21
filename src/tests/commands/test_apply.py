@@ -313,3 +313,77 @@ class TestCmdApplyCheck:
         err = capsys.readouterr().err
         assert "missing" in err.lower()
         assert "community" in err
+
+
+class TestCmdApplyOrphanFiles:
+    """Files from inactive template bundles must be reported as orphans."""
+
+    def _workspace(self, tmp_path):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(
+            repos={"community": BranchSpec("origin/master")},
+            templates=["common"],
+        )
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+        return ws_dir
+
+    def test_apply_reports_orphan_files_from_inactive_bundles(self, tmp_path, capsys, config_with_remotes):
+        """A file on disk that belongs to a bundle NOT in ws.templates is listed."""
+        ws_dir = self._workspace(tmp_path)
+        # Simulate a prior apply that included the vscode template:
+        (ws_dir / ".vscode").mkdir()
+        (ws_dir / ".vscode" / "launch.json").write_text("{}")
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community"}, {}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    cmd_apply(config_with_remotes)
+
+        out = capsys.readouterr().out
+        assert "Some files may come from templates not in your config" in out
+        assert ".vscode/launch.json" in out
+        assert "[vscode]" in out
+
+    def test_apply_does_not_report_orphans_when_all_bundles_active(self, tmp_path, capsys, config_with_remotes):
+        """No orphan message when every file belongs to an active template."""
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(
+            repos={"community": BranchSpec("origin/master")},
+            templates=["common", "vscode", "zed", "bwrap"],
+        )
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+        # Create a file that belongs to vscode — but vscode IS active
+        (ws_dir / ".vscode").mkdir()
+        (ws_dir / ".vscode" / "launch.json").write_text("{}")
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community"}, {}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    cmd_apply(config_with_remotes)
+
+        out = capsys.readouterr().out
+        assert "Some files may come from templates not in your config" not in out
+
+    def test_apply_does_not_report_nonexistent_orphan_files(self, tmp_path, capsys, config_with_remotes):
+        """No orphan message when no files from inactive bundles exist on disk."""
+        ws_dir = self._workspace(tmp_path)
+        # No stale files on disk — workspace is clean
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community"}, {}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    cmd_apply(config_with_remotes)
+
+        out = capsys.readouterr().out
+        assert "Some files may come from templates not in your config" not in out

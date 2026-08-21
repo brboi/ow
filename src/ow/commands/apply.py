@@ -6,7 +6,7 @@ from ow.utils.drift import warn_if_drifted
 from ow.utils.config import Config
 from ow.utils.git import run_cmd
 from ow.utils.resolver import resolve_workspace
-from ow.utils.templates import apply_templates, ensure_services_compose, ensure_workspace_materialized
+from ow.utils.templates import apply_templates, available_templates, ensure_services_compose, ensure_workspace_materialized, resolve_template_files
 
 
 def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = False) -> None:
@@ -43,6 +43,27 @@ def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = Fal
     _, successful, errors = ensure_workspace_materialized(ws, config, ws_dir)
     ensure_services_compose()
     apply_templates(ws, config, ws_dir)
+
+    # Report files that exist on disk but belong to template bundles not in
+    # the workspace config.  Stateless: no manifest, no mutation.
+    inactive_bundles = set(available_templates()) - set(ws.templates)
+    orphans: list[tuple[str, str]] = []
+    for bundle in sorted(inactive_bundles):
+        try:
+            files = resolve_template_files(bundle)
+        except (OSError, FileNotFoundError):
+            continue
+        for rel, src in files.items():
+            out_rel = rel.with_suffix("") if src.suffix == ".j2" else rel
+            if (ws_dir / out_rel).exists():
+                orphans.append((out_rel.as_posix(), bundle))
+    if orphans:
+        print(
+            "\nSome files may come from templates not in your config. "
+            "Remove them manually if stale:"
+        )
+        for file_path, bundle_name in orphans:
+            print(f"  {file_path}  [{bundle_name}]")
 
     if errors:
         print("\nWarning: repo(s) failed to set up:", file=sys.stderr)
