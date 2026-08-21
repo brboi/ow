@@ -156,6 +156,51 @@ def test_load_config_remotes_non_table_raises_valueerror():
 
 
 # ---------------------------------------------------------------------------
+# version field
+# ---------------------------------------------------------------------------
+
+def test_load_config_with_version():
+    toml = "version = 1\n[remotes.community]\norigin.url = \"x\""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        path.write_text(toml)
+        config = load_config(path)
+        assert config.version == 1
+
+def test_load_config_version_absent_means_1():
+    toml = "[remotes.community]\norigin.url = \"x\""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        path.write_text(toml)
+        config = load_config(path)
+        assert config.version == 1
+
+def test_load_config_version_unknown_raises():
+    toml = "version = 99\n[remotes.community]\norigin.url = \"x\""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        path.write_text(toml)
+        with pytest.raises(ValueError, match="schema version 99"):
+            load_config(path)
+
+def test_load_workspace_config_version_absent_means_1():
+    toml = 'templates = ["common"]\n[repos]\ncommunity = "master"'
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        path.write_text(toml)
+        ws = load_workspace_config(path)
+        assert ws.version == 1
+
+def test_write_workspace_config_includes_version():
+    ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        write_workspace_config(path, ws)
+        content = path.read_text()
+        assert "version = 1" in content
+
+
+# ---------------------------------------------------------------------------
 # load_global_config
 # ---------------------------------------------------------------------------
 

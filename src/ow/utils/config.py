@@ -68,18 +68,27 @@ class WorkspaceConfig:
     repos: dict[str, BranchSpec]
     templates: list[str]
     vars: dict[str, Any] = field(default_factory=dict)
+    version: int = 1
 
 
 @dataclass
 class Config:
     vars: dict[str, Any]
     remotes: dict[str, dict[str, RemoteConfig]]  # alias -> remote_name -> cfg
+    version: int = 1
 
 
 def load_workspace_config(path: Path) -> WorkspaceConfig:
     """Read the .ow/config.toml file from an individual workspace."""
     with open(path, "rb") as f:
         data = tomllib.load(f)
+
+    version = data.get("version", 1)
+    if version > 1:
+        raise ValueError(
+            f"workspace config schema version {version} is newer than ow supports (1); "
+            f"upgrade ow to read this file"
+        )
 
     repos = {}
     for alias, spec_str in data.get("repos", {}).items():
@@ -95,12 +104,14 @@ def load_workspace_config(path: Path) -> WorkspaceConfig:
         repos=repos,
         templates=templates,
         vars=data.get("vars", {}),
+        version=version,
     )
 
 
 def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
     """Write the .ow/config.toml file for an individual workspace."""
     data: dict[str, Any] = {
+        "version": ws.version,
         "templates": ws.templates,
         "repos": {alias: spec.to_spec_str() for alias, spec in ws.repos.items()},
     }
@@ -154,6 +165,13 @@ def load_config(path: Path) -> Config:
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
+    version = data.get("version", 1)
+    if version > 1:
+        raise ValueError(
+            f"config schema version {version} is newer than ow supports (1); "
+            f"upgrade ow to read this file"
+        )
+
     vars = data.get("vars", {})
 
     remotes: dict[str, dict[str, RemoteConfig]] = {}
@@ -177,11 +195,13 @@ def load_config(path: Path) -> Config:
     return Config(
         vars=vars,
         remotes=remotes,
+        version=version,
     )
 
 
 _DEFAULT_CONFIG = '''\
 # ow configuration. Everything here is optional except at least one remote.
+version = 1
 
 [vars]
 http_port = 8069
