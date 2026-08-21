@@ -446,13 +446,22 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
 
 
 def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
+    """Does this worktree path appear in the bare repo's worktree list?"""
     if not worktree_path.exists():
         return False
     result = _run(
-        ["git", "-C", str(bare_repo), "worktree", "list"],
-        capture_output=True, text=True, check=True,
+        ["git", "-C", str(bare_repo), "worktree", "list", "--porcelain"],
+        capture_output=True, text=True,
     )
-    return str(worktree_path) in result.stdout
+    if result.returncode != 0:
+        return False
+    target = str(worktree_path.resolve())
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            wt_path = line.split(" ", 1)[1]
+            if str(Path(wt_path).resolve()) == target:
+                return True
+    return False
 
 
 def get_all_remote_refs(bare_repo: Path) -> set[str]:
