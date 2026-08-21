@@ -615,3 +615,47 @@ def test_init_with_a_tty_checks_duplicates_before_asking_anything(tmp_path, monk
     checkbox.assert_not_called()
     text.assert_not_called()
     confirm.assert_not_called()
+
+
+def _broken_workspace(at):
+    """A workspace ow knows about whose config.toml no longer parses."""
+    (at / ".ow").mkdir(parents=True, exist_ok=True)
+    (at / ".ow" / "config.toml").write_text("templates = [oops\n")
+    index.remember(at)
+    return at
+
+
+def test_init_still_finds_a_real_collision_past_a_broken_workspace(tmp_path, monkeypatch, capsys, config_with_remotes):
+    """One unreadable workspace must not blind the check to the others."""
+    _broken_workspace(tmp_path / "broken")
+    _remembered_workspace(tmp_path / "parrot", "community", "master..master-parrot")
+    monkeypatch.chdir(tmp_path)
+
+    with _tty(False), _questionary_answers(), pytest.raises(SystemExit) as exc:
+        cmd_init(
+            config_with_remotes,
+            name="new-ws",
+            templates=["common"],
+            repos={"community": BranchSpec("origin/master", "master-parrot")},
+        )
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "parrot" in err
+    assert "master-parrot" in err
+
+
+def test_init_survives_an_indexed_workspace_with_a_corrupt_config(tmp_path, monkeypatch, config_with_remotes):
+    """A neighbour's broken config.toml is not this workspace's problem."""
+    _broken_workspace(tmp_path / "broken")
+    monkeypatch.chdir(tmp_path)
+
+    with _tty(False), _questionary_answers(), _no_git(tmp_path / "new-ws"):
+        cmd_init(
+            config_with_remotes,
+            name="new-ws",
+            templates=["common"],
+            repos={"community": BranchSpec("origin/master", "master-new")},
+        )
+
+    assert (tmp_path / "new-ws" / ".ow" / "config.toml").exists()

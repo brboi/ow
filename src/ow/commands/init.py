@@ -9,6 +9,7 @@ because there is none.
 import re
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -251,9 +252,16 @@ def _check_duplicate_branches(new_repos: dict[str, BranchSpec]) -> None:
     acceptable, because git itself still refuses the second worktree. This
     check exists only to say so earlier, and in a sentence naming the
     workspace that already holds the branch.
+
+    A workspace whose own config no longer reads is skipped for the same
+    reason: nothing about the workspace being created is wrong, and git
+    still refuses the second worktree if it turns out to collide.
     """
     for existing_ws_dir in index.known_workspaces():
-        existing = load_workspace_config(existing_ws_dir / MARKER)
+        try:
+            existing = load_workspace_config(existing_ws_dir / MARKER)
+        except (OSError, tomllib.TOMLDecodeError, ValueError):
+            continue
         for alias, new_spec in new_repos.items():
             if alias not in existing.repos:
                 continue
