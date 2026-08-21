@@ -72,8 +72,10 @@ class TestCmdApplyExtended:
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {"community": "clone failed"})):
                 with patch("ow.commands.apply.apply_templates"):
-                    cmd_apply(config)
+                    with pytest.raises(SystemExit) as exc:
+                        cmd_apply(config)
 
+        assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "Warning" in captured.err or "Warning" in captured.out
         assert "community" in (captured.err + captured.out)

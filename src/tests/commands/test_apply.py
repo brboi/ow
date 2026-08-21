@@ -113,3 +113,61 @@ class TestCmdApplyOnly:
                     cmd_apply(config_with_remotes)
 
         assert list(materialize.call_args.args[0].repos) == ["community", "enterprise"]
+
+
+class TestCmdApplyFailedRepos:
+    """A repo that failed to set up must not be reported as a clean run."""
+
+    def _workspace(self, tmp_path):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(
+            repos={
+                "community": BranchSpec("origin/master"),
+                "enterprise": BranchSpec("origin/master"),
+            },
+            templates=["common"],
+        )
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+        return ws_dir
+
+    def test_a_failed_repo_exits_non_zero(self, tmp_path, capsys, config_with_remotes):
+        """Otherwise CI goes green on half a workspace."""
+        ws_dir = self._workspace(tmp_path)
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community"}, {"enterprise": "unreachable"}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    with pytest.raises(SystemExit) as exc:
+                        cmd_apply(config_with_remotes)
+
+        assert exc.value.code == 1
+
+    def test_the_closing_line_does_not_claim_success(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community"}, {"enterprise": "unreachable"}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    with pytest.raises(SystemExit):
+                        cmd_apply(config_with_remotes)
+
+        out = capsys.readouterr().out
+        assert f"Workspace '{ws_dir.name}' applied." not in out
+        assert "1 repo failed" in out
+
+    def test_a_clean_run_still_says_applied_and_does_not_exit(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community", "enterprise"}, {}),
+            ):
+                with patch("ow.commands.apply.apply_templates"):
+                    cmd_apply(config_with_remotes)
+
+        assert f"Workspace '{ws_dir.name}' applied." in capsys.readouterr().out

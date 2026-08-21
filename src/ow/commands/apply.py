@@ -45,4 +45,12 @@ def cmd_apply(config: Config, workspace: str | None = None, *, only: str | None 
             print(f"  {name}")
         print("Run `ow templates --diff` to see what changed.")
 
+    if errors:
+        # Everything above still ran — the templates are rendered, the vars
+        # are back-filled — but a workspace missing a repo is not applied,
+        # and a CI step that says so must go red rather than green.
+        noun = "repo" if len(errors) == 1 else "repos"
+        print(f"\nWorkspace '{ws_dir.name}' partly applied: {len(errors)} {noun} failed.")
+        sys.exit(1)
+
     print(f"\nWorkspace '{ws_dir.name}' applied.")
