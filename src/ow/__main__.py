@@ -44,9 +44,11 @@ app = typer.Typer(
 def callback(
     version: bool = typer.Option(
         None,
+        # No "-v": that spelling is left free for a future --verbose. ow
+        # shells out to git constantly, so verbosity is the flag most likely
+        # to be wanted next, and the CLI surface freezes at 2.0.
         "--version",
         "-V",
-        "-v",
         callback=_version_callback,
         is_eager=True,
         help="Show version and exit.",

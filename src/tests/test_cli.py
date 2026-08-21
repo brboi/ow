@@ -18,12 +18,27 @@ def test_no_args_shows_help():
     assert "Odoo workspace manager" in result.output
 
 
-@pytest.mark.parametrize("flag", ["--version", "-V", "-v"])
+@pytest.mark.parametrize("flag", ["--version", "-V"])
 def test_version_flag(flag):
-    """-v was the argparse spelling; keep it working alongside -V."""
+    """The two spellings 2.0 freezes."""
     result = runner.invoke(app, [flag])
     assert result.exit_code == 0
     assert result.output.startswith("ow ")
+
+
+def test_short_v_is_not_version():
+    """1.x spelled it `-v`; 2.0 does not.
+
+    `-v` is near-universally --verbose, and ow shells out to git constantly,
+    so a verbosity flag is the obvious addition. Binding it to --version
+    forecloses that permanently, and the CLI surface freezes at 2.0 — so the
+    short spelling is dropped now, while it still can be. This test is the
+    reservation: `-v` must stay unclaimed by --version.
+    """
+    result = runner.invoke(app, ["-v"])
+
+    assert result.exit_code == 2
+    assert not result.output.startswith("ow ")
 
 
 def test_init_with_args(xdg):

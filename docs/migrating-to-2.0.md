@@ -229,6 +229,10 @@ Nothing is ever pushed, then or now.
 | — | `ow ls` — list every known workspace, its path and its repos |
 | — | `ow templates` — list, take and diff template files |
 
+`ow -v` is gone: the version flag is now `--version` or `-V`. `-v` almost
+everywhere means `--verbose`, and ow shells out to git constantly, so the
+short spelling is left free for that.
+
 `ow init` now behaves like `git init`: it creates a workspace in the current
 directory, or in `./NAME` if you pass a name. The old `-n/--name` option is
 gone — the name is the argument.
