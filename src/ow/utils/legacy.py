@@ -41,12 +41,13 @@ def check_legacy_layout(*, fatal: bool = True) -> None:
     migrating user what ow has picked up so far, from inside the very
     workspaces they are migrating.
     """
+    prefix = "Error:" if fatal else "Warning:"
     if not paths.config_file().exists():
         old_root = find_project_root(Path.cwd())
         if old_root is not None:
             marker = "ow.toml" if (old_root / "ow.toml").exists() else "ow.toml.example"
             err_console.print(
-                f"Error: found an old project layout at {old_root} ({marker})", markup=False
+                f"{prefix} found an old project layout at {old_root} ({marker})", markup=False
             )
             err_console.print(f"       {marker} is no longer used — {_GUIDE}")
             if fatal:
@@ -58,11 +59,9 @@ def check_legacy_layout(*, fatal: bool = True) -> None:
         old_config = candidate / ".ow" / "config"
         if old_config.exists() and not (candidate / ".ow" / "config.toml").exists():
             err_console.print(
-                f"Error: found an old workspace config at {old_config}", markup=False
+                f"{prefix} found an old workspace config at {old_config}", markup=False
             )
-            # The whole fix, spelled out: this one is a rename, and sending
-            # someone to a web page to read a single mv is a poor trade.
-            err_console.print("       expected .ow/config.toml instead: mv .ow/config .ow/config.toml")
+            err_console.print(f"       {HINT_RENAME}")
             err_console.print(f"       {_GUIDE}")
             if fatal:
                 raise typer.Exit(1)

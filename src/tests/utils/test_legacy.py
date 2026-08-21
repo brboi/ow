@@ -218,6 +218,39 @@ def test_fatal_false_is_still_silent_on_a_migrated_setup(
     assert capsys.readouterr().err == ""
 
 
+def test_fatal_false_workspace_says_warning_not_error(
+    xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A non-fatal call must say Warning:, not Error:."""
+    ws = tmp_path / "myws"
+    (ws / ".ow").mkdir(parents=True)
+    (ws / ".ow" / "config").write_text("")
+    monkeypatch.chdir(ws)
+
+    check_legacy_layout(fatal=False)
+
+    err = capsys.readouterr().err
+    assert "Warning:" in err
+    assert "Error:" not in err
+
+
+def test_fatal_true_workspace_says_error(
+    xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A fatal call must keep saying Error:."""
+    ws = tmp_path / "myws"
+    (ws / ".ow").mkdir(parents=True)
+    (ws / ".ow" / "config").write_text("")
+    monkeypatch.chdir(ws)
+
+    import typer
+    with pytest.raises(typer.Exit):
+        check_legacy_layout(fatal=True)
+
+    err = capsys.readouterr().err
+    assert "Error:" in err
+
+
 def test_resolver_hints_at_rename_when_old_config_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
