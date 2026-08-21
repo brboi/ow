@@ -11,8 +11,6 @@ from ow.utils.resolver import resolve_workspace
 from ow.utils.config import BranchSpec, Config
 from ow.utils import paths
 from ow.utils.git import (
-    get_all_remote_refs,
-    get_remote_ref_for_branch,
     get_remote_url,
     get_rev_list_count,
     get_upstream,
@@ -73,8 +71,6 @@ def _display_attached_status(
     resolved: BranchSpec,
     worktree_path: Path,
     max_alias_len: int,
-    *,
-    refs: set[str] | None = None,
 ) -> str:
     """Format status line for an attached worktree."""
     padding = " " * (max_alias_len - len(alias) + 1)
@@ -103,7 +99,6 @@ def _display_attached_status(
 def _gather_repo_status(
     alias: str, spec: BranchSpec, resolved: BranchSpec,
     worktree_path: Path, bare_repo: Path, max_alias_len: int,
-    refs: set[str],
 ) -> _StatusResult:
     """Gather all display data for one repo (runs in parallel)."""
     if resolved.is_detached:
@@ -118,7 +113,7 @@ def _gather_repo_status(
         return _StatusResult(status_line, None, link)
     else:
         status_line = _display_attached_status(
-            alias, spec, resolved, worktree_path, max_alias_len, refs=refs,
+            alias, spec, resolved, worktree_path, max_alias_len,
         )
         remote_url = get_remote_url(bare_repo, resolved.remote)
         link = None
@@ -142,7 +137,8 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
 
     warn_if_drifted(ws, ws_dir)
 
-    resolved_specs = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True).specs
+    fetched = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
+    resolved_specs = fetched.specs
 
     header = Text(f"[{ws_dir.name}]", style="bold cyan")
     console.print(header)
@@ -160,10 +156,9 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
         if resolved is None:
             continue
         bare_repo = bare_repos_dir / f"{alias}.git"
-        refs = get_all_remote_refs(bare_repo)
         status_tasks[alias] = (
-            lambda a=alias, s=spec, r=resolved, w=worktree_path, b=bare_repo, rf=refs:
-            _gather_repo_status(a, s, r, w, b, max_alias_len, rf)
+            lambda a=alias, s=spec, r=resolved, w=worktree_path, b=bare_repo:
+            _gather_repo_status(a, s, r, w, b, max_alias_len)
         )
 
     if status_tasks:
@@ -193,6 +188,8 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
             continue
 
         console.print(result.status_line)
+        if alias in fetched.failed:
+            console.print(f"        {escape(alias)}:{padding}[red](fetch failed; showing stale)[/]")
         if first_attached_branch is None and result.first_attached_branch:
             first_attached_branch = result.first_attached_branch
         if result.github_link:
