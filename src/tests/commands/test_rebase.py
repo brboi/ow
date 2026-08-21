@@ -497,3 +497,119 @@ class TestSummaryLine:
             replay_count=1,
         )
         assert "←" not in _summary_line(plan, 9)
+
+
+def _facts_detached(worktree, alias, base, up, up_before, is_detached):
+    return RepoFacts(alias=alias, base=base, is_detached=True, bound="BOUND", base_merged=True)
+
+
+class TestFailingStepIsNamedPrecisely:
+    """`GitStep.onto` exists so a failure names the ref that actually failed.
+
+    Only step 2 was ever failed in a test, and step 2's `onto` *is*
+    `plan.base` — so `_report_conflict(..., step.onto)` could be rewritten to
+    `plan.base` with the suite still green, and `_report_switch_failure` was
+    never executed at all.
+    """
+
+    def test_a_step_one_conflict_names_the_upstream_not_the_base(self, tmp_path, capsys):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_two_step),
+            patch("ow.commands.rebase.in_progress_operation", return_value=_REBASE_IN_PROGRESS),
+            patch("ow.commands.rebase.git", side_effect=[_fail()]) as mock_git,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert exc.value.code == 1
+        assert mock_git.call_count == 1  # step 2 never ran
+        conflict_line = capsys.readouterr().err.split("CONFLICT")[1].split("\n")[0]
+        assert "dev/work" in conflict_line
+        assert "origin/master" not in conflict_line
+
+    def test_a_failing_switch_is_not_reported_as_a_conflict(self, tmp_path, capsys):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master"})
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_detached),
+            patch("ow.commands.rebase.git", return_value=_fail()),
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "could not switch to origin/master" in err
+        assert "CONFLICT" not in err
+
+
+class TestDryRunExitCode:
+    """--dry-run reported a failed analysis and then exited 0 anyway."""
+
+    def test_a_missing_worktree_still_fails_a_dry_run(self, tmp_path, capsys):
+        config, ws_dir = make_workspace(tmp_path, {
+            "community": "master..work",
+            "enterprise": "master..work",
+        })
+        shutil.rmtree(ws_dir / "community")
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({
+                      "community": "origin/master", "enterprise": "origin/master",
+                  })),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git") as mock_git,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None, dry_run=True)
+        assert exc.value.code == 1
+        assert mock_git.call_count == 0
+
+
+class TestFetchWiring:
+    """Two arguments no test looked at, both load-bearing."""
+
+    def test_upstreams_are_fetched(self, tmp_path):
+        """Without this, step 1 of a two-step rebase can never be planned:
+        `fetched.upstreams` stays empty and `up` is always None."""
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})) as mock_fetch,
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git", return_value=_ok()),
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert mock_fetch.call_args.kwargs["fetch_upstreams"] is True
+
+    def test_the_resolved_track_wins_over_the_configured_base_ref(self, tmp_path):
+        """`master` resolves to whichever remote actually carries it; rebasing
+        onto the unresolved config string would use the wrong remote."""
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        seen = {}
+
+        def _record(worktree, alias, base, up, up_before, is_detached):
+            seen["base"] = base
+            return RepoFacts(alias=alias, base=base, bound="BOUND", base_merged=True)
+
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "upstream/master"})),
+            patch("ow.commands.rebase.gather_facts", side_effect=_record),
+            patch("ow.commands.rebase.git", return_value=_ok()),
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert seen["base"] == "upstream/master"
+        assert _ws(ws_dir).repos["community"].base_ref == "origin/master"

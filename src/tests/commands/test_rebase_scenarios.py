@@ -140,6 +140,10 @@ class TestForcePush:
         assert facts.force_pushed is True
         assert facts.bound == up_before
         assert facts.unpushed == 1
+        # `base..HEAD` would say 3 here (X, Y, W); only W actually moves.
+        # This is the one scenario where the two candidate ranges disagree,
+        # so it is the only place the choice of range is observable.
+        assert facts.replay_count == 1
 
         run(git_lab, plan_for(facts))
         subjects = git_lab.git("log", "--format=%s", "origin/master..HEAD").split("\n")
