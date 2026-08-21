@@ -409,6 +409,17 @@ def test_init_configuration_not_found(tmp_path, monkeypatch, capsys, config):
     assert "not found" in capsys.readouterr().err.lower()
 
 
+
+def test_init_configuration_malformed_exits_cleanly(tmp_path, monkeypatch, capsys, config):
+    """Malformed TOML in a --configuration file must exit cleanly, not traceback."""
+    monkeypatch.chdir(tmp_path)
+    bad = tmp_path / "bad.toml"
+    bad.write_text("templates = [unclosed")
+    with _tty(False), pytest.raises(SystemExit) as exc_info:
+        cmd_init(config, name="target", configuration=str(bad))
+    assert exc_info.value.code == 1
+    assert "could not load" in capsys.readouterr().err.lower()
+
 # ---------------------------------------------------------------------------
 # The index
 # ---------------------------------------------------------------------------

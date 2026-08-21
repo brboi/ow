@@ -92,7 +92,14 @@ def _validate_init_inputs(
         if not src_config_file.exists():
             print(f"Error: configuration file not found: {src_config_file}", file=sys.stderr)
             sys.exit(1)
-        source_ws = load_workspace_config(src_config_file)
+        try:
+            source_ws = load_workspace_config(src_config_file)
+        except (OSError, ValueError) as exc:
+            # TOMLDecodeError is a ValueError; a fumbled quote or missing
+            # bracket deserves the same one-liner the global config gets,
+            # not eight frames of tomllib.
+            print(f"Error: could not load {src_config_file}: {exc}", file=sys.stderr)
+            sys.exit(1)
 
         invalid = [t for t in source_ws.templates if t not in available]
         if invalid:
