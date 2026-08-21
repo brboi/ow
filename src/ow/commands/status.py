@@ -4,6 +4,7 @@ from typing import Any, NamedTuple
 
 from ow.utils.display import console, counts
 from rich.text import Text
+from rich.markup import escape
 from ow.utils.drift import warn_if_drifted
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
@@ -63,7 +64,7 @@ def _display_detached_status(
     short_hash, _ = get_worktree_head(worktree_path)
 
     status = f"[bold]{resolved.base_ref}[/] {counts(behind, ahead)} ([yellow]DETACHED[/]: {short_hash})"
-    return f"        {alias}:{padding}{status}"
+    return f"        {escape(alias)}:{padding}{status}"
 
 
 def _display_attached_status(
@@ -96,7 +97,7 @@ def _display_attached_status(
         ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
         status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
 
-    return f"        {alias}:{padding}{status}"
+    return f"        {escape(alias)}:{padding}{status}"
 
 
 def _gather_repo_status(
@@ -178,17 +179,17 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
         padding = " " * (max_alias_len - len(alias) + 1)
         worktree_path = ws_dir / alias
         if not worktree_path.exists():
-            console.print(f"        {alias}:{padding}[dim](not applied)[/]")
+            console.print(f"        {escape(alias)}:{padding}[dim](not applied)[/]")
             continue
 
         resolved = resolved_specs.get(alias)
         if resolved is None:
-            console.print(f"        {alias}:{padding}[red](error: could not resolve)[/]")
+            console.print(f"        {escape(alias)}:{padding}[red](error: could not resolve)[/]")
             continue
 
         result = status_results.get(alias)
         if isinstance(result, Exception):
-            console.print(f"        {alias}:{padding}[red](error)[/]")
+            console.print(f"        {escape(alias)}:{padding}[red](error)[/]")
             continue
 
         console.print(result.status_line)
@@ -204,6 +205,6 @@ def cmd_status(config: Config, workspace: str | None = None) -> None:
             console.print(f"        runbot: [link={runbot_url}]{first_attached_branch}[/]")
         for link_alias, link_url in github_links:
             link_padding = " " * (max_alias_len - len(link_alias) + 1)
-            console.print(f"        {link_alias}:{link_padding}[link={link_url}]{link_url}[/]")
+            console.print(f"        {escape(link_alias)}:{link_padding}[link={link_url}]{link_url}[/]")
 
     console.print()

@@ -109,3 +109,23 @@ class TestCmdStatusErrorPaths:
             cmd_status(config)
         captured = capsys.readouterr()
         assert "links" not in captured.out
+
+    def test_status_survives_brackets_in_alias(self, tmp_path, capsys, config):
+        """An alias containing Rich markup characters must not crash status."""
+        alias = "[/]evil"
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={alias: BranchSpec("origin/master")}, templates=["common"])
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+        fetch_return = FetchOutcome(
+            tracks={alias: "origin/master"}, upstreams={},
+            specs={}, upstream_before={},
+        )
+        with (
+            patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
+            patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
+            patch("ow.commands.status.warn_if_drifted"),
+        ):
+            cmd_status(config)
+        captured = capsys.readouterr()
+        assert alias in captured.out
