@@ -170,3 +170,44 @@ def test_warn_if_drifted_names_the_command_that_fixes_it(tmp_path, capsys):
         warn_if_drifted(ws, ws_dir)
 
     assert "ow apply" in capsys.readouterr().err
+
+
+def test_drift_message_says_expected_then_found_in_that_order():
+    """Swapping the two reads as a perfectly plausible sentence, and sends
+    the user to fix the branch they are already on."""
+    dr = DriftResult(
+        alias="enterprise",
+        spec=BranchSpec("origin/master", "my-feature"),
+        actual_branch="sidetrack",
+    )
+    assert dr.message == "enterprise: expected branch my-feature, found branch sidetrack"
+
+
+def test_drift_message_for_an_unexpectedly_detached_worktree():
+    dr = DriftResult(
+        alias="community", spec=BranchSpec("origin/master", "feat"), actual_branch=None,
+    )
+    assert dr.message == "community: expected branch feat, found detached HEAD"
+
+
+def test_drift_message_for_an_unexpectedly_attached_worktree():
+    dr = DriftResult(
+        alias="community", spec=BranchSpec("origin/master"), actual_branch="rogue",
+    )
+    assert dr.message == "community: expected detached at origin/master, found branch rogue"
+
+
+def test_warn_if_drifted_survives_a_check_that_raised(tmp_path, capsys):
+    """parallel_per_repo hands back the exception as the result; reaching
+    for .is_drifted on it turns a warning into a crash."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    (ws_dir / "community").mkdir(parents=True)
+    ws = WorkspaceConfig(
+        repos={"community": BranchSpec("origin/master", "my-feature")},
+        templates=["common"],
+    )
+
+    with patch("ow.utils.drift.get_worktree_branch", side_effect=RuntimeError("boom")):
+        warn_if_drifted(ws, ws_dir)
+
+    assert "Warning" not in capsys.readouterr().err

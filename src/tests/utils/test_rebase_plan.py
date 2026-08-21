@@ -126,3 +126,10 @@ class TestCarriedFields:
         assert plan.force_pushed is True
         assert plan.alias == "community"
         assert plan.base == "origin/master"
+
+
+def test_exactly_three_dirty_files_are_all_listed_with_no_remainder():
+    """`+0 more` is not a thing. Off-by-one on the truncation boundary."""
+    plan = plan_for(facts(dirty_files=("a", "b", "c")))
+    assert "a, b, c" in plan.skip_reason
+    assert "more" not in plan.skip_reason
