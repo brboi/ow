@@ -125,6 +125,29 @@ def test_load_config_vars_empty():
 
     assert config.vars == {}
 
+def test_load_config_remotes_missing_url_raises_valueerror():
+    toml = textwrap.dedent("""\
+    [remotes.community]
+    origin.pushurl = "git@github.com:odoo-dev/odoo.git"
+    """)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        path.write_text(toml)
+        with pytest.raises(ValueError, match="community.*origin"):
+            load_config(path)
+
+
+def test_load_config_remotes_non_table_raises_valueerror():
+    toml = textwrap.dedent("""\
+    [remotes.community]
+    origin = "not-a-table"
+    """)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        path.write_text(toml)
+        with pytest.raises(ValueError, match="community.*origin"):
+            load_config(path)
+
 
 # ---------------------------------------------------------------------------
 # load_global_config
