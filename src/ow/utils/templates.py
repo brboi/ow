@@ -127,11 +127,14 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
 
     return {
         "ws_name": ws_dir.name,
+        "ws_dir": str(ws_dir),
         "main_repo_alias": main_repo_alias,
         "repos": list(ws.repos.keys()),
         "vars": {**config.vars, **ws.vars},
         "addons_paths": addons_paths + main_addons_paths,
         "odools_path_items": odools_path_items + odools_main_items,
+        "services_compose": str(paths.services_dir() / "compose.yml"),
+        "volumes_dir": str(paths.volumes_dir()),
     }
 
 
