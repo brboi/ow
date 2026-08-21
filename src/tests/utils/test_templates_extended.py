@@ -7,6 +7,7 @@ from ow.utils.config import BranchSpec, WorkspaceConfig
 from ow.utils import paths
 from ow.utils.templates import (
     _get_packaged_templates,
+    _packaged_bundle,
     available_templates,
     apply_templates,
     ensure_workspace_materialized,
@@ -20,6 +21,51 @@ class TestGetPackagedTemplates:
         assert "common" in names
         assert "vscode" in names
         assert "zed" in names
+
+
+class TestPackagedLookupFailures:
+    """A broken install must not masquerade as "ow ships no templates".
+
+    Swallowing every exception here turned an unreadable `_static/templates`
+    into `unknown template(s): common. Available: ` — a message that blames
+    the user's config for a broken package.
+    """
+
+    def test_an_unreadable_packaged_tree_names_the_cause(self, xdg, capsys):
+        (paths.templates_dir() / "mine").mkdir(parents=True)
+        with patch(
+            "ow.utils.templates._packaged_templates_dir",
+            autospec=True,
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            assert available_templates() == ["mine"]
+
+        err = capsys.readouterr().err
+        assert "Permission denied" in err
+        assert "packaged templates" in err
+
+    def test_a_broken_lookup_is_not_swallowed(self, xdg):
+        """Only unreadable files are survivable; a bug is not."""
+        with patch(
+            "ow.utils.templates._packaged_templates_dir",
+            autospec=True,
+            side_effect=ValueError("ow is not a package"),
+        ):
+            with pytest.raises(ValueError):
+                available_templates()
+
+    def test_a_bundle_lookup_does_not_swallow_a_broken_lookup(self, xdg):
+        with patch(
+            "ow.utils.templates._packaged_templates_dir",
+            autospec=True,
+            side_effect=ValueError("ow is not a package"),
+        ):
+            with pytest.raises(ValueError):
+                _packaged_bundle("common")
+
+    def test_a_bundle_ow_does_not_ship_is_none(self, xdg):
+        assert _packaged_bundle("nosuch-bundle") is None
+        assert _packaged_bundle("common") is not None
 
 
 class TestAvailableTemplates:

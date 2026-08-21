@@ -1,4 +1,5 @@
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -99,13 +100,28 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
 # ---------------------------------------------------------------------------
 
 
+def _packaged_templates_dir() -> Path:
+    """The template tree shipped inside the ow distribution."""
+    from importlib.resources import files
+
+    return files("ow") / "_static" / "templates"  # type: ignore[return-value]
+
+
 def _get_packaged_templates() -> list[str]:
-    """Return list of packaged template names from ow/_static/templates/."""
+    """Names of the bundles ow ships.
+
+    An unreadable tree means a broken install, not an ow that ships nothing:
+    say so, then carry on with whatever the user has locally. Anything other
+    than an OSError is a bug and travels on.
+    """
     try:
-        from importlib.resources import files
-        pkg_templates = files("ow") / "_static" / "templates"
-        return sorted(d.name for d in pkg_templates.iterdir() if d.is_dir())
-    except Exception:
+        return sorted(d.name for d in _packaged_templates_dir().iterdir() if d.is_dir())
+    except OSError as exc:
+        print(
+            f"Warning: ow's packaged templates are unreadable ({exc}); "
+            "only your own templates are available.",
+            file=sys.stderr,
+        )
         return []
 
 
@@ -125,12 +141,9 @@ def available_templates() -> list[str]:
 
 
 def _packaged_bundle(bundle: str) -> Path | None:
-    """Return the packaged bundle directory for `bundle`, or None if unavailable."""
-    try:
-        from importlib.resources import files
-        return files("ow") / "_static" / "templates" / bundle
-    except Exception:
-        return None
+    """The packaged directory for `bundle`, or None if ow does not ship it."""
+    path = _packaged_templates_dir() / bundle
+    return path if path.is_dir() else None
 
 
 def _files_under(root: Path | None) -> dict[Path, Path]:
