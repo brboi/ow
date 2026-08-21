@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from ow.utils.git import (
     create_worktree,
     detach_worktree,
     ensure_bare_repo,
+    in_progress_operation,
     parallel_per_repo,
     resolve_spec,
     run_cmd,
@@ -263,21 +265,33 @@ def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: P
     for alias, resolved in resolved_specs.items():
         bare_repo = bare_repos_dir / f"{alias}.git"
         worktree_path = ws_dir / alias
-        if not worktree_exists(bare_repo, worktree_path):
-            run_cmd(["git", "-C", str(bare_repo), "worktree", "prune"], check=True, label=alias)
-            create_worktree(bare_repo, worktree_path, resolved)
-        else:
-            currently_detached = worktree_is_detached(worktree_path)
-            if currently_detached and not resolved.is_detached:
-                attach_worktree(bare_repo, worktree_path, resolved)
-            elif not currently_detached and resolved.is_detached:
-                detach_worktree(worktree_path, resolved.base_ref)
-            elif not resolved.is_detached:
-                set_branch_upstream(
-                    bare_repo,
-                    resolved.local_branch,
-                    resolved.remote,
-                    resolved.branch,
+        try:
+            if not worktree_exists(bare_repo, worktree_path):
+                run_cmd(["git", "-C", str(bare_repo), "worktree", "prune"], check=True, label=alias)
+                create_worktree(bare_repo, worktree_path, resolved)
+            else:
+                currently_detached = worktree_is_detached(worktree_path)
+                if currently_detached and not resolved.is_detached:
+                    attach_worktree(bare_repo, worktree_path, resolved)
+                elif not currently_detached and resolved.is_detached:
+                    detach_worktree(worktree_path, resolved.base_ref)
+                elif not resolved.is_detached:
+                    set_branch_upstream(
+                        bare_repo,
+                        resolved.local_branch,
+                        resolved.remote,
+                        resolved.branch,
+                    )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            successful.discard(alias)
+            busy = in_progress_operation(worktree_path)
+            if busy is not None:
+                operation, continue_cmd, abort_cmd = busy
+                errors[alias] = (
+                    f"{operation} in progress; finish with `{continue_cmd}` or abort with `{abort_cmd}`"
                 )
+            else:
+                errors[alias] = str(exc)
+            print_git_result(alias, "reconcile", [], False, errors[alias])
 
     return ws_dir, successful, errors

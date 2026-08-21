@@ -1,12 +1,13 @@
 import json
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from jinja2 import Environment, FileSystemLoader
 
-from ow.utils.templates import apply_templates, build_template_context, find_addon_paths
+from ow.utils.templates import apply_templates, build_template_context, ensure_workspace_materialized, find_addon_paths
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
 
 TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "common"
@@ -627,3 +628,280 @@ def test_odoorc_still_lists_the_non_core_addons(tmp_path, config):
 
     assert f"addons_path = {ws_dir / 'plain'}" in rendered
     assert "db_name = plainws" in rendered
+
+
+# ---------------------------------------------------------------------------
+# ensure_workspace_materialized — reconcile loop error handling
+# ---------------------------------------------------------------------------
+
+class TestEnsureWorkspaceMaterializedReconcileErrors:
+    """A failure in the reconcile loop must land in errors like any other repo failure."""
+
+    def test_attach_failure_is_caught_and_reported(self, tmp_path):
+        """Currently detached + resolved attached → attach_worktree; failure caught."""
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        config = Config(remotes={}, vars={})
+        ws = WorkspaceConfig(
+            repos={
+                "community": BranchSpec("origin/master", "my-feature"),
+                "enterprise": BranchSpec("origin/master", "ent-feature"),
+            },
+            templates=[],
+        )
+
+        with patch("ow.utils.templates.ensure_bare_repo"):
+            with patch("ow.utils.templates.resolve_spec") as mr:
+                mr.side_effect = [
+                    BranchSpec("origin/master", "my-feature"),
+                    BranchSpec("origin/master", "ent-feature"),
+                ]
+                with patch(
+                    "ow.utils.templates.parallel_per_repo",
+                    return_value={
+                        "community": BranchSpec("origin/master", "my-feature"),
+                        "enterprise": BranchSpec("origin/master", "ent-feature"),
+                    },
+                ):
+                    with patch("ow.utils.templates.worktree_exists", return_value=True):
+                        with patch(
+                            "ow.utils.templates.worktree_is_detached",
+                            side_effect=[True, False],
+                        ):
+                            with patch(
+                                "ow.utils.templates.attach_worktree"
+                            ) as mock_attach:
+                                mock_attach.side_effect = subprocess.CalledProcessError(
+                                    128, ["git", "switch"], stderr=b"fatal: bla"
+                                )
+                                with patch(
+                                    "ow.utils.templates.set_branch_upstream"
+                                ):
+                                    with patch("ow.utils.templates.run_cmd"):
+                                        _, successful, errors = (
+                                            ensure_workspace_materialized(
+                                                ws, config, ws_dir
+                                            )
+                                        )
+
+        assert "community" in errors
+        assert "community" not in successful
+        assert "enterprise" in successful
+
+    def test_detach_failure_is_caught_and_reported(self, tmp_path):
+        """Currently attached + resolved detached → detach_worktree; failure caught."""
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        config = Config(remotes={}, vars={})
+        ws = WorkspaceConfig(
+            repos={
+                "community": BranchSpec("origin/master"),
+                "enterprise": BranchSpec("origin/master"),
+            },
+            templates=[],
+        )
+
+        with patch("ow.utils.templates.ensure_bare_repo"):
+            with patch("ow.utils.templates.resolve_spec") as mr:
+                mr.side_effect = [
+                    BranchSpec("origin/master"),
+                    BranchSpec("origin/master"),
+                ]
+                with patch(
+                    "ow.utils.templates.parallel_per_repo",
+                    return_value={
+                        "community": BranchSpec("origin/master"),
+                        "enterprise": BranchSpec("origin/master"),
+                    },
+                ):
+                    with patch("ow.utils.templates.worktree_exists", return_value=True):
+                        with patch(
+                            "ow.utils.templates.worktree_is_detached",
+                            side_effect=[False, True],
+                        ):
+                            with patch(
+                                "ow.utils.templates.detach_worktree"
+                            ) as mock_detach:
+                                mock_detach.side_effect = subprocess.CalledProcessError(
+                                    128, ["git", "switch", "--detach"], stderr=b"fatal: bla"
+                                )
+                                with patch("ow.utils.templates.run_cmd"):
+                                    _, successful, errors = (
+                                        ensure_workspace_materialized(
+                                            ws, config, ws_dir
+                                        )
+                                    )
+
+        assert "community" in errors
+        assert "community" not in successful
+        assert "enterprise" in successful
+
+    def test_create_worktree_failure_is_caught_and_reported(self, tmp_path):
+        """Missing worktree + resolved attached → create_worktree; failure caught."""
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        config = Config(remotes={}, vars={})
+        ws = WorkspaceConfig(
+            repos={
+                "community": BranchSpec("origin/master", "my-feature"),
+                "enterprise": BranchSpec("origin/master", "ent-feature"),
+            },
+            templates=[],
+        )
+
+        with patch("ow.utils.templates.ensure_bare_repo"):
+            with patch("ow.utils.templates.resolve_spec") as mr:
+                mr.side_effect = [
+                    BranchSpec("origin/master", "my-feature"),
+                    BranchSpec("origin/master", "ent-feature"),
+                ]
+                with patch(
+                    "ow.utils.templates.parallel_per_repo",
+                    return_value={
+                        "community": BranchSpec("origin/master", "my-feature"),
+                        "enterprise": BranchSpec("origin/master", "ent-feature"),
+                    },
+                ):
+                    with patch(
+                        "ow.utils.templates.worktree_exists",
+                        side_effect=[False, True],
+                    ):
+                        with patch(
+                            "ow.utils.templates.create_worktree"
+                        ) as mock_create:
+                            mock_create.side_effect = subprocess.CalledProcessError(
+                                128, ["git", "worktree", "add"], stderr=b"fatal: bla"
+                            )
+                            with patch(
+                                "ow.utils.templates.set_branch_upstream"
+                            ):
+                                with patch("ow.utils.templates.run_cmd"):
+                                    with patch(
+                                        "ow.utils.templates.worktree_is_detached",
+                                        return_value=False,
+                                    ):
+                                        _, successful, errors = (
+                                            ensure_workspace_materialized(
+                                                ws, config, ws_dir
+                                            )
+                                        )
+
+        assert "community" in errors
+        assert "community" not in successful
+        assert "enterprise" in successful
+
+    def test_in_progress_operation_is_named_in_error(self, tmp_path):
+        """A mid-rebase worktree is named and told how to finish or abort."""
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        config = Config(remotes={}, vars={})
+        ws = WorkspaceConfig(
+            repos={
+                "community": BranchSpec("origin/master", "my-feature"),
+                "enterprise": BranchSpec("origin/master", "ent-feature"),
+            },
+            templates=[],
+        )
+
+        with patch("ow.utils.templates.ensure_bare_repo"):
+            with patch("ow.utils.templates.resolve_spec") as mr:
+                mr.side_effect = [
+                    BranchSpec("origin/master", "my-feature"),
+                    BranchSpec("origin/master", "ent-feature"),
+                ]
+                with patch(
+                    "ow.utils.templates.parallel_per_repo",
+                    return_value={
+                        "community": BranchSpec("origin/master", "my-feature"),
+                        "enterprise": BranchSpec("origin/master", "ent-feature"),
+                    },
+                ):
+                    with patch("ow.utils.templates.worktree_exists", return_value=True):
+                        with patch(
+                            "ow.utils.templates.worktree_is_detached",
+                            side_effect=[True, False],
+                        ):
+                            with patch(
+                                "ow.utils.templates.attach_worktree"
+                            ) as mock_attach:
+                                mock_attach.side_effect = subprocess.CalledProcessError(
+                                    128, ["git", "switch"], stderr=b"fatal: bla"
+                                )
+                                with patch(
+                                    "ow.utils.templates.set_branch_upstream"
+                                ):
+                                    with patch("ow.utils.templates.run_cmd"):
+                                        with patch(
+                                            "ow.utils.templates.in_progress_operation",
+                                            return_value=(
+                                                "rebase",
+                                                "git rebase --continue",
+                                                "git rebase --abort",
+                                            ),
+                                        ):
+                                            _, successful, errors = (
+                                                ensure_workspace_materialized(
+                                                    ws, config, ws_dir
+                                                )
+                                            )
+
+        assert "community" in errors
+        assert "rebase" in errors["community"]
+        assert "git rebase --continue" in errors["community"]
+        assert "git rebase --abort" in errors["community"]
+        assert "enterprise" in successful
+
+    def test_broken_git_file_error_is_caught_and_reported(self, tmp_path):
+        """A .git file pointing at a moved bare repo raises CalledProcessError."""
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        config = Config(remotes={}, vars={})
+        ws = WorkspaceConfig(
+            repos={
+                "community": BranchSpec("origin/master", "my-feature"),
+                "enterprise": BranchSpec("origin/master", "ent-feature"),
+            },
+            templates=[],
+        )
+
+        with patch("ow.utils.templates.ensure_bare_repo"):
+            with patch("ow.utils.templates.resolve_spec") as mr:
+                mr.side_effect = [
+                    BranchSpec("origin/master", "my-feature"),
+                    BranchSpec("origin/master", "ent-feature"),
+                ]
+                with patch(
+                    "ow.utils.templates.parallel_per_repo",
+                    return_value={
+                        "community": BranchSpec("origin/master", "my-feature"),
+                        "enterprise": BranchSpec("origin/master", "ent-feature"),
+                    },
+                ):
+                    with patch("ow.utils.templates.worktree_exists", return_value=True):
+                        with patch(
+                            "ow.utils.templates.worktree_is_detached",
+                            side_effect=[True, False],
+                        ):
+                            with patch(
+                                "ow.utils.templates.attach_worktree"
+                            ) as mock_attach:
+                                mock_attach.side_effect = subprocess.CalledProcessError(
+                                    128, ["git", "switch"], stderr=b"fatal: not a git repository"
+                                )
+                                with patch(
+                                    "ow.utils.templates.set_branch_upstream"
+                                ):
+                                    with patch("ow.utils.templates.run_cmd"):
+                                        with patch(
+                                            "ow.utils.templates.in_progress_operation",
+                                            return_value=None,
+                                        ):
+                                            _, successful, errors = (
+                                                ensure_workspace_materialized(
+                                                    ws, config, ws_dir
+                                                )
+                                            )
+
+        assert "community" in errors
+        assert "community" not in successful
+        assert "enterprise" in successful
