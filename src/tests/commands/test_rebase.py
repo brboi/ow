@@ -143,6 +143,8 @@ class TestConflictReporting:
             patch("ow.commands.rebase.fetch_workspace_refs",
                   return_value=fetch_returning({"community": "origin/master"})),
             patch("ow.commands.rebase.gather_facts", side_effect=_facts_two_step),
+            patch("ow.commands.rebase.in_progress_operation",
+                  return_value=("rebase", "git rebase --continue", "git rebase --abort")),
             patch("ow.commands.rebase.git", side_effect=[_ok(), _fail()]),
             patch("builtins.input", return_value="y"),
             pytest.raises(SystemExit) as exc,
@@ -232,6 +234,8 @@ class TestMultiRepo:
                       "community": "origin/master", "enterprise": "origin/master",
                   })),
             patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.in_progress_operation",
+                  return_value=("rebase", "git rebase --continue", "git rebase --abort")),
             patch("ow.commands.rebase.git", side_effect=[_fail(), _ok()]) as mock_git,
             patch("builtins.input", return_value="y"),
             pytest.raises(SystemExit) as exc,
@@ -368,3 +372,48 @@ class TestFailedFetch:
         assert exc.value.code == 1
         touched = {call.args[0] for call in mock_git.call_args_list}
         assert touched == {ws_dir / "enterprise"}
+
+
+_REBASE_IN_PROGRESS = ("rebase", "git rebase --continue", "git rebase --abort")
+
+
+class TestNonConflictFailures:
+    """D3 — `_execute` called every non-zero exit a CONFLICT.
+
+    A rebase that never started — no git identity, a rejecting hook, a full
+    disk — got `git rebase --continue` / `--abort` prescribed at it, and both
+    of those just error out when no rebase is in progress.
+    """
+
+    def _run_failing_step(self, tmp_path, in_progress):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.in_progress_operation", return_value=in_progress),
+            patch("ow.commands.rebase.git", return_value=_fail()),
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert exc.value.code == 1
+
+    def test_a_failure_with_no_rebase_in_progress_is_not_called_a_conflict(
+        self, tmp_path, capsys,
+    ):
+        self._run_failing_step(tmp_path, None)
+        err = capsys.readouterr().err
+        assert "CONFLICT" not in err
+        assert "rebase --continue" not in err
+        assert "rebase --abort" not in err
+        assert "community" in err
+        assert "origin/master" in err
+
+    def test_a_real_conflict_still_gets_the_resume_advice(self, tmp_path, capsys):
+        self._run_failing_step(tmp_path, _REBASE_IN_PROGRESS)
+        err = capsys.readouterr().err
+        assert "CONFLICT" in err
+        assert "git rebase --continue" in err
+        assert "git rebase --abort" in err

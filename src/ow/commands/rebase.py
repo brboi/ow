@@ -181,6 +181,18 @@ def _report_conflict(alias: str, worktree: Path, onto: str) -> None:
     err_console.print(f"    then re-run: ow rebase --only {alias}\n")
 
 
+def _report_failure(alias: str, worktree: Path, onto: str) -> None:
+    """A step that failed without leaving a rebase behind.
+
+    No identity configured, a hook that said no, a full disk: prescribing
+    `git rebase --continue` here would only produce a second error.
+    """
+    err_console.print(f"\n  [red]Error[/] in [bold]{alias}[/]: rebase onto {onto} failed")
+    err_console.print("    git's output above says why; no rebase is in progress")
+    err_console.print(f"    cd {worktree}")
+    err_console.print(f"    then re-run: ow rebase --only {alias}\n")
+
+
 def _report_switch_failure(alias: str, worktree: Path, ref: str) -> None:
     err_console.print(f"\n  [red]Error[/] in [bold]{alias}[/]: could not switch to {ref}")
     err_console.print(f"    cd {worktree}")
@@ -204,8 +216,10 @@ def _execute(plan: RebasePlan, worktree: Path) -> bool:
         if result.returncode != 0:
             if step.args[0] == "switch":
                 _report_switch_failure(plan.alias, worktree, step.onto)
-            else:
+            elif in_progress_operation(worktree) is not None:
                 _report_conflict(plan.alias, worktree, step.onto)
+            else:
+                _report_failure(plan.alias, worktree, step.onto)
             return False
     console.print("    Done.")
     return True
