@@ -10,6 +10,31 @@ class _PruneResult(NamedTuple):
     alias: str
     pruned_worktrees: bool
     deleted_branches: list[str]
+    kept_branches: list[str]
+
+
+def _is_pushed(bare_repo: Path, branch: str) -> bool:
+    """Is every commit on <branch> reachable from some refs/remotes/* ref?
+
+    If it is, the branch is a label over history a remote already has, and
+    deleting the label loses nothing. If it is not, the branch is the only
+    thing keeping those commits alive: a bare repo has no reflog for them by
+    default, so `git branch -D` leaves them unreachable, unnamed, and gone
+    at the next gc.
+
+    for-each-ref rather than `branch -r --contains`: it is plumbing, so no
+    colour setting can turn its answer into escape codes. An unresolvable
+    branch answers "not pushed" — refusing to delete is never the dangerous
+    direction to be wrong in.
+    """
+    result = _run(
+        [
+            "git", "-C", str(bare_repo), "for-each-ref",
+            "--contains", branch, "--format=%(refname)", "refs/remotes/",
+        ],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
@@ -17,6 +42,7 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
     alias = bare_repo.stem
     pruned = False
     deleted: list[str] = []
+    kept: list[str] = []
 
     # 1. Worktree prune
     result = _run(
@@ -50,6 +76,12 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
     if branch_result.returncode == 0:
         all_branches = {b.strip() for b in branch_result.stdout.splitlines() if b.strip()}
         for branch in sorted(all_branches - used_branches):
+            # "Orphaned" describes the worktree that is gone, not the work
+            # that may still be on the branch. Only the former is ours to
+            # throw away.
+            if not _is_pushed(bare_repo, branch):
+                kept.append(branch)
+                continue
             # Only a delete git confirmed. Claiming a refusal as a deletion
             # sends the user looking elsewhere for work that is still here.
             if _run(
@@ -58,7 +90,10 @@ def _prune_bare_repo(bare_repo: Path) -> _PruneResult:
             ).returncode == 0:
                 deleted.append(branch)
 
-    return _PruneResult(alias=alias, pruned_worktrees=pruned, deleted_branches=deleted)
+    return _PruneResult(
+        alias=alias, pruned_worktrees=pruned,
+        deleted_branches=deleted, kept_branches=kept,
+    )
 
 
 def _prune_index() -> None:
@@ -119,6 +154,7 @@ def cmd_prune(config: Config) -> None:
     prune_results = parallel_per_repo(prune_tasks)
 
     cleaned = False
+    kept_any = False
     for repo in bare_repos:
         alias = repo.stem
         result = prune_results.get(alias)
@@ -130,6 +166,18 @@ def cmd_prune(config: Config) -> None:
         if result.deleted_branches:
             print(f"  [{alias}] deleted orphaned branches: {', '.join(result.deleted_branches)}")
             cleaned = True
+        if result.kept_branches:
+            noun = "branch" if len(result.kept_branches) == 1 else "branches"
+            print(
+                f"  [{alias}] kept {len(result.kept_branches)} {noun} with unpushed commits: "
+                f"{', '.join(result.kept_branches)}"
+            )
+            cleaned = True
+            kept_any = True
+
+    if kept_any:
+        print("\nKept branches hold commits no remote has. Push them, or delete one by hand:")
+        print(f"  git -C {bare_repos_dir}/<alias>.git branch -D <branch>")
 
     if not cleaned:
         print("All bare repos are clean.")

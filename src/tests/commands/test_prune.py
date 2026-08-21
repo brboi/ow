@@ -241,3 +241,90 @@ def test_prune_reports_only_the_branches_it_actually_deleted(tmp_path, capsys, x
     out = capsys.readouterr().out
     assert "orphanbr" in _branches(bare)
     assert "deleted orphaned branches" not in out
+
+
+def _commit_on_branch(bare: Path, tmp_path: Path, branch: str, name: str) -> str:
+    """Create <branch> off master with one commit on it, reachable from nowhere else."""
+    scratch = tmp_path / "scratch"
+    _git(bare, "worktree", "add", "-q", str(scratch), "-b", branch, "master")
+    (scratch / f"{name}.txt").write_text(name)
+    _git(scratch, "add", "-A")
+    _git(scratch, "commit", "-qm", name)
+    sha = _git(scratch, "rev-parse", "HEAD")
+    _git(bare, "worktree", "remove", "--force", str(scratch))
+    return sha
+
+
+def test_prune_keeps_a_branch_whose_commits_exist_nowhere_else(tmp_path, capsys, xdg):
+    """The whole point. A ref is the only thing holding an unpushed commit alive.
+
+    Delete it and the commit has no ref and, in a bare repo, no reflog
+    either — it survives until the next gc, findable only through
+    `git fsck --lost-found`, which nothing tells the user about. "Orphaned"
+    describes the worktree that is gone, not the work that is still there.
+    """
+    bare = _bare_repo(tmp_path)
+    sha = _commit_on_branch(bare, tmp_path, "featA", "work")
+
+    cmd_prune(_make_config())
+
+    assert "featA" in _branches(bare)
+    assert _git(bare, "rev-parse", "featA") == sha
+
+
+def test_prune_deletes_a_branch_already_contained_in_a_remote_ref(tmp_path, capsys, xdg):
+    """Refusing everything would just be a broken command.
+
+    A branch whose tip a remote already has holds nothing that deleting it
+    can lose, so it still goes.
+    """
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "spent", "refs/remotes/origin/master")
+
+    cmd_prune(_make_config())
+
+    assert "spent" not in _branches(bare)
+    out = capsys.readouterr().out
+    assert "deleted orphaned branches" in out
+    assert "spent" in out
+
+
+def test_prune_says_which_branches_it_refused_and_why(tmp_path, capsys, xdg):
+    """Silently keeping them is better than deleting, but still not honest.
+
+    The user asked for a cleanup and must be told what the cleanup left
+    behind, by name, and what would make it go.
+    """
+    bare = _bare_repo(tmp_path)
+    _commit_on_branch(bare, tmp_path, "featA", "work")
+
+    cmd_prune(_make_config())
+
+    out = capsys.readouterr().out
+    assert "featA" in out
+    assert "unpushed" in out
+    assert "All bare repos are clean." not in out
+
+
+def test_moving_a_workspace_directory_does_not_destroy_its_unpushed_commits(tmp_path, capsys, xdg):
+    """The reported reproduction, end to end.
+
+    `git worktree prune` unregisters the worktree whose directory moved, so
+    its branch stops being "used" and becomes indistinguishable from an
+    abandoned one. The same thing happens for a workspace on an unmounted
+    disk or a dead fuse mount, where the directory is coming back.
+    """
+    bare = _bare_repo(tmp_path)
+    ws = tmp_path / "wsA" / "community"
+    _git(bare, "worktree", "add", "-q", str(ws), "-b", "featA", "master")
+    (ws / "work.txt").write_text("work")
+    _git(ws, "add", "-A")
+    _git(ws, "commit", "-qm", "work")
+    sha = _git(ws, "rev-parse", "HEAD")
+
+    (tmp_path / "wsA").rename(tmp_path / "wsA-moved")
+
+    cmd_prune(_make_config())
+
+    assert "featA" in _branches(bare)
+    assert _git(bare, "rev-parse", "featA") == sha
