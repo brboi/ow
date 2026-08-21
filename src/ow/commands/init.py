@@ -311,8 +311,13 @@ def cmd_init(
     print(f"  Templates: {', '.join(ws.templates)}")
     for alias, spec in ws.repos.items():
         print(f"  {alias}: {spec.to_spec_str()}")
-    for name, value in ws.vars.items():
-        print(f"  {name}: {value}")
+    if ws.vars:
+        # Labelled, and indented one step further than the repo lines above:
+        # without that, a var named like a repo alias is indistinguishable
+        # from one on the screen someone reads before typing `y`.
+        print("  Vars:")
+        for name, value in ws.vars.items():
+            print(f"    {name}: {value}")
 
     if interactive:
         try:

@@ -773,6 +773,7 @@ def test_init_lists_the_vars_one_per_line(tmp_path, monkeypatch, capsys, config_
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
     out = capsys.readouterr().out
-    assert "  http_port: 8069" in out
-    assert "  db_host: localhost" in out
+    assert "  Vars:" in out
+    assert "    http_port: 8069" in out
+    assert "    db_host: localhost" in out
     assert "{" not in out
