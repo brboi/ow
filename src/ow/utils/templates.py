@@ -283,7 +283,6 @@ def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
                 shutil.copy2(src, out_path)
 
 
-
 def ensure_services_compose() -> Path:
     """Render the bundled compose.yml.j2 into services_dir().
 
