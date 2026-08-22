@@ -8,6 +8,7 @@
 | `ow apply` | `[workspace]` | Re-render templates and materialize worktrees |
 | `ow status` | `[workspace]`, `-f/--fetch` | Show branch status with behind/ahead counts |
 | `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
+| `ow prune` | `--dry-run`, `-y/--yes` | Clean up stale worktree references, orphaned branches, and dead index entries |
 | `ow rm` | `<name>`, `-y/--yes` | Remove a workspace: worktrees, local branches, directory, and index entry |
 | `ow ls` | — | List every known workspace, its path, and its repos |
 | `ow templates` | `--take`, `--diff` | List template files and their state, take one, or diff the stale ones |
