@@ -147,7 +147,7 @@ def _preselection(
         chosen_templates = list(templates) if templates else list(source_ws.templates)
         chosen_repos: dict[str, BranchSpec] = dict(source_ws.repos)
     else:
-        chosen_templates = list(templates) if templates else []
+        chosen_templates = list(templates) if templates else ["common"]
         chosen_repos = {}
     if repos:
         chosen_repos.update(repos)
@@ -216,6 +216,8 @@ def _gather_workspace_config_interactive(
 
     if known_aliases:
         pre_selected_aliases = set(final_repos.keys())
+        if "community" in known_aliases:
+            pre_selected_aliases.add("community")
         try:
             selected_aliases = questionary.checkbox(
                 "Repos to include (space to select, enter to confirm)",

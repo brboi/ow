@@ -279,7 +279,7 @@ def test_init_with_a_tty_stops_when_the_confirmation_is_declined(tmp_path, monke
 
 
 def test_init_checkbox_uses_choice_objects(tmp_path, monkeypatch, config):
-    """The questionnaire offers Choice objects, none selected unless a flag says so."""
+    """The questionnaire offers Choice objects, with common and community preselected by default."""
     monkeypatch.chdir(tmp_path)
     config.remotes = {
         "brboi-addons": {"origin": MagicMock(url="git@github.com:brboi/addons.git")},
@@ -311,13 +311,15 @@ def test_init_checkbox_uses_choice_objects(tmp_path, monkeypatch, config):
     template_names = [c.title for c in template_checkbox["choices"]]
     assert template_names == sorted(template_names)
     assert {"common", "vscode", "zed"} <= set(template_names)  # packaged templates
-    assert not any(c.checked for c in template_checkbox["choices"])
+    checked_templates = [c.title for c in template_checkbox["choices"] if c.checked]
+    assert checked_templates == ["common"]
 
     repo_checkbox = checkbox_calls[1]
     assert "Repos" in repo_checkbox["message"]
     repo_names = [c.title for c in repo_checkbox["choices"]]
     assert repo_names == ["brboi-addons", "community"]  # declaration order, not sorted
-    assert not any(c.checked for c in repo_checkbox["choices"])
+    checked_repos = [c.title for c in repo_checkbox["choices"] if c.checked]
+    assert checked_repos == ["community"]
 
 
 # ---------------------------------------------------------------------------
