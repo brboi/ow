@@ -12,6 +12,7 @@ from ow.utils import paths
 from ow.utils.git import (
     attach_worktree,
     create_worktree,
+    get_worktree_branch,
     detach_worktree,
     ensure_bare_repo,
     in_progress_operation,
@@ -356,12 +357,16 @@ def ensure_workspace_materialized(ws: WorkspaceConfig, config: Config, ws_dir: P
                 elif not currently_detached and resolved.is_detached:
                     detach_worktree(worktree_path, resolved.base_ref)
                 elif not resolved.is_detached:
-                    set_branch_upstream(
-                        bare_repo,
-                        resolved.local_branch,
-                        resolved.remote,
-                        resolved.branch,
-                    )
+                    current_branch = get_worktree_branch(worktree_path)
+                    if current_branch != resolved.local_branch:
+                        attach_worktree(bare_repo, worktree_path, resolved)
+                    else:
+                        set_branch_upstream(
+                            bare_repo,
+                            resolved.local_branch,
+                            resolved.remote,
+                            resolved.branch,
+                        )
         except (OSError, subprocess.CalledProcessError) as exc:
             successful.discard(alias)
             busy = in_progress_operation(worktree_path)

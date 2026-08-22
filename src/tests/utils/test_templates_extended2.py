@@ -29,9 +29,10 @@ class TestEnsureWorkspaceMaterializedExtended:
                 with patch("ow.utils.templates.parallel_per_repo", return_value={"community": BranchSpec("origin/master", "my-feature")}):
                     with patch("ow.utils.templates.worktree_exists", return_value=True):
                         with patch("ow.utils.templates.worktree_is_detached", return_value=False):
-                            with patch("ow.utils.templates.set_branch_upstream") as mock_up:
-                                with patch("ow.utils.templates.run_cmd"):
-                                    ensure_workspace_materialized(ws, config, ws_dir)
+                            with patch("ow.utils.templates.get_worktree_branch", return_value="my-feature"):
+                                with patch("ow.utils.templates.set_branch_upstream") as mock_up:
+                                    with patch("ow.utils.templates.run_cmd"):
+                                        ensure_workspace_materialized(ws, config, ws_dir)
         mock_up.assert_called_once()
 
     def test_existing_detached_and_resolved_detached_noop(self, tmp_path, config_with_remotes):

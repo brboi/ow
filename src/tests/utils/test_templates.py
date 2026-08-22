@@ -738,16 +738,20 @@ class TestEnsureWorkspaceMaterializedReconcileErrors:
                             side_effect=[True, False],
                         ):
                             with patch(
-                                "ow.utils.templates.attach_worktree"
-                            ) as mock_attach:
-                                mock_attach.side_effect = subprocess.CalledProcessError(
-                                    128, ["git", "switch"], stderr=b"fatal: bla"
-                                )
+                                "ow.utils.templates.get_worktree_branch",
+                                return_value="ent-feature",
+                            ):
                                 with patch(
-                                    "ow.utils.templates.set_branch_upstream"
-                                ):
-                                    with patch("ow.utils.templates.run_cmd"):
-                                        _, successful, errors = (
+                                    "ow.utils.templates.attach_worktree"
+                                ) as mock_attach:
+                                    mock_attach.side_effect = subprocess.CalledProcessError(
+                                        128, ["git", "switch"], stderr=b"fatal: bla"
+                                    )
+                                    with patch(
+                                        "ow.utils.templates.set_branch_upstream"
+                                    ):
+                                        with patch("ow.utils.templates.run_cmd"):
+                                            _, successful, errors = (
                                             ensure_workspace_materialized(
                                                 ws, config, ws_dir
                                             )
@@ -849,7 +853,11 @@ class TestEnsureWorkspaceMaterializedReconcileErrors:
                                         "ow.utils.templates.worktree_is_detached",
                                         return_value=False,
                                     ):
-                                        _, successful, errors = (
+                                        with patch(
+                                            "ow.utils.templates.get_worktree_branch",
+                                            return_value="ent-feature",
+                                        ):
+                                            _, successful, errors = (
                                             ensure_workspace_materialized(
                                                 ws, config, ws_dir
                                             )
@@ -891,28 +899,32 @@ class TestEnsureWorkspaceMaterializedReconcileErrors:
                             side_effect=[True, False],
                         ):
                             with patch(
-                                "ow.utils.templates.attach_worktree"
-                            ) as mock_attach:
-                                mock_attach.side_effect = subprocess.CalledProcessError(
-                                    128, ["git", "switch"], stderr=b"fatal: bla"
-                                )
+                                "ow.utils.templates.get_worktree_branch",
+                                return_value="ent-feature",
+                            ):
                                 with patch(
-                                    "ow.utils.templates.set_branch_upstream"
-                                ):
-                                    with patch("ow.utils.templates.run_cmd"):
-                                        with patch(
-                                            "ow.utils.templates.in_progress_operation",
-                                            return_value=(
-                                                "rebase",
-                                                "git rebase --continue",
-                                                "git rebase --abort",
-                                            ),
-                                        ):
-                                            _, successful, errors = (
-                                                ensure_workspace_materialized(
-                                                    ws, config, ws_dir
+                                    "ow.utils.templates.attach_worktree"
+                                ) as mock_attach:
+                                    mock_attach.side_effect = subprocess.CalledProcessError(
+                                        128, ["git", "switch"], stderr=b"fatal: bla"
+                                    )
+                                    with patch(
+                                        "ow.utils.templates.set_branch_upstream"
+                                    ):
+                                        with patch("ow.utils.templates.run_cmd"):
+                                            with patch(
+                                                "ow.utils.templates.in_progress_operation",
+                                                return_value=(
+                                                    "rebase",
+                                                    "git rebase --continue",
+                                                    "git rebase --abort",
+                                                ),
+                                            ):
+                                                _, successful, errors = (
+                                                    ensure_workspace_materialized(
+                                                        ws, config, ws_dir
+                                                    )
                                                 )
-                                            )
 
         assert "community" in errors
         assert "rebase" in errors["community"]
@@ -952,24 +964,28 @@ class TestEnsureWorkspaceMaterializedReconcileErrors:
                             side_effect=[True, False],
                         ):
                             with patch(
-                                "ow.utils.templates.attach_worktree"
-                            ) as mock_attach:
-                                mock_attach.side_effect = subprocess.CalledProcessError(
-                                    128, ["git", "switch"], stderr=b"fatal: not a git repository"
-                                )
+                                "ow.utils.templates.get_worktree_branch",
+                                return_value="ent-feature",
+                            ):
                                 with patch(
-                                    "ow.utils.templates.set_branch_upstream"
-                                ):
-                                    with patch("ow.utils.templates.run_cmd"):
-                                        with patch(
-                                            "ow.utils.templates.in_progress_operation",
-                                            return_value=None,
-                                        ):
-                                            _, successful, errors = (
-                                                ensure_workspace_materialized(
-                                                    ws, config, ws_dir
+                                    "ow.utils.templates.attach_worktree"
+                                ) as mock_attach:
+                                    mock_attach.side_effect = subprocess.CalledProcessError(
+                                        128, ["git", "switch"], stderr=b"fatal: not a git repository"
+                                    )
+                                    with patch(
+                                        "ow.utils.templates.set_branch_upstream"
+                                    ):
+                                        with patch("ow.utils.templates.run_cmd"):
+                                            with patch(
+                                                "ow.utils.templates.in_progress_operation",
+                                                return_value=None,
+                                            ):
+                                                _, successful, errors = (
+                                                    ensure_workspace_materialized(
+                                                        ws, config, ws_dir
+                                                    )
                                                 )
-                                            )
 
         assert "community" in errors
         assert "community" not in successful
