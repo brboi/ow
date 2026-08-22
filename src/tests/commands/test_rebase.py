@@ -129,7 +129,7 @@ class TestConfirmation:
         ):
             with pytest.raises(SystemExit) as exc_info:
                 cmd_rebase(config, workspace=None)
-        assert exc_info.value.code != 0
+        assert exc_info.value.code == 2
         assert mock_git.call_count == 0
         assert "Aborted" in capsys.readouterr().out
 

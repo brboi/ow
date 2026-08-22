@@ -591,7 +591,7 @@ def test_prune_abort_exits_nonzero(tmp_path, capsys, xdg, monkeypatch):
 
     with pytest.raises(SystemExit) as exc_info:
         cmd_prune()
-    assert exc_info.value.code != 0
+    assert exc_info.value.code == 2
     assert "Aborted." in capsys.readouterr().out
     assert "spent" in _branches(bare)
 

@@ -187,10 +187,13 @@ def fetch_workspace_refs(
             repo: (lambda chain=items: _run_chain(chain))
             for repo, items in repo_chains.items()
         }
-        with task_progress("Fetching ref(s)", len(chain_tasks)) as advance:
+        with task_progress("Fetching ref(s)", len(fetch_tasks)) as advance:
+            def _on_chain_done(repo: str) -> None:
+                for _ in repo_chains[repo]:
+                    advance()
             chain_results = parallel_per_repo(
                 chain_tasks,
-                on_done=lambda _repo: advance(),
+                on_done=_on_chain_done,
             )
         fetch_results: dict[str, subprocess.CompletedProcess | Exception] = {}
         for result in chain_results.values():
