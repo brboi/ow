@@ -7,6 +7,20 @@ There is no project root any more.
 Nothing migrates itself. This is a one-time move you do by hand. It takes a few
 minutes and it keeps your bare repos — no re-cloning.
 
+The mechanical steps (config copy, bare repo move, worktree repair, workspace
+config rename) are automated by a migration script:
+
+```sh
+python scripts/migrate-to-2.0.py "$OLD"              # dry-run: show the plan
+python scripts/migrate-to-2.0.py "$OLD" --yes        # execute
+python scripts/migrate-to-2.0.py "$OLD" --yes --apply  # also run ow apply per workspace
+```
+
+Pass `--apply` to also run `ow apply` on each workspace (registers it in the
+index and re-renders templates). Templates themselves stay manual — see
+[Templates](#templates-take-only-what-you-changed) below. The sections that
+follow describe what each step does, for context and for doing it by hand.
+
 Set this once, and paste the rest as is:
 
 ```sh
