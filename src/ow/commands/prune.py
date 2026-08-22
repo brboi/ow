@@ -4,7 +4,7 @@ from typing import NamedTuple
 
 from ow.utils.display import err_console
 from ow.utils import index, paths
-from ow.utils.git import _run, parallel_per_repo
+from ow.utils.git import _run, is_branch_pushed, parallel_per_repo
 
 
 class _PrunePlan(NamedTuple):
@@ -92,30 +92,6 @@ def _survey_worktrees(bare_repo: Path) -> tuple[set[str], list[str]]:
     return used, stale
 
 
-def _is_pushed(bare_repo: Path, branch: str) -> bool:
-    """Is every commit on <branch> reachable from some refs/remotes/* ref?
-
-    If it is, the branch is a label over history a remote already has, and
-    deleting the label loses nothing. If it is not, the branch is the only
-    thing keeping those commits alive: a bare repo has no reflog for them by
-    default, so `git branch -D` leaves them unreachable, unnamed, and gone
-    at the next gc.
-
-    for-each-ref rather than `branch -r --contains`: it is plumbing, so no
-    colour setting can turn its answer into escape codes. An unresolvable
-    branch answers "not pushed" — refusing to delete is never the dangerous
-    direction to be wrong in.
-    """
-    result = _run(
-        [
-            "git", "-C", str(bare_repo), "for-each-ref",
-            "--contains", branch, "--format=%(refname)", "refs/remotes/",
-        ],
-        capture_output=True, text=True,
-    )
-    return result.returncode == 0 and bool(result.stdout.strip())
-
-
 def _survey_bare_repo(bare_repo: Path) -> _PrunePlan:
     """Work out what would go from one bare repo, without touching it."""
     used_branches, stale = _survey_worktrees(bare_repo)
@@ -149,7 +125,7 @@ def _survey_bare_repo(bare_repo: Path) -> _PrunePlan:
             # "Orphaned" describes the worktree that is gone, not the work
             # that may still be on the branch. Only the former is ours to
             # throw away.
-            target = to_delete if _is_pushed(bare_repo, branch) else kept
+            target = to_delete if is_branch_pushed(bare_repo, branch) else kept
             target.append(branch)
 
     return _PrunePlan(

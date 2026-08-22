@@ -1,3 +1,4 @@
+from ow.commands.rm import cmd_rm
 from ow.commands.apply import cmd_apply
 from ow.commands.init import cmd_init
 from ow.commands.ls import cmd_ls
@@ -11,6 +12,7 @@ __all__ = [
     "cmd_init",
     "cmd_ls",
     "cmd_prune",
+    "cmd_rm",
     "cmd_rebase",
     "cmd_status",
     "cmd_templates",

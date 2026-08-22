@@ -185,3 +185,20 @@ def remember(ws_dir: Path) -> None:
 
 def find_by_name(name: str) -> list[Path]:
     return [p for p in known_workspaces() if p.name == name]
+
+def forget(ws_dir: Path) -> None:
+    """Remove a workspace from the discovery index.
+
+    The inverse of remember(). Does not touch the workspace directory itself
+    or any bare repo — those are the caller's responsibility. A workspace not
+    in the index is a no-op, not an error.
+    """
+    resolved = ws_dir.resolve()
+    entries, pruned = _read()
+    if resolved not in entries and not pruned:
+        return
+
+    with _locked():
+        entries, _ = _read()
+        entries = [e for e in entries if e != resolved]
+        _write(entries)

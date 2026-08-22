@@ -13,14 +13,14 @@ src/
 │   │   ├── status.py        # cmd_status + display helpers
 │   │   ├── rebase.py        # cmd_rebase + fact gathering, display, execution
 │   │   ├── prune.py         # cmd_prune
-│   │   ├── ls.py            # cmd_ls — list known workspaces, their path and repos, from the index (no git)
+│   │   ├── rm.py            # cmd_rm — remove a workspace: worktrees, local branches, directory, index entry
 │   │   └── templates.py     # cmd_templates — list/take/diff template files; outdated_templates() used by cmd_apply
 │   ├── utils/               # shared utilities used by commands
 │   │   ├── config.py        # Config dataclasses, TOML loading/writing, BranchSpec, select_aliases
 │   │   ├── display.py       # console, err_console, counts, print_git_result
 │   │   ├── drift.py         # DriftResult, check_drift, warn_if_drifted
 │   │   ├── git.py           # All git operations via subprocess
-│   │   ├── index.py         # remembers where workspaces live (known_workspaces, remember, find_by_name)
+│   │   ├── index.py         # remembers where workspaces live (known_workspaces, remember, find_by_name, forget)
 │   │   ├── legacy.py        # check_legacy_layout — the 1.x gate, points at docs/migrating-to-2.0.md
 │   │   ├── paths.py         # ow's locations, resolved from the XDG base directories
 │   │   ├── refs.py          # fetch_workspace_refs
@@ -66,7 +66,7 @@ AGENTS.md
   - `index.py` — remembers where workspaces live (for name-based resolution and duplicate-branch checks), without owning the truth — the workspace's own `.ow/config.toml` is that.
   - `display.py` — `console`, `err_console`, `counts`, `print_git_result`.
   - `drift.py` — `DriftResult`, `check_drift`, `warn_if_drifted`. Detect when worktree branch state doesn't match config. Commands call `warn_if_drifted` to display warnings but proceed anyway.
-  - `git.py` — worktree operations: `create_worktree`, `attach_worktree`, `detach_worktree`, `worktree_exists`, `worktree_is_detached`, `get_worktree_branch`, `get_worktree_head`. Bare repo operations: `ensure_bare_repo`, `ensure_ref`. Ref/branch queries: `resolve_spec`, `resolve_spec_local`, `get_all_remote_refs`, `get_remote_ref_for_branch`, `get_remote_url`, `get_upstream`, `set_branch_upstream`. Analysis: `rev_parse`, `is_ancestor`, `merge_base`, `count_commits`, `count_new_patches`, `count_unpushed`, `in_progress_operation`, `dirty_files`. Execution: `git`, `git_fetch`, `parallel_per_repo`, `run_cmd`.
+  - `git.py` — worktree operations: `create_worktree`, `attach_worktree`, `detach_worktree`, `worktree_exists`, `worktree_is_detached`, `get_worktree_branch`, `get_worktree_head`. Bare repo operations: `ensure_bare_repo`, `ensure_ref`. Ref/branch queries: `resolve_spec`, `resolve_spec_local`, `get_all_remote_refs`, `get_remote_ref_for_branch`, `get_remote_url`, `get_upstream`, `set_branch_upstream`, `is_branch_pushed`. Analysis: `rev_parse`, `is_ancestor`, `merge_base`, `count_commits`, `count_new_patches`, `count_unpushed`, `in_progress_operation`, `dirty_files`. Execution: `git`, `git_fetch`, `parallel_per_repo`, `run_cmd`.
   - `refs.py` — `fetch_workspace_refs` — three-phase pipeline for fetching workspace refs.
   - `rebase_plan.py` — `RepoFacts`, `GitStep`, `RebasePlan`, `plan_for` — pure analysis functions for rebase planning.
   - `resolver.py` — `resolve_workspace(name=None)` resolves a workspace: an explicit path, an explicit name (looked up via the index), the `OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml`. One rule, four branches, no fallback between them.
@@ -81,15 +81,16 @@ AGENTS.md
 | `ow status` | `cmd_status(config, workspace=None)` | Show workspace branch status |
 | `ow rebase` | `cmd_rebase(config, workspace=None, *, only=None, autostash=False, dry_run=False, yes=False)` | Fetch + rebase workspace branches |
 | `ow prune` | `cmd_prune(config)` | Clean up stale worktree references, orphaned branches, dead index entries |
-| `ow ls` | `cmd_ls()` | List every known workspace, its path, and its repos |
+| `ow rm` | `cmd_rm(name, *, yes=False)` | Remove a workspace: worktrees, local branches, directory, index entry |
 | `ow templates` | `cmd_templates(take=None, show_diff=False)` | List template files with their state, take one, or diff the stale ones |
 
-Every command except `ls` and `templates` loads the same global config; those two read the
+Every command except `ls`, `templates`, and `rm` loads the same global config; those three read the
 index, the workspace configs and the template files, none of which need it — so on a machine
-with no `config.toml` yet, neither creates one. `apply`, `status` and `rebase` then resolve their
+with no `config.toml` yet, none creates one. `apply`, `status` and `rebase` then resolve their
 target workspace via `resolve_workspace(workspace)` — an explicit path or name, the
 `OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml`. `init` resolves its target
-directory itself (current directory, or `./NAME`), since the workspace doesn't exist yet.
+directory itself (current directory, or `./NAME`), since the workspace doesn't exist yet. `rm`
+resolves its target by name only (via the index), since it removes a known workspace.
 
 ## Template system
 

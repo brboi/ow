@@ -8,7 +8,7 @@
 | `ow apply` | `[workspace]` | Re-render templates and materialize worktrees |
 | `ow status` | `[workspace]`, `-f/--fetch` | Show branch status with behind/ahead counts |
 | `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
-| `ow prune` | `--dry-run`, `-y/--yes` | Clean up stale worktree references, orphaned branches, and dead index entries |
+| `ow rm` | `<name>`, `-y/--yes` | Remove a workspace: worktrees, local branches, directory, and index entry |
 | `ow ls` | — | List every known workspace, its path, and its repos |
 | `ow templates` | `--take`, `--diff` | List template files and their state, take one, or diff the stale ones |
 
@@ -126,6 +126,24 @@ defaulting to no; `-y/--yes` skips the prompt and `--dry-run` stops after the
 survey. A branch holding commits no remote has is never deleted — it is listed,
 with the command to delete it by hand.
 
+
+## `ow rm`
+
+Removes a workspace and everything `ow` created for it: worktrees unregistered from their bare
+repos, local branches deleted, the workspace directory removed, and the index entry dropped.
+Bare repos are shared and stay.
+
+```sh
+ow rm canary              # asks for confirmation after showing what will go
+ow rm canary -y           # skip the prompt
+```
+
+Before touching anything, `ow rm` shows a summary of each repo: its branch spec, whether the
+local branch is safe to delete (pushed to a remote), and warns about unpushed commits and
+uncommitted changes in the working tree. Confirmation defaults to no — `-y/--yes` skips it.
+
+A workspace whose bare repo is missing still has its directory and index entry cleaned up.
+
 ## `ow ls`
 
 Lists every workspace `ow` currently knows about, in name order — name, path (home-relative), and its repos
@@ -159,5 +177,5 @@ ow --show-completion
 
 Completion covers template names (`ow init -t <TAB>`), repo aliases (`ow init -r <TAB>`,
 which only offers aliases you haven't already passed) and workspace names
-(`ow status <TAB>`, from the same discovery index `ow ls` reads — so a workspace `ow` has
+(`ow status <TAB>`, `ow rm <TAB>`, from the same discovery index `ow ls` reads — so a workspace `ow` has
 never resolved is not offered).

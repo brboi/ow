@@ -7,6 +7,7 @@ import typer
 
 from ow.commands import (
     cmd_apply,
+    cmd_rm,
     cmd_init,
     cmd_ls,
     cmd_prune,
@@ -203,6 +204,17 @@ def rebase(
 def ls() -> None:
     """List every known workspace, its path, and its repos."""
     cmd_ls()
+
+
+@app.command()
+def rm(
+    name: str = typer.Argument(..., help="Workspace name (as shown by ow ls)", autocompletion=complete_workspace_name),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+) -> None:
+    """Remove a workspace: worktrees, local branches, directory, and index entry."""
+    # Same as prune and ls: no global config needed, no bootstrap.
+    check_legacy_layout()
+    cmd_rm(name=name, yes=yes)
 
 
 @app.command()
