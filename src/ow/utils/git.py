@@ -454,6 +454,29 @@ def get_all_remote_refs(bare_repo: Path) -> set[str]:
         return set()
     return {line for line in result.stdout.strip().split("\n") if line}
 
+def is_branch_pushed(bare_repo: Path, branch: str) -> bool:
+    """Is every commit on <branch> reachable from some refs/remotes/* ref?
+
+    If it is, the branch is a label over history a remote already has, and
+    deleting the label loses nothing. If it is not, the branch is the only
+    thing keeping those commits alive: a bare repo has no reflog for them by
+    default, so `git branch -D` leaves them unreachable, unnamed, and gone
+    at the next gc.
+
+    for-each-ref rather than `branch -r --contains`: it is plumbing, so no
+    colour setting can turn its answer into escape codes. An unresolvable
+    branch answers "not pushed" — refusing to delete is never the dangerous
+    direction to be wrong in.
+    """
+    result = _run(
+        [
+            "git", "-C", str(bare_repo), "for-each-ref",
+            "--contains", branch, "--format=%(refname)", "refs/remotes/",
+        ],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
 
 def resolve_spec_local(
     bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, RemoteConfig],
