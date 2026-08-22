@@ -49,7 +49,7 @@ def parse_branch_spec(spec: str) -> BranchSpec:
             return BranchSpec(spec)
         return BranchSpec(f"origin/{spec}")
     base, local = spec.split("..", 1)
-    if not base or not local or ".." in local or " " in base or " " in local:
+    if not base or not local or ".." in local or any(c.isspace() for c in base) or any(c.isspace() for c in local):
         raise ValueError(f"invalid branch spec: {spec!r}")
     if "/" not in base:
         base = f"origin/{base}"

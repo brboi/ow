@@ -154,6 +154,16 @@ def test_load_config_remotes_non_table_raises_valueerror():
         with pytest.raises(ValueError, match="community.*origin"):
             load_config(path)
 
+def test_load_config_remotes_scalar_alias_raises_valueerror():
+    toml = textwrap.dedent("""\
+    [remotes]
+    community = "not-a-table"
+    """)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        path.write_text(toml)
+        with pytest.raises(ValueError, match=r"remotes\.community.*table"):
+            load_config(path)
 
 # ---------------------------------------------------------------------------
 # version field
@@ -191,6 +201,13 @@ def test_load_workspace_config_version_absent_means_1():
         ws = load_workspace_config(path)
         assert ws.version == 1
 
+def test_load_workspace_config_version_unknown_raises():
+    toml = 'version = 99\ntemplates = ["common"]\n[repos]\ncommunity = "master"'
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        path.write_text(toml)
+        with pytest.raises(ValueError, match="schema version 99"):
+            load_workspace_config(path)
 def test_write_workspace_config_includes_version():
     ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
     with tempfile.TemporaryDirectory() as tmpdir:
