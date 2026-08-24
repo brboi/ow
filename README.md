@@ -2,6 +2,8 @@
 
 CLI tool that turns interactive prompts into ready-to-code Odoo workspaces using git worktrees.
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/brboi/ow)
+
 ## What it is
 
 `ow` manages Odoo development workspaces. Each workspace is a directory holding git worktrees for
