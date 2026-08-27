@@ -477,3 +477,71 @@ def test_rm_does_not_emit_fatal_when_worktree_not_registered(tmp_path, capsys, x
     assert "not a working tree" not in err.lower()
     assert not ws.exists()
     assert ws not in index.list_workspaces()
+
+
+# ---------------------------------------------------------------------------
+# #33: a backup of the removed workspace's config is saved for `ow init -c`
+# ---------------------------------------------------------------------------
+
+def test_rm_saves_a_config_backup(tmp_path, capsys, xdg, monkeypatch):
+    bare = _bare_repo(tmp_path, "community")
+    ws = _make_workspace(
+        tmp_path, "canary",
+        {"community": BranchSpec("origin/master", "master-canary")},
+        bare_repos={"community": bare},
+    )
+    _answer(monkeypatch, "y")
+
+    capsys.readouterr()
+    cmd_rm("canary")
+
+    out = capsys.readouterr().out
+    backups = sorted(paths.backups_dir().glob("canary-*.toml"))
+    assert len(backups) == 1
+    # It really is a restorable workspace config.
+    from ow.utils.config import load_workspace_config
+
+    saved = load_workspace_config(backups[0])
+    assert "community" in saved.repos
+    # And the command told the user where it is and how to restore.
+    assert str(backups[0]) in out
+    assert "ow init canary -c" in out
+
+
+def test_rm_without_a_backup_dir_does_not_crash(tmp_path, capsys, xdg, monkeypatch):
+    bare = _bare_repo(tmp_path, "community")
+    ws = _make_workspace(
+        tmp_path, "canary",
+        {"community": BranchSpec("origin/master", "master-canary")},
+        bare_repos={"community": bare},
+    )
+    _answer(monkeypatch, "y")
+
+    # Remove the backup directory to prove the mkdir path is exercised.
+    if paths.backups_dir().exists():
+        import shutil as _shutil
+        _shutil.rmtree(paths.backups_dir())
+
+    cmd_rm("canary")
+
+    assert sorted(paths.backups_dir().glob("canary-*.toml"))
+    assert not ws.exists()
+
+
+def test_rm_backup_failure_does_not_block_removal(tmp_path, capsys, xdg, monkeypatch):
+    bare = _bare_repo(tmp_path, "community")
+    ws = _make_workspace(
+        tmp_path, "canary",
+        {"community": BranchSpec("origin/master", "master-canary")},
+        bare_repos={"community": bare},
+    )
+    _answer(monkeypatch, "y")
+
+    monkeypatch.setattr("ow.commands.rm.shutil.copy2", lambda *a, **kw: (_ for _ in ()).throw(OSError("no space")))
+
+    capsys.readouterr()
+    cmd_rm("canary")
+
+    err = capsys.readouterr().err
+    assert "could not save config backup" in err
+    assert not ws.exists()

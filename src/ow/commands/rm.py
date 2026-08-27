@@ -5,14 +5,14 @@ Takes a workspace name known to `ow ls`. Shows a summary of what will be removed
 before touching anything.
 """
 
+import datetime
 import shutil
 import sys
-import tomllib
 from pathlib import Path
 
 from ow.utils import index, paths
 from ow.utils.config import BranchSpec, WorkspaceConfig, load_workspace_config
-from ow.utils.display import err_console
+from ow.utils.display import confirm, display_path, err_console
 from ow.utils.git import (
     count_commits,
     dirty_files,
@@ -62,21 +62,9 @@ class _RepoInfo:
             self.dirty = dirty_files(worktree_path)
 
 
-def _display_path(path: Path) -> str:
-    """Render a path with the home directory abbreviated to ~."""
-    home = Path.home()
-    try:
-        rel = path.relative_to(home)
-    except ValueError:
-        return str(path)
-    if str(rel) == ".":
-        return "~"
-    return f"~/{rel}"
-
-
 def _display_summary(name: str, ws_dir: Path, repos: list[_RepoInfo]) -> None:
     """The whole report, in the imperative: nothing here has happened yet."""
-    print(f"Removing workspace '{name}' at {_display_path(ws_dir)}")
+    print(f"Removing workspace '{name}' at {display_path(ws_dir)}")
     print()
     print("Repos:")
     for r in repos:
@@ -101,22 +89,16 @@ def _display_summary(name: str, ws_dir: Path, repos: list[_RepoInfo]) -> None:
 
     print()
     print("Will remove:")
-    print(f"  workspace directory {_display_path(ws_dir)}")
+    print(f"  workspace directory {display_path(ws_dir)}")
     for r in repos:
         if r.bare_exists:
             print(f"  [{r.alias}] worktree + local branch {r.spec.local_branch}"
                   if r.will_delete_branch
                   else f"  [{r.alias}] worktree (detached, no branch)")
     print("  index entry")
-
-
-def _confirm() -> bool:
-    """Default is no. A destructive command must not proceed unasked."""
-    try:
-        answer = input("\nProceed? [y/N] ")
-    except EOFError:
-        return False
-    return answer.strip().lower() in ("y", "yes")
+    print()
+    print("Will save:")
+    print(f"  .ow/config.toml → {display_path(paths.backups_dir() / f'{name}-<timestamp>.toml')}")
 
 
 def _remove_worktree(bare_repo: Path, worktree_path: Path, alias: str) -> None:
@@ -144,7 +126,23 @@ def _delete_branch(bare_repo: Path, branch: str, alias: str) -> bool:
         ["git", "-C", str(bare_repo), "branch", "-D", branch],
         quiet=True, label=alias,
     )
-    return result.returncode == 0
+
+
+def _save_backup(name: str, ws_dir: Path) -> Path | None:
+    """Copy the workspace config aside so `ow init -c` can restore it.
+
+    A failed backup must not block the removal the user asked for: warn and
+    carry on.
+    """
+    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    target = paths.backups_dir() / f"{name}-{stamp}.toml"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ws_dir / MARKER, target)
+    except OSError as exc:
+        err_console.print(f"  Warning: could not save config backup ({exc})", markup=False)
+        return None
+    return target
 
 
 def cmd_rm(name: str, *, yes: bool = False) -> None:
@@ -185,11 +183,13 @@ def cmd_rm(name: str, *, yes: bool = False) -> None:
 
     _display_summary(name, ws_dir, repos)
 
-    if not yes and not _confirm():
+    if not yes and not confirm():
         print("Aborted.")
         sys.exit(2)
 
     sys.stdout.flush()
+
+    backup = _save_backup(name, ws_dir)
 
     # 1. Remove worktrees and delete local branches from bare repos.
     for r in repos:
@@ -209,8 +209,10 @@ def cmd_rm(name: str, *, yes: bool = False) -> None:
 
     # 2. Remove the workspace directory (worktrees, templates, .ow, .data, etc.).
     shutil.rmtree(ws_dir, ignore_errors=True)
-
-    # 3. Remove the index entry.
     index.forget(ws_dir)
+
+    if backup is not None:
+        print(f"Config saved to {backup}")
+        print(f"Restore with: ow init {name} -c {backup}")
 
     print("Done.")

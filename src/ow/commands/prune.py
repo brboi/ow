@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from ow.utils.display import err_console
+from ow.utils.display import confirm, err_console
 from ow.utils import index, paths
 from ow.utils.git import _run, is_branch_pushed, parallel_per_repo
 
@@ -200,13 +200,27 @@ def _index_line(dropped: int, verb: str) -> str:
     return f"{verb} {dropped} dead index {noun}."
 
 
-def _confirm() -> bool:
-    """Default is no. A destructive command must not proceed unasked."""
+def _stale_backups() -> list[Path]:
+    """Every backup file on disk, newest last. Empty list when there are none.
+
+    `--also-backups` lists every backup — no age heuristic to explain, and
+    the confirmation prompt already makes the list visible before anything
+    is deleted.
+    """
     try:
-        answer = input("\nProceed? [y/N] ")
-    except EOFError:
-        return False
-    return answer.strip().lower() in ("y", "yes")
+        return sorted(paths.backups_dir().glob("*.toml"))
+    except OSError:
+        return []
+
+
+def _display_backups(backups: list[Path]) -> None:
+    if not backups:
+        return
+    print()
+    noun = "backup" if len(backups) == 1 else "backups"
+    print(f"Backups ({len(backups)} {noun}):")
+    for p in backups:
+        print(f"  {p.name}")
 
 
 def _display_plan(plans: list[_PrunePlan]) -> None:
@@ -245,7 +259,7 @@ def _display_dry_run(plans: list[_PrunePlan]) -> None:
             print(f"  [{plan.alias}] git {' '.join(argv)}")
 
 
-def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
+def cmd_prune(*, dry_run: bool = False, yes: bool = False, also_backups: bool = False) -> None:
     """Clean up stale worktree references, orphaned branches, and dead index entries.
 
     Survey first, then act. --dry-run stops after the survey; otherwise the
@@ -278,17 +292,27 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
         err_console.print(f"  [{alias}] survey failed: {exc}", markup=False)
 
     _display_plan(plans)
+    backups = _stale_backups() if also_backups else []
+    _display_backups(backups)
     if bare_repos and not survey_errors and all(plan.is_empty for plan in plans):
         print("All bare repos are clean.")
 
     if dry_run:
         if any(plan.commands for plan in plans):
             _display_dry_run(plans)
+        if backups:
+            print()
+            print("Would delete:")
+            for p in backups:
+                print(f"  rm {p}")
         if dropped:
             print(_index_line(dropped, "Would drop"))
         return
 
-    if any(plan.to_delete for plan in plans) and not yes and not _confirm():
+    if (
+        (any(plan.to_delete for plan in plans) or backups)
+        and not yes and not confirm()
+    ):
         print("Aborted.")
         sys.exit(2)
 
@@ -321,13 +345,25 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False) -> None:
                 )
             failed = True
 
+    if backups:
+        deleted = 0
+        for p in backups:
+            try:
+                p.unlink()
+                deleted += 1
+            except OSError as exc:
+                err_console.print(f"  could not delete {p.name}: {exc}", markup=False)
+                failed = True
+        if deleted:
+            noun = "backup" if deleted == 1 else "backups"
+            print(f"Deleted {deleted} backup {noun}.")
+
     if dropped:
         index.known_workspaces()
         print(_index_line(dropped, "Dropped"))
 
     if acted:
         # The plan above is written in the imperative. Without this, silence
-        # is all that separates "done" from "gave up somewhere".
         print("Done.")
 
     if failed:

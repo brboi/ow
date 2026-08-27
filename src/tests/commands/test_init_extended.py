@@ -87,7 +87,7 @@ class TestInteractiveQuestionnaire:
         monkeypatch.chdir(tmp_path)
         asked = []
 
-        def mock_text(message):
+        def mock_text(message, **kwargs):
             asked.append(message)
             return MagicMock(ask=lambda: "master..from-the-questionnaire")
 
@@ -109,3 +109,56 @@ class TestInteractiveQuestionnaire:
 
         assert any("branch spec" in message for message in asked)
         assert "from-the-questionnaire" in (tmp_path / ".ow" / "config.toml").read_text()
+
+    def test_an_empty_spec_takes_the_master_default(self, tmp_path, monkeypatch, config_with_remotes):
+        """#38: a cleared prompt asks for the default, not for the command to stop."""
+        monkeypatch.chdir(tmp_path)
+        defaults = []
+
+        def mock_text(message, **kwargs):
+            defaults.append(kwargs.get("default"))
+            return MagicMock(ask=lambda: "")
+
+        stdin = MagicMock()
+        stdin.isatty.return_value = True
+
+        with (
+            patch("sys.stdin", stdin),
+            patch("questionary.text", side_effect=mock_text),
+            patch("questionary.checkbox", side_effect=lambda message, **kw: MagicMock(
+                ask=lambda: ["common"] if "Templates" in message else ["community"]
+            )),
+            patch("questionary.confirm", side_effect=lambda message: MagicMock(ask=lambda: True)),
+            patch("ow.commands.init.ensure_workspace_materialized", return_value=(tmp_path, set(), {})),
+            patch("ow.commands.init.apply_templates"),
+            patch("ow.commands.init.run_cmd"),
+        ):
+            cmd_init(config_with_remotes)
+
+        # The prompt is prefilled, so a plain Enter already yields "master".
+        assert defaults == ["master"]
+        assert 'community = "master"' in (tmp_path / ".ow" / "config.toml").read_text()
+
+    def test_an_interrupted_spec_prompt_still_aborts(self, tmp_path, monkeypatch, capsys, config_with_remotes):
+        """questionary returns None on Ctrl-C — that is not an empty answer."""
+        monkeypatch.chdir(tmp_path)
+
+        stdin = MagicMock()
+        stdin.isatty.return_value = True
+
+        with (
+            patch("sys.stdin", stdin),
+            patch("questionary.text", side_effect=lambda message, **kw: MagicMock(ask=lambda: None)),
+            patch("questionary.checkbox", side_effect=lambda message, **kw: MagicMock(
+                ask=lambda: ["common"] if "Templates" in message else ["community"]
+            )),
+            patch("questionary.confirm", side_effect=lambda message: MagicMock(ask=lambda: True)),
+            patch("ow.commands.init.ensure_workspace_materialized", return_value=(tmp_path, set(), {})),
+            patch("ow.commands.init.apply_templates"),
+            patch("ow.commands.init.run_cmd"),
+            pytest.raises(SystemExit) as exc,
+        ):
+            cmd_init(config_with_remotes)
+
+        assert exc.value.code == 1
+        assert "Aborted" in capsys.readouterr().err

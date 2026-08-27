@@ -661,3 +661,65 @@ class TestFetchWiring:
             cmd_rebase(config, workspace=None, yes=True)
         assert seen["base"] == "upstream/master"
         assert _ws(ws_dir).repos["community"].base_ref == "origin/master"
+
+
+class TestNoFetch:
+    """--no-fetch opts out of the network without changing the plan."""
+
+    def test_no_fetch_passes_fetch_false(self, tmp_path):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        (ws_dir / "community").mkdir(parents=True, exist_ok=True)
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})) as mock_fetch,
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git", return_value=_ok()),
+        ):
+            cmd_rebase(config, workspace=None, yes=True, no_fetch=True)
+        assert mock_fetch.call_args.kwargs["fetch"] is False
+
+    def test_fetch_true_by_default(self, tmp_path):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        (ws_dir / "community").mkdir(parents=True, exist_ok=True)
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})) as mock_fetch,
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git", return_value=_ok()),
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        assert mock_fetch.call_args.kwargs["fetch"] is True
+
+    def test_no_fetch_says_cached_in_the_summary(self, tmp_path, capsys):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        (ws_dir / "community").mkdir(parents=True, exist_ok=True)
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git", return_value=_ok()),
+        ):
+            cmd_rebase(config, workspace=None, yes=True, no_fetch=True)
+        out = capsys.readouterr().out
+        assert "cached refs" in out
+
+    def test_fetch_by_default_does_not_say_cached(self, tmp_path, capsys):
+        config, ws_dir = make_workspace(tmp_path, {"community": "master..work"})
+        (ws_dir / "community").mkdir(parents=True, exist_ok=True)
+        with (
+            patch("ow.commands.rebase.resolve_workspace", return_value=(ws_dir, _ws(ws_dir))),
+            patch("ow.commands.rebase.warn_if_drifted"),
+            patch("ow.commands.rebase.fetch_workspace_refs",
+                  return_value=fetch_returning({"community": "origin/master"})),
+            patch("ow.commands.rebase.gather_facts", side_effect=_facts_with_work),
+            patch("ow.commands.rebase.git", return_value=_ok()),
+        ):
+            cmd_rebase(config, workspace=None, yes=True)
+        out = capsys.readouterr().out
+        assert "cached refs" not in out

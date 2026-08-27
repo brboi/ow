@@ -26,6 +26,10 @@ classifiers = [
 Homepage = "https://github.com/brboi/ow"
 Repository = "https://github.com/brboi/ow"
 
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.scripts]
 ow = "ow.__main__:main"
 

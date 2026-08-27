@@ -7,13 +7,19 @@ import typer
 
 from ow.commands import (
     cmd_apply,
-    cmd_rm,
+    cmd_archive,
+    cmd_cd,
     cmd_init,
     cmd_ls,
+    cmd_mv,
+    cmd_open,
     cmd_prune,
     cmd_rebase,
+    cmd_rm,
+    cmd_shell_init,
     cmd_status,
     cmd_templates,
+    cmd_unarchive,
 )
 from ow.utils import index
 from ow.utils.config import Config, load_global_config, parse_branch_spec
@@ -142,6 +148,19 @@ def complete_workspace_name(ctx: typer.Context, incomplete: str) -> list[str]:
     return [name for name in names if name.startswith(incomplete)]
 
 
+def complete_archived_name(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Tab completion for an archived workspace name.
+
+    Reads the archive directory, not the index: an archived workspace is by
+    definition not in the index.
+    """
+    from ow.commands.archive import archived_workspaces
+
+    return [
+        d.name for d in archived_workspaces() if d.name.startswith(incomplete)
+    ]
+
+
 # The four forms resolve_workspace() accepts, in the order it tries them.
 # Naming only the first two is how someone fresh out of the migration — with
 # workspaces on disk that the index has never seen — reads "Workspace name",
@@ -191,19 +210,22 @@ def rebase(
     autostash: bool = typer.Option(False, "--autostash", help="Stash and restore uncommitted changes around each rebase"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+    no_fetch: bool = typer.Option(False, "--no-fetch", help="Rebase against cached refs without fetching"),
 ) -> None:
     """Fetch and rebase workspace branches."""
     config = _load_config()
     cmd_rebase(
         config, workspace=workspace, only=only,
-        autostash=autostash, dry_run=dry_run, yes=yes,
+        autostash=autostash, dry_run=dry_run, yes=yes, no_fetch=no_fetch,
     )
 
 
 @app.command()
-def ls() -> None:
+def ls(
+    archived: bool = typer.Option(False, "--archived", help="List archived workspaces instead of active ones"),
+) -> None:
     """List every known workspace, its path, and its repos."""
-    cmd_ls()
+    cmd_ls(archived=archived)
 
 
 @app.command()
@@ -218,17 +240,50 @@ def rm(
 
 
 @app.command()
+def mv(
+    source: str = typer.Argument(..., help="Workspace name or path", autocompletion=complete_workspace_name),
+    dest: str = typer.Argument(..., help="New path, or an existing directory to move into"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+) -> None:
+    """Move a workspace to a new path, repairing its worktrees."""
+    config = _load_config()
+    cmd_mv(config, source=source, dest=dest, yes=yes)
+
+
+@app.command()
+def archive(
+    name: str = typer.Argument(..., help="Workspace name (as shown by ow ls)", autocompletion=complete_workspace_name),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+) -> None:
+    """Move a workspace into the archive, keeping its worktrees and branches."""
+    # Same as rm, prune and ls: no global config needed, no bootstrap.
+    check_legacy_layout()
+    cmd_archive(name=name, yes=yes)
+
+
+@app.command()
+def unarchive(
+    name: str = typer.Argument(..., help="Archived workspace name (as shown by ow ls --archived)", autocompletion=complete_archived_name),
+    dest: Optional[str] = typer.Argument(None, help="Where to restore it (default: ./NAME)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+) -> None:
+    """Restore an archived workspace."""
+    config = _load_config()
+    cmd_unarchive(config, name=name, dest=dest, yes=yes)
+
+
+@app.command()
 def prune(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the cleanup plan and dead index entries without making any changes"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+    also_backups: bool = typer.Option(False, "--also-backups", help="Also delete every saved `ow rm` config backup"),
 ) -> None:
     """Clean up stale worktree references, orphaned branches, and dead index entries."""
     # Not _load_config(): prune reads no global config, and bootstrapping one
     # here would write a default config.toml for a command that never opens
     # it. The legacy gate is the only part of that path prune needs.
     check_legacy_layout()
-    cmd_prune(dry_run=dry_run, yes=yes)
-
+    cmd_prune(dry_run=dry_run, yes=yes, also_backups=also_backups)
 
 @app.command()
 def templates(
@@ -237,6 +292,33 @@ def templates(
 ) -> None:
     """List template files and their state, or take one."""
     cmd_templates(take=take, show_diff=diff)
+
+
+@app.command()
+def cd(
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+) -> None:
+    """Print a workspace path — with `ow shell-init`, changes directory."""
+    # Warn, never stop: cd is read-only and is where a lost user is sent.
+    check_legacy_layout(fatal=False)
+    cmd_cd(workspace)
+
+
+@app.command(name="shell-init")
+def shell_init(
+    shell: str = typer.Argument(..., help="bash, zsh, or fish"),
+) -> None:
+    """Print the shell snippet that makes `ow cd` change directory."""
+    cmd_shell_init(shell)
+
+
+@app.command(name="open")
+def open_ws(
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+) -> None:
+    """Open a workspace in the configured editor."""
+    config = _load_config()
+    cmd_open(config, workspace=workspace)
 
 
 def main() -> None:
@@ -249,6 +331,7 @@ def main() -> None:
         # it was waiting on when the interrupt lands in communicate().
         print("Interrupted.", file=sys.stderr)
         raise SystemExit(130)
+
 
 
 if __name__ == "__main__":

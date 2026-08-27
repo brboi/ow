@@ -142,6 +142,50 @@ def test_find_addon_paths_prunes_noise_dirs(tmp_path):
     assert result == [root / "real_addons"]
 
 
+def test_find_addon_paths_ignores_python_packages(tmp_path):
+    """A bare __init__.py is a Python package marker, not an addon marker.
+
+    Reproduces #44: an Ansible repo whose role trees hold ordinary Python
+    packages had every one of their parents rendered into addons_path.
+    """
+    repo = tmp_path / "repo"
+    # A plain Python package, nested the way an Ansible role tree nests them.
+    pkg = repo / "roles" / "prom_node" / "files" / "etc" / "prometheus"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").touch()
+    # A real addon, so the walk has something legitimate to find.
+    addon = repo / "custom" / "my_addon"
+    addon.mkdir(parents=True)
+    (addon / "__manifest__.py").touch()
+
+    assert find_addon_paths(repo) == [repo / "custom"]
+
+
+def test_find_addon_paths_prunes_hidden_dirs(tmp_path):
+    """An addon never lives in .venv, .odoo or .ow — and a vendored Odoo does."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    for hidden in (".venv", ".odoo", ".ow"):
+        d = root / hidden / "addons" / "vendored_addon"
+        d.mkdir(parents=True)
+        (d / "__manifest__.py").touch()
+    (root / "real_addons" / "real_addon").mkdir(parents=True)
+    (root / "real_addons" / "real_addon" / "__manifest__.py").touch()
+
+    assert find_addon_paths(root) == [root / "real_addons"]
+
+
+def test_find_addon_paths_honours_exclude(tmp_path):
+    """Excluded directories are not entered at all."""
+    root = tmp_path / "repo"
+    for name in ("mine", "theirs"):
+        d = root / name / "an_addon"
+        d.mkdir(parents=True)
+        (d / "__manifest__.py").touch()
+
+    assert find_addon_paths(root, exclude=[root / "theirs"]) == [root / "mine"]
+
+
 # ---------------------------------------------------------------------------
 # build_template_context
 # ---------------------------------------------------------------------------
@@ -1039,3 +1083,79 @@ def test_undefined_var_raises_at_render(xdg, tmp_path, config):
     ws = WorkspaceConfig(repos={}, templates=["common"])
     with pytest.raises(UndefinedError):
         apply_templates(ws, config, ws_dir)
+
+
+# ---------------------------------------------------------------------------
+# Two-pass rendering — an addon shipped by a template must reach addons_path
+# ---------------------------------------------------------------------------
+
+def test_apply_templates_sees_an_addon_a_template_created(xdg, tmp_path, config):
+    """#42: build_template_context reads the filesystem, so an addon that a
+    bundle materialises does not exist yet on the first pass."""
+    from ow.utils import paths
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+
+    # A local bundle that ships an addon of its own, plus the odoorc that
+    # has to name it.
+    local_dir = paths.templates_dir() / "local"
+    (local_dir / "custom" / "my_addon").mkdir(parents=True)
+    (local_dir / "custom" / "my_addon" / "__manifest__.py").write_text("{}\n")
+    (local_dir / "odoorc.j2").write_text("addons_path = {{ addons_paths | join(',') }}\n")
+
+    ws = WorkspaceConfig(
+        repos={"community": BranchSpec("origin/master")},
+        templates=["local"],
+    )
+    apply_templates(ws, config, ws_dir)
+
+    addons_path = (ws_dir / "odoorc").read_text()
+    assert str(ws_dir / "custom") in addons_path
+
+
+def test_apply_templates_is_idempotent(xdg, tmp_path, config):
+    """A second run must produce the same bytes — the two-pass driver relies on it."""
+    from ow.utils import paths
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+
+    local_dir = paths.templates_dir() / "local"
+    (local_dir / "custom" / "my_addon").mkdir(parents=True)
+    (local_dir / "custom" / "my_addon" / "__manifest__.py").write_text("{}\n")
+    (local_dir / "odoorc.j2").write_text("addons_path = {{ addons_paths | join(',') }}\n")
+
+    ws = WorkspaceConfig(
+        repos={"community": BranchSpec("origin/master")},
+        templates=["local"],
+    )
+    apply_templates(ws, config, ws_dir)
+    first = (ws_dir / "odoorc").read_bytes()
+    apply_templates(ws, config, ws_dir)
+
+    assert (ws_dir / "odoorc").read_bytes() == first
+
+
+def test_apply_templates_renders_once_when_nothing_appears(xdg, tmp_path, config):
+    """The second pass is a fallback, not a tax on every apply."""
+    from ow.utils import paths
+    from ow.utils import templates as templates_mod
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+
+    local_dir = paths.templates_dir() / "local"
+    local_dir.mkdir(parents=True)
+    (local_dir / "odoorc.j2").write_text("db_name = {{ ws_name }}\n")
+
+    ws = WorkspaceConfig(
+        repos={"community": BranchSpec("origin/master")},
+        templates=["local"],
+    )
+    with patch.object(
+        templates_mod, "_render_bundles", wraps=templates_mod._render_bundles,
+    ) as render:
+        apply_templates(ws, config, ws_dir)
+
+    assert render.call_count == 1

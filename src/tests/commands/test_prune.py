@@ -789,3 +789,59 @@ def test_prune_does_not_claim_to_be_done_when_it_only_refused(tmp_path, capsys, 
     out = capsys.readouterr().out
     assert "keep 1 branch with unpushed commits: featA" in out
     assert "Done." not in out
+
+
+# ---------------------------------------------------------------------------
+# --also-backups
+# ---------------------------------------------------------------------------
+
+def _seed_backups(count: int = 2) -> list[Path]:
+    """Drop a few backup files, the way `ow rm` does."""
+    paths.backups_dir().mkdir(parents=True, exist_ok=True)
+    out = []
+    for i in range(count):
+        p = paths.backups_dir() / f"ws-{i}-20260101T00000{i}.toml"
+        p.write_text("version = 1\ntemplates = []\n")
+        out.append(p)
+    return out
+
+
+def test_also_backups_lists_every_backup(tmp_path, capsys, xdg, monkeypatch):
+    """--also-backups shows what it would delete before deleting anything."""
+    _refuse_input(monkeypatch, "dry run must not prompt")
+    _seed_backups(2)
+
+    capsys.readouterr()
+    cmd_prune(dry_run=True, also_backups=True)
+
+    out = capsys.readouterr().out
+    assert "Backups (2 backups):" in out
+    assert "Would delete:" in out
+    # Dry-run never deletes.
+    assert sorted(paths.backups_dir().glob("*.toml"))
+
+
+def test_also_backups_deletes_every_backup(tmp_path, capsys, xdg, monkeypatch):
+    _answer(monkeypatch, "y")
+    _seed_backups(3)
+
+    cmd_prune(also_backups=True, yes=True)
+
+    assert not sorted(paths.backups_dir().glob("*.toml"))
+
+
+def test_also_backups_off_leaves_backups_alone(tmp_path, capsys, xdg, monkeypatch):
+    _answer(monkeypatch, "y")
+    seeded = _seed_backups(2)
+
+    cmd_prune(yes=True)
+
+    for p in seeded:
+        assert p.exists()
+
+
+def test_also_backups_with_no_backups_does_nothing(tmp_path, capsys, xdg, monkeypatch):
+    _refuse_input(monkeypatch, "no backups to delete means no prompt")
+    cmd_prune(also_backups=True)
+
+    assert "Aborted." not in capsys.readouterr().out

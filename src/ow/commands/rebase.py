@@ -6,7 +6,7 @@ from rich.markup import escape
 from rich.text import Text
 
 from ow.utils.config import Config, WorkspaceConfig, select_aliases
-from ow.utils.display import console, err_console
+from ow.utils.display import confirm, console, err_console
 from ow.utils.drift import warn_if_drifted
 from ow.utils.git import (
     count_commits,
@@ -148,8 +148,9 @@ def _summary_line(plan: RebasePlan, width: int) -> str:
     return f"  {plan.alias.ljust(width)}  {target}  {state}{suffix}"
 
 
-def _display_summary(ws_name: str, plans: list[RebasePlan]) -> None:
-    console.print(Text(f"[{ws_name}]", style="bold cyan"))
+def _display_summary(ws_name: str, plans: list[RebasePlan], *, cached: bool = False) -> None:
+    header = f"[{ws_name}] (cached refs — no fetch)" if cached else f"[{ws_name}]"
+    console.print(Text(header, style="bold cyan"))
     width = max((len(p.alias) for p in plans), default=0)
     for plan in plans:
         console.print(_summary_line(plan, width))
@@ -204,15 +205,6 @@ def _report_switch_failure(alias: str, worktree: Path, ref: str) -> None:
     err_console.print(f"    then re-run: ow rebase --only {escape(alias)}\n")
 
 
-def _confirm() -> bool:
-    """Default is no. A destructive command must not proceed unasked."""
-    try:
-        answer = input("\nProceed? [y/N] ")
-    except EOFError:
-        return False
-    return answer.strip().lower() in ("y", "yes")
-
-
 def _execute(plan: RebasePlan, worktree: Path) -> bool:
     """Run a plan's steps. Returns True on success."""
     console.print(f"  {plan.alias}:", markup=False)
@@ -238,6 +230,7 @@ def cmd_rebase(
     autostash: bool = False,
     dry_run: bool = False,
     yes: bool = False,
+    no_fetch: bool = False,
 ) -> None:
     """Fetch and rebase the repos of a workspace."""
     ws_dir, ws = resolve_workspace(name=workspace)
@@ -252,6 +245,7 @@ def cmd_rebase(
     fetched = fetch_workspace_refs(
         selected_ws, ws_dir, config, fetch_upstreams=True,
         resolve_fn=resolve_spec, spinner_prefix="Preparing",
+        fetch=not no_fetch,
     )
 
     failed = False
@@ -265,7 +259,11 @@ def cmd_rebase(
             continue
         # Rebasing onto the stale cached ref would look like a success.
         if alias in fetched.failed:
-            err_console.print(f"  Skipping {alias}: fetch failed, refs are stale", markup=False)
+            reason = (
+                "could not resolve refs locally" if no_fetch
+                else "fetch failed, refs are stale"
+            )
+            err_console.print(f"  Skipping {alias}: {reason}", markup=False)
             failed = True
             continue
         tasks[alias] = (
@@ -299,7 +297,7 @@ def cmd_rebase(
             sys.exit(1)
         return
 
-    _display_summary(ws_dir.name, plans)
+    _display_summary(ws_dir.name, plans, cached=no_fetch)
 
     if dry_run:
         _display_dry_run(plans, ws_dir)
@@ -313,7 +311,7 @@ def cmd_rebase(
             sys.exit(1)
         return
 
-    if actionable and not yes and not _confirm():
+    if actionable and not yes and not confirm():
         console.print("Aborted.")
         sys.exit(2)
 

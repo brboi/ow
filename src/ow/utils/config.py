@@ -76,6 +76,7 @@ class Config:
     vars: dict[str, Any]
     remotes: dict[str, dict[str, RemoteConfig]]  # alias -> remote_name -> cfg
     version: int = 1
+    editor: str = "code"
 
 
 def load_workspace_config(path: Path) -> WorkspaceConfig:
@@ -108,10 +109,18 @@ def load_workspace_config(path: Path) -> WorkspaceConfig:
     )
 
 
+_WS_HEADER = "# Managed by ow. Do not edit `version` — ow reads it to migrate this file.\n"
+
+
 def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
-    """Write the .ow/config.toml file for an individual workspace."""
+    """Write the .ow/config.toml file for an individual workspace.
+
+    `version` is emitted by hand, ahead of the serialised body: tomli_w
+    cannot write comments, and this one has to sit next to the key it warns
+    about. Keeping it out of `data` also means a bare top-level key can
+    never land after the [repos] table, which would not be valid TOML.
+    """
     data: dict[str, Any] = {
-        "version": ws.version,
         "templates": ws.templates,
         "repos": {alias: spec.to_spec_str() for alias, spec in ws.repos.items()},
     }
@@ -119,8 +128,10 @@ def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
         data["vars"] = ws.vars
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        tomli_w.dump(data, f)
+    path.write_text(
+        f"{_WS_HEADER}version = {ws.version}\n\n{tomli_w.dumps(data)}",
+        encoding="utf-8",
+    )
 
 
 def select_aliases(available: list[str], only: str | None) -> list[str]:
@@ -171,6 +182,9 @@ def load_config(path: Path) -> Config:
             f"config schema version {version} is newer than ow supports (1); "
             f"upgrade ow to read this file"
         )
+    editor = data.get("editor", "code")
+    if not isinstance(editor, str):
+        raise ValueError("'editor' must be a string")
 
     vars = data.get("vars", {})
 
@@ -196,12 +210,14 @@ def load_config(path: Path) -> Config:
         vars=vars,
         remotes=remotes,
         version=version,
+        editor=editor,
     )
 
 
 _DEFAULT_CONFIG = '''\
 # ow configuration. Everything here is optional except at least one remote.
-version = 1
+# `version` is ow's schema marker — do not edit it.
+# editor = "code"   # command `ow open` runs; may include flags, e.g. "code -n"
 
 [vars]
 http_port = 8069

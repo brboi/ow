@@ -208,6 +208,8 @@ def test_load_workspace_config_version_unknown_raises():
         path.write_text(toml)
         with pytest.raises(ValueError, match="schema version 99"):
             load_workspace_config(path)
+
+
 def test_write_workspace_config_includes_version():
     ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -215,6 +217,30 @@ def test_write_workspace_config_includes_version():
         write_workspace_config(path, ws)
         content = path.read_text()
         assert "version = 1" in content
+
+
+def test_write_workspace_config_warns_against_editing_version():
+    """#43: the warning has to sit next to the key it is about."""
+    ws = WorkspaceConfig(
+        repos={"community": BranchSpec("origin/master", "work")},
+        templates=["common"],
+        vars={"http_port": 8070},
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        write_workspace_config(path, ws)
+        lines = path.read_text().splitlines()
+
+        assert lines[0].startswith("# Managed by ow")
+        assert "Do not edit `version`" in lines[0]
+        assert lines[1] == "version = 1"
+
+        # The comment must not cost anything on the way back in.
+        back = load_workspace_config(path)
+        assert back.version == 1
+        assert back.templates == ["common"]
+        assert back.repos["community"].to_spec_str() == "master..work"
+        assert back.vars == {"http_port": 8070}
 
 
 # ---------------------------------------------------------------------------
