@@ -1,6 +1,7 @@
 # Hidden files
 /.*
 !.github
+!.vscode
 
 # Python
 *.egg-info
@@ -9,11 +10,5 @@ __pycache__
 # OW version
 src/ow/_version.py
 
-# OW working directories
-.bare-git-repos/
-mise.toml
+# OW local
 mise.local.toml
-ow.toml
-services/*
-templates/*
-workspaces/*

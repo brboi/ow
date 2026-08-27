@@ -32,21 +32,21 @@
       "cwd": "${workspaceFolder}"
     },
     {
-      "name": "Debug OW: create",
+      "name": "Debug OW: init",
       "type": "debugpy",
       "request": "launch",
       "module": "ow",
-      "args": ["create", "test-ws", "community:master", "templates=common"],
+      "args": ["init", "test-ws", "-r", "community:master", "-t", "common"],
       "console": "integratedTerminal",
       "justMyCode": false,
       "cwd": "${workspaceFolder}"
     },
     {
-      "name": "Debug OW: remove",
+      "name": "Debug OW: rm",
       "type": "debugpy",
       "request": "launch",
       "module": "ow",
-      "args": ["remove", "test-ws"],
+      "args": ["rm", "test-ws", "-y"],
       "console": "integratedTerminal",
       "justMyCode": false,
       "cwd": "${workspaceFolder}"
@@ -56,7 +56,7 @@
       "type": "debugpy",
       "request": "launch",
       "module": "pytest",
-      "args": ["-v", "ow/tests/"],
+      "args": ["-v", "src/tests/"],
       "console": "integratedTerminal",
       "justMyCode": false,
       "cwd": "${workspaceFolder}"

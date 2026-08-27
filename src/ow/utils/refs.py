@@ -57,14 +57,21 @@ def fetch_workspace_refs(
     ws: WorkspaceConfig,
     ws_dir,
     config: Config,
-    *,
     fetch_upstreams: bool = False,
+    fetch: bool = True,
     resolve_fn=resolve_spec_local,
     spinner_prefix: str = "Checking",
 ) -> FetchOutcome:
     """Fetch refs for all workspace repos into their bare repos.
 
     Returns a FetchOutcome.
+
+    When `fetch` is False, phase 2 (the actual `git fetch`) is skipped
+    entirely and phase 1 is forced to use `resolve_spec_local`, which
+    never fetches on its own. The outcome still names the resolved base
+    and upstream refs — `resolve_spec` itself calls `git fetch` when a ref
+    is missing locally, which is why the local resolver is forced here
+    rather than left to the caller.
 
     Three-phase pipeline:
     1. Resolve specs per repo (parallel) — determines what to fetch
@@ -79,8 +86,8 @@ def fetch_workspace_refs(
     resolved_specs: dict[str, BranchSpec] = {}
     upstream_before: dict[str, str] = {}
     failed: set[str] = set()
-
-    # -- Phase 1: resolve specs per repo ----------------------------------
+    if not fetch:
+        resolve_fn = resolve_spec_local
 
     def _resolve_alias(alias: str, spec: BranchSpec) -> _ResolveResult:
         worktree_path = ws_dir / alias
@@ -175,7 +182,7 @@ def fetch_workspace_refs(
         args.extend([job.remote, job.refspec])
         return _run(args, capture_output=True)
 
-    if fetch_tasks:
+    if fetch and fetch_tasks:
         repo_chains: dict[str, list[tuple[str, _FetchJob]]] = defaultdict(list)
         for key, job in fetch_tasks.items():
             repo_chains[job.bare_repo].append((key, job))
@@ -221,18 +228,19 @@ def fetch_workspace_refs(
         if resolve.resolved_spec:
             resolved_specs[alias] = resolve.resolved_spec
 
-        for i, job in enumerate(resolve.fetch_jobs):
-            key = f"{alias}:{i}"
-            fetch_result = fetch_results[key]
-            if isinstance(fetch_result, Exception):
-                print_git_result(alias, "fetch", [job.remote, job.refspec], False, str(fetch_result))
-                failed.add(alias)
-            elif fetch_result.returncode != 0:
-                err = fetch_result.stderr.decode().strip() if fetch_result.stderr else "unknown"
-                print_git_result(alias, "fetch", [job.remote, job.refspec], False, err)
-                failed.add(alias)
-            else:
-                print_git_result(alias, "fetch", [job.remote, job.refspec], True)
+        if fetch:
+            for i, job in enumerate(resolve.fetch_jobs):
+                key = f"{alias}:{i}"
+                fetch_result = fetch_results[key]
+                if isinstance(fetch_result, Exception):
+                    print_git_result(alias, "fetch", [job.remote, job.refspec], False, str(fetch_result))
+                    failed.add(alias)
+                elif fetch_result.returncode != 0:
+                    err = fetch_result.stderr.decode().strip() if fetch_result.stderr else "unknown"
+                    print_git_result(alias, "fetch", [job.remote, job.refspec], False, err)
+                    failed.add(alias)
+                else:
+                    print_git_result(alias, "fetch", [job.remote, job.refspec], True)
 
     return FetchOutcome(
         tracks=resolved_tracks,

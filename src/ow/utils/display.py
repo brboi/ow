@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator
 
 from rich.console import Console
@@ -24,6 +25,31 @@ def counts(behind: int, ahead: int) -> str:
     b_color = "yellow" if behind > 0 else "dim"
     a_color = "green" if ahead > 0 else "dim"
     return f"[{b_color}]↓{behind}[/] [{a_color}]↑{ahead}[/]"
+
+
+def display_path(path: Path) -> str:
+    """Render a path with the home directory abbreviated to ~.
+
+    A full absolute path drowns the useful part of a listing in repetition —
+    every entry shares the same long prefix.
+    """
+    home = Path.home()
+    try:
+        rel = path.relative_to(home)
+    except ValueError:
+        return str(path)
+    if str(rel) == ".":
+        return "~"
+    return f"~/{rel}"
+
+
+def confirm() -> bool:
+    """Default is no. A destructive command must not proceed unasked."""
+    try:
+        answer = input("\nProceed? [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
 
 
 def print_git_result(alias: str, cmd: str, args: list[str], ok: bool, error: str | None = None) -> None:

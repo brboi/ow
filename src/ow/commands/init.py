@@ -234,17 +234,23 @@ def _gather_workspace_config_interactive(
                 try:
                     spec_str = questionary.text(
                         f"{alias} branch spec (e.g. master, master..my-feature)",
+                        default="master",
                     ).ask()
                 except KeyboardInterrupt:
                     print("\nAborted.", file=sys.stderr)
                     sys.exit(1)
-                if not spec_str:
+                if spec_str is None:
+                    # questionary's .ask() returns None on Ctrl-C / Ctrl-D.
+                    # An empty string is a different answer: the prefilled
+                    # default was cleared, which asks for the default, not
+                    # for the whole command to stop.
                     print("Aborted.", file=sys.stderr)
                     sys.exit(1)
+                spec_str = spec_str.strip() or "master"
                 try:
-                    final_repos[alias] = parse_branch_spec(spec_str.strip())
+                    final_repos[alias] = parse_branch_spec(spec_str)
                 except ValueError as e:
-                    print(f"Error: invalid branch spec '{spec_str.strip()}': {e}", file=sys.stderr)
+                    print(f"Error: invalid branch spec '{spec_str}': {e}", file=sys.stderr)
                     sys.exit(1)
 
     ws_vars: dict[str, Any] = dict(source_ws.vars) if source_ws is not None else dict(config.vars)

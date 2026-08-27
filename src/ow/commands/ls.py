@@ -13,26 +13,10 @@ from rich.text import Text
 
 from ow.utils import index
 from ow.utils.config import load_workspace_config
-from ow.utils.display import console
+from ow.utils.display import console, display_path
 from ow.utils.legacy import check_legacy_layout
 
 MARKER = Path(".ow") / "config.toml"
-
-
-def _display_path(path: Path) -> str:
-    """Render a path with the home directory abbreviated to ~.
-
-    A full absolute path drowns the useful part of a workspace listing in
-    repetition — every entry shares the same long prefix.
-    """
-    home = Path.home()
-    try:
-        rel = path.relative_to(home)
-    except ValueError:
-        return str(path)
-    if str(rel) == ".":
-        return "~"
-    return f"~/{rel}"
 
 
 def _repos_cell(ws_dir: Path) -> str | Text:
@@ -51,17 +35,30 @@ def _repos_cell(ws_dir: Path) -> str | Text:
     return ", ".join(f"{alias}:{spec.to_spec_str()}" for alias, spec in ws.repos.items())
 
 
-def cmd_ls() -> None:
-    """List every known workspace: its name, path, and repos."""
+def cmd_ls(*, archived: bool = False) -> None:
+    """List every known workspace: its name, path, and repos.
+
+    With `archived`, list the archive instead. The archive is not in the
+    index by design — that is what being archived means — so it is read
+    straight off the filesystem.
+    """
     # A warning, not a stop: see check_legacy_layout's own docstring. ls is
     # read-only and index-only, and it is where the other commands' error
     # messages send a lost user.
     check_legacy_layout(fatal=False)
 
-    workspaces = index.known_workspaces()
-    if not workspaces:
-        console.print("No known workspaces. Run `ow init` to create one.")
-        return
+    if archived:
+        from ow.commands.archive import archived_workspaces
+
+        workspaces = archived_workspaces()
+        if not workspaces:
+            console.print("No archived workspaces.")
+            return
+    else:
+        workspaces = index.known_workspaces()
+        if not workspaces:
+            console.print("No known workspaces. Run `ow init` to create one.")
+            return
 
     table = Table(box=None)
     table.add_column("NAME")
@@ -77,6 +74,6 @@ def cmd_ls() -> None:
         # NAME and PATH come straight from the filesystem: a directory named
         # something like "ws[/bad]" is data, not Rich markup, and must not
         # be parsed as such — Text() renders it literally.
-        table.add_row(Text(ws_dir.name), Text(_display_path(ws_dir)), _repos_cell(ws_dir))
+        table.add_row(Text(ws_dir.name), Text(display_path(ws_dir)), _repos_cell(ws_dir))
 
     console.print(table)

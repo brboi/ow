@@ -2,7 +2,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
@@ -38,19 +38,25 @@ def is_odoo_main_repo(repo_dir: Path) -> bool:
     )
 
 
-def find_addon_paths(path: Path) -> list[Path]:
+def find_addon_paths(path: Path, exclude: Iterable[Path] = ()) -> list[Path]:
     """Return addons_path directories found under path.
 
     Uses an iterative walk with a visited inode set to break symlink cycles.
-    Prunes .git, node_modules, and __pycache__ directories.
+    Prunes node_modules, __pycache__ and every hidden directory: an Odoo
+    addon never lives inside .git, .venv, .odoo or .ow, and naming them one
+    by one only postpones the next one. `exclude` names directories the
+    caller handles itself and the walk must not enter.
     An addons_path is a directory whose immediate children include addon
-    directories (directories containing __manifest__.py, __openerp__.py, or
-    __init__.py). Stops descending once an addons_path is identified.
+    directories (directories containing __manifest__.py for Odoo >= 10, or
+    __openerp__.py for Odoo < 10). A bare __init__.py is a Python package
+    marker, not an addon marker: counting it made every Python subtree look
+    like an addons_path. Stops descending once an addons_path is identified.
     Returns [] if path is not a directory or contains no addons.
     """
     if not path.is_dir():
         return []
 
+    skip = {p.resolve() for p in exclude}
     result: list[Path] = []
     seen: set[int] = set()
     stack = [path]
@@ -70,8 +76,14 @@ def find_addon_paths(path: Path) -> list[Path]:
         if not current.is_dir():
             continue
 
-        # Prune noise directories
-        if current.name in (".git", "node_modules", "__pycache__"):
+        # Prune noise directories. `path` itself is never pruned: a caller
+        # asking about ~/ws/.hidden means it.
+        if current != path and (
+            current.name.startswith(".")
+            or current.name in ("node_modules", "__pycache__")
+        ):
+            continue
+        if current.resolve() in skip:
             continue
 
         # Get directory children
@@ -84,7 +96,7 @@ def find_addon_paths(path: Path) -> list[Path]:
         has_manifest = any(
             (child / m).exists()
             for child in children
-            for m in ("__manifest__.py", "__openerp__.py", "__init__.py")
+            for m in ("__manifest__.py", "__openerp__.py")
         )
 
         if has_manifest:
@@ -125,6 +137,14 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
             addons_paths.extend(str(p) for p in found)
             for p in found:
                 odools_path_items.append(str(p.relative_to(ws_dir)))
+
+    # Addons that belong to no repo: a template bundle may ship one of its
+    # own, and it lands next to the worktrees rather than inside them —
+    # writing into a worktree would show up as a dirty git checkout (#42).
+    # The alias directories are excluded because the loop above owns them.
+    for p in find_addon_paths(ws_dir, exclude=[ws_dir / alias for alias in ws.repos]):
+        addons_paths.append(str(p))
+        odools_path_items.append(str(p.relative_to(ws_dir)))
 
     return {
         "ws_name": ws_dir.name,
@@ -225,9 +245,32 @@ def resolve_template_files(bundle: str) -> dict[Path, Path]:
 
 
 def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
-    """Apply templates in order to ws_dir (later templates override earlier ones)."""
-    context = build_template_context(ws, config, ws_dir)
+    """Apply templates in order to ws_dir (later templates override earlier ones).
 
+    Rendered twice when the first pass changed what the addon scan can see: a
+    template bundle may itself materialise an Odoo addon, and
+    build_template_context reads the filesystem — so on the first pass that
+    addon does not exist yet and never reaches addons_path (#42). The second
+    pass is skipped whenever the rescan agrees with the first, which is the
+    normal case.
+    """
+    context = build_template_context(ws, config, ws_dir)
+    _render_bundles(ws, context, ws_dir)
+
+    rescanned = build_template_context(ws, config, ws_dir)
+    if any(
+        rescanned[key] != context[key]
+        for key in ("addons_paths", "odools_path_items")
+    ):
+        _render_bundles(ws, rescanned, ws_dir)
+
+
+def _render_bundles(ws: WorkspaceConfig, context: dict, ws_dir: Path) -> None:
+    """Render every bundle of `ws` into ws_dir against a fixed context.
+
+    Every write here is a deterministic function of `context`, which is what
+    lets apply_templates run this twice.
+    """
     for template_name in ws.templates:
         files = resolve_template_files(template_name)
         local_dir = paths.templates_dir() / template_name

@@ -391,3 +391,47 @@ class TestFetchJobsSameRepoAreSequential:
             "two fetches hit the same bare repo concurrently"
         )
 
+
+
+class TestNoFetch:
+    """`fetch=False` skips the network but still resolves from local refs."""
+
+    def test_no_git_fetch_is_invoked(self, tmp_path, monkeypatch, xdg):
+        from ow.utils import refs as refs_mod
+        config, ws, ws_dir = _workspace(tmp_path)
+        bare = paths.repos_dir() / "community.git"
+        bare.mkdir(parents=True)
+        subprocess.run(
+            ["git", "-C", str(bare), "init", "-q", "--bare", "-b", "master"],
+            check=True,
+        )
+        # Create a commit so HEAD is a valid ref for update-ref.
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as _clone_dir:
+            subprocess.run(
+                ["git", "clone", "-q", str(bare), _clone_dir], check=True,
+            )
+            subprocess.run(["git", "-C", _clone_dir, "config", "user.email", "t@t"], check=True)
+            subprocess.run(["git", "-C", _clone_dir, "config", "user.name", "T"], check=True)
+            from pathlib import Path
+            Path(_clone_dir, "a.txt").write_text("a")
+            subprocess.run(["git", "-C", _clone_dir, "add", "a.txt"], check=True)
+            subprocess.run(["git", "-C", _clone_dir, "commit", "-qm", "A"], check=True)
+            subprocess.run(["git", "-C", _clone_dir, "push", "-q", "origin", "master"], check=True)
+        subprocess.run(
+            ["git", "-C", str(bare), "update-ref", "refs/remotes/origin/master", "refs/heads/master"],
+            check=True,
+        )
+
+        called = []
+        monkeypatch.setattr(
+            refs_mod, "_run",
+            lambda *a, **kw: called.append(a) or subprocess.CompletedProcess(a[0], 0, b"", b""),
+        )
+
+        outcome = fetch_workspace_refs(ws, ws_dir, config, fetch=False)
+
+        # No call whose argv contains "fetch".
+        for argv in called:
+            assert "fetch" not in argv[0]
+        assert outcome.specs["community"].base_ref == "origin/master"

@@ -52,7 +52,7 @@ def _questionary_answers(templates=("common",), aliases=("community",), spec="ma
         mock.ask.return_value = list(templates) if "Templates" in message else list(aliases)
         return mock
 
-    def text(message):
+    def text(message, **kwargs):
         asked.append(message)
         mock = MagicMock()
         mock.ask.return_value = spec
@@ -301,7 +301,7 @@ def test_init_checkbox_uses_choice_objects(tmp_path, monkeypatch, config):
         _tty(True),
         _no_git(tmp_path),
         patch("questionary.checkbox", side_effect=mock_checkbox),
-        patch("questionary.text", side_effect=lambda message: MagicMock(ask=lambda: "master")),
+        patch("questionary.text", side_effect=lambda message, **kw: MagicMock(ask=lambda: "master")),
         patch("questionary.confirm", side_effect=lambda message: MagicMock(ask=lambda: True)),
     ):
         cmd_init(config)
@@ -370,7 +370,7 @@ def test_init_configuration_preselects_its_templates_and_repos(tmp_path, monkeyp
         _tty(True),
         _no_git(tmp_path / "target"),
         patch("questionary.checkbox", side_effect=mock_checkbox),
-        patch("questionary.text", side_effect=lambda message: MagicMock(ask=lambda: "master")),
+        patch("questionary.text", side_effect=lambda message, **kw: MagicMock(ask=lambda: "master")),
         patch("questionary.confirm", side_effect=lambda message: MagicMock(ask=lambda: True)),
     ):
         cmd_init(config, name="target", configuration=str(src_ws))

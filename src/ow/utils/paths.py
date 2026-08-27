@@ -56,6 +56,18 @@ def volumes_dir() -> Path:
     return data_home() / "volumes"
 
 
+def archives_dir() -> Path:
+    # data, not state: an archive holds a whole workspace, worktrees
+    # included, not a disposable cache entry.
+    return data_home() / "archives"
+
+
+def backups_dir() -> Path:
+    # state, not data: one small TOML per removal, regenerable from the
+    # workspace it came from and safe to lose.
+    return state_home() / "backups"
+
+
 def index_file() -> Path:
     return state_home() / "workspaces"
 

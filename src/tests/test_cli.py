@@ -200,7 +200,7 @@ def test_prune(xdg):
 
     assert result.exit_code == 0
     mock_prune.assert_called_once()
-    assert mock_prune.call_args.kwargs == {"dry_run": False, "yes": False}
+    assert mock_prune.call_args.kwargs == {"dry_run": False, "yes": False, "also_backups": False}
 
 
 def test_prune_dry_run(xdg):
@@ -266,7 +266,7 @@ def test_prune_still_gates_on_the_legacy_layout(xdg, tmp_path):
 
 
 def test_ls(xdg):
-    """ow ls wiring: __main__.ls() calls cmd_ls() with no arguments, and does
+    """ow ls wiring: __main__.ls() calls cmd_ls() with archived=False, and does
     not route through _load_config() to get there — ls needs no Config.
 
     cmd_ls is mocked here, so this is wiring only: it says nothing about
@@ -280,7 +280,18 @@ def test_ls(xdg):
         result = runner.invoke(app, ["ls"])
 
     assert result.exit_code == 0
-    mock_ls.assert_called_once_with()
+    mock_ls.assert_called_once_with(archived=False)
+    mock_load_config.assert_not_called()
+
+
+def test_ls_archived(xdg):
+    """--archived reaches cmd_ls, and still needs no Config."""
+    with patch("ow.__main__.cmd_ls", autospec=True) as mock_ls, \
+            patch("ow.__main__._load_config", autospec=True) as mock_load_config:
+        result = runner.invoke(app, ["ls", "--archived"])
+
+    assert result.exit_code == 0
+    mock_ls.assert_called_once_with(archived=True)
     mock_load_config.assert_not_called()
 
 
