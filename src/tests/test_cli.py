@@ -365,11 +365,49 @@ def test_legacy_layout_is_detected_before_the_config_bootstrap(xdg, tmp_path):
 
 
 def _complete(args, incomplete):
-    from click.shell_completion import ShellComplete
+    """Call the autocompletion callback Click's ShellComplete would invoke.
+
+    Click 8.5 changed _resolve_context so it no longer descends into
+    subcommands during completion, which makes ShellComplete return
+    command names instead of parameter completions. We test our
+    completer callbacks, not Click's shell integration, so we resolve
+    the subcommand and call the first parameter with `autocompletion`.
+    """
     from typer.main import get_command
 
-    comp = ShellComplete(get_command(app), {}, "ow", "_OW_COMPLETE")
-    return [item.value for item in comp.get_completions(args, incomplete)]
+    cmd = get_command(app)
+    ctx = cmd.make_context("ow", args, resilient_parsing=True)
+
+    # TyperGroup in Typer >= 0.16 inherits from typer's own Command shim,
+    # not click.Group — check for the method instead.
+    if not args or not hasattr(ctx.command, "get_command"):
+        return []
+    name = args[0]
+    sub_cmd = ctx.command.get_command(ctx, name)
+    if sub_cmd is None:
+        return []
+    sub_ctx = sub_cmd.make_context(
+        name, args[1:], parent=ctx, resilient_parsing=True,
+    )
+    # Find which param the completion is for: the last complete arg is
+    # an option flag (e.g. "-r"), and we want that option's completions.
+    # If the last arg is not a flag, it's an argument completion.
+    last_arg = args[-1] if args else ""
+    if last_arg.startswith("-"):
+        for param in sub_ctx.command.get_params(sub_ctx):
+            opts = getattr(param, "opts", [])
+            if last_arg in opts:
+                items = param.shell_complete(sub_ctx, incomplete)
+                return [item.value for item in items]
+
+    for param in sub_ctx.command.get_params(sub_ctx):
+        # Click 8.5: shell_complete(ctx, incomplete) → list[CompletionItem].
+        # Every param has it as a base method, so only stop when it
+        # actually returns something.
+        items = param.shell_complete(sub_ctx, incomplete)
+        if items:
+            return [item.value for item in items]
+    return []
 
 
 def _make_templates(*names):
