@@ -9,8 +9,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from textwrap import indent
 from typing import Callable, TypeVar
+from rich.text import Text
 
-from ow.utils import askpass, paths
+from ow.utils import askpass, display, paths
 from ow.utils.config import BranchSpec, RemoteConfig
 
 # Every git child is tracked here so an interrupt can kill it. An abandoned
@@ -42,6 +43,20 @@ def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     extra = askpass.child_env()
     if extra and "env" not in kwargs:
         kwargs["env"] = {**os.environ, **extra}
+    # When a sink is installed (the dashboard owns the terminal), every
+    # subprocess line that would have painted fd 1/2 has to land in the
+    # sink instead. Probes pass capture_output explicitly, so they skip
+    # this path; only action commands — the ones whose output humans read
+    # as it happens — hit it.
+    forward_to_sink = (
+        display.current_sink() is not None
+        and "stdout" not in kwargs
+        and "stderr" not in kwargs
+    )
+    if forward_to_sink:
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.STDOUT
+        kwargs.setdefault("text", True)
     # The lock spans Popen() itself, not just the registration after it: a
     # child that exists between Popen() returning and the lock being taken
     # would be invisible to a terminate_children() racing that window.
@@ -66,6 +81,11 @@ def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
             _children.discard(proc)
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, args, stdout, stderr)
+    if forward_to_sink and stdout:
+        sink = display.current_sink()
+        if sink is not None:
+            for line in stdout.splitlines():
+                sink.line(Text(line))
     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
@@ -92,7 +112,6 @@ def _kill_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
             proc.wait(timeout=1.0)
         except subprocess.TimeoutExpired:
             pass
-
 
 def terminate_children(grace: float = 2.0) -> int:
     """SIGTERM every tracked child's group, SIGKILL whatever outlives `grace`.

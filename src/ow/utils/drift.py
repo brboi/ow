@@ -37,8 +37,8 @@ def check_drift(worktree_path, spec: BranchSpec, alias: str) -> DriftResult:
     return DriftResult(alias=alias, spec=spec, actual_branch=actual_branch)
 
 
-def warn_if_drifted(ws: WorkspaceConfig, ws_dir) -> bool:
-    """Display warnings for drift; return True if any drifted. Never exits."""
+def check_all_drift(ws: WorkspaceConfig, ws_dir) -> list[DriftResult]:
+    """Every drifted repo, in config order. No output."""
     from typing import Any
 
     drift_tasks: dict[str, Any] = {}
@@ -49,20 +49,30 @@ def warn_if_drifted(ws: WorkspaceConfig, ws_dir) -> bool:
         drift_tasks[alias] = (lambda w=worktree_path, s=spec, a=alias: check_drift(w, s, a))
 
     if not drift_tasks:
-        return False
+        return []
 
     drift_results = parallel_per_repo(drift_tasks)
 
-    drifted = []
+    drifted: list[DriftResult] = []
     for alias in ws.repos:
         result = drift_results.get(alias)
         if result and not isinstance(result, Exception) and result.is_drifted:
             drifted.append(result)
+    return drifted
 
-    if drifted:
-        print("Warning: drift detected between config and worktree state:", file=sys.stderr)
-        for d in drifted:
-            print(f"  {d.message}", file=sys.stderr)
-        print("  Run `ow apply` to realign the worktree(s) with the config.", file=sys.stderr)
-        return True
-    return False
+
+def print_drift_warning(drifted: list[DriftResult]) -> None:
+    """The stderr warning block — unchanged text."""
+    if not drifted:
+        return
+    print("Warning: drift detected between config and worktree state:", file=sys.stderr)
+    for d in drifted:
+        print(f"  {d.message}", file=sys.stderr)
+    print("  Run `ow apply` to realign the worktree(s) with the config.", file=sys.stderr)
+
+
+def warn_if_drifted(ws: WorkspaceConfig, ws_dir) -> bool:
+    """Display warnings for drift; return True if any drifted. Never exits."""
+    drifted = check_all_drift(ws, ws_dir)
+    print_drift_warning(drifted)
+    return bool(drifted)

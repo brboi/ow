@@ -36,38 +36,42 @@ def _tty(present: bool):
 
 
 @contextmanager
-def _questionary_answers(templates=("common",), aliases=("community",), spec="master", confirm=True):
-    """Make every prompt answerable, and record what was asked.
+def _prompt_answers(templates=("common",), aliases=("community",), spec="master", confirm=True, cancelled=False):
+    """Make every Rich prompt answerable, and record what was asked.
 
-    Deliberate: the non-interactive refusal has to be provable against a
-    questionnaire that *would* have succeeded. Without this, deleting the
-    isatty guard would make the refusal tests fail for want of a terminal
-    rather than pass, and they would be green either way.
+    Patches ow.commands.init.Prompt.ask with a side effect keyed on the
+    prompt text. When cancelled=True, the first Prompt.ask raises
+    KeyboardInterrupt — mirroring a user pressing Ctrl-C at the prompt.
+    Also patches ow.utils.display.confirm to return the `confirm` value.
     """
     asked = []
+    call_count = [0]
 
-    def checkbox(message, choices=None, **kwargs):
+    def prompt_ask(message, **kwargs):
+        call_count[0] += 1
         asked.append(message)
-        mock = MagicMock()
-        mock.ask.return_value = list(templates) if "Templates" in message else list(aliases)
-        return mock
+        if cancelled:
+            raise KeyboardInterrupt()
+        # Match on the prompt message to determine what to return.
+        if "Templates" in message or ("Select" in message and call_count[0] == 1):
+            # First prompt is the templates multi-select.
+            return ",".join(str(i + 1) for i in range(len(templates))) if templates else "none"
+        elif "Repos" in message or ("Select" in message and call_count[0] == 2):
+            # Second prompt is the repos multi-select.
+            return ",".join(str(i + 1) for i in range(len(aliases))) if aliases else "none"
+        elif "branch spec" in message:
+            return spec
+        else:
+            # Default: return the default value if provided.
+            return kwargs.get("default", "")
 
-    def text(message, **kwargs):
+    def confirm_fn(message="Proceed?"):
         asked.append(message)
-        mock = MagicMock()
-        mock.ask.return_value = spec
-        return mock
-
-    def confirm_(message):
-        asked.append(message)
-        mock = MagicMock()
-        mock.ask.return_value = confirm
-        return mock
+        return confirm
 
     with (
-        patch("questionary.checkbox", side_effect=checkbox),
-        patch("questionary.text", side_effect=text),
-        patch("questionary.confirm", side_effect=confirm_),
+        patch("ow.commands.init.Prompt.ask", side_effect=prompt_ask),
+        patch("ow.utils.display.confirm", side_effect=confirm_fn),
     ):
         yield asked
 
@@ -106,7 +110,7 @@ def test_init_without_a_name_uses_the_current_directory(tmp_path, monkeypatch, c
     here.mkdir()
     monkeypatch.chdir(here)
 
-    with _tty(False), _questionary_answers(), _no_git(here):
+    with _tty(False), _prompt_answers(), _no_git(here):
         cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
 
     assert (here / ".ow" / "config.toml").exists()
@@ -116,7 +120,7 @@ def test_init_without_a_name_uses_the_current_directory(tmp_path, monkeypatch, c
 def test_init_with_a_name_creates_the_subdirectory(tmp_path, monkeypatch, config_with_remotes):
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), _no_git(tmp_path / "parrot"):
+    with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
     assert (tmp_path / "parrot" / ".ow" / "config.toml").exists()
@@ -128,7 +132,7 @@ def test_init_with_a_name_accepts_an_existing_directory(tmp_path, monkeypatch, c
     (tmp_path / "parrot").mkdir()
     (tmp_path / "parrot" / "notes.txt").write_text("mine")
 
-    with _tty(False), _questionary_answers(), _no_git(tmp_path / "parrot"):
+    with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
     assert (tmp_path / "parrot" / ".ow" / "config.toml").exists()
@@ -141,7 +145,7 @@ def test_init_here_accepts_a_directory_name_it_would_reject_as_an_argument(tmp_p
     here.mkdir()
     monkeypatch.chdir(here)
 
-    with _tty(False), _questionary_answers(), _no_git(here):
+    with _tty(False), _prompt_answers(), _no_git(here):
         cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
 
     assert (here / ".ow" / "config.toml").exists()
@@ -167,7 +171,7 @@ def test_init_refuses_a_named_directory_that_is_already_a_workspace(tmp_path, mo
 
     with (
         _tty(False),
-        _questionary_answers(),
+        _prompt_answers(),
         _no_git(tmp_path / "parrot"),
         pytest.raises(SystemExit) as exc,
     ):
@@ -187,7 +191,7 @@ def test_init_refuses_the_current_directory_when_it_is_already_a_workspace(tmp_p
 
     with (
         _tty(False),
-        _questionary_answers(),
+        _prompt_answers(),
         _no_git(tmp_path),
         pytest.raises(SystemExit) as exc,
     ):
@@ -207,7 +211,7 @@ def test_init_without_a_tty_refuses_when_nothing_is_given(tmp_path, monkeypatch,
     """No -t, no -r, no -c: the one case the refusal exists to catch."""
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), _no_git(tmp_path), pytest.raises(SystemExit) as exc:
+    with _tty(False), _prompt_answers(), _no_git(tmp_path), pytest.raises(SystemExit) as exc:
         cmd_init(config_with_remotes)
 
     assert exc.value.code == 1
@@ -222,7 +226,7 @@ def test_init_without_a_tty_succeeds_with_only_a_template(tmp_path, monkeypatch,
     """A repo-less workspace is legitimate: the interactive path allows it too."""
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), _no_git(tmp_path):
+    with _tty(False), _prompt_answers(), _no_git(tmp_path):
         cmd_init(config_with_remotes, templates=["common"])
 
     ws = load_workspace_config(tmp_path / ".ow" / "config.toml")
@@ -233,7 +237,7 @@ def test_init_without_a_tty_succeeds_with_only_a_template(tmp_path, monkeypatch,
 def test_init_without_a_tty_asks_nothing(tmp_path, monkeypatch, config_with_remotes):
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers() as asked, _no_git(tmp_path):
+    with _tty(False), _prompt_answers() as asked, _no_git(tmp_path):
         cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
 
     assert asked == []
@@ -251,7 +255,7 @@ def test_init_without_a_tty_takes_everything_from_a_configuration(tmp_path, monk
     target.mkdir()
     monkeypatch.chdir(target)
 
-    with _tty(False), _questionary_answers() as asked, _no_git(target):
+    with _tty(False), _prompt_answers() as asked, _no_git(target):
         cmd_init(config_with_remotes, configuration=str(source))
 
     assert asked == []
@@ -261,66 +265,37 @@ def test_init_without_a_tty_takes_everything_from_a_configuration(tmp_path, monk
 def test_init_with_a_tty_asks(tmp_path, monkeypatch, config_with_remotes):
     monkeypatch.chdir(tmp_path)
 
-    with _tty(True), _questionary_answers() as asked, _no_git(tmp_path):
+    with _tty(True), _prompt_answers() as asked, _no_git(tmp_path):
         cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
 
-    assert any("Templates" in message for message in asked)
+    # The Rich prompts were called.
+    assert any("Templates" in message or "Select" in message for message in asked)
     assert any("Proceed" in message for message in asked)
 
 
 def test_init_with_a_tty_stops_when_the_confirmation_is_declined(tmp_path, monkeypatch, capsys, config_with_remotes):
     monkeypatch.chdir(tmp_path)
 
-    with _tty(True), _questionary_answers(confirm=False), _no_git(tmp_path):
+    with _tty(True), _prompt_answers(confirm=False), _no_git(tmp_path):
         cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
 
     assert "Aborted." in capsys.readouterr().out
     assert not (tmp_path / ".ow" / "config.toml").exists()
 
 
-def test_init_checkbox_uses_choice_objects(tmp_path, monkeypatch, config):
-    """The questionnaire offers Choice objects, with common and community preselected by default."""
+def test_init_with_a_tty_stops_when_the_prompt_is_cancelled(tmp_path, monkeypatch, capsys, config_with_remotes):
+    """KeyboardInterrupt at a Rich prompt aborts before confirmation, and
+    ow init exits non-zero so a wrapper script sees the cancellation, not
+    success (finding 7)."""
     monkeypatch.chdir(tmp_path)
-    config.remotes = {
-        "brboi-addons": {"origin": MagicMock(url="git@github.com:brboi/addons.git")},
-        "community": {"origin": MagicMock(url="git@github.com:odoo/odoo.git")},
-    }
 
-    checkbox_calls = []
+    with _tty(True), _prompt_answers(cancelled=True) as asked, _no_git(tmp_path):
+        with pytest.raises(SystemExit) as exc:
+            cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+    assert exc.value.code != 0
 
-    def mock_checkbox(message, choices=None, **kwargs):
-        checkbox_calls.append({"message": message, "choices": choices})
-        mock = MagicMock()
-        if "Templates" in message:
-            mock.ask.return_value = ["common", "vscode"]
-        else:
-            mock.ask.return_value = ["brboi-addons", "community"]
-        return mock
-
-    with (
-        _tty(True),
-        _no_git(tmp_path),
-        patch("questionary.checkbox", side_effect=mock_checkbox),
-        patch("questionary.text", side_effect=lambda message, **kw: MagicMock(ask=lambda: "master")),
-        patch("questionary.confirm", side_effect=lambda message: MagicMock(ask=lambda: True)),
-    ):
-        cmd_init(config)
-
-    template_checkbox = checkbox_calls[0]
-    assert "Templates" in template_checkbox["message"]
-    template_names = [c.title for c in template_checkbox["choices"]]
-    assert template_names == sorted(template_names)
-    assert {"common", "vscode", "zed"} <= set(template_names)  # packaged templates
-    checked_templates = [c.title for c in template_checkbox["choices"] if c.checked]
-    assert checked_templates == ["common"]
-
-    repo_checkbox = checkbox_calls[1]
-    assert "Repos" in repo_checkbox["message"]
-    repo_names = [c.title for c in repo_checkbox["choices"]]
-    assert repo_names == ["brboi-addons", "community"]  # declaration order, not sorted
-    checked_repos = [c.title for c in repo_checkbox["choices"] if c.checked]
-    assert checked_repos == ["community"]
-
+    assert "Aborted." in capsys.readouterr().err
+    assert not (tmp_path / ".ow" / "config.toml").exists()
 
 # ---------------------------------------------------------------------------
 # Validation of the flags
@@ -347,38 +322,7 @@ def test_init_rejects_invalid_repo_alias(tmp_path, monkeypatch, capsys, config_w
     assert "community" in captured.err
 
 
-def test_init_configuration_preselects_its_templates_and_repos(tmp_path, monkeypatch, config_with_remotes):
-    monkeypatch.chdir(tmp_path)
-    src_ws = tmp_path / "source"
-    (src_ws / ".ow").mkdir(parents=True)
-    (src_ws / ".ow" / "config.toml").write_text(
-        'templates = ["common", "vscode"]\n\n'
-        '[repos]\ncommunity = "master..master-source"\n\n'
-        '[vars]\nhttp_port = 9000\n'
-    )
-    config = _make_config(vars={"http_port": 8069}, remotes=config_with_remotes.remotes)
 
-    checkbox_calls = []
-
-    def mock_checkbox(message, choices=None, **kwargs):
-        checkbox_calls.append({"message": message, "choices": choices})
-        mock = MagicMock()
-        mock.ask.return_value = ["common", "vscode"] if "Templates" in message else ["community"]
-        return mock
-
-    with (
-        _tty(True),
-        _no_git(tmp_path / "target"),
-        patch("questionary.checkbox", side_effect=mock_checkbox),
-        patch("questionary.text", side_effect=lambda message, **kw: MagicMock(ask=lambda: "master")),
-        patch("questionary.confirm", side_effect=lambda message: MagicMock(ask=lambda: True)),
-    ):
-        cmd_init(config, name="target", configuration=str(src_ws))
-
-    checked_templates = [c.title for c in checkbox_calls[0]["choices"] if c.checked]
-    assert {"common", "vscode"} <= set(checked_templates)
-    checked_repos = [c.title for c in checkbox_calls[1]["choices"] if c.checked]
-    assert "community" in checked_repos
 
 
 def test_init_configuration_rejects_unknown_remote(tmp_path, monkeypatch, capsys, xdg):
@@ -429,7 +373,7 @@ def test_init_configuration_malformed_exits_cleanly(tmp_path, monkeypatch, capsy
 def test_init_remembers_the_new_workspace(tmp_path, monkeypatch, config_with_remotes):
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), _no_git(tmp_path / "parrot"):
+    with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [(tmp_path / "parrot").resolve()]
@@ -447,7 +391,7 @@ def test_init_here_survives_every_repo_failing(tmp_path, monkeypatch, capsys, co
 
     with (
         _tty(False),
-        _questionary_answers(),
+        _prompt_answers(),
         _no_git(here, errors={"community": "boom"}),
         pytest.raises(SystemExit) as exc,
     ):
@@ -463,7 +407,7 @@ def test_init_removes_the_directory_it_created_when_every_repo_fails(tmp_path, m
 
     with (
         _tty(False),
-        _questionary_answers(),
+        _prompt_answers(),
         _no_git(tmp_path / "parrot", errors={"community": "boom"}),
         pytest.raises(SystemExit) as exc,
     ):
@@ -484,7 +428,7 @@ def test_init_keeps_going_when_only_some_repos_fail(tmp_path, monkeypatch, capsy
 
     with (
         _tty(False),
-        _questionary_answers(),
+        _prompt_answers(),
         _no_git(tmp_path, errors={"community": "boom"}),
         pytest.raises(SystemExit) as exc,
     ):
@@ -504,7 +448,7 @@ def test_init_leaves_workspace_visible_when_template_fails(tmp_path, monkeypatch
 
     with (
         _tty(False),
-        _questionary_answers(),
+        _prompt_answers(),
         patch("ow.commands.init.ensure_workspace_materialized", return_value=(tmp_path, set(), {})),
         patch("ow.commands.init.apply_templates", side_effect=RuntimeError("jinja boom")),
         pytest.raises(SystemExit) as exc,
@@ -530,7 +474,7 @@ def test_init_exits_non_zero_when_any_repo_failed(tmp_path, monkeypatch, capsys,
 
     with (
         _tty(False),
-        _questionary_answers(),
+        _prompt_answers(),
         _no_git(tmp_path, errors={"community": "boom"}),
         pytest.raises(SystemExit) as exc,
     ):
@@ -632,7 +576,7 @@ def test_init_rejects_a_duplicate_branch(tmp_path, monkeypatch, capsys, config_w
     _remembered_workspace(tmp_path / "parrot", "community", "master..master-parrot")
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), pytest.raises(SystemExit) as exc:
+    with _tty(False), _prompt_answers(), pytest.raises(SystemExit) as exc:
         cmd_init(
             config_with_remotes,
             name="new-ws",
@@ -651,7 +595,7 @@ def test_init_duplicate_branch_error_names_the_override_flag(tmp_path, monkeypat
     _remembered_workspace(tmp_path / "parrot", "community", "master..master-parrot")
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), pytest.raises(SystemExit) as exc:
+    with _tty(False), _prompt_answers(), pytest.raises(SystemExit) as exc:
         cmd_init(
             config_with_remotes,
             name="new-ws",
@@ -668,7 +612,7 @@ def test_init_accepts_a_different_branch(tmp_path, monkeypatch, config_with_remo
     _remembered_workspace(tmp_path / "parrot", "community", "master..master-parrot")
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), _no_git(tmp_path / "new-ws"):
+    with _tty(False), _prompt_answers(), _no_git(tmp_path / "new-ws"):
         cmd_init(
             config_with_remotes,
             name="new-ws",
@@ -691,9 +635,7 @@ def test_init_with_a_tty_checks_duplicates_before_asking_anything(tmp_path, monk
 
     with (
         _tty(True),
-        patch("questionary.checkbox") as checkbox,
-        patch("questionary.text") as text,
-        patch("questionary.confirm") as confirm,
+        patch("ow.commands.init.Prompt.ask") as mock_ask,
         pytest.raises(SystemExit) as exc,
     ):
         cmd_init(
@@ -706,9 +648,7 @@ def test_init_with_a_tty_checks_duplicates_before_asking_anything(tmp_path, monk
     err = capsys.readouterr().err
     assert "already uses" in err.lower()
     assert "master-parrot" in err
-    checkbox.assert_not_called()
-    text.assert_not_called()
-    confirm.assert_not_called()
+    mock_ask.assert_not_called()
 
 
 def _broken_workspace(at):
@@ -725,7 +665,7 @@ def test_init_still_finds_a_real_collision_past_a_broken_workspace(tmp_path, mon
     _remembered_workspace(tmp_path / "parrot", "community", "master..master-parrot")
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), pytest.raises(SystemExit) as exc:
+    with _tty(False), _prompt_answers(), pytest.raises(SystemExit) as exc:
         cmd_init(
             config_with_remotes,
             name="new-ws",
@@ -744,7 +684,7 @@ def test_init_survives_an_indexed_workspace_with_a_corrupt_config(tmp_path, monk
     _broken_workspace(tmp_path / "broken")
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), _no_git(tmp_path / "new-ws"):
+    with _tty(False), _prompt_answers(), _no_git(tmp_path / "new-ws"):
         cmd_init(
             config_with_remotes,
             name="new-ws",
@@ -778,7 +718,7 @@ def test_init_keeps_the_workspace_when_mise_trust_fails(tmp_path, monkeypatch, c
     monkeypatch.chdir(tmp_path)
     failure = subprocess.CalledProcessError(1, ["mise", "trust"])
 
-    with _tty(False), _questionary_answers(), _workspace_with_a_mise_toml(ws_dir, failure):
+    with _tty(False), _prompt_answers(), _workspace_with_a_mise_toml(ws_dir, failure):
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [ws_dir.resolve()]
@@ -791,7 +731,7 @@ def test_init_survives_mise_not_being_installed(tmp_path, monkeypatch, capsys, c
     ws_dir = tmp_path / "parrot"
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), _workspace_with_a_mise_toml(ws_dir, FileNotFoundError("mise")):
+    with _tty(False), _prompt_answers(), _workspace_with_a_mise_toml(ws_dir, FileNotFoundError("mise")):
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [ws_dir.resolve()]
@@ -805,7 +745,7 @@ def test_init_remembers_the_workspace_before_it_reaches_mise(tmp_path, monkeypat
 
     with (
         _tty(False),
-        _questionary_answers(),
+        _prompt_answers(),
         _workspace_with_a_mise_toml(ws_dir, KeyboardInterrupt),
         pytest.raises(KeyboardInterrupt),
     ):
@@ -823,7 +763,7 @@ def test_init_lists_the_vars_one_per_line(tmp_path, monkeypatch, capsys, config_
     config_with_remotes.vars = {"http_port": 8069, "db_host": "localhost"}
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _questionary_answers(), _no_git(tmp_path / "parrot"):
+    with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
         cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
 
     out = capsys.readouterr().out

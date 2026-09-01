@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ow.commands import cmd_status
+from ow.commands.status import cmd_status
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, parse_branch_spec, write_workspace_config
 from ow.utils.refs import FetchOutcome
 from ow.utils import paths
@@ -47,10 +47,17 @@ def test_cmd_status_drift_warns(tmp_path, capsys, xdg):
     with (
         patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"),
         patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
-        patch("ow.utils.refs.fetch_workspace_refs", return_value=fetch_return),
-        patch("ow.commands.status._gather_repo_status", return_value=MagicMock(
-            status_line="        community: origin/master", first_attached_branch=None, github_link=None,
+        patch("ow.utils.status.fetch_workspace_refs", return_value=fetch_return),
+        patch("ow.utils.status._gather_one_repo", return_value=MagicMock(
+            alias="community", state="ok", kind="tracking_base",
+            head_label="my-feature", short_hash=None,
+            base_ref="origin/master", upstream="origin/my-feature",
+            primary=(0, 0), secondary=None,
+            github_url=None, runbot_branch=None,
+            fetch_failed=False, error=None,
+            spec=BranchSpec("origin/master", "my-feature"),
         )),
+        patch("ow.utils.status.check_all_drift", return_value=[]),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
         cmd_status(config)
@@ -82,10 +89,17 @@ def test_cmd_status_fetches_before_display(tmp_path, xdg):
     with (
         patch("ow.utils.drift.get_worktree_branch", return_value=None),
         patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
-        patch("ow.commands.status.fetch_workspace_refs", side_effect=mock_fetch),
-        patch("ow.commands.status._gather_repo_status", return_value=MagicMock(
-            status_line="        community: origin/master", first_attached_branch=None, github_link=None,
+        patch("ow.utils.status.fetch_workspace_refs", side_effect=mock_fetch),
+        patch("ow.utils.status._gather_one_repo", return_value=MagicMock(
+            alias="community", state="ok", kind="tracking_base",
+            head_label="master", short_hash=None,
+            base_ref="origin/master", upstream=None,
+            primary=(0, 0), secondary=None,
+            github_url=None, runbot_branch=None,
+            fetch_failed=False, error=None,
+            spec=BranchSpec("origin/master"),
         )),
+        patch("ow.utils.status.check_all_drift", return_value=[]),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
         cmd_status(config, fetch=True)
@@ -114,10 +128,17 @@ def test_cmd_status_marks_fetch_failure(tmp_path, capsys, xdg):
     with (
         patch("ow.utils.drift.get_worktree_branch", return_value=None),
         patch("ow.utils.drift.parallel_per_repo", side_effect=_mock_parallel_exec),
-        patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
-        patch("ow.commands.status._gather_repo_status", return_value=MagicMock(
-            status_line="        community: origin/master", first_attached_branch=None, github_link=None,
+        patch("ow.utils.status.fetch_workspace_refs", return_value=fetch_return),
+        patch("ow.utils.status._gather_one_repo", return_value=MagicMock(
+            alias="community", state="ok", kind="tracking_base",
+            head_label="master", short_hash=None,
+            base_ref="origin/master", upstream=None,
+            primary=(0, 0), secondary=None,
+            github_url=None, runbot_branch=None,
+            fetch_failed=True, error=None,
+            spec=BranchSpec("origin/master"),
         )),
+        patch("ow.utils.status.check_all_drift", return_value=[]),
         patch.dict(os.environ, {"OW_WORKSPACE": str(ws_dir)}),
     ):
         cmd_status(config, fetch=True)
@@ -136,7 +157,7 @@ def test_status_offline_does_not_fetch(tmp_path, xdg, monkeypatch):
 
     fetch_called = []
     monkeypatch.setattr(
-        "ow.commands.status.fetch_workspace_refs",
+        "ow.utils.status.fetch_workspace_refs",
         lambda *a, **kw: fetch_called.append(True),
     )
     monkeypatch.setattr("ow.commands.status.warn_if_drifted", lambda *a, **kw: None)
@@ -161,7 +182,7 @@ def test_status_fetch_calls_fetch(tmp_path, xdg, monkeypatch):
             tracks={}, upstreams={}, specs={}, upstream_before={},
         )
     monkeypatch.setattr(
-        "ow.commands.status.fetch_workspace_refs",
+        "ow.utils.status.fetch_workspace_refs",
         mock_fetch,
     )
     monkeypatch.setattr("ow.commands.status.warn_if_drifted", lambda *a, **kw: None)

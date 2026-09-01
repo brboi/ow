@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ow.commands.rm import cmd_rm, _RepoInfo, _display_summary
+from ow.commands.rm import cmd_rm, RepoRemoval, _display_summary
 from ow.utils import index, paths
 from ow.utils.config import BranchSpec, WorkspaceConfig, write_workspace_config
 from ow.utils.git import dirty_files
@@ -545,3 +545,43 @@ def test_rm_backup_failure_does_not_block_removal(tmp_path, capsys, xdg, monkeyp
     err = capsys.readouterr().err
     assert "could not save config backup" in err
     assert not ws.exists()
+
+
+# ---------------------------------------------------------------------------
+# _delete_branch return value
+# ---------------------------------------------------------------------------
+
+def test_delete_branch_returns_true_on_success(tmp_path, xdg, monkeypatch):
+    """_delete_branch returns True when git branch -D succeeds."""
+    from ow.commands.rm import _delete_branch
+    bare = _bare_repo(tmp_path, "community")
+    # Create a branch to delete
+    _git(bare, "branch", "to-delete")
+    assert "to-delete" in _branches(bare)
+    result = _delete_branch(bare, "to-delete", "community")
+    assert result is True
+    assert "to-delete" not in _branches(bare)
+
+
+def test_delete_branch_returns_false_on_failure(tmp_path, xdg, monkeypatch):
+    """_delete_branch returns False when git branch -D fails."""
+    from ow.commands.rm import _delete_branch
+    bare = _bare_repo(tmp_path, "community")
+    # Try to delete a branch that doesn't exist
+    result = _delete_branch(bare, "nonexistent", "community")
+    assert result is False
+
+def test_rm_no_branch_warning_when_delete_succeeds(tmp_path, capsys, xdg, monkeypatch):
+    """The 'could not delete branch' warning only fires on real failure."""
+    bare = _bare_repo(tmp_path, "community")
+    spec = BranchSpec("origin/master", "my-feature")
+    ws = _make_workspace(
+        tmp_path, "canary",
+        {"community": spec},
+        bare_repos={"community": bare},
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    cmd_rm("canary")
+    out = capsys.readouterr()
+    assert "could not delete branch" not in out.err
+    assert "could not delete branch" not in out.out

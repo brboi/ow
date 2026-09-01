@@ -1,224 +1,66 @@
-import re
 from pathlib import Path
-from typing import Any, NamedTuple
 
-from ow.utils.display import console, counts
+from ow.utils.display import console
 from rich.text import Text
 from rich.markup import escape
 from ow.utils.drift import warn_if_drifted
-from ow.utils.refs import fetch_workspace_refs, FetchOutcome
 from ow.utils.resolver import resolve_workspace
-from ow.utils.config import BranchSpec, Config
-from ow.utils import paths
-from ow.utils.git import (
-    get_remote_url,
-    get_rev_list_count,
-    get_upstream,
-    get_worktree_branch,
-    get_worktree_head,
-    parallel_per_repo,
-    resolve_spec_local,
+from ow.utils.config import Config
+from ow.utils.status import (
+    RepoStatus,
+    WorkspaceStatus,
+    gather_workspace_status,
+    _display_detached_status,
+    _display_attached_status,
 )
 
-# ---------------------------------------------------------------------------
-# Display helpers for status
-# ---------------------------------------------------------------------------
-
-
-def _github_url_from_remote(remote_url: str) -> str | None:
-    """Parse git remote URL to GitHub web URL."""
-    ssh_match = re.match(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$", remote_url)
-    if ssh_match:
-        return f"https://github.com/{ssh_match.group(1)}/{ssh_match.group(2)}"
-    https_match = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", remote_url)
-    if https_match:
-        return f"https://github.com/{https_match.group(1)}/{https_match.group(2)}"
-    return None
-
-
-def _is_odoo_remote(remote_url: str | None) -> bool:
-    """Runbot only knows bundles for the odoo organisation's repositories."""
-    if remote_url is None:
-        return False
-    github_base = _github_url_from_remote(remote_url)
-    return github_base is not None and github_base.startswith("https://github.com/odoo/")
-
-
-class _StatusResult(NamedTuple):
-    status_line: str
-    first_attached_branch: str | None
-    github_link: tuple[str, str] | None
-
-
-def _display_detached_status(
-    alias: str,
-    spec: BranchSpec,
-    resolved: BranchSpec,
-    worktree_path: Path,
-    max_alias_len: int,
-) -> str:
-    """Format status line for a detached worktree."""
-    padding = " " * (max_alias_len - len(alias) + 1)
-    ahead, behind = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
-    short_hash, _ = get_worktree_head(worktree_path)
-
-    status = f"[bold]{resolved.base_ref}[/] {counts(behind, ahead)} ([yellow]DETACHED[/]: {short_hash})"
-    return f"        {escape(alias)}:{padding}{status}"
-
-
-def _display_attached_status(
-    alias: str,
-    spec: BranchSpec,
-    resolved: BranchSpec,
-    worktree_path: Path,
-    max_alias_len: int,
-) -> str:
-    """Format status line for an attached worktree."""
-    padding = " " * (max_alias_len - len(alias) + 1)
-
-    # Every count below is measured from HEAD. Labelling the line with the
-    # config's branch attributes those commits to a branch the user is not
-    # on — and the drift warning that would have caught it scrolls off.
-    actual_branch = get_worktree_branch(worktree_path)
-    head_label = actual_branch if actual_branch else "[yellow]DETACHED[/]"
-
-    upstream = get_upstream(worktree_path)
-    if upstream:
-        ahead_up, behind_up = get_rev_list_count(worktree_path, "HEAD", upstream)
-        if upstream != resolved.base_ref:
-            ahead_base, behind_base = get_rev_list_count(worktree_path, upstream, resolved.base_ref)
-            status = f"[bold]{upstream}[/] {counts(behind_up, ahead_up)} ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
-        else:
-            status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{upstream}[/] {counts(behind_up, ahead_up)})"
-    else:
-        ahead_base, behind_base = get_rev_list_count(worktree_path, "HEAD", resolved.base_ref)
-        status = f"[bold]{head_label}[/] [dim](local)[/] ([bold]{resolved.base_ref}[/] {counts(behind_base, ahead_base)})"
-
-    return f"        {escape(alias)}:{padding}{status}"
-
-
-def _gather_repo_status(
-    alias: str, spec: BranchSpec, resolved: BranchSpec,
-    worktree_path: Path, bare_repo: Path, max_alias_len: int,
-) -> _StatusResult:
-    """Gather all display data for one repo (runs in parallel)."""
-    if resolved.is_detached:
-        status_line = _display_detached_status(alias, spec, resolved, worktree_path, max_alias_len)
-        short_hash, _ = get_worktree_head(worktree_path)
-        remote_url = get_remote_url(bare_repo, resolved.remote)
-        link = None
-        if remote_url:
-            github_base = _github_url_from_remote(remote_url)
-            if github_base:
-                link = (alias, f"{github_base}/commit/{short_hash}")
-        return _StatusResult(status_line, None, link)
-    else:
-        status_line = _display_attached_status(
-            alias, spec, resolved, worktree_path, max_alias_len,
-        )
-        remote_url = get_remote_url(bare_repo, resolved.remote)
-        link = None
-        if remote_url:
-            github_base = _github_url_from_remote(remote_url)
-            if github_base:
-                link = (alias, f"{github_base}/tree/{resolved.local_branch}")
-        runbot_branch = resolved.local_branch if _is_odoo_remote(remote_url) else None
-        return _StatusResult(status_line, runbot_branch, link)
-
 
 # ---------------------------------------------------------------------------
-# Command: status
+# Render
 # ---------------------------------------------------------------------------
 
 
-def cmd_status(config: Config, workspace: str | None = None, *, fetch: bool = False) -> None:
-    """Show branch status for the current workspace."""
-    ws_dir, ws = resolve_workspace(name=workspace)
-    bare_repos_dir = paths.repos_dir()
+def _format_status_line(rs: RepoStatus, max_alias_len: int) -> str:
+    if rs.kind == "detached":
+        return _display_detached_status(rs, max_alias_len)
+    return _display_attached_status(rs, max_alias_len)
 
-    warn_if_drifted(ws, ws_dir)
 
-    if fetch:
-        fetched = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
-    else:
-        # Offline mode: resolve specs from local bare repos without fetching
-        resolved_specs: dict[str, BranchSpec] = {}
-        for alias, spec in ws.repos.items():
-            if not (ws_dir / alias).exists():
-                continue
-            bare_repo_path = bare_repos_dir / f"{alias}.git"
-            if not bare_repo_path.exists():
-                continue
-            alias_remotes = config.remotes.get(alias, {})
-            try:
-                resolved = resolve_spec_local(bare_repo_path, spec, alias_remotes)
-                resolved_specs[alias] = resolved
-            except RuntimeError:
-                # If we can't resolve locally, skip this repo
-                pass
-        fetched = FetchOutcome(
-            tracks={},
-            upstreams={},
-            specs=resolved_specs,
-            upstream_before={},
-            failed=frozenset(),
-        )
-    resolved_specs = fetched.specs
-
-    header = Text(f"[{ws_dir.name}]", style="bold cyan")
+def _render_status(status: WorkspaceStatus, max_alias_len: int) -> None:
+    """Produce byte-identical CLI output from a WorkspaceStatus."""
+    header = Text(f"[{status.ws_dir.name}]", style="bold cyan")
     console.print(header)
     console.print("    [dim]branches[/]")
 
-    max_alias_len = max((len(a) for a in ws.repos), default=0)
-
-    # Build parallel tasks for repos that exist and have resolved specs
-    status_tasks: dict[str, Any] = {}
-    for alias, spec in ws.repos.items():
-        worktree_path = ws_dir / alias
-        if not worktree_path.exists():
-            continue
-        resolved = resolved_specs.get(alias)
-        if resolved is None:
-            continue
-        bare_repo = bare_repos_dir / f"{alias}.git"
-        status_tasks[alias] = (
-            lambda a=alias, s=spec, r=resolved, w=worktree_path, b=bare_repo:
-            _gather_repo_status(a, s, r, w, b, max_alias_len)
-        )
-
-    if status_tasks:
-        status_results = parallel_per_repo(status_tasks)
-    else:
-        status_results = {}
-
-    # Print results in config order
     first_attached_branch: str | None = None
     github_links: list[tuple[str, str]] = []
 
-    for alias, spec in ws.repos.items():
+    for rs in status.repos:
+        alias = rs.alias
         padding = " " * (max_alias_len - len(alias) + 1)
-        worktree_path = ws_dir / alias
-        if not worktree_path.exists():
+
+        if rs.state == "not_applied":
             console.print(f"        {escape(alias)}:{padding}[dim](not applied)[/]")
             continue
 
-        resolved = resolved_specs.get(alias)
-        if resolved is None:
+        if rs.state == "unresolved":
             console.print(f"        {escape(alias)}:{padding}[red](error: could not resolve)[/]")
             continue
 
-        result = status_results.get(alias)
-        if isinstance(result, Exception):
+        if rs.state == "error":
             console.print(f"        {escape(alias)}:{padding}[red](error)[/]")
+            if rs.fetch_failed:
+                console.print(f"        {escape(alias)}:{padding}[red](fetch failed; showing stale)[/]")
             continue
 
-        console.print(result.status_line)
-        if alias in fetched.failed:
+        # state == "ok"
+        console.print(_format_status_line(rs, max_alias_len))
+        if rs.fetch_failed:
             console.print(f"        {escape(alias)}:{padding}[red](fetch failed; showing stale)[/]")
-        if first_attached_branch is None and result.first_attached_branch:
-            first_attached_branch = result.first_attached_branch
-        if result.github_link:
-            github_links.append(result.github_link)
+        if first_attached_branch is None and rs.runbot_branch:
+            first_attached_branch = rs.runbot_branch
+        if rs.github_url:
+            github_links.append((alias, rs.github_url))
 
     if first_attached_branch or github_links:
         console.print("    [dim]links[/]")
@@ -230,3 +72,17 @@ def cmd_status(config: Config, workspace: str | None = None, *, fetch: bool = Fa
             console.print(f"        {escape(link_alias)}:{link_padding}[link={link_url}]{link_url}[/]")
 
     console.print()
+
+
+# ---------------------------------------------------------------------------
+# Command: status
+# ---------------------------------------------------------------------------
+
+
+def cmd_status(config: Config, workspace: str | None = None, *, fetch: bool = False) -> None:
+    """Show branch status for the current workspace."""
+    ws_dir, ws = resolve_workspace(name=workspace)
+    warn_if_drifted(ws, ws_dir)
+    status = gather_workspace_status(ws, ws_dir, config, fetch=fetch)
+    max_alias_len = max((len(a) for a in ws.repos), default=0)
+    _render_status(status, max_alias_len=max_alias_len)
