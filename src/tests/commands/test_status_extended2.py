@@ -3,14 +3,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ow.commands.status import _StatusResult, _gather_repo_status, cmd_status
+from ow.commands.status import cmd_status
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
 from ow.utils.refs import FetchOutcome
 
 
 class TestCmdStatusErrorPaths:
     def test_resolve_error(self, tmp_path, capsys, config):
-        """When fetch_workspace_refs returns None for a repo, shows error."""
+        """When fetch_workspace_refs returns no specs for a repo, shows error."""
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         (ws_dir / "community").mkdir()
@@ -18,10 +18,11 @@ class TestCmdStatusErrorPaths:
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
-            patch("ow.commands.status.fetch_workspace_refs",
+            patch("ow.utils.status.fetch_workspace_refs",
                   return_value=FetchOutcome(
                       tracks={"community": "origin/master"}, upstreams={}, specs={}, upstream_before={},
                   )),
+            patch("ow.utils.status.check_all_drift", return_value=[]),
             patch("ow.commands.status.warn_if_drifted"),
         ):
             cmd_status(config, fetch=True)
@@ -44,8 +45,9 @@ class TestCmdStatusErrorPaths:
             return {"community": RuntimeError("boom")}
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
-            patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
-            patch("ow.commands.status.parallel_per_repo", side_effect=mock_exec),
+            patch("ow.utils.status.fetch_workspace_refs", return_value=fetch_return),
+            patch("ow.utils.status.parallel_per_repo", side_effect=mock_exec),
+            patch("ow.utils.status.check_all_drift", return_value=[]),
             patch("ow.commands.status.warn_if_drifted"),
         ):
             cmd_status(config, fetch=True)
@@ -68,16 +70,15 @@ class TestCmdStatusErrorPaths:
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
             patch("ow.utils.drift.get_worktree_branch", return_value=None),
             patch("ow.utils.drift.parallel_per_repo", side_effect=lambda t: {k: fn() for k, fn in t.items()}),
-            patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
-            patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
-            patch("ow.commands.status.get_worktree_head", return_value=("abc123", "")),
-            patch("ow.commands.status.get_remote_url", return_value="git@github.com:odoo/odoo.git"),
+            patch("ow.utils.status.fetch_workspace_refs", return_value=fetch_return),
+            patch("ow.utils.status.check_all_drift", return_value=[]),
+            patch("ow.utils.status.get_rev_list_count", return_value=(0, 0)),
+            patch("ow.utils.status.get_worktree_head", return_value=("abc123", "")),
+            patch("ow.utils.status.get_remote_url", return_value="git@github.com:odoo/odoo.git"),
             patch("ow.commands.status.warn_if_drifted"),
         ):
             cmd_status(config, fetch=True)
         captured = capsys.readouterr()
-        assert "github.com" in captured.out
-        # runbot only for attached, check github link displayed
         assert "github.com" in captured.out
 
     def test_no_empty_links_header_when_no_links(self, tmp_path, capsys, config):
@@ -96,11 +97,12 @@ class TestCmdStatusErrorPaths:
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
             patch("ow.utils.drift.get_worktree_branch", return_value=None),
             patch("ow.utils.drift.parallel_per_repo", side_effect=lambda t: {k: fn() for k, fn in t.items()}),
-            patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
-            patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
-            patch("ow.commands.status.get_worktree_head", return_value=("abc123", "")),
+            patch("ow.utils.status.fetch_workspace_refs", return_value=fetch_return),
+            patch("ow.utils.status.check_all_drift", return_value=[]),
+            patch("ow.utils.status.get_rev_list_count", return_value=(0, 0)),
+            patch("ow.utils.status.get_worktree_head", return_value=("abc123", "")),
             # A non-GitHub remote produces no links at all.
-            patch("ow.commands.status.get_remote_url", return_value="file:///srv/mirrors/odoo.git"),
+            patch("ow.utils.status.get_remote_url", return_value="file:///srv/mirrors/odoo.git"),
             patch("ow.commands.status.warn_if_drifted"),
         ):
             cmd_status(config, fetch=True)
@@ -120,7 +122,8 @@ class TestCmdStatusErrorPaths:
         )
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
-            patch("ow.commands.status.fetch_workspace_refs", return_value=fetch_return),
+            patch("ow.utils.status.fetch_workspace_refs", return_value=fetch_return),
+            patch("ow.utils.status.check_all_drift", return_value=[]),
             patch("ow.commands.status.warn_if_drifted"),
         ):
             cmd_status(config, fetch=True)

@@ -1,8 +1,10 @@
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import tomlkit
 import tomli_w
 import typer
 
@@ -77,7 +79,7 @@ class Config:
     remotes: dict[str, dict[str, RemoteConfig]]  # alias -> remote_name -> cfg
     version: int = 1
     editor: str = "code"
-
+    theme: str = "textual-dark"
 
 def load_workspace_config(path: Path) -> WorkspaceConfig:
     """Read the .ow/config.toml file from an individual workspace."""
@@ -185,6 +187,9 @@ def load_config(path: Path) -> Config:
     editor = data.get("editor", "code")
     if not isinstance(editor, str):
         raise ValueError("'editor' must be a string")
+    theme = data.get("theme", "textual-dark")
+    if not isinstance(theme, str):
+        raise ValueError("'theme' must be a string")
 
     vars = data.get("vars", {})
 
@@ -211,6 +216,7 @@ def load_config(path: Path) -> Config:
         remotes=remotes,
         version=version,
         editor=editor,
+        theme=theme,
     )
 
 
@@ -218,6 +224,7 @@ _DEFAULT_CONFIG = '''\
 # ow configuration. Everything here is optional except at least one remote.
 # `version` is ow's schema marker — do not edit it.
 # editor = "code"   # command `ow open` runs; may include flags, e.g. "code -n"
+# theme = "textual-dark"   # dashboard theme: textual-dark, textual-light, monokai, dracula, etc.
 
 [vars]
 http_port = 8069
@@ -254,3 +261,71 @@ def load_global_config() -> Config:
         path.write_text(_DEFAULT_CONFIG, encoding="utf-8")
         err_console.print(f"Created {path} — edit it to add your remotes.")
     return load_config(path)
+
+
+def write_global_config(config: Config) -> None:
+    """Rewrite $XDG_CONFIG_HOME/ow/config.toml to match `config`.
+
+    Round-trips through tomlkit: comments, key order and commented-out
+    example lines survive. Keys the caller dropped are removed; a removed
+    key's own trailing comment goes with it.
+    """
+    path = paths.config_file()
+    if path.exists():
+        doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+    else:
+        doc = tomlkit.parse(_DEFAULT_CONFIG)
+
+    # version: never touched.
+
+    # editor: set when the key already exists, or when non-default.
+    if "editor" in doc or config.editor != "code":
+        doc["editor"] = config.editor
+
+    # theme: set when the key already exists, or when non-default.
+    if "theme" in doc or config.theme != "textual-dark":
+        doc["theme"] = config.theme
+
+    # [vars]
+    if "vars" not in doc:
+        doc.add("vars", tomlkit.table())
+    vars_tbl = doc["vars"]
+    for k in list(vars_tbl.keys()):
+        if k not in config.vars:
+            del vars_tbl[k]
+    for k, v in config.vars.items():
+        vars_tbl[k] = v
+
+    # [remotes]
+    if "remotes" not in doc:
+        doc.add("remotes", tomlkit.table(is_super_table=True))
+    remotes_tbl = doc["remotes"]
+    for alias in list(remotes_tbl.keys()):
+        if alias not in config.remotes:
+            del remotes_tbl[alias]
+    for alias, remote_map in config.remotes.items():
+        if alias not in remotes_tbl:
+            remotes_tbl[alias] = tomlkit.table()
+        alias_tbl = remotes_tbl[alias]
+        for rname in list(alias_tbl.keys()):
+            if rname not in remote_map:
+                del alias_tbl[rname]
+        for rname, rcfg in remote_map.items():
+            if rname not in alias_tbl:
+                alias_tbl[rname] = tomlkit.table()
+            r = alias_tbl[rname]
+            r["url"] = rcfg.url
+            if rcfg.pushurl is not None:
+                r["pushurl"] = rcfg.pushurl
+            elif "pushurl" in r:
+                del r["pushurl"]
+            if rcfg.fetch is not None:
+                r["fetch"] = rcfg.fetch
+            elif "fetch" in r:
+                del r["fetch"]
+
+    target_dir = path.parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".toml.tmp")
+    tmp.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    os.replace(tmp, path)

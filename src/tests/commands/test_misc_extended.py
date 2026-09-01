@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from ow.commands.status import _gather_repo_status
+from ow.utils.status import _gather_one_repo
 from ow.commands.apply import cmd_apply
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
 
@@ -23,15 +23,16 @@ class TestStatusExtended:
         resolved = BranchSpec("origin/master", "feature")
 
         with (
-            patch("ow.commands.status.get_upstream", return_value=None),
-            patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
-            patch("ow.commands.status.get_remote_url", return_value="https://gitlab.example.com/odoo.git"),
+            patch("ow.utils.status.get_upstream", return_value=None),
+            patch("ow.utils.status.get_rev_list_count", return_value=(0, 0)),
+            patch("ow.utils.status.get_remote_url", return_value="https://gitlab.example.com/odoo.git"),
+            patch("ow.utils.status.get_worktree_branch", return_value="feature"),
         ):
-            result = _gather_repo_status(
-                "community", spec, resolved, worktree, bare_repo, 9
+            result = _gather_one_repo(
+                "community", spec, resolved, worktree, bare_repo, False,
             )
 
-        assert result.github_link is None
+        assert result.github_url is None
 
     def test_gather_attached_branch_shows_tree_link(self, tmp_path):
         worktree = tmp_path / "community"
@@ -42,16 +43,17 @@ class TestStatusExtended:
         resolved = BranchSpec("origin/master", "feature")
 
         with (
-            patch("ow.commands.status.get_upstream", return_value=None),
-            patch("ow.commands.status.get_rev_list_count", return_value=(0, 0)),
-            patch("ow.commands.status.get_remote_url", return_value="git@github.com:odoo/odoo.git"),
+            patch("ow.utils.status.get_upstream", return_value=None),
+            patch("ow.utils.status.get_rev_list_count", return_value=(0, 0)),
+            patch("ow.utils.status.get_remote_url", return_value="git@github.com:odoo/odoo.git"),
+            patch("ow.utils.status.get_worktree_branch", return_value="feature"),
         ):
-            result = _gather_repo_status(
-                "community", spec, resolved, worktree, bare_repo, 9
+            result = _gather_one_repo(
+                "community", spec, resolved, worktree, bare_repo, False,
             )
 
-        assert result.github_link is not None
-        assert "tree/feature" in result.github_link[1]
+        assert result.github_url is not None
+        assert "tree/feature" in result.github_url
 
 
 # ---------------------------------------------------------------------------

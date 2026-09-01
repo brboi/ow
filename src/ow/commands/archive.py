@@ -55,6 +55,13 @@ def _report_unrepaired(unrepaired: list[str]) -> None:
         )
 
 
+def execute_archive(ws_dir: Path, ws: WorkspaceConfig, target: Path) -> list[str]:
+    """Relocate to archive + drop index entry. Returns aliases left unrepaired."""
+    unrepaired = relocate_workspace(ws_dir, target, ws.repos)
+    index.forget(ws_dir)
+    return unrepaired
+
+
 def cmd_archive(name: str, *, yes: bool = False) -> None:
     """Move a workspace into the archive, keeping its worktrees and branches."""
     ws_dir, ws = _resolve_by_name(name)
@@ -85,8 +92,7 @@ def cmd_archive(name: str, *, yes: bool = False) -> None:
 
     sys.stdout.flush()
 
-    unrepaired = relocate_workspace(ws_dir, target, ws.repos)
-    index.forget(ws_dir)
+    unrepaired = execute_archive(ws_dir, ws, target)
 
     # No apply_templates: an archive is not meant to be used in place.
     if unrepaired:
@@ -104,6 +110,16 @@ def _resolve_unarchive_dest(name: str, dest: str | None) -> Path:
     if d.is_dir():
         return (d / name).resolve()
     return d.resolve()
+
+
+def execute_unarchive(
+    config: Config, source: Path, ws: WorkspaceConfig, target: Path,
+) -> list[str]:
+    """Relocate from archive + reindex + re-render. Returns aliases left unrepaired."""
+    unrepaired = relocate_workspace(source, target, ws.repos)
+    index.remember(target)
+    apply_templates(ws, config, target)
+    return unrepaired
 
 
 def cmd_unarchive(
@@ -144,9 +160,7 @@ def cmd_unarchive(
 
     sys.stdout.flush()
 
-    unrepaired = relocate_workspace(source, target, ws.repos)
-    index.remember(target)
-    apply_templates(ws, config, target)
+    unrepaired = execute_unarchive(config, source, ws, target)
 
     if unrepaired:
         _report_unrepaired(unrepaired)

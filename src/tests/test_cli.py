@@ -29,7 +29,7 @@ def _unwrap(help_text: str) -> str:
 
 
 def test_no_args_shows_help():
-    """ow without args shows help (no_args_is_help=True)."""
+    """ow without args in a non-TTY shows help and exits 2."""
     result = runner.invoke(app, [])
     assert result.exit_code == 2
     assert "Odoo workspace manager" in result.output

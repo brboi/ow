@@ -11,14 +11,14 @@ import sys
 from pathlib import Path
 
 from ow.utils import index, paths
-from ow.utils.config import Config
+from ow.utils.config import Config, WorkspaceConfig
 from ow.utils.display import confirm, display_path, err_console
 from ow.utils.relocate import relocate_workspace, validate_target
 from ow.utils.resolver import resolve_workspace
 from ow.utils.templates import apply_templates
 
 
-def _resolve_dest(ws_dir: Path, dest: str) -> Path:
+def resolve_dest(ws_dir: Path, dest: str) -> Path:
     """Where the workspace lands, with mv(1) semantics.
 
     An existing directory means "move into it"; anything else is the new
@@ -29,6 +29,10 @@ def _resolve_dest(ws_dir: Path, dest: str) -> Path:
     if d.is_dir():
         return (d / ws_dir.name).resolve()
     return d.resolve()
+
+
+# Keep the old private name as an alias for any external callers.
+_resolve_dest = resolve_dest
 
 
 def _display_summary(ws_dir: Path, target: Path, aliases: list[str], repairable: list[str]) -> None:
@@ -56,6 +60,15 @@ def _display_summary(ws_dir: Path, target: Path, aliases: list[str], repairable:
         print("  ⚠ .venv holds absolute paths — run `mise install` in the new location")
 
 
+def execute_move(config: Config, ws_dir: Path, ws: WorkspaceConfig, target: Path) -> list[str]:
+    """relocate + reindex + re-render. Returns aliases left unrepaired."""
+    unrepaired = relocate_workspace(ws_dir, target, ws.repos)
+    index.forget(ws_dir)
+    index.remember(target)
+    apply_templates(ws, config, target)
+    return unrepaired
+
+
 def cmd_mv(config: Config, source: str, dest: str, *, yes: bool = False) -> None:
     """Move a workspace to a new path, repairing its worktrees.
 
@@ -63,7 +76,7 @@ def cmd_mv(config: Config, source: str, dest: str, *, yes: bool = False) -> None
     `$OW_WORKSPACE`, or the workspace holding the current directory.
     """
     ws_dir, ws = resolve_workspace(name=source)
-    target = _resolve_dest(ws_dir, dest)
+    target = resolve_dest(ws_dir, dest)
 
     err = validate_target(ws_dir, target)
     if err is not None:
@@ -82,12 +95,7 @@ def cmd_mv(config: Config, source: str, dest: str, *, yes: bool = False) -> None
 
     sys.stdout.flush()
 
-    unrepaired = relocate_workspace(ws_dir, target, aliases)
-
-    index.forget(ws_dir)
-    index.remember(target)
-
-    apply_templates(ws, config, target)
+    unrepaired = execute_move(config, ws_dir, ws, target)
 
     if unrepaired:
         for alias in unrepaired:

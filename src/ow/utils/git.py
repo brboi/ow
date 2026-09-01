@@ -12,6 +12,8 @@ from typing import Callable, TypeVar
 
 from ow.utils import paths
 from ow.utils.config import BranchSpec, RemoteConfig
+from ow.utils import display
+from rich.text import Text
 
 # Every git child is tracked here so an interrupt can kill it. An abandoned
 # `git fetch` holds a lock inside a bare repo that every workspace shares, so
@@ -36,7 +38,20 @@ def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     if kwargs.pop("capture_output", False):
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
-    # The lock spans Popen() itself, not just the registration after it: a
+    # When a sink is installed (the dashboard owns the terminal), every
+    # subprocess line that would have painted fd 1/2 has to land in the
+    # sink instead. Probes pass capture_output explicitly, so they skip
+    # this path; only action commands — the ones whose output humans read
+    # as it happens — hit it.
+    forward_to_sink = (
+        display.current_sink() is not None
+        and "stdout" not in kwargs
+        and "stderr" not in kwargs
+    )
+    if forward_to_sink:
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.STDOUT
+        kwargs.setdefault("text", True)
     # child that exists between Popen() returning and the lock being taken
     # would be invisible to a terminate_children() racing that window.
     # Spawning is a few milliseconds and there are single-digit repos, so
@@ -60,6 +75,11 @@ def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
             _children.discard(proc)
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, args, stdout, stderr)
+    if forward_to_sink and stdout:
+        sink = display.current_sink()
+        if sink is not None:
+            for line in stdout.splitlines():
+                sink.line(Text(line))
     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 

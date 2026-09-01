@@ -1,5 +1,6 @@
 import io
 
+import pytest
 from rich.console import Console
 
 from ow.utils.display import _make_console, console, counts, err_console, print_git_result
@@ -95,3 +96,53 @@ def test_print_git_result_error_with_markup_close_does_not_raise(capsys):
 
 def test_console_is_rich_console():
     assert isinstance(console, Console)
+
+
+# ---------------------------------------------------------------------------
+# confirm()
+# ---------------------------------------------------------------------------
+
+
+def test_confirm_returns_false_on_eof():
+    """EOF at the prompt returns False."""
+    from unittest.mock import patch
+    from ow.utils import display as _display
+
+    with patch.object(_display.Confirm, "ask", side_effect=EOFError):
+        assert _display.confirm() is False
+
+
+def test_confirm_returns_true_on_yes():
+    """'y' at the prompt returns True."""
+    from unittest.mock import patch
+    from ow.utils import display as _display
+
+    with patch.object(_display.Confirm, "ask", return_value=True) as asked:
+        assert _display.confirm("Are you sure?") is True
+        assert asked.call_args.kwargs["default"] is False
+
+
+def test_confirm_returns_false_on_no():
+    """'n' at the prompt returns False (the explicit default)."""
+    from unittest.mock import patch
+    from ow.utils import display as _display
+
+    with patch.object(_display.Confirm, "ask", return_value=False):
+        assert _display.confirm() is False
+
+
+def test_confirm_refuses_under_a_sink():
+    """A redirect has no visible terminal to read from — fail loud, not hang."""
+    from ow.utils import display as _display
+
+    def dummy_line(_): pass
+    def dummy_task(_l, _t):
+        class _T:
+            def advance(self): pass
+            def done(self): pass
+        return _T()
+    sink = _display.OutputSink(line=dummy_line, task=dummy_task)
+
+    with _display.redirect_output(sink):
+        with pytest.raises(RuntimeError, match="redirected"):
+            _display.confirm()

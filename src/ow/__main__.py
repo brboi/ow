@@ -43,12 +43,12 @@ def _version_callback(value: bool) -> None:
 app = typer.Typer(
     name="ow",
     help="Odoo workspace manager",
-    no_args_is_help=True,
 )
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def callback(
+    ctx: typer.Context,
     version: bool = typer.Option(
         None,
         # No "-v": that spelling is left free for a future --verbose. ow
@@ -62,7 +62,14 @@ def callback(
     ),
 ) -> None:
     """Odoo workspace manager."""
-    pass
+    if ctx.invoked_subcommand is not None:
+        return
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        typer.echo(ctx.get_help())
+        raise typer.Exit(2)
+    config = _load_config()
+    from ow.tui.dashboard import run_dashboard
+    run_dashboard(config)
 
 
 def _load_config() -> Config:
