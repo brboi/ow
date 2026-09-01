@@ -8,6 +8,7 @@ before touching anything.
 import datetime
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 
 from ow.utils import index, paths
@@ -24,7 +25,7 @@ from ow.utils.git import (
 MARKER = Path(".ow") / "config.toml"
 
 
-class _RepoInfo:
+class RepoRemoval:
     """What rm gathered about one repo: observation only, nothing applied."""
 
     __slots__ = (
@@ -62,7 +63,7 @@ class _RepoInfo:
             self.dirty = dirty_files(worktree_path)
 
 
-def _display_summary(name: str, ws_dir: Path, repos: list[_RepoInfo]) -> None:
+def _display_summary(name: str, ws_dir: Path, repos: list[RepoRemoval]) -> None:
     """The whole report, in the imperative: nothing here has happened yet."""
     print(f"Removing workspace '{name}' at {display_path(ws_dir)}")
     print()
@@ -126,6 +127,7 @@ def _delete_branch(bare_repo: Path, branch: str, alias: str) -> bool:
         ["git", "-C", str(bare_repo), "branch", "-D", branch],
         quiet=True, label=alias,
     )
+    return result.returncode == 0
 
 
 def _save_backup(name: str, ws_dir: Path) -> Path | None:
@@ -143,6 +145,43 @@ def _save_backup(name: str, ws_dir: Path) -> Path | None:
         err_console.print(f"  Warning: could not save config backup ({exc})", markup=False)
         return None
     return target
+
+def survey_removal(ws_dir: Path, ws: WorkspaceConfig) -> list[RepoRemoval]:
+    """What removing this workspace would touch. No output, no mutation."""
+    bare_repos_dir = paths.repos_dir()
+    return [
+        RepoRemoval(alias, spec, bare_repos_dir / f"{alias}.git", ws_dir / alias)
+        for alias, spec in ws.repos.items()
+    ]
+
+
+def execute_removal(name: str, ws_dir: Path, repos: list[RepoRemoval]) -> None:
+    """Backup, unregister worktrees, delete branches, rmtree, forget."""
+    backup = _save_backup(name, ws_dir)
+
+    # 1. Remove worktrees and delete local branches from bare repos.
+    for r in repos:
+        if not r.bare_exists:
+            continue
+        if r.worktree_exists:
+            _remove_worktree(r.bare_repo, r.worktree_path, r.alias)
+        if r.will_delete_branch:
+            if not _delete_branch(r.bare_repo, r.spec.local_branch, r.alias):
+                err_console.print(
+                    f"  [{r.alias}] could not delete branch "
+                    f"{r.spec.local_branch}",
+                    markup=False,
+                )
+
+    # 2. Remove the workspace directory (worktrees, templates, .ow, .data, etc.).
+    shutil.rmtree(ws_dir, ignore_errors=True)
+    index.forget(ws_dir)
+
+    if backup is not None:
+        print(f"Config saved to {backup}")
+        print(f"Restore with: ow init {name} -c {backup}")
+
+    print("Done.")
 
 
 def cmd_rm(name: str, *, yes: bool = False) -> None:
@@ -174,12 +213,7 @@ def cmd_rm(name: str, *, yes: bool = False) -> None:
         print(f"Could not read workspace config: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    bare_repos_dir = paths.repos_dir()
-    repos: list[_RepoInfo] = []
-    for alias, spec in ws.repos.items():
-        bare_repo = bare_repos_dir / f"{alias}.git"
-        worktree_path = ws_dir / alias
-        repos.append(_RepoInfo(alias, spec, bare_repo, worktree_path))
+    repos = survey_removal(ws_dir, ws)
 
     _display_summary(name, ws_dir, repos)
 
@@ -189,30 +223,4 @@ def cmd_rm(name: str, *, yes: bool = False) -> None:
 
     sys.stdout.flush()
 
-    backup = _save_backup(name, ws_dir)
-
-    # 1. Remove worktrees and delete local branches from bare repos.
-    for r in repos:
-        if not r.bare_exists:
-            continue
-        if r.worktree_exists:
-            _remove_worktree(r.bare_repo, r.worktree_path, r.alias)
-        if r.will_delete_branch:
-            if not _delete_branch(r.bare_repo, r.spec.local_branch, r.alias):
-                # HEAD branch, a lock, or git's refusal — not fatal: the
-                # workspace directory and index entry still go.
-                err_console.print(
-                    f"  [{r.alias}] could not delete branch "
-                    f"{r.spec.local_branch}",
-                    markup=False,
-                )
-
-    # 2. Remove the workspace directory (worktrees, templates, .ow, .data, etc.).
-    shutil.rmtree(ws_dir, ignore_errors=True)
-    index.forget(ws_dir)
-
-    if backup is not None:
-        print(f"Config saved to {backup}")
-        print(f"Restore with: ow init {name} -c {backup}")
-
-    print("Done.")
+    execute_removal(name, ws_dir, repos)

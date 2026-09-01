@@ -14,9 +14,10 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-import questionary
+from rich.prompt import Prompt
 
 from ow.utils import index
+from ow.utils.display import console, err_console
 from ow.utils.templates import (
     apply_templates,
     available_templates,
@@ -60,6 +61,8 @@ def _validate_init_inputs(
     templates: list[str] | None,
     repos: dict[str, BranchSpec] | None,
     configuration: str | None,
+    *,
+    parent: Path | None = None,
 ) -> tuple[WorkspaceConfig | None, Path]:
     """Validate CLI inputs and resolve the target directory.
 
@@ -115,17 +118,18 @@ def _validate_init_inputs(
                 print(f"  Available remotes: {avail}", file=sys.stderr)
                 sys.exit(1)
 
+    base_dir = parent or Path.cwd()
     if name is None:
         # No argument means "here", like `git init`. The charset rule below
         # does not apply: ow is not naming this directory, it is standing in
         # one the user already named.
-        ws_dir = Path.cwd()
+        ws_dir = base_dir
     else:
         name = name.strip()
         if not name or not re.match(r'^[a-zA-Z0-9_-]+$', name):
             print("Error: name must be alphanumeric with hyphens and underscores only.", file=sys.stderr)
             sys.exit(1)
-        ws_dir = Path.cwd() / name
+        ws_dir = base_dir / name
 
     # A plain directory, empty or not, is just a place to work. The one thing
     # ow refuses to walk over is an existing workspace definition.
@@ -185,73 +189,119 @@ def _workspace_config_from_flags(
     return WorkspaceConfig(repos=chosen_repos, templates=chosen_templates, vars=ws_vars)
 
 
+def _ask_multi(title: str, items: list[str], preselected: set[str]) -> list[str]:
+    """Numbered multi-select.
+
+    Prints the list with ``*`` marking preselected items, then asks for a
+    comma-separated answer of names and/or 1-based indices. Empty answer
+    keeps the default; the literal string ``none`` (case-insensitive) or
+    ``-`` selects nothing. Re-asks on an unknown token.
+    """
+    # Build the default answer: indices (1-based) of preselected items.
+    default_indices = [str(i + 1) for i, item in enumerate(items) if item in preselected]
+    default_str = ",".join(default_indices)
+
+    while True:
+        console.print(f"[bold]{title}[/]")
+        for i, item in enumerate(items, 1):
+            marker = "*" if item in preselected else " "
+            console.print(f"  {i} {marker} {item}")
+
+        answer = Prompt.ask(
+            f'Select [{default_str}] (comma-separated, "none" for none)',
+            default=default_str,
+            console=console,
+        )
+
+        answer = answer.strip()
+        if not answer or answer.lower() in ("none", "-"):
+            return []
+
+        # Parse the answer: split by comma, match each token as name or index.
+        tokens = [t.strip() for t in answer.split(",") if t.strip()]
+        selected: list[str] = []
+        unknown: list[str] = []
+        for token in tokens:
+            # Try name first (case-sensitive).
+            if token in items:
+                if token not in selected:
+                    selected.append(token)
+                continue
+            # Try 1-based index.
+            try:
+                idx = int(token)
+                if 1 <= idx <= len(items):
+                    name = items[idx - 1]
+                    if name not in selected:
+                        selected.append(name)
+                    continue
+            except ValueError:
+                pass
+            unknown.append(token)
+
+        if unknown:
+            for token in unknown:
+                err_console.print(f"unknown: {token}")
+            continue
+
+        return selected
+
+
+def _ask_spec(alias: str, default: str) -> BranchSpec:
+    """Prompt for a branch spec, re-asking while parse_branch_spec raises."""
+    while True:
+        answer = Prompt.ask(
+            f"{alias} branch spec",
+            default=default,
+            console=console,
+        )
+        answer = answer.strip() or default
+        try:
+            return parse_branch_spec(answer)
+        except ValueError as e:
+            err_console.print(f"Error: invalid branch spec '{answer}': {e}")
+
+
 def _gather_workspace_config_interactive(
     config: Config,
     source_ws: WorkspaceConfig | None,
     templates: list[str] | None,
     repos: dict[str, BranchSpec] | None,
-) -> WorkspaceConfig:
-    """Run interactive questionnaire to build WorkspaceConfig.
+    ws_name: str,
+) -> WorkspaceConfig | None:
+    """Run the interactive questionnaire to build WorkspaceConfig.
 
-    Pre-populates from source_ws or CLI args where available.
+    Returns None if the user cancelled.
     """
-    available_t = available_templates()
-    known_aliases = list(config.remotes.keys())
     pre_selected_templates, final_repos = _preselection(source_ws, templates, repos)
-    pre_selected = set(pre_selected_templates)
 
     # Fail on what the flags already say before making anyone answer questions.
     _check_duplicate_branches(final_repos)
 
     try:
-        selected_templates = questionary.checkbox(
-            "Templates (space to select, enter to confirm)",
-            choices=[questionary.Choice(t, checked=(t in pre_selected)) for t in available_t],
-        ).ask()
+        selected_templates = _ask_multi(
+            "Templates",
+            available_templates(),
+            set(pre_selected_templates),
+        )
+
+        known_aliases = list(config.remotes.keys())
+        if known_aliases:
+            pre_selected_aliases = set(final_repos.keys())
+            if "community" in known_aliases:
+                pre_selected_aliases.add("community")
+            selected_aliases = _ask_multi(
+                "Repos",
+                known_aliases,
+                pre_selected_aliases,
+            )
+
+            for alias in selected_aliases:
+                if alias not in final_repos:
+                    final_repos[alias] = _ask_spec(alias, "master")
     except KeyboardInterrupt:
-        print("\nAborted.", file=sys.stderr)
+        err_console.print("Aborted.")
         sys.exit(1)
-    if not selected_templates:
-        selected_templates = []
-
-    if known_aliases:
-        pre_selected_aliases = set(final_repos.keys())
-        if "community" in known_aliases:
-            pre_selected_aliases.add("community")
-        try:
-            selected_aliases = questionary.checkbox(
-                "Repos to include (space to select, enter to confirm)",
-                choices=[questionary.Choice(a, checked=(a in pre_selected_aliases)) for a in known_aliases],
-            ).ask()
-        except KeyboardInterrupt:
-            print("\nAborted.", file=sys.stderr)
-            sys.exit(1)
-        if not selected_aliases:
-            selected_aliases = []
-
-        for alias in selected_aliases:
-            if alias not in final_repos:
-                try:
-                    spec_str = questionary.text(
-                        f"{alias} branch spec (e.g. master, master..my-feature)",
-                        default="master",
-                    ).ask()
-                except KeyboardInterrupt:
-                    print("\nAborted.", file=sys.stderr)
-                    sys.exit(1)
-                if spec_str is None:
-                    # questionary's .ask() returns None on Ctrl-C / Ctrl-D.
-                    # An empty string is a different answer: the prefilled
-                    # default was cleared, which asks for the default, not
-                    # for the whole command to stop.
-                    print("Aborted.", file=sys.stderr)
-                    sys.exit(1)
-                spec_str = spec_str.strip() or "master"
-                try:
-                    final_repos[alias] = parse_branch_spec(spec_str)
-                except ValueError as e:
-                    print(f"Error: invalid branch spec '{spec_str}': {e}", file=sys.stderr)
-                    sys.exit(1)
 
     ws_vars: dict[str, Any] = dict(source_ws.vars) if source_ws is not None else dict(config.vars)
 
@@ -303,6 +353,9 @@ def cmd_init(
     templates: list[str] | None = None,
     repos: dict[str, BranchSpec] | None = None,
     configuration: str | None = None,
+    *,
+    parent: Path | None = None,
+    yes: bool = False,
 ) -> None:
     """Create a workspace in the current directory, or in ./NAME.
 
@@ -311,14 +364,21 @@ def cmd_init(
       templates: list of template names to apply
       repos: dict of alias -> BranchSpec
       configuration: path to an existing workspace config to duplicate
+      parent: directory to create the workspace in (default: cwd)
+      yes: skip the confirmation prompt
     """
-    source_ws, ws_dir = _validate_init_inputs(config, name, templates, repos, configuration)
+    source_ws, ws_dir = _validate_init_inputs(
+        config, name, templates, repos, configuration, parent=parent
+    )
 
     # Read once, so the questionnaire and the confirmation cannot disagree.
     interactive = sys.stdin.isatty()
 
     if interactive:
-        ws = _gather_workspace_config_interactive(config, source_ws, templates, repos)
+        ws = _gather_workspace_config_interactive(config, source_ws, templates, repos, ws_dir.name)
+        if ws is None:
+            print("Aborted.", file=sys.stderr)
+            sys.exit(1)
     else:
         ws = _workspace_config_from_flags(config, source_ws, templates, repos)
 
@@ -336,15 +396,12 @@ def cmd_init(
         for var_name, value in ws.vars.items():
             print(f"    {var_name}: {value}")
 
-    if interactive:
-        try:
-            confirm = questionary.confirm("Proceed?").ask()
-        except KeyboardInterrupt:
-            print("\nAborted.", file=sys.stderr)
-            sys.exit(1)
-        if not confirm:
+    if interactive and not yes:
+        from ow.utils.display import confirm
+        if not confirm():
             print("Aborted.")
             return
+
 
     ow_config_path = ws_dir / MARKER
     ow_created_the_dir = not ws_dir.exists()
