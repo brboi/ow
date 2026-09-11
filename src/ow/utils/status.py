@@ -311,7 +311,7 @@ def gather_workspace_status(
                 kind=None, head_label=None, short_hash=None,
                 base_ref=None, upstream=None, primary=None, secondary=None,
                 github_url=None, runbot_branch=None,
-                fetch_failed=alias in fetched.failed, error=None,
+                fetch_failed=alias in fetched.failed, error=str(result),
             ))
             continue
 

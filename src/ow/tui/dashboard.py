@@ -135,11 +135,14 @@ class HelpScreen(ModalScreen[None]):
             "  x            Remove\n"
             "\n"
             "[bold]Other[/]\n"
+            "  t            Theme\n"
             "  ctrl+r       Reload list\n"
             "  ctrl+l       Clear log\n"
-            "  ctrl+c       Cancel operation / quit\n"
+            "  ctrl+c       Cancel operation (or quit if idle)\n"
             "  ?            This help\n"
             "  q            Quit\n"
+            "\n"
+            "[dim]Esc — Close[/]"
         )
         with Vertical():
             yield Static(bindings_text)
@@ -464,9 +467,15 @@ class MainScreen(Screen):
                 self.notify("An operation is already running", severity="warning")
             return
         self._busy = True
+        # Capture DOM reference on the main thread — the worker cannot query_one.
+        try:
+            log = self.query_one("#log", OperationLog)
+        except Exception:
+            log = None
         self.run_operation_worker = self._run_worker(
             label, fn, then=then, quiet=quiet,
             reload=reload, invalidate=invalidate,
+            log=log,
         )
 
     @work(thread=True, group="op", exit_on_error=False)
@@ -479,14 +488,11 @@ class MainScreen(Screen):
         quiet: bool = False,
         reload: bool = False,
         invalidate: Path | None = None,
+        log: OperationLog | None = None,
     ) -> None:
         from ow.utils.display import redirect_output
         import typer
 
-        try:
-            log = self.query_one("#log", OperationLog)
-        except Exception:
-            log = None  # Widget not mounted yet
         if not quiet:
             self.app.call_from_thread(self._log_header, label)
 
@@ -547,6 +553,7 @@ class MainScreen(Screen):
         try:
             log = self.query_one("#log", OperationLog)
             log.write(Text.from_markup(f"── [bold]{label}[/] ──"))
+            self.query_one("#task_label", Static).update(label)
             self._show_progress_row()
         except Exception:
             pass  # Widget not mounted yet
@@ -740,11 +747,27 @@ class MainScreen(Screen):
             return
         from ow.commands.reset import cmd_reset
         self.run_operation(
-            f"reset {entry.name}",
+            f"reset {entry.name} (plan)",
             lambda: cmd_reset(
-                self._config, workspace=str(entry.path), yes=True,
+                self._config, workspace=str(entry.path), dry_run=True,
             ),
-            invalidate=entry.path,
+            then=lambda _r: self._push_reset_confirm(entry),
+        )
+
+    def _push_reset_confirm(self, entry: WorkspaceEntry) -> None:
+        from ow.commands.reset import cmd_reset
+        self.app.push_screen(
+            ConfirmDialog(
+                "Reset now?",
+                details=Text("Resets every repo to the ref it tracks. Uncommitted changes are kept unless --hard was used."),
+            ),
+            callback=lambda ok: ok and self.run_operation(
+                f"reset {entry.name}",
+                lambda: cmd_reset(
+                    self._config, workspace=str(entry.path), yes=True,
+                ),
+                invalidate=entry.path,
+            ),
         )
 
     # ---- prune (§4.4) --------------------------------------------------
@@ -762,7 +785,7 @@ class MainScreen(Screen):
         self.app.push_screen(
             ConfirmDialog(
                 "Prune now?",
-                details=Text("Refs were just fetched; prune reuses them."),
+                details=Text("Surveys dead index entries, stale worktree references, and orphaned branches in bare repos."),
             ),
             callback=lambda ok: ok and self.run_operation(
                 "prune",
@@ -1022,28 +1045,20 @@ class MainScreen(Screen):
             self.notify("No editor configured", severity="warning")
             return
 
-        def _open() -> int:
-            try:
-                with self.app.suspend():
-                    result = subprocess.run(
-                        [*shlex.split(editor), str(entry.path)]
-                    )
-                return result.returncode
-            except Exception:
-                return -1
-
-        def _then(code: int) -> None:
-            if code == -1:
-                log = self.query_one("#log", OperationLog)
-                log.write(
-                    f"editor needs a terminal ow cannot release; "
-                    f"run: ow open {entry.name}"
+        # suspend() must run on the main thread — it stops the asyncio loop.
+        # Running it inside run_operation's worker thread is not thread-safe.
+        log = self.query_one("#log", OperationLog)
+        try:
+            with self.app.suspend():
+                result = subprocess.run(
+                    [*shlex.split(editor), str(entry.path)]
                 )
-            else:
-                log = self.query_one("#log", OperationLog)
-                log.write(f"editor exited with code {code}")
-
-        self.run_operation(f"open {entry.name}", _open, then=_then)
+            log.write(f"editor exited with code {result.returncode}")
+        except Exception:
+            log.write(
+                f"editor needs a terminal ow cannot release; "
+                f"run: ow open {entry.name}"
+            )
 
     # ---- new workspace (§4.9) ------------------------------------------
 

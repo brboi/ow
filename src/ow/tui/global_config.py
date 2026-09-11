@@ -457,6 +457,7 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
         alias, name = sel
         url = self.query_one("#gc_remote_url", LabeledInput).value.strip()
         if not url:
+            self.query_one("#gc_remote_url", LabeledInput).query_one("#li_input").set_error("URL is required")
             return
         pushurl = self.query_one("#gc_remote_pushurl", LabeledInput).value.strip()
         fetch = self.query_one("#gc_remote_fetch", LabeledInput).value.strip()

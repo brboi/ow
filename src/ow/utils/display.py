@@ -137,9 +137,9 @@ def redirect_output(sink: OutputSink) -> Iterator[None]:
                 out_writer.flush()
                 err_writer.flush()
     finally:
-        _sink = None
         err_console.pop_render_hook()
         console.pop_render_hook()
+        _sink = None
 
 
 def counts(behind: int, ahead: int) -> str:

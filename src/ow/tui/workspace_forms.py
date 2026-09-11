@@ -414,23 +414,27 @@ class VarsEditor(Vertical):
     def _remove_row(self) -> None:
         table = self.query_one("#vars_table", DataTable)
         cursor = table.cursor_coordinate
-        if cursor is not None and cursor.row is not None:
-            try:
-                row_key, _ = table.get_row_at(cursor.row)
-                table.remove_row(row_key)
-            except Exception:
-                pass
+        if cursor is None or cursor.row is None:
+            self.app.notify("No row selected", severity="warning")
+            return
+        try:
+            row_key, _ = table.get_row_at(cursor.row)
+            table.remove_row(row_key)
+        except Exception:
+            self.app.notify("Could not remove row", severity="warning")
 
     def action_edit_cell(self) -> None:
         table = self.query_one("#vars_table", DataTable)
         cursor = table.cursor_coordinate
         if cursor is None:
+            self.app.notify("No row selected", severity="warning")
             return
         row_idx = cursor.row
         col_idx = cursor.column
         try:
             current = str(table.get_cell_at(row_idx, col_idx))
         except Exception:
+            self.app.notify("Could not read cell", severity="warning")
             return
 
         async def _prompt() -> None:

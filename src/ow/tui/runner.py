@@ -63,8 +63,10 @@ class TuiSink(OutputSink):
 
     def _line(self, renderable: RenderableType) -> None:
         from textual.widgets import RichLog
-        log = self._app.query_one("#log", RichLog)
-        self._app.call_from_thread(log.write, renderable)
+        def _write() -> None:
+            log = self._app.query_one("#log", RichLog)
+            log.write(renderable)
+        self._app.call_from_thread(_write)
 
     def _task(self, label: str, total: int) -> SinkTask:
         task_id = id(object())
