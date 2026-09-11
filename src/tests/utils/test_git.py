@@ -345,6 +345,7 @@ def test_clone_bare_asks_for_the_cheapest_clone_git_will_give(tmp_path):
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
 
 

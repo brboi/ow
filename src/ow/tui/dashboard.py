@@ -1047,6 +1047,9 @@ class MainScreen(Screen):
     # ---- open in editor (§4.8) -----------------------------------------
 
     def action_open_editor(self) -> None:
+        if self._busy:
+            self.notify("Operation in progress", severity="warning")
+            return
         entry = self._selected_entry()
         if entry is None:
             self.notify("No workspace selected", severity="warning")

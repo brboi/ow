@@ -39,10 +39,11 @@ def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
         kwargs["stderr"] = subprocess.PIPE
     # Passphrase prompts: the child is in its own session and cannot open
     # /dev/tty, so ssh has to reach ow's terminal through the askpass
-    # broker. Callers that pass their own env opt out.
+    # broker. Merge into caller-supplied env or os.environ.
     extra = askpass.child_env()
-    if extra and "env" not in kwargs:
-        kwargs["env"] = {**os.environ, **extra}
+    if extra:
+        base_env = kwargs.get("env", os.environ)
+        kwargs["env"] = {**base_env, **extra}
     # When a sink is installed (the dashboard owns the terminal), every
     # subprocess line that would have painted fd 1/2 has to land in the
     # sink instead. Probes pass capture_output explicitly, so they skip
@@ -165,7 +166,7 @@ def _get_bare_config(bare_repo: Path) -> dict[str, str]:
     """Read all local git config as a dict via a single subprocess."""
     result = _run(
         ["git", "-C", str(bare_repo), "config", "--list", "--local"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return {}
@@ -175,7 +176,6 @@ def _get_bare_config(bare_repo: Path) -> dict[str, str]:
             key, _, value = line.partition("=")
             config[key] = value
     return config
-
 
 def _is_bare_repo(path: Path) -> bool:
     """True only if `path` is itself a git repository.
@@ -198,14 +198,13 @@ def _is_bare_repo(path: Path) -> bool:
         return False
     result = _run(
         ["git", "-C", str(path), "rev-parse", "--absolute-git-dir"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return False
     try:
         return os.path.samefile(result.stdout.strip(), path)
     except OSError:
-        # Both paths existed a moment ago; if one no longer does, or cannot be
         # stat'd, "not a repository" is the answer already given everywhere
         # else on this path.
         return False
@@ -224,9 +223,8 @@ def _git_calls_it_a_repository(path: Path) -> bool:
         return False
     return _run(
         ["git", "rev-parse", "--resolve-git-dir", str(path)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     ).returncode == 0
-
 
 def _refuse_to_displace_a_repository(bare_repo: Path) -> None:
     """Stop before a repair can destroy a repository it failed to recognise.
@@ -283,10 +281,10 @@ def _clone_bare_into_place(alias: str, url: str, bare_repo: Path) -> None:
             # so a repeatedly-repaired repo cannot fill the disk with copies.
             broken = bare_repo.with_name(f"{bare_repo.name}.broken")
             shutil.rmtree(broken, ignore_errors=True)
-            os.rename(bare_repo, broken)
+            shutil.move(bare_repo, broken)
             print(f"  [{alias}] {bare_repo} was not a git repository; moved to {broken}",
                   file=sys.stderr)
-        os.rename(staging, bare_repo)
+        shutil.move(staging, bare_repo)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -331,6 +329,7 @@ def _clone_bare(alias: str, url: str, destination: Path) -> None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
@@ -341,7 +340,6 @@ def _clone_bare(alias: str, url: str, destination: Path) -> None:
         raise RuntimeError(
             f"cloning '{alias}' from {url} failed with exit status {exc.returncode}"
         ) from exc
-
 
 def ensure_bare_repo(
     alias: str,
@@ -456,7 +454,7 @@ def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
         return False
     result = _run(
         ["git", "-C", str(bare_repo), "worktree", "list", "--porcelain"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return False
@@ -468,17 +466,15 @@ def worktree_exists(bare_repo: Path, worktree_path: Path) -> bool:
                 return True
     return False
 
-
 def get_all_remote_refs(bare_repo: Path) -> set[str]:
     """Return all remote refs as short names (e.g. 'origin/master') via a single subprocess."""
     result = _run(
         ["git", "-C", str(bare_repo), "for-each-ref", "--format=%(refname:short)", "refs/remotes/"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return set()
     return {line for line in result.stdout.strip().split("\n") if line}
-
 def is_branch_pushed(bare_repo: Path, branch: str) -> bool:
     """Is every commit on <branch> reachable from some refs/remotes/* ref?
 
@@ -498,10 +494,9 @@ def is_branch_pushed(bare_repo: Path, branch: str) -> bool:
             "git", "-C", str(bare_repo), "for-each-ref",
             "--contains", branch, "--format=%(refname)", "refs/remotes/",
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     return result.returncode == 0 and bool(result.stdout.strip())
-
 
 def resolve_spec_local(
     bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, RemoteConfig],
@@ -573,31 +568,28 @@ def get_rev_list_count(repo_path: Path, ref_a: str, ref_b: str) -> tuple[int, in
     """Return (ahead, behind): ref_a ahead of ref_b, ref_a behind ref_b."""
     result = _run(
         ["git", "-C", str(repo_path), "rev-list", "--left-right", "--count", f"{ref_a}...{ref_b}"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", check=True,
     )
     parts = result.stdout.strip().split()
     return int(parts[0]), int(parts[1])
-
 
 def get_worktree_head(worktree_path: Path) -> tuple[str, str]:
     """Return (short_hash, full_hash)."""
     result = _run(
         ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", check=True,
     )
     full_hash = result.stdout.strip()
     return full_hash[:7], full_hash
 
-
 def get_upstream(worktree_path: Path) -> str | None:
     result = _run(
         ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return None
     return result.stdout.strip()
-
 
 def worktree_is_detached(worktree_path: Path) -> bool:
     """True if HEAD is detached (no symbolic ref)."""
@@ -612,13 +604,12 @@ def get_worktree_branch(worktree_path: Path) -> str | None:
     """Return the current branch name, or None if HEAD is detached."""
     result = _run(
         ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return None
     branch = result.stdout.strip()
     return None if branch == "HEAD" else branch
-
 
 def attach_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> None:
     """Switch a detached worktree to a local branch tracking spec.base_ref."""
@@ -683,10 +674,9 @@ def get_remote_ref_for_branch(
 def get_remote_url(bare_repo: Path, remote: str) -> str | None:
     result = _run(
         ["git", "-C", str(bare_repo), "remote", "get-url", remote],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     return result.stdout.strip() if result.returncode == 0 else None
-
 
 def git(repo: Path, *args, quiet: bool = False, **kwargs) -> subprocess.CompletedProcess:
     """Central git wrapper with automatic -C."""
@@ -705,21 +695,19 @@ def _git_dir(worktree: Path) -> Path | None:
     """
     result = _run(
         ["git", "-C", str(worktree), "rev-parse", "--absolute-git-dir"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return None
     return Path(result.stdout.strip())
 
-
 def rev_parse(repo: Path, ref: str) -> str | None:
     """Resolve ref to a full SHA, or None if it does not exist."""
     result = _run(
         ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     return result.stdout.strip() or None
-
 
 def is_ancestor(repo: Path, a: str, b: str) -> bool:
     """True if a is an ancestor of b (a commit is its own ancestor)."""
@@ -732,12 +720,11 @@ def is_ancestor(repo: Path, a: str, b: str) -> bool:
 def merge_base(repo: Path, a: str, b: str) -> str | None:
     result = _run(
         ["git", "-C", str(repo), "merge-base", a, b],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
-
 
 def merge_base_fork_point(repo: Path, upstream: str, ref: str = "HEAD") -> str | None:
     """The newest past value of `upstream` that `ref` is built on.
@@ -749,22 +736,20 @@ def merge_base_fork_point(repo: Path, upstream: str, ref: str = "HEAD") -> str |
     """
     result = _run(
         ["git", "-C", str(repo), "merge-base", "--fork-point", upstream, ref],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
 
-
 def count_commits(repo: Path, rev_range: str) -> int:
     result = _run(
         ["git", "-C", str(repo), "rev-list", "--count", rev_range],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return 0
     return int(result.stdout.strip() or 0)
-
 
 def count_unbacked_commits(worktree: Path, base: str) -> int | None:
     """Commits in base..HEAD that no remote-tracking ref carries.
@@ -779,7 +764,7 @@ def count_unbacked_commits(worktree: Path, base: str) -> int | None:
     """
     result = _run(
         ["git", "-C", str(worktree), "rev-list", "--count", f"{base}..HEAD", "--not", "--remotes"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return None
@@ -787,7 +772,6 @@ def count_unbacked_commits(worktree: Path, base: str) -> int | None:
         return int(result.stdout.strip() or 0)
     except ValueError:
         return None
-
 
 def count_new_patches(worktree: Path, other: str) -> int:
     """Commits in `other` whose patch HEAD does not already carry.
@@ -801,12 +785,11 @@ def count_new_patches(worktree: Path, other: str) -> int:
     result = _run(
         ["git", "-C", str(worktree), "rev-list", "--count",
          "--cherry-pick", "--right-only", "--no-merges", f"HEAD...{other}"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return 0
     return int(result.stdout.strip() or 0)
-
 
 def count_unpushed(worktree: Path, bound: str, other: str) -> int:
     """Commits in bound..HEAD whose patch `other` does not already carry.
@@ -826,12 +809,11 @@ def count_unpushed(worktree: Path, bound: str, other: str) -> int:
     """
     result = _run(
         ["git", "-C", str(worktree), "cherry", other, "HEAD", bound],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return 0
     return sum(1 for line in result.stdout.splitlines() if line.startswith("+"))
-
 
 # Ordered: rebase markers first, because an interactive rebase also writes a
 # sequencer directory and must not be reported as a cherry-pick.
@@ -860,12 +842,11 @@ def dirty_files(worktree: Path) -> list[str]:
     """Modified tracked files. Untracked files do not block a rebase."""
     result = _run(
         ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=no"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         return []
     return [line[3:] for line in result.stdout.splitlines() if line.strip()]
-
 
 T = TypeVar("T")
 

@@ -437,15 +437,15 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
         if rc is None:
             self._clear_remote_fields()
             return
-        self.query_one("#gc_remote_url", LabeledInput).query_one(
-            "#li_input"
-        ).value = rc.url
-        self.query_one("#gc_remote_pushurl", LabeledInput).query_one(
-            "#li_input"
-        ).value = rc.pushurl or ""
-        self.query_one("#gc_remote_fetch", LabeledInput).query_one(
-            "#li_input"
-        ).value = rc.fetch or ""
+        url_li = self.query_one("#gc_remote_url", LabeledInput)
+        url_li.query_one("#li_input").value = rc.url
+        url_li.set_error(None)
+        pushurl_li = self.query_one("#gc_remote_pushurl", LabeledInput)
+        pushurl_li.query_one("#li_input").value = rc.pushurl or ""
+        pushurl_li.set_error(None)
+        fetch_li = self.query_one("#gc_remote_fetch", LabeledInput)
+        fetch_li.query_one("#li_input").value = rc.fetch or ""
+        fetch_li.set_error(None)
 
     def _clear_remote_fields(self) -> None:
         for wid in ("#gc_remote_url", "#gc_remote_pushurl", "#gc_remote_fetch"):
@@ -453,17 +453,18 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
             li.query_one("#li_input").value = ""
             li.set_error(None)
 
-    def _apply_field_edits(self) -> None:
+    def _apply_field_edits(self) -> bool:
         """Write back any edits in the url/pushurl/fetch fields to the
-        currently selected remote in self._remotes."""
+        currently selected remote in self._remotes.
+        Returns False if validation failed (caller should abort save)."""
         sel = self._selected_remote()
         if sel is None:
-            return
+            return True
         alias, name = sel
         url = self.query_one("#gc_remote_url", LabeledInput).value.strip()
         if not url:
             self.query_one("#gc_remote_url", LabeledInput).set_error("URL is required")
-            return
+            return False
         pushurl = self.query_one("#gc_remote_pushurl", LabeledInput).value.strip()
         fetch = self.query_one("#gc_remote_fetch", LabeledInput).value.strip()
         if alias not in self._remotes:
@@ -473,6 +474,7 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
             pushurl=pushurl or None,
             fetch=fetch or None,
         )
+        return True
 
 
     # ------------------------------------------------------------------
@@ -543,7 +545,8 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
 
     def _try_save(self) -> None:
         # Apply any pending remote field edits
-        self._apply_field_edits()
+        if not self._apply_field_edits():
+            return
 
         # Editor
         editor = self.query_one("#gc_editor", LabeledInput).value.strip() or "code"

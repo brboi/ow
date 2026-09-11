@@ -45,7 +45,7 @@ class _SinkTask:
     def _do_done(self) -> None:
         from textual.containers import Horizontal
         row = self._app.query_one("#progress", Horizontal)
-        row.styles.display = "none"
+        row.remove_class("-active")
 
 
 class TuiSink(OutputSink):
@@ -77,9 +77,10 @@ class TuiSink(OutputSink):
         from textual.containers import Horizontal
         from textual.widgets import ProgressBar, Static
         row = self._app.query_one("#progress", Horizontal)
-        row.styles.display = "block"
+        row.add_class("-active")
         lbl = self._app.query_one("#task_label", Static)
         lbl.update(label)
         bar = self._app.query_one("#task_bar", ProgressBar)
-        bar.total = total
+        # Fix #7: Handle total=0 by using indeterminate mode
+        bar.total = total if total > 0 else None
         bar.update(progress=0)
