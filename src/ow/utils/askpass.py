@@ -45,12 +45,20 @@ def _ask(prompt: str) -> str:
     return getpass.getpass(prompt.rstrip() + " ", stream=sys.stderr)
 
 
-def _serve(listener: socket.socket, answers: dict[str, str]) -> None:
-    """Accept loop. Ends when the listening socket is closed."""
+def _serve(listener: socket.socket, answers: dict[str, str], stop: threading.Event) -> None:
+    """Accept loop, until `stop` is set and the waker connection arrives.
+
+    Closing the listening socket is not enough to end this on its own:
+    a thread blocked in accept() is not guaranteed to be woken by close(),
+    which is why the broker connects to itself on the way out.
+    """
     while True:
         try:
             conn, _ = listener.accept()
         except OSError:
+            return
+        if stop.is_set():
+            conn.close()
             return
         with conn:
             try:
@@ -141,7 +149,8 @@ def broker() -> Iterator[None]:
         return
 
     answers: dict[str, str] = {}
-    thread = threading.Thread(target=_serve, args=(listener, answers), daemon=True)
+    stop = threading.Event()
+    thread = threading.Thread(target=_serve, args=(listener, answers, stop), daemon=True)
     thread.start()
 
     _ACTIVE = {
@@ -156,5 +165,16 @@ def broker() -> Iterator[None]:
         yield
     finally:
         _ACTIVE = previous
+        stop.set()
+        # Wake the accept() the thread is parked in, so it can see `stop` and
+        # return. Leaving it running would make ow multi-threaded for the rest
+        # of the process, which is more than a leaked thread: os.fork() in a
+        # multi-threaded process is exactly what Python warns about.
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as waker:
+                waker.connect(str(sock_path))
+        except OSError:
+            pass
+        thread.join(timeout=2)
         listener.close()
         shutil.rmtree(directory, ignore_errors=True)
