@@ -4,7 +4,8 @@ from typing import NamedTuple
 
 from ow.utils.display import confirm, err_console
 from ow.utils import index, paths
-from ow.utils.git import _run, is_branch_pushed, parallel_per_repo
+from ow.utils.config import load_workspace_config
+from ow.utils.git import _run, get_worktree_branch, is_branch_pushed, parallel_per_repo
 
 
 class _PrunePlan(NamedTuple):
@@ -51,7 +52,8 @@ def _survey_worktrees(bare_repo: Path) -> tuple[set[str], list[str]]:
 
     A prunable worktree's branch is deliberately not counted as in use: it
     is about to stop being attached to anything, and the branch pass has to
-    see the repo as it will be, not as it was.
+    see the repo as it will be, not as it was. What keeps that from eating a
+    live workspace's branch is _declared_branches(), not this listing.
     """
     result = _run(
         ["git", "-C", str(bare_repo), "worktree", "list", "--porcelain"],
@@ -60,7 +62,12 @@ def _survey_worktrees(bare_repo: Path) -> tuple[set[str], list[str]]:
     used: set[str] = set()
     stale: list[str] = []
     if result.returncode != 0:
-        return used, stale
+        # Not "nothing is in use": that reading turns every branch in the
+        # repo into an orphan candidate, which is the one direction this
+        # command must never fail in.
+        raise RuntimeError(
+            f"git worktree list failed: {result.stderr.strip() or 'no output'}"
+        )
 
     path: str | None = None
     branch: str | None = None
@@ -92,7 +99,57 @@ def _survey_worktrees(bare_repo: Path) -> tuple[set[str], list[str]]:
     return used, stale
 
 
-def _survey_bare_repo(bare_repo: Path) -> _PrunePlan:
+def _declared_branches() -> tuple[dict[str, set[str]], list[tuple[Path, str]]]:
+    """Per alias, the branches live workspaces own. Plus the configs that would not read.
+
+    git's worktree bookkeeping is not the only truth. A registration that
+    went stale — a directory moved by hand, a mount that was away when the
+    listing ran — makes git call the worktree prunable and its branch
+    unattached, while the workspace is still there and still says in its own
+    .ow/config.toml which branch it works on. Issue #50: prune offered to
+    delete exactly such a branch, and git refused it as in use.
+
+    Both the declared branch and the branch actually checked out are taken:
+    a worktree moved to a branch the config does not name is still work.
+    """
+    declared: dict[str, set[str]] = {}
+    unreadable: list[tuple[Path, str]] = []
+
+    # list_workspaces, not known_workspaces: the latter rewrites the index
+    # as it reads, and --dry-run and a declined confirmation must leave it
+    # exactly as they found it. Dead entries are dropped later, by the index
+    # pass that already owns that job.
+    for ws_dir in index.list_workspaces():
+        try:
+            config_file = ws_dir / ".ow" / "config.toml"
+            if not config_file.is_file():
+                # A dead index entry, not a workspace whose config is broken.
+                continue
+            ws = load_workspace_config(config_file)
+            owned_here: dict[str, set[str]] = {}
+            for alias, spec in ws.repos.items():
+                owned = owned_here.setdefault(alias, set())
+                if spec.local_branch:
+                    # A detached spec owns no branch.
+                    owned.add(spec.local_branch)
+                if (ws_dir / alias).is_dir():
+                    checked_out = get_worktree_branch(ws_dir / alias)
+                    if checked_out:
+                        owned.add(checked_out)
+        except Exception as exc:
+            # Unparseable, unreadable, on a directory that will not even
+            # stat: all the same answer — this workspace's branches cannot
+            # be named, so none of them can be shown to be orphaned.
+            unreadable.append((ws_dir, str(exc)))
+            continue
+
+        for alias, owned in owned_here.items():
+            declared.setdefault(alias, set()).update(owned)
+
+    return declared, unreadable
+
+
+def _survey_bare_repo(bare_repo: Path, protected: frozenset[str] = frozenset()) -> _PrunePlan:
     """Work out what would go from one bare repo, without touching it."""
     used_branches, stale = _survey_worktrees(bare_repo)
 
@@ -117,7 +174,7 @@ def _survey_bare_repo(bare_repo: Path) -> _PrunePlan:
 
     if branch_result.returncode == 0:
         all_branches = {b.strip() for b in branch_result.stdout.splitlines() if b.strip()}
-        for branch in sorted(all_branches - used_branches):
+        for branch in sorted(all_branches - used_branches - protected):
             if branch == head_branch:
                 # Never delete the branch HEAD points at — a dangling HEAD
                 # confuses every subsequent git command and looks like data loss.
@@ -268,14 +325,19 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False, also_backups: bool = 
     leaves everything untouched, the index included.
     """
     dropped = _dead_index_entries()
+    declared, unreadable = _declared_branches()
 
     bare_repos_dir = paths.repos_dir()
-    bare_repos = sorted(bare_repos_dir.glob("*.git")) if bare_repos_dir.exists() else []
+    # Not every *.git under there is an alias: a stray `.git` directory
+    # matches the pattern too, and surveying it fails as "not a repository".
+    bare_repos = sorted(
+        p for p in bare_repos_dir.glob("*.git") if not p.name.startswith(".")
+    ) if bare_repos_dir.exists() else []
     if not bare_repos:
         print("No bare repos found.")
 
     surveyed = parallel_per_repo({
-        repo.stem: (lambda r=repo: _survey_bare_repo(r))
+        repo.stem: (lambda r=repo: _survey_bare_repo(r, frozenset(declared.get(r.stem, ()))))
         for repo in bare_repos
     })
     plans: list[_PrunePlan] = []
@@ -290,6 +352,20 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False, also_backups: bool = 
     sys.stdout.flush()
     for alias, exc in survey_errors.items():
         err_console.print(f"  [{alias}] survey failed: {exc}", markup=False)
+
+    for ws_dir, reason in unreadable:
+        err_console.print(f"  [{ws_dir.name}] unreadable .ow/config.toml: {reason}", markup=False)
+    if unreadable:
+        # Which branches that workspace owns is exactly what could not be
+        # read, so no branch can be shown to be orphaned. The reversible
+        # work — stale worktrees, the index, backups — still happens.
+        err_console.print(
+            "  No branch will be deleted this run: ow cannot tell which branches that workspace owns."
+        )
+        plans = [
+            plan._replace(to_delete=[], kept=[*plan.kept, *plan.to_delete])
+            for plan in plans
+        ]
 
     _display_plan(plans)
     backups = _stale_backups() if also_backups else []

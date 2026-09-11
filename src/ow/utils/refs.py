@@ -3,7 +3,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from ow.utils.display import print_git_result, task_progress
+from ow.utils.display import err_console, print_git_result, task_progress
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 from ow.utils import paths
 from ow.utils.git import (
@@ -51,6 +51,18 @@ class _ResolveResult:
     fetch_jobs: list[_FetchJob]
     resolved_spec: BranchSpec | None = None
     upstream_before: str | None = None
+
+
+_AUTH_MARKERS = (
+    "Permission denied (publickey)",
+    "ssh_askpass",
+    "Host key verification failed",
+)
+
+
+def _is_auth_failure(err: str) -> bool:
+    """Did git fail because ssh could not authenticate, rather than because of the ref?"""
+    return any(marker in err for marker in _AUTH_MARKERS)
 
 
 def fetch_workspace_refs(
@@ -216,6 +228,7 @@ def fetch_workspace_refs(
 
     # -- Phase 3: print results -------------------------------------------
 
+    hinted = False
     for alias in ws.repos:
         if alias in skipped or alias not in alias_resolve:
             continue
@@ -239,6 +252,14 @@ def fetch_workspace_refs(
                     err = fetch_result.stderr.decode().strip() if fetch_result.stderr else "unknown"
                     print_git_result(alias, "fetch", [job.remote, job.refspec], False, err)
                     failed.add(alias)
+                    if not hinted and _is_auth_failure(err):
+                        # Said once for the whole run: the cause is the key,
+                        # not the repo, and repeating it per repo buries it.
+                        err_console.print(
+                            "    ssh could not authenticate — load your key (ssh-add) "
+                            "or check the remote's access rights"
+                        )
+                        hinted = True
                 else:
                     print_git_result(alias, "fetch", [job.remote, job.refspec], True)
 

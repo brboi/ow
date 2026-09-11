@@ -1,6 +1,8 @@
 import subprocess
 
+from ow.utils import askpass
 from ow.utils.git import (
+    _run,
     _git_dir,
     _is_bare_repo,
     count_commits,
@@ -303,3 +305,21 @@ class TestIsBareRepo:
 
     def test_rejects_a_path_that_does_not_exist(self, tmp_path):
         assert _is_bare_repo(tmp_path / "missing.git") is False
+
+
+class TestAskpassEnv:
+    """Every git child must be able to reach the broker, or ssh cannot ask."""
+
+    def test_a_child_spawned_under_a_broker_can_find_the_socket(self, monkeypatch):
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+
+        with askpass.broker():
+            result = _run(["/usr/bin/env"], capture_output=True, text=True)
+
+        assert "OW_ASKPASS_SOCK=" in result.stdout
+        assert "SSH_ASKPASS=" in result.stdout
+
+    def test_a_child_spawned_without_one_carries_nothing(self):
+        result = _run(["/usr/bin/env"], capture_output=True, text=True)
+
+        assert "OW_ASKPASS_SOCK=" not in result.stdout

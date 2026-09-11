@@ -12,6 +12,7 @@ src/
 │   │   ├── apply.py         # cmd_apply — make the tree match .ow/config.toml (--only narrows the git work, never the rendering)
 │   │   ├── status.py        # cmd_status + display helpers
 │   │   ├── rebase.py        # cmd_rebase + fact gathering, display, execution
+│   │   ├── pull.py          # cmd_pull + fact gathering, display, execution (fast-forward only)
 │   │   ├── prune.py         # cmd_prune
 │   │   ├── rm.py            # cmd_rm — remove a workspace: worktrees, local branches, directory, index entry
 │   │   └── templates.py     # cmd_templates — list/take/diff template files; outdated_templates() used by cmd_apply
@@ -25,6 +26,8 @@ src/
 │   │   ├── paths.py         # ow's locations, resolved from the XDG base directories
 │   │   ├── refs.py          # fetch_workspace_refs
 │   │   ├── rebase_plan.py   # RepoFacts, GitStep, RebasePlan, plan_for (pure)
+│   │   ├── pull_plan.py     # PullFacts, PullPlan, plan_pull (pure)
+│   │   ├── askpass.py       # SSH_ASKPASS broker: git children ask ow, ow asks the terminal
 │   │   ├── resolver.py      # resolve_workspace
 │   │   └── templates.py     # file generators, template resolution, application, materialization
 │   └── _static/
@@ -69,6 +72,8 @@ AGENTS.md
   - `git.py` — worktree operations: `create_worktree`, `attach_worktree`, `detach_worktree`, `worktree_exists`, `worktree_is_detached`, `get_worktree_branch`, `get_worktree_head`. Bare repo operations: `ensure_bare_repo`, `ensure_ref`. Ref/branch queries: `resolve_spec`, `resolve_spec_local`, `get_all_remote_refs`, `get_remote_ref_for_branch`, `get_remote_url`, `get_upstream`, `set_branch_upstream`, `is_branch_pushed`. Analysis: `rev_parse`, `is_ancestor`, `merge_base`, `count_commits`, `count_new_patches`, `count_unpushed`, `in_progress_operation`, `dirty_files`. Execution: `git`, `git_fetch`, `parallel_per_repo`, `run_cmd`.
   - `refs.py` — `fetch_workspace_refs` — three-phase pipeline for fetching workspace refs.
   - `rebase_plan.py` — `RepoFacts`, `GitStep`, `RebasePlan`, `plan_for` — pure analysis functions for rebase planning.
+  - `pull_plan.py` — `PullFacts`, `PullPlan`, `plan_pull` — pure analysis functions for fast-forward planning.
+  - `askpass.py` — `broker()`, `child_env()`. Every git child runs in its own session and so has no controlling terminal; ssh therefore falls back to `SSH_ASKPASS`. The broker points it at a generated shim that forwards the prompt over a Unix socket to ow, which still owns the terminal. Prompts are serialised and answers cached per run. Entered once, in `__main__.main()`.
   - `resolver.py` — `resolve_workspace(name=None)` resolves a workspace: an explicit path, an explicit name (looked up via the index), the `OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml`. One rule, four branches, no fallback between them.
   - `templates.py` — `is_odoo_main_repo`, `find_addon_paths`, `build_template_context`, `apply_templates`, `ensure_workspace_materialized`, `available_templates`, `packaged_files`, `resolve_template_files` (local overrides win per file, packaged sibling still reachable via Jinja include/extends).
 
@@ -80,6 +85,7 @@ AGENTS.md
 | `ow apply` | `cmd_apply(config, workspace=None, *, only=None)` | Materialize worktrees + re-render templates |
 | `ow status` | `cmd_status(config, workspace=None)` | Show workspace branch status |
 | `ow rebase` | `cmd_rebase(config, workspace=None, *, only=None, autostash=False, dry_run=False, yes=False)` | Fetch + rebase workspace branches |
+| `ow pull` | `cmd_pull(config, workspace=None, *, only=None, dry_run=False)` | Fetch, then fast-forward each repo — or replay it on its own upstream, `git pull --rebase` style. Never moves a repo off its base ref; that stays `ow rebase` |
 | `ow prune` | `cmd_prune(config)` | Clean up stale worktree references, orphaned branches, dead index entries |
 | `ow rm` | `cmd_rm(name, *, yes=False)` | Remove a workspace: worktrees, local branches, directory, index entry |
 | `ow templates` | `cmd_templates(take=None, show_diff=False)` | List template files with their state, take one, or diff the stale ones |
