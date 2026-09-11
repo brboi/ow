@@ -9,7 +9,7 @@
 | `ow status` | `[workspace]`, `-f/--fetch` | Show branch status with behind/ahead counts |
 | `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
 | `ow pull` | `[workspace]`, `--only`, `--dry-run` | Fetch and fast-forward repos in a workspace |
-| `ow reset` | `[workspace]`, `--only`, `--hard`, `--dry-run`, `-y/--yes` | Put repos back on the refs their config names |
+| `ow reset` | `[workspace]`, `--only`, `--hard`, `-f/--fetch`, `--dry-run`, `-y/--yes` | Put repos back on the refs they follow |
 | `ow prune` | `--dry-run`, `-y/--yes` | Clean up stale worktree references, orphaned branches, and dead index entries |
 | `ow rm` | `<name>`, `-y/--yes` | Remove a workspace: worktrees, local branches, directory, and index entry |
 | `ow ls` | — | List every known workspace, its path, and its repos |
@@ -148,16 +148,23 @@ On conflict during a replay, resolve, `git rebase --continue`, then re-run
 
 ## `ow reset`
 
-Puts every repo back on the ref its config names — `git reset`, one repo at a
-time. Use it when a workspace has wandered and you want the configured state
-back.
+Puts every repo back on the ref it follows — `git reset`, one repo at a time.
+Use it when a workspace has wandered, or when an upstream was force-pushed and
+you want the remote's version of the branch, whatever yours has become.
 
 ```sh
 ow reset                                   # every repo of the current workspace
 ow reset parrot --only enterprise          # one repo of a named workspace
 ow reset --hard                            # discard the working tree too
+ow reset --hard -f                         # ... against freshly fetched refs
 ow reset --dry-run                         # print the plan, touch nothing
 ```
+
+**The ref each repo is reset to** is the one `git reset @{u}` would have used:
+the branch's upstream — its own copy on a remote — or, for a branch nobody has
+pushed and for a detached repo, the base ref it was cut from. An attached branch
+is never reset onto its base: that would not put the repo back, it would throw
+the whole branch away.
 
 The two forms differ exactly as git's do:
 
@@ -168,8 +175,10 @@ The two forms differ exactly as git's do:
   alone, exactly as `git reset --hard` leaves them; `git clean` is its own
   command.
 
-No fetch: it resets to the refs already in the bare repos, the way
-`git reset origin/master` does. Run `ow pull` first if you want the latest.
+No fetch by default: it resets to the refs already in the bare repos, the way
+`git reset origin/master` does. `-f/--fetch` refreshes them first, which is what
+an upstream that was force-pushed needs — otherwise you land on the copy the
+last fetch happened to cache.
 
 The summary counts what each repo loses before anything runs, and flags the
 commits no remote carries — the only ones a reset makes unrecoverable outside
