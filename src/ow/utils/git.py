@@ -747,6 +747,29 @@ def count_commits(repo: Path, rev_range: str) -> int:
     return int(result.stdout.strip() or 0)
 
 
+def count_unbacked_commits(worktree: Path, base: str) -> int | None:
+    """Commits in base..HEAD that no remote-tracking ref carries.
+
+    The ones a reset would genuinely destroy: everything else is still
+    named by some refs/remotes/* ref and can be fetched again. `--not
+    --remotes` is the same judgement `is_branch_pushed` makes in a bare
+    repo, asked from inside a worktree.
+
+    None, not 0, when git could not answer: the caller is about to throw
+    commits away, and "nothing is at risk" is the wrong way to be wrong.
+    """
+    result = _run(
+        ["git", "-C", str(worktree), "rev-list", "--count", f"{base}..HEAD", "--not", "--remotes"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip() or 0)
+    except ValueError:
+        return None
+
+
 def count_new_patches(worktree: Path, other: str) -> int:
     """Commits in `other` whose patch HEAD does not already carry.
 

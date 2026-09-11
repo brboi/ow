@@ -16,6 +16,7 @@ from ow.commands import (
     cmd_prune,
     cmd_pull,
     cmd_rebase,
+    cmd_reset,
     cmd_rm,
     cmd_shell_init,
     cmd_status,
@@ -230,6 +231,19 @@ def pull(
     """Fetch and fast-forward workspace branches."""
     config = _load_config()
     cmd_pull(config, workspace=workspace, only=only, dry_run=dry_run)
+
+
+@app.command()
+def reset(
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to reset (default: all)"),
+    hard: bool = typer.Option(False, "--hard", help="Discard the working tree too, not just the commits"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+) -> None:
+    """Put workspace repos back on the refs their config names."""
+    config = _load_config()
+    cmd_reset(config, workspace=workspace, only=only, hard=hard, dry_run=dry_run, yes=yes)
 
 
 @app.command()

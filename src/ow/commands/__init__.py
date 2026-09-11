@@ -8,6 +8,7 @@ from ow.commands.open import cmd_open
 from ow.commands.prune import cmd_prune
 from ow.commands.pull import cmd_pull
 from ow.commands.rebase import cmd_rebase
+from ow.commands.reset import cmd_reset
 from ow.commands.rm import cmd_rm
 from ow.commands.shell_init import cmd_shell_init
 from ow.commands.status import cmd_status
@@ -24,6 +25,7 @@ __all__ = [
     "cmd_prune",
     "cmd_pull",
     "cmd_rebase",
+    "cmd_reset",
     "cmd_rm",
     "cmd_shell_init",
     "cmd_status",
