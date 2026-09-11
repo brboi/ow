@@ -364,6 +364,7 @@ class MainScreen(Screen):
         self._entries = entries
 
         option_list = self.query_one("#ws_list", OptionList)
+        prev_idx = option_list.highlighted
         option_list.clear_options()
         for i, entry in enumerate(entries):
             text = display_path(entry.path)
@@ -378,6 +379,9 @@ class MainScreen(Screen):
             option_list.add_option(Option(prompt, id=f"ws_{i}"))
             if i == len(active) - 1 and archived:
                 option_list.add_option(None)
+        # Restore previous selection or default to first item
+        if entries:
+            option_list.highlighted = prev_idx if prev_idx is not None and prev_idx < len(entries) else 0
 
         self.app.sub_title = (
             f"{len(active)} workspace(s), {len(archived)} archived"
@@ -1278,12 +1282,18 @@ class DashboardApp(App[None]):
         self.push_screen(MainScreen(self._config))
 
     def action_cancel(self) -> None:
-        screen = self.screen
-        if isinstance(screen, MainScreen) and screen._busy:
-            from ow.utils.git import terminate_children
-            terminate_children()
-            if screen.run_operation_worker is not None:
-                screen.run_operation_worker.cancel()
+        # Find MainScreen in the stack (it may not be the top screen)
+        for screen in self._screen_stack:
+            if isinstance(screen, MainScreen) and screen._busy:
+                from ow.utils.git import terminate_children
+                terminate_children()
+                if screen.run_operation_worker is not None:
+                    screen.run_operation_worker.cancel()
+                return
+        # No busy MainScreen found — dismiss top modal or exit
+        top = self.screen
+        if isinstance(top, ModalScreen):
+            top.dismiss(None)
         else:
             self.exit()
 

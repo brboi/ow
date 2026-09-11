@@ -267,6 +267,7 @@ class OperationLog(RichLog):
             wrap=True,
             auto_scroll=True,
             min_width=20,
+            max_lines=5000,
             **kwargs,
         )
 
@@ -464,7 +465,7 @@ def _render_repos_table(
 
         # state
         if rs.state == "not_applied":
-            line.append("⊘ not applied", style="yellow")
+            line.append("not applied", style="yellow")
         elif rs.state == "unresolved":
             line.append("✗ unresolved", style="red")
         elif rs.state == "error":
@@ -481,7 +482,7 @@ def _render_repos_table(
 
             # head
             if rs.kind == "detached":
-                line.append(f"⊘ DETACHED {rs.short_hash or ''}", style="yellow")
+                line.append(f"DETACHED {rs.short_hash or ''}", style="yellow")
             elif rs.head_label:
                 line.append(rs.head_label)
             else:

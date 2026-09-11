@@ -370,6 +370,9 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
             idx = event.option_index
             if idx is not None:
                 self._show_section(idx)
+        elif event.option_list.id == "gc_remotes_list":
+            self._apply_field_edits()
+            self._refresh_remote_fields()
 
     def _show_section(self, index: int) -> None:
         """Show the section at `index` and hide the others."""
@@ -446,7 +449,9 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
 
     def _clear_remote_fields(self) -> None:
         for wid in ("#gc_remote_url", "#gc_remote_pushurl", "#gc_remote_fetch"):
-            self.query_one(wid, LabeledInput).query_one("#li_input").value = ""
+            li = self.query_one(wid, LabeledInput)
+            li.query_one("#li_input").value = ""
+            li.set_error(None)
 
     def _apply_field_edits(self) -> None:
         """Write back any edits in the url/pushurl/fetch fields to the
@@ -469,11 +474,6 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
             fetch=fetch or None,
         )
 
-    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        """Refresh remote fields when user selects a different remote."""
-        if event.option_list.id == "gc_remotes_list":
-            self._apply_field_edits()
-            self._refresh_remote_fields()
 
     # ------------------------------------------------------------------
     # Button handlers

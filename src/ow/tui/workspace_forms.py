@@ -15,7 +15,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, SelectionList, Static
 
@@ -37,7 +37,7 @@ _FORM_SCREEN_CSS = """
 {cls} {{
     align: center middle;
 }}
-{cls} > Vertical {{
+{cls} > VerticalScroll {{
     width: 80;
     max-height: 90%;
     padding: 1 2;
@@ -48,7 +48,7 @@ _FORM_SCREEN_CSS = """
     text-style: bold;
     margin: 1 0 0 0;
 }}
-{cls} > Vertical > Horizontal {{
+{cls} > VerticalScroll > Horizontal {{
     align: center middle;
     height: auto;
     margin-top: 1;
@@ -164,7 +164,7 @@ class NewWorkspaceScreen(ModalScreen[NewWorkspaceRequest | None]):
         self._aliases = list(config.remotes.keys())
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with VerticalScroll():
             yield LabeledInput(
                 "parent", value=str(Path.cwd()), id="nw_parent"
             )
@@ -276,7 +276,7 @@ class WorkspaceConfigScreen(ModalScreen[WorkspaceConfig | None]):
         self._aliases = list(config.remotes.keys())
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with VerticalScroll():
             yield Static("Templates", classes="section-heading")
             sel = SelectionList[str](id="wc_templates")
             for t in available_templates():
@@ -426,7 +426,7 @@ class VarsEditor(Vertical):
             self.app.notify("No row selected", severity="warning")
             return
         try:
-            row_key, _ = table.get_row_at(cursor.row)
+            row_key = table.coordinate_to_cell_key(cursor)[0]
             table.remove_row(row_key)
         except Exception:
             self.app.notify("Could not remove row", severity="warning")
@@ -441,6 +441,7 @@ class VarsEditor(Vertical):
         col_idx = cursor.column
         try:
             current = str(table.get_cell_at(row_idx, col_idx))
+            row_key = table.coordinate_to_cell_key(cursor)[0]
         except Exception:
             self.app.notify("Could not read cell", severity="warning")
             return
@@ -452,7 +453,6 @@ class VarsEditor(Vertical):
                 return
             table = self.query_one("#vars_table", DataTable)
             try:
-                row_key, _ = table.get_row_at(row_idx)
                 # Rebuild the row with the new value
                 other_col = 1 - col_idx
                 other_val = str(table.get_cell_at(row_idx, other_col))
