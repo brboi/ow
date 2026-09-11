@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tomllib
+
 import shlex
 import subprocess
 from pathlib import Path
@@ -70,7 +72,7 @@ class WorkspaceEntry:
 def _load_ws_config(ws_dir: Path) -> tuple[WorkspaceConfig | None, str | None]:
     try:
         return load_workspace_config(ws_dir / MARKER), None
-    except Exception as exc:  # OSError / TOMLDecodeError / ValueError
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         return None, str(exc)
 
 
@@ -315,14 +317,16 @@ class MainScreen(Screen):
     def _show_progress_row(self) -> None:
         try:
             self.query_one("#progress").add_class("-active")
-        except Exception:
-            pass  # Widget not mounted yet
+        except Exception as e:
+            import sys
+            print(f"Warning: _show_progress_row failed: {e}", file=sys.stderr)
 
     def _hide_progress_row(self) -> None:
         try:
             self.query_one("#progress").remove_class("-active")
-        except Exception:
-            pass  # Widget not mounted yet
+        except Exception as e:
+            import sys
+            print(f"Warning: _hide_progress_row failed: {e}", file=sys.stderr)
 
     def on_resize(self, event: Any) -> None:
         min_w, min_h = 80, 24
@@ -537,12 +541,13 @@ class MainScreen(Screen):
                     log.write(f"{label}: failed (exit {exit_code})")
                 else:
                     log.write(f"{label}: done")
-        except Exception:
-            pass  # Widget not mounted yet
-        if exit_code is None and then is not None:
-            then(result)
+        except Exception as e:
+            import sys
+            print(f"Warning: _finish log write failed: {e}", file=sys.stderr)
         if invalidate is not None:
             self._status_cache.pop(invalidate, None)
+        if exit_code is None and then is not None:
+            then(result)
         if reload:
             self.reload_workspaces()
         self._busy = False
@@ -555,8 +560,9 @@ class MainScreen(Screen):
             log.write(Text.from_markup(f"── [bold]{label}[/] ──"))
             self.query_one("#task_label", Static).update(label)
             self._show_progress_row()
-        except Exception:
-            pass  # Widget not mounted yet
+        except Exception as e:
+            import sys
+            print(f"Warning: _log_header failed: {e}", file=sys.stderr)
 
     # ---- focus navigation ----------------------------------------------
 
@@ -598,6 +604,9 @@ class MainScreen(Screen):
         self.query_one("#log", OperationLog).clear()
 
     def action_request_quit(self) -> None:
+        if self._busy:
+            self.notify("Operation in progress", severity="warning")
+            return
         self.app.exit()
 
     def action_cursor_down(self) -> None:
@@ -996,10 +1005,11 @@ class MainScreen(Screen):
     ) -> None:
 
         lines = Text()
-        lines.append(f"Remove workspace '{entry.name}'\n")
+        lines.append(f"Remove workspace '{entry.name}'\n", style="bold")
+        lines.append("This permanently deletes the workspace directory and worktree branches.\n", style="bold")
+        lines.append("Uncommitted changes and unpushed commits will be lost.\n\n", style="bold")
         lines.append(f"  directory:  {display_path(entry.path)}\n")
         lines.append(f"  backup:     {display_path(paths.backups_dir())}/{entry.name}-<timestamp>.toml\n\n")
-        lines.append("Repos:\n")
         for r in repos:
             alias = r.alias
             spec = r.spec.to_spec_str()

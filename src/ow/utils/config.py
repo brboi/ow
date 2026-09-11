@@ -130,10 +130,10 @@ def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
         data["vars"] = ws.vars
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        f"{_WS_HEADER}version = {ws.version}\n\n{tomli_w.dumps(data)}",
-        encoding="utf-8",
-    )
+    content = f"{_WS_HEADER}version = {ws.version}\n\n{tomli_w.dumps(data)}"
+    tmp = path.with_suffix(".toml.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def select_aliases(available: list[str], only: str | None) -> list[str]:

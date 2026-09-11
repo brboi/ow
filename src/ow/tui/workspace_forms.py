@@ -196,6 +196,10 @@ class NewWorkspaceScreen(ModalScreen[NewWorkspaceRequest | None]):
         else:
             self.dismiss(None)
 
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Submit form when Enter is pressed in any input field."""
+        self._try_create()
+
     def _try_create(self) -> None:
         parent_str = self.query_one("#nw_parent", LabeledInput).value.strip()
         name = self.query_one("#nw_name", LabeledInput).value.strip()
@@ -298,6 +302,10 @@ class WorkspaceConfigScreen(ModalScreen[WorkspaceConfig | None]):
             self._try_save()
         else:
             self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Submit form when Enter is pressed in any input field."""
+        self._try_save()
 
     def _try_save(self) -> None:
         # Templates

@@ -457,7 +457,7 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
         alias, name = sel
         url = self.query_one("#gc_remote_url", LabeledInput).value.strip()
         if not url:
-            self.query_one("#gc_remote_url", LabeledInput).query_one("#li_input").set_error("URL is required")
+            self.query_one("#gc_remote_url", LabeledInput).set_error("URL is required")
             return
         pushurl = self.query_one("#gc_remote_pushurl", LabeledInput).value.strip()
         fetch = self.query_one("#gc_remote_fetch", LabeledInput).value.strip()
@@ -469,18 +469,24 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
             fetch=fetch or None,
         )
 
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        """Refresh remote fields when user selects a different remote."""
+        if event.option_list.id == "gc_remotes_list":
+            self._apply_field_edits()
+            self._refresh_remote_fields()
+
     # ------------------------------------------------------------------
     # Button handlers
     # ------------------------------------------------------------------
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "btn_save":
             self._try_save()
         elif bid == "btn_cancel":
             self.dismiss(None)
         elif bid == "gc_remote_add":
-            self._add_remote()
+            await self._add_remote()
         elif bid == "gc_remote_remove":
             self._remove_remote()
 
