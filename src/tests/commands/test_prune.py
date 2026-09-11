@@ -845,3 +845,110 @@ def test_also_backups_with_no_backups_does_nothing(tmp_path, capsys, xdg, monkey
     cmd_prune(also_backups=True)
 
     assert "Aborted." not in capsys.readouterr().out
+
+# ---------------------------------------------------------------------------
+# What a live workspace owns (issue #50)
+#
+# git's worktree bookkeeping is not the only truth: a workspace says in its
+# own .ow/config.toml which branch it works on, and prune offered to delete
+# exactly such a branch — git then refused it as in use.
+# ---------------------------------------------------------------------------
+
+def _workspace_owning(ws_root: Path, alias: str, spec: str) -> None:
+    (ws_root / ".ow").mkdir(parents=True, exist_ok=True)
+    (ws_root / ".ow" / "config.toml").write_text(
+        f'version = 1\ntemplates = []\n\n[repos]\n{alias} = "{spec}"\n'
+    )
+    index.remember(ws_root)
+
+
+def test_a_branch_a_live_workspace_declares_is_never_orphaned(tmp_path, capsys, xdg):
+    """The reported reproduction: the worktree registration went stale, the
+    workspace did not. git calls the branch unattached; the workspace calls
+    it its own, and the workspace is right."""
+    bare = _bare_repo(tmp_path)
+    ws_root = tmp_path / "wsA"
+    _git(bare, "worktree", "add", "-q", str(ws_root / "community"), "-b", "featA", "master")
+    # Pushed, so nothing but ownership can save it from deletion.
+    _git(bare, "update-ref", "refs/remotes/origin/featA", "featA")
+    _workspace_owning(ws_root, "community", "master..featA")
+
+    # What makes git call the worktree prunable: the directory it registered
+    # is not there any more.
+    (ws_root / "community").rename(ws_root / "community-moved")
+
+    cmd_prune(yes=True)
+
+    assert "featA" in _branches(bare)
+    assert "orphaned" not in capsys.readouterr().out
+
+
+def test_a_branch_checked_out_but_not_declared_is_also_protected(tmp_path, capsys, xdg):
+    """Someone switched the worktree by hand. That is still work in progress."""
+    bare = _bare_repo(tmp_path)
+    ws_root = tmp_path / "wsA"
+    worktree = ws_root / "community"
+    _git(bare, "worktree", "add", "-q", str(worktree), "-b", "featA", "master")
+    _git(worktree, "switch", "-q", "-c", "featB")
+    _git(bare, "update-ref", "refs/remotes/origin/featA", "featA")
+    _git(bare, "update-ref", "refs/remotes/origin/featB", "featB")
+    _workspace_owning(ws_root, "community", "master..featA")
+
+    # git reports featB as in use; featA is only in the config.
+    cmd_prune(yes=True)
+
+    assert "featA" in _branches(bare)
+    assert "featB" in _branches(bare)
+
+
+def test_an_unreadable_workspace_config_stops_every_deletion(tmp_path, capsys, xdg):
+    """Which branches it owns is exactly what could not be read."""
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "spent", "refs/remotes/origin/master")
+    ws_root = tmp_path / "broken"
+    (ws_root / ".ow").mkdir(parents=True)
+    (ws_root / ".ow" / "config.toml").write_text("this is not = = toml\n")
+    index.remember(ws_root)
+
+    cmd_prune(yes=True)
+
+    assert "spent" in _branches(bare)
+    err = capsys.readouterr().err
+    assert "broken" in err
+    assert "No branch will be deleted" in err
+
+
+def test_a_failed_worktree_listing_is_an_error_not_a_clean_slate(tmp_path, capsys, xdg, monkeypatch):
+    """An empty in-use set reads as 'every branch is orphaned'. That is the
+    one direction this command must never fail in."""
+    from ow.commands import prune as prune_mod
+
+    bare = _bare_repo(tmp_path)
+    _git(bare, "branch", "spent", "refs/remotes/origin/master")
+    real_run = prune_mod._run
+
+    def failing_run(args, **kwargs):
+        if "worktree" in args and "list" in args:
+            return subprocess.CompletedProcess(args, 1, "", "fatal: not a git repository")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(prune_mod, "_run", failing_run)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cmd_prune(yes=True)
+
+    assert exit_info.value.code == 1
+    assert "spent" in _branches(bare)
+    assert "survey failed" in capsys.readouterr().err
+
+
+def test_a_stray_dot_git_directory_is_not_mistaken_for_an_alias(tmp_path, capsys, xdg):
+    """`*.git` matches `.git` too, and surveying it fails as 'not a repository'."""
+    bare = _bare_repo(tmp_path)
+    (paths.repos_dir() / ".git").mkdir()
+
+    cmd_prune(yes=True)
+
+    err = capsys.readouterr().err
+    assert "survey failed" not in err
+    assert "master" in _branches(bare)

@@ -14,6 +14,7 @@ from ow.commands import (
     cmd_mv,
     cmd_open,
     cmd_prune,
+    cmd_pull,
     cmd_rebase,
     cmd_rm,
     cmd_shell_init,
@@ -21,7 +22,7 @@ from ow.commands import (
     cmd_templates,
     cmd_unarchive,
 )
-from ow.utils import index
+from ow.utils import askpass, index
 from ow.utils.config import Config, load_global_config, parse_branch_spec
 from ow.utils.display import err_console
 from ow.utils.legacy import check_legacy_layout
@@ -221,6 +222,17 @@ def rebase(
 
 
 @app.command()
+def pull(
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to pull (default: all)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
+) -> None:
+    """Fetch and fast-forward workspace branches."""
+    config = _load_config()
+    cmd_pull(config, workspace=workspace, only=only, dry_run=dry_run)
+
+
+@app.command()
 def ls(
     archived: bool = typer.Option(False, "--archived", help="List archived workspaces instead of active ones"),
 ) -> None:
@@ -323,7 +335,8 @@ def open_ws(
 
 def main() -> None:
     try:
-        app()
+        with askpass.broker():
+            app()
     except KeyboardInterrupt:
         # 130 is the conventional shell status for SIGINT. The git children
         # are already gone, pool or no pool: each one runs in its own session

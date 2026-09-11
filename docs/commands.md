@@ -8,6 +8,7 @@
 | `ow apply` | `[workspace]` | Re-render templates and materialize worktrees |
 | `ow status` | `[workspace]`, `-f/--fetch` | Show branch status with behind/ahead counts |
 | `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
+| `ow pull` | `[workspace]`, `--only`, `--dry-run` | Fetch and fast-forward repos in a workspace |
 | `ow prune` | `--dry-run`, `-y/--yes` | Clean up stale worktree references, orphaned branches, and dead index entries |
 | `ow rm` | `<name>`, `-y/--yes` | Remove a workspace: worktrees, local branches, directory, and index entry |
 | `ow ls` | — | List every known workspace, its path, and its repos |
@@ -110,6 +111,39 @@ ever pushed: the `git push --force-with-lease` stays yours.
 
 `--dry-run` fetches refs to show you what would happen, but runs no command that
 touches your worktrees.
+
+## `ow pull`
+
+Brings every repo of a workspace up to date without moving any of them off the
+base branch they are configured on. `ow rebase` is the command that does move
+them.
+
+```sh
+ow pull                                    # every repo of the current workspace
+ow pull parrot --only community            # one repo of a named workspace
+ow pull --dry-run                          # fetch, then print the plan — no worktree touched
+```
+
+Each repo follows its upstream when it has one — its own branch as pushed
+elsewhere — and its base ref otherwise.
+
+- already there: left alone
+- detached: re-detaches onto the fetched ref
+- behind: `git merge --ff-only`, which git refuses if the move would clobber a
+  local modification
+- diverged **from its upstream**: `git rebase <upstream>`, exactly what
+  `git pull --rebase` does — same branch, same base, nobody else's commits
+- diverged **from its base ref**, with no upstream: reported and left alone.
+  Carrying local work over to a moved base needs force-push detection and a
+  replay floor, and is `ow rebase`'s job
+
+A repo is also left alone, and the run exits non-zero, when a git operation is
+already in progress, when a replay would be needed but the worktree is dirty
+(the message names the files), when the worktree is missing, or when the fetch
+failed — moving onto the stale cached ref would look like success.
+
+On conflict during a replay, resolve, `git rebase --continue`, then re-run
+`ow pull --only <alias>`. Nothing is ever pushed.
 
 ## `ow prune`
 

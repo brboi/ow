@@ -10,7 +10,7 @@ from pathlib import Path
 from textwrap import indent
 from typing import Callable, TypeVar
 
-from ow.utils import paths
+from ow.utils import askpass, paths
 from ow.utils.config import BranchSpec, RemoteConfig
 
 # Every git child is tracked here so an interrupt can kill it. An abandoned
@@ -36,6 +36,12 @@ def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     if kwargs.pop("capture_output", False):
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
+    # Passphrase prompts: the child is in its own session and cannot open
+    # /dev/tty, so ssh has to reach ow's terminal through the askpass
+    # broker. Callers that pass their own env opt out.
+    extra = askpass.child_env()
+    if extra and "env" not in kwargs:
+        kwargs["env"] = {**os.environ, **extra}
     # The lock spans Popen() itself, not just the registration after it: a
     # child that exists between Popen() returning and the lock being taken
     # would be invisible to a terminate_children() racing that window.

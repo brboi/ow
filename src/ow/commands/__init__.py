@@ -6,6 +6,7 @@ from ow.commands.ls import cmd_ls
 from ow.commands.mv import cmd_mv
 from ow.commands.open import cmd_open
 from ow.commands.prune import cmd_prune
+from ow.commands.pull import cmd_pull
 from ow.commands.rebase import cmd_rebase
 from ow.commands.rm import cmd_rm
 from ow.commands.shell_init import cmd_shell_init
@@ -21,6 +22,7 @@ __all__ = [
     "cmd_mv",
     "cmd_open",
     "cmd_prune",
+    "cmd_pull",
     "cmd_rebase",
     "cmd_rm",
     "cmd_shell_init",

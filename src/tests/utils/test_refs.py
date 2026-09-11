@@ -204,6 +204,28 @@ class TestFetchFailureIsReported:
 
         assert outcome.failed == frozenset()
 
+    def test_an_auth_failure_says_what_to_do_about_it(self, tmp_path, monkeypatch, capsys, xdg):
+        """`Permission denied (publickey)` after a silent askpass says nothing useful."""
+        self._drive(
+            tmp_path, monkeypatch,
+            subprocess.CompletedProcess(
+                [], 128, b"",
+                b"ssh_askpass: exec(/usr/lib/ssh/ssh-askpass): No such file or directory\n"
+                b"git@github.com: Permission denied (publickey).",
+            ),
+        )
+
+        assert "ssh could not authenticate" in capsys.readouterr().err
+
+    def test_a_plain_fetch_failure_gets_no_ssh_advice(self, tmp_path, monkeypatch, capsys, xdg):
+        self._drive(
+            tmp_path, monkeypatch,
+            subprocess.CompletedProcess([], 1, b"", b"fatal: couldn't find remote ref x"),
+        )
+
+        assert "ssh could not authenticate" not in capsys.readouterr().err
+
+
     def test_a_missing_bare_repo_counts_as_a_failure(self, tmp_path, capsys, xdg):
         """Resolution never got far enough to fetch anything."""
         config, ws, ws_dir = _workspace(tmp_path)
