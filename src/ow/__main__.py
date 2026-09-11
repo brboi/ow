@@ -238,12 +238,13 @@ def reset(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to reset (default: all)"),
     hard: bool = typer.Option(False, "--hard", help="Discard the working tree too, not just the commits"),
+    fetch: bool = typer.Option(False, "--fetch", "-f", help="Refresh the refs first, instead of resetting to what is already cached"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
 ) -> None:
-    """Put workspace repos back on the refs their config names."""
+    """Put workspace repos back on the refs they follow."""
     config = _load_config()
-    cmd_reset(config, workspace=workspace, only=only, hard=hard, dry_run=dry_run, yes=yes)
+    cmd_reset(config, workspace=workspace, only=only, hard=hard, fetch=fetch, dry_run=dry_run, yes=yes)
 
 
 @app.command()

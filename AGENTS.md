@@ -89,7 +89,7 @@ AGENTS.md
 | `ow status` | `cmd_status(config, workspace=None)` | Show workspace branch status |
 | `ow rebase` | `cmd_rebase(config, workspace=None, *, only=None, autostash=False, dry_run=False, yes=False)` | Fetch + rebase workspace branches |
 | `ow pull` | `cmd_pull(config, workspace=None, *, only=None, dry_run=False)` | Fetch, then fast-forward each repo — or replay it on its own upstream, `git pull --rebase` style. Never moves a repo off its base ref; that stays `ow rebase` |
-| `ow reset` | `cmd_reset(config, workspace=None, *, only=None, hard=False, dry_run=False, yes=False)` | Put each repo back on the ref its config names. Plain form moves HEAD and leaves the working tree, so nothing on disk is lost; `--hard` discards it too. No fetch; skips a repo that is not on the branch the config names |
+| `ow reset` | `cmd_reset(config, workspace=None, *, only=None, hard=False, fetch=False, dry_run=False, yes=False)` | Put each repo back on the ref it follows — its branch's upstream, or the base ref when there is none. Plain form moves HEAD and leaves the working tree, so nothing on disk is lost; `--hard` discards it too. No fetch unless `-f`; skips a repo that is not on the branch the config names |
 | `ow prune` | `cmd_prune(config)` | Clean up stale worktree references, orphaned branches, dead index entries |
 | `ow rm` | `cmd_rm(name, *, yes=False)` | Remove a workspace: worktrees, local branches, directory, index entry |
 | `ow templates` | `cmd_templates(take=None, show_diff=False)` | List template files with their state, take one, or diff the stale ones |

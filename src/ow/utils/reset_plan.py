@@ -1,7 +1,8 @@
 """The reset decision table, as a pure function.
 
-`ow reset` puts every repo of a workspace back on the ref its config
-names, `git reset` style: the plain form moves the branch and leaves the
+`ow reset` puts every repo of a workspace back on the ref it follows —
+its branch's upstream, or the base ref it was cut from when there is no
+upstream. `git reset` style: the plain form moves HEAD and leaves the
 working tree exactly as it is, so nothing on disk is lost; `--hard`
 discards the working tree too. Untracked files are never touched, for the
 same reason `git reset --hard` does not touch them.
@@ -20,7 +21,7 @@ class ResetFacts:
     """Everything observed about one repo, before any decision is made."""
 
     alias: str
-    target: str  # the base ref the config names, resolved
+    target: str  # the ref this repo follows, resolved
     head: str | None = None  # HEAD's sha, None when it will not resolve
     target_sha: str | None = None
     drift: str | None = None  # why the worktree disagrees with the config

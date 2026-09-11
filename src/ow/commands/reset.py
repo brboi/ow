@@ -12,9 +12,11 @@ from ow.utils.git import (
     count_commits,
     count_unbacked_commits,
     dirty_files,
+    get_upstream,
     git,
     in_progress_operation,
     parallel_per_repo,
+    resolve_spec,
     rev_parse,
 )
 from ow.utils.refs import fetch_workspace_refs
@@ -156,28 +158,36 @@ def cmd_reset(
     *,
     only: str | None = None,
     hard: bool = False,
+    fetch: bool = False,
     dry_run: bool = False,
     yes: bool = False,
 ) -> None:
-    """Put the repos of a workspace back on the refs their config names.
+    """Put the repos of a workspace back on the refs they follow.
 
-    `git reset`, one repo at a time. The plain form moves HEAD and leaves
-    the working tree untouched, so the content of the dropped commits is
-    still on disk as unstaged changes and nothing is lost; `--hard`
-    discards the working tree as well. Untracked files are never touched.
+    `git reset`, one repo at a time, onto the ref `git reset @{u}` would
+    have used: the branch's upstream when it has one, the base ref it was
+    cut from otherwise. Resetting an attached branch onto its base would
+    throw the whole branch away, which is not what resetting a repo means.
 
-    No fetch: this resets to the refs already in the bare repos, the way
-    `git reset origin/master` does. Run `ow pull` first for the latest.
+    The plain form moves HEAD and leaves the working tree untouched, so
+    the content of the dropped commits is still on disk as unstaged
+    changes and nothing is lost; `--hard` discards the working tree as
+    well. Untracked files are never touched.
+
+    No fetch unless asked: this resets to the refs already in the bare
+    repos, the way `git reset origin/master` does. `--fetch` refreshes
+    them first, which is what an upstream that was force-pushed needs.
     """
     ws_dir, ws = resolve_workspace(name=workspace)
     aliases = select_aliases(list(ws.repos), only)
 
-    # --only must also narrow resolution, not just execution.
+    # --only must also narrow resolution and fetching, not just execution.
     selected_repos = {a: spec for a, spec in ws.repos.items() if a in aliases}
     selected_ws = WorkspaceConfig(repos=selected_repos, templates=ws.templates, vars=ws.vars)
 
     resolved = fetch_workspace_refs(
-        selected_ws, ws_dir, config, fetch=False, spinner_prefix="Checking",
+        selected_ws, ws_dir, config, fetch_upstreams=True,
+        resolve_fn=resolve_spec, spinner_prefix="Checking", fetch=fetch,
     )
 
     failed = False
@@ -190,12 +200,17 @@ def cmd_reset(
             failed = True
             continue
         if alias in resolved.failed:
-            err_console.print(
-                f"  Skipping {alias}: could not resolve refs locally", markup=False
-            )
+            reason = "fetch failed, refs are stale" if fetch else "could not resolve refs locally"
+            err_console.print(f"  Skipping {alias}: {reason}", markup=False)
             failed = True
             continue
-        target = resolved.tracks.get(alias, ws.repos[alias].base_ref)
+        # @{u} first: the branch's own remote copy is what a repo is reset
+        # to. get_upstream reads git's own config and needs no network, so
+        # it answers even when nothing was fetched; the resolved upstream
+        # covers a branch git is not tracking yet. A detached worktree has
+        # neither, and falls back to the base ref, which is its whole spec.
+        upstream = get_upstream(worktree) or resolved.upstreams.get(alias)
+        target = upstream or resolved.tracks.get(alias, ws.repos[alias].base_ref)
         tasks[alias] = (
             lambda w=worktree, a=alias, s=ws.repos[alias], t=target:
             gather_reset_facts(w, a, s, t)

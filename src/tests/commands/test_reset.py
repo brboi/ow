@@ -47,6 +47,9 @@ def _bare_repo(tmp_path: Path, alias: str = "community") -> Path:
     )
     _git(bare, "config", "user.email", "t@t")
     _git(bare, "config", "user.name", "T")
+    # `clone --bare` leaves no fetch refspec, so git does not recognise
+    # refs/remotes/* as remote branches. ow sets one; tests need it too.
+    _git(bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
     _git(bare, "update-ref", "refs/remotes/origin/master", "refs/heads/master")
     return bare
 
@@ -137,6 +140,52 @@ def test_hard_leaves_untracked_files_alone(tmp_path, capsys, xdg):
     cmd_reset(config, workspace=str(ws_dir), hard=True, yes=True)
 
     assert (worktree / "scratch.txt").read_text() == "mine"
+
+
+def test_a_branch_is_reset_to_its_upstream_not_to_its_base(tmp_path, capsys, xdg):
+    """The reported case: an upstream that was force-pushed. Resetting onto
+    the base ref instead would throw the whole branch away and leave the
+    working tree miles from HEAD."""
+    config, ws_dir, worktree = _workspace(tmp_path)
+    pushed = _commit(worktree, "C")
+    _git(worktree, "update-ref", "refs/remotes/origin/featA", pushed)
+    _git(worktree, "branch", "--set-upstream-to=origin/featA", "featA")
+    _commit(worktree, "D")
+
+    cmd_reset(config, workspace=str(ws_dir), hard=True, yes=True)
+
+    assert _git(worktree, "rev-parse", "HEAD") == pushed
+    assert "origin/featA" in capsys.readouterr().out
+
+
+def test_without_an_upstream_the_base_ref_is_what_it_falls_back_to(tmp_path, capsys, xdg):
+    """A branch nobody has pushed has no remote copy to go back to."""
+    config, ws_dir, worktree = _workspace(tmp_path)
+    base = _git(worktree, "rev-parse", "refs/remotes/origin/master")
+    _commit(worktree, "C")
+
+    cmd_reset(config, workspace=str(ws_dir), hard=True, yes=True)
+
+    assert _git(worktree, "rev-parse", "HEAD") == base
+
+
+def test_fetch_refreshes_the_ref_before_resetting(tmp_path, capsys, xdg):
+    """Without it, reset lands on whatever the last fetch cached — which is
+    not what a force-pushed upstream needs."""
+    config, ws_dir, worktree = _workspace(tmp_path)
+    src = tmp_path / "origin" / "community"
+    (src / "b.txt").write_text("b")
+    _git(src, "add", "-A")
+    _git(src, "commit", "-qm", "B")
+    moved = _git(src, "rev-parse", "HEAD")
+    stale = _git(worktree, "rev-parse", "HEAD")
+
+    cmd_reset(config, workspace=str(ws_dir), yes=True)
+    assert _git(worktree, "rev-parse", "HEAD") == stale
+
+    cmd_reset(config, workspace=str(ws_dir), fetch=True, yes=True)
+
+    assert _git(worktree, "rev-parse", "HEAD") == moved
 
 
 def test_a_detached_repo_is_put_back_on_its_base_ref(tmp_path, capsys, xdg):
