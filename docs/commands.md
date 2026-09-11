@@ -9,6 +9,7 @@
 | `ow status` | `[workspace]`, `-f/--fetch` | Show branch status with behind/ahead counts |
 | `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
 | `ow pull` | `[workspace]`, `--only`, `--dry-run` | Fetch and fast-forward repos in a workspace |
+| `ow reset` | `[workspace]`, `--only`, `--hard`, `--dry-run`, `-y/--yes` | Put repos back on the refs their config names |
 | `ow prune` | `--dry-run`, `-y/--yes` | Clean up stale worktree references, orphaned branches, and dead index entries |
 | `ow rm` | `<name>`, `-y/--yes` | Remove a workspace: worktrees, local branches, directory, and index entry |
 | `ow ls` | — | List every known workspace, its path, and its repos |
@@ -144,6 +145,41 @@ failed — moving onto the stale cached ref would look like success.
 
 On conflict during a replay, resolve, `git rebase --continue`, then re-run
 `ow pull --only <alias>`. Nothing is ever pushed.
+
+## `ow reset`
+
+Puts every repo back on the ref its config names — `git reset`, one repo at a
+time. Use it when a workspace has wandered and you want the configured state
+back.
+
+```sh
+ow reset                                   # every repo of the current workspace
+ow reset parrot --only enterprise          # one repo of a named workspace
+ow reset --hard                            # discard the working tree too
+ow reset --dry-run                         # print the plan, touch nothing
+```
+
+The two forms differ exactly as git's do:
+
+- `ow reset` moves HEAD and leaves the working tree alone. The commits are gone
+  from the branch, but their content is still on disk as unstaged changes —
+  **nothing on disk is lost**.
+- `ow reset --hard` discards the working tree as well. Untracked files are left
+  alone, exactly as `git reset --hard` leaves them; `git clean` is its own
+  command.
+
+No fetch: it resets to the refs already in the bare repos, the way
+`git reset origin/master` does. Run `ow pull` first if you want the latest.
+
+The summary counts what each repo loses before anything runs, and flags the
+commits no remote carries — the only ones a reset makes unrecoverable outside
+the reflog. The confirmation defaults to no; `-y/--yes` skips it.
+
+A repo is skipped, and the run exits non-zero, when a git operation is already
+in progress, when the worktree is missing, when its refs will not resolve
+locally, or when it is not on the branch the config names. That last one
+matters: resetting whatever else happens to be checked out would throw away
+work ow was never told about, and realigning is `ow apply`'s job.
 
 ## `ow prune`
 
