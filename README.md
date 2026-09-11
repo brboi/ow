@@ -46,6 +46,7 @@ mkdir my_work && cd my_work
 ow init                            # interactive form: templates, repos, branch specs
 mise install
 code .                             # open in your IDE and enjoy
+ow                                 # launch the interactive dashboard
 ```
 
 On first use, `ow` writes a commented default config to `~/.config/ow/config.toml` — edit it to
@@ -54,6 +55,7 @@ point at your Odoo remotes. See [Configuration](docs/configuration.md) for the f
 ## Documentation
 
 - [Commands](docs/commands.md) — full command reference with flags and workspace resolution
+- [Interactive Dashboard](docs/commands.md#interactive-dashboard) — TUI for managing workspaces without memorising flags
 - [Configuration](docs/configuration.md) — XDG paths, remotes, variables, branch spec syntax
 - [Template System](docs/templates.md) — bundles, overrides, context keys, custom bundles
 - [Services](docs/services.md) — Docker Compose stack (postgres, pgweb, mailpit)

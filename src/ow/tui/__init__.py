@@ -1,4 +1,2 @@
-"""ow's Textual TUI.
-
-Phase 3 will add ``run_dashboard`` here.
-"""
+"""Textual-based TUI dashboard for ow."""
+from ow.tui.dashboard import run_dashboard

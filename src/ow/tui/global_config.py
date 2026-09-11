@@ -550,6 +550,7 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
             remotes=dict(self._remotes),
             version=self._config.version,
             editor=editor,
+            theme=self._config.theme,
         ))
 
     def action_save(self) -> None:

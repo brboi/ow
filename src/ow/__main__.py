@@ -63,7 +63,9 @@ def callback(
         help="Show version and exit.",
     ),
 ) -> None:
-    """Odoo workspace manager."""
+    """Odoo workspace manager.
+
+    Run without a subcommand to launch the interactive dashboard."""
     if ctx.invoked_subcommand is not None:
         return
     if not (sys.stdin.isatty() and sys.stdout.isatty()):

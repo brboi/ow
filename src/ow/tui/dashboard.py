@@ -121,6 +121,8 @@ class HelpScreen(ModalScreen[None]):
             "  f            Fetch + status\n"
             "  a            Apply\n"
             "  R            Rebase\n"
+            "  P            Pull\n"
+            "  r            Reset\n"
             "  p            Prune\n"
             "\n"
             "[bold]Workspace management[/]\n"
@@ -174,6 +176,8 @@ class MainScreen(Screen):
         Binding("f", "fetch_status", "Fetch+status", show=True),
         Binding("a", "apply", "Apply", show=True),
         Binding("R", "rebase", "Rebase", show=True),
+        Binding("P", "pull", "Pull", show=True),
+        Binding("r", "reset", "Reset", show=True),
         Binding("n", "new_workspace", "New", show=True),
         Binding("e", "edit_config", "Edit", show=True),
         Binding("E", "edit_global_config", "Global", show=True),
@@ -701,6 +705,48 @@ class MainScreen(Screen):
             ),
         )
 
+    # ---- pull (§4.3b) --------------------------------------------------
+
+    def action_pull(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self.notify("No workspace selected", severity="warning")
+            return
+        if entry.archived:
+            self.notify("Cannot pull archived workspace", severity="warning")
+            return
+        if entry.ws is None:
+            self.notify("Workspace config not loaded", severity="warning")
+            return
+        from ow.commands.pull import cmd_pull
+        self.run_operation(
+            f"pull {entry.name}",
+            lambda: cmd_pull(self._config, workspace=str(entry.path)),
+            invalidate=entry.path,
+        )
+
+    # ---- reset (§4.3c) -------------------------------------------------
+
+    def action_reset(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self.notify("No workspace selected", severity="warning")
+            return
+        if entry.archived:
+            self.notify("Cannot reset archived workspace", severity="warning")
+            return
+        if entry.ws is None:
+            self.notify("Workspace config not loaded", severity="warning")
+            return
+        from ow.commands.reset import cmd_reset
+        self.run_operation(
+            f"reset {entry.name}",
+            lambda: cmd_reset(
+                self._config, workspace=str(entry.path), yes=True,
+            ),
+            invalidate=entry.path,
+        )
+
     # ---- prune (§4.4) --------------------------------------------------
 
     def action_prune(self) -> None:
@@ -1200,7 +1246,10 @@ class DashboardApp(App[None]):
         try:
             self.theme = self._config.theme
         except Exception:
-            pass  # Invalid theme, keep default
+            self.notify(
+                f"Theme '{self._config.theme}' is not available, using default.",
+                severity="warning",
+            )
         self.push_screen(MainScreen(self._config))
 
     def action_cancel(self) -> None:

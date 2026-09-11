@@ -84,6 +84,7 @@ AGENTS.md
 
 | Command | Signature | Purpose |
 |---------|-----------|---------|
+| `ow (bare)` | `run_dashboard(config)` | Launches the interactive dashboard (TTY only) |
 | `ow init` | `cmd_init(config, name=None, templates=None, repos=None, configuration=None)` | Create a workspace in the current directory, or in `./NAME` — interactive form, or flags-only when stdin isn't a terminal |
 | `ow apply` | `cmd_apply(config, workspace=None, *, only=None)` | Materialize worktrees + re-render templates |
 | `ow status` | `cmd_status(config, workspace=None)` | Show workspace branch status |
@@ -101,6 +102,22 @@ target workspace via `resolve_workspace(workspace)` — an explicit path or name
 `OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml`. `init` resolves its target
 directory itself (current directory, or `./NAME`), since the workspace doesn't exist yet. `rm`
 resolves its target by name only (via the index), since it removes a known workspace.
+
+## TUI Dashboard
+
+`ow` without a subcommand launches a Textual-based TUI when run in a terminal.
+The TUI lives in `src/ow/tui/`:
+- `dashboard.py` — MainScreen, HelpScreen, ThemeSelectorScreen, run_dashboard()
+- `runner.py` — TuiSink, OutputSink protocol bridge
+- `widgets.py` — ConfirmDialog, OperationLog, WorkspaceDetail, LabeledInput
+- `workspace_forms.py` — NewWorkspaceScreen, WorkspaceConfigScreen, PromptScreen, VarsEditor
+- `global_config.py` — GlobalConfigScreen, AddRemoteScreen
+
+`src/ow/utils/status.py` holds shared status data (RepoStatus, WorkspaceStatus, gather_workspace_status)
+used by both CLI `ow status` and the TUI dashboard.
+
+`src/ow/utils/display.py` provides OutputSink/redirect_output for capturing command output
+into the TUI's log pane.
 
 ## Template system
 

@@ -49,6 +49,18 @@ db_password = "odoo"
 
 Templates use `{{ vars.key | default(fallback) }}` so undefined variables get safe defaults.
 
+## Editor and theme
+
+```toml
+editor = "code"
+theme = "textual-dark"
+```
+
+`editor` is the command `ow open` runs (may include flags, e.g. `"code -n"`). `theme` is
+the dashboard's Textual theme — press `t` in the dashboard to pick one interactively, or
+set it by hand. Any theme name Textual ships is accepted; an unknown name is silently
+ignored and the default is used.
+
 ## Branch Spec Syntax
 
 | Spec | Worktree mode |

@@ -64,6 +64,57 @@ orphans — remove them manually if stale.
 Like `ow init` and `ow rebase`, `ow apply` exits non-zero when any repo failed, even though
 everything else — templates, vars, the repos that worked — is applied.
 
+## Interactive Dashboard
+
+Running `ow` without a subcommand in a terminal launches the interactive dashboard — a
+two-pane TUI for managing workspaces without memorising flags. In a non-TTY environment
+(scripts, pipes) it prints help and exits 2, so `ow` without arguments is safe to type
+anywhere.
+
+The left pane lists every known workspace (active, then archived, separated); the right
+pane shows the highlighted workspace's config and, once status has been gathered, a
+per-repo table with behind/ahead counts, drift warnings, and links. A log pane at the
+bottom captures every operation's output.
+
+### Key bindings
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Move up/down in the workspace list |
+| `tab` / `shift+tab` | Cycle focus between list, detail, and log |
+| `enter` | Focus the detail pane |
+| `s` | Status (local — no fetch) |
+| `f` | Fetch + status |
+| `a` | Apply |
+| `R` | Rebase |
+| `P` | Pull |
+| `r` | Reset |
+| `p` | Prune |
+| `n` | New workspace |
+| `e` | Edit workspace config |
+| `E` | Edit global config |
+| `o` | Open in editor |
+| `m` | Move workspace |
+| `A` | Archive / unarchive |
+| `x` | Remove workspace |
+| `t` | Select theme |
+| `ctrl+r` | Reload workspace list |
+| `ctrl+l` | Clear log |
+| `ctrl+c` | Cancel running operation, or quit if idle |
+| `?` | Help screen |
+| `q` | Quit |
+
+Operations that touch worktrees run on a worker thread; the log pane shows their output
+in real time and a progress row appears for multi-step operations. `ctrl+c` cancels the
+running operation (killing child git processes) without exiting the dashboard; pressed
+again when idle, it quits.
+
+### Theme
+
+Press `t` to open the theme picker — a modal listing every built-in Textual theme. The
+selection is applied immediately and persisted to `theme` in the global config, so it
+survives across sessions. See [Configuration](configuration.md) for the config field.
+
 ## `ow status`
 
 Shows local branch status with behind/ahead counts — no network by default, like `git status`:
