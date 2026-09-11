@@ -453,14 +453,8 @@ class VarsEditor(Vertical):
                 return
             table = self.query_one("#vars_table", DataTable)
             try:
-                # Rebuild the row with the new value
-                other_col = 1 - col_idx
-                other_val = str(table.get_cell_at(row_idx, other_col))
-                table.remove_row(row_key)
-                if col_idx == 0:
-                    table.add_row(result, other_val)
-                else:
-                    table.add_row(other_val, result)
+                # Update cell in-place — preserves row position and cursor
+                table.update_cell(row_key, table.columns[col_idx].key, result)
             except Exception:
                 pass
         self.app.call_later(_prompt)
@@ -481,6 +475,10 @@ def _parse_value(text: str) -> Any:
     if not text:
         return ""
     try:
-        return tomllib.loads(f"_ = {text}")["_"]
+        value = tomllib.loads(f"_ = {text}")["_"]
+        # Restrict to scalar types only — dates, arrays, tables corrupt config
+        if isinstance(value, (str, int, float, bool)):
+            return value
     except Exception:
-        return text
+        pass
+    return text

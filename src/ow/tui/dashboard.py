@@ -213,7 +213,7 @@ class MainScreen(Screen):
             yield WorkspaceDetail(id="detail")
             yield Static(
                 "[dim]No workspaces found[/]\n\n"
-                "Press [bold]n[/] to create one, or [bold]Ctrl+R[/] to reload.",
+                "Press [bold]n[/] to create one, [bold]Ctrl+R[/] to reload, or [bold]?[/] for help.",
                 id="empty_state",
             )
         with Vertical(id="bottom"):
@@ -541,22 +541,26 @@ class MainScreen(Screen):
         try:
             log = self.query_one("#log", OperationLog)
             if not quiet:
-                if exit_code is not None:
+                # Fix #2: exit_code=0 is success, not failure
+                if exit_code is not None and exit_code != 0:
                     log.write(f"{label}: failed (exit {exit_code})")
                 else:
                     log.write(f"{label}: done")
         except Exception as e:
             import sys
             print(f"Warning: _finish log write failed: {e}", file=sys.stderr)
-        if invalidate is not None:
-            self._status_cache.pop(invalidate, None)
-        if exit_code is None and then is not None:
-            then(result)
-        if reload:
-            self.reload_workspaces()
-        self._busy = False
-        self._hide_progress_row()
-        self.run_operation_worker = None
+        try:
+            if invalidate is not None:
+                self._status_cache.pop(invalidate, None)
+            # Fix #2: SystemExit(0) should also trigger then()
+            if exit_code in (None, 0) and then is not None:
+                then(result)
+            if reload:
+                self.reload_workspaces()
+        finally:
+            self._busy = False
+            self._hide_progress_row()
+            self.run_operation_worker = None
 
     def _log_header(self, label: str) -> None:
         try:
@@ -1272,6 +1276,7 @@ class DashboardApp(App[None]):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self._config = config
+        self.main_screen: MainScreen | None = None
 
     def on_mount(self) -> None:
         # Apply saved theme
@@ -1282,21 +1287,27 @@ class DashboardApp(App[None]):
                 f"Theme '{self._config.theme}' is not available, using default.",
                 severity="warning",
             )
-        self.push_screen(MainScreen(self._config))
+        self.main_screen = MainScreen(self._config)
+        self.push_screen(self.main_screen)
 
     def action_cancel(self) -> None:
-        # Find MainScreen in the stack (it may not be the top screen)
-        for screen in self._screen_stack:
-            if isinstance(screen, MainScreen) and screen._busy:
-                from ow.utils.git import terminate_children
-                terminate_children()
-                if screen.run_operation_worker is not None:
-                    screen.run_operation_worker.cancel()
-                return
-        # No busy MainScreen found — dismiss top modal or exit
+        # Check explicit MainScreen reference (no private API)
+        if self.main_screen is not None and self.main_screen._busy:
+            from ow.utils.git import terminate_children
+            terminate_children()
+            if self.main_screen.run_operation_worker is not None:
+                self.main_screen.run_operation_worker.cancel()
+            return
+        # No busy MainScreen — dismiss top modal or confirm quit
         top = self.screen
         if isinstance(top, ModalScreen):
             top.dismiss(None)
+        elif self.main_screen is not None and not self.main_screen._busy:
+            # Confirm before quitting
+            self.push_screen(
+                ConfirmDialog("Quit the dashboard?"),
+                callback=lambda ok: ok and self.exit(),
+            )
         else:
             self.exit()
 
