@@ -6,6 +6,7 @@ reaches ow's prompt and prints the answer back on stdout.
 
 import os
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -96,6 +97,21 @@ def test_the_broker_leaves_nothing_behind(tty):
     assert askpass.child_env() == {}
     assert not socket_path.exists()
     assert not socket_path.parent.exists()
+
+
+def test_the_broker_leaves_no_thread_behind(tty):
+    """A thread parked in accept() would make the whole process
+    multi-threaded for good, and os.fork() in a multi-threaded process is
+    exactly what Python warns about. Closing the socket does not reliably
+    wake accept(), so the broker has to wake it deliberately."""
+    tty(True)
+    before = threading.active_count()
+
+    with patch("ow.utils.askpass._ask", return_value="x"):
+        with askpass.broker():
+            _ask_via_shim(askpass.child_env(), "passphrase:")
+
+    assert threading.active_count() == before
 
 
 def test_the_shim_fails_quietly_when_no_broker_is_listening(tty):
