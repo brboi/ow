@@ -294,3 +294,69 @@ def test_theme_escape_reverts_without_writing(dashboard_pilot):
             )
 
     asyncio.run(_run())
+
+
+def test_command_palette_reflects_previewed_theme(dashboard_pilot):
+    """Regression test: when the user arrows through themes in the command
+    palette, the palette's own background must change to reflect the
+    previewed theme's design tokens.
+
+    Textual's refresh_css() doesn't re-resolve CSS variables on the current
+    screen (only on other screens in the stack). The CommandPalette uses
+    design tokens ($panel-darken-1) that must be re-resolved when the theme
+    changes. The fix schedules a stylesheet.update on the palette after the
+    theme change.
+    """
+    from textual.command import CommandPalette
+    from textual.containers import Vertical
+
+    write_global_config(_theme_test_config())
+    config = load_global_config()
+    assert config.theme == "textual-dark"
+
+    async def _run():
+        async with dashboard_pilot(config) as (pilot, screen):
+            assert pilot.app.theme == "textual-dark"
+
+            # Open the theme command palette
+            pilot.app.search_themes()
+            await pilot.pause()
+            await pilot.pause()
+
+            palette = pilot.app.screen
+            assert isinstance(palette, CommandPalette)
+
+            vertical = palette.query_one(Vertical)
+            bg_before = vertical.styles.background
+
+            # Arrow down to preview a different theme
+            await pilot.press("down")
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause()
+            await pilot.pause()
+
+            # The theme should have changed
+            assert pilot.app.theme != "textual-dark", (
+                "theme did not change on highlight — preview is broken"
+            )
+
+            # The palette's background should have changed to match the
+            # previewed theme's panel-darken-1 token
+            bg_after = vertical.styles.background
+            assert bg_before != bg_after, (
+                "palette background did not change when theme was previewed — "
+                "the stylesheet.update fix is not working"
+            )
+
+            # Verify the background matches the previewed theme's token
+            expected_vars = pilot.app.get_css_variables()
+            expected_panel = expected_vars.get("panel-darken-1")
+            if expected_panel and expected_panel != "transparent":
+                assert bg_after.hex == expected_panel, (
+                    f"palette background {bg_after.hex} does not match "
+                    f"expected panel-darken-1 {expected_panel} for theme {pilot.app.theme}"
+                )
+
+    asyncio.run(_run())

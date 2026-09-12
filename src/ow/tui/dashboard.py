@@ -1319,6 +1319,18 @@ class DashboardApp(App[None]):
             if theme_name is not None:
                 self._theme_previewing = True
                 self.theme = theme_name
+                # Textual's refresh_css() doesn't re-resolve CSS variables on
+                # the *current* screen (only on other screens in the stack).
+                # The CommandPalette uses design tokens ($surface, $panel-darken-1)
+                # that must be re-resolved when the theme changes, otherwise the
+                # palette's own colors don't reflect the previewed theme.
+                # Schedule the stylesheet update via call_next to ensure it runs
+                # AFTER refresh_css (which is also scheduled via call_next).
+                def _update_palette_styles() -> None:
+                    palette = self.screen
+                    if isinstance(palette, CommandPalette):
+                        self.stylesheet.update(palette, animate=False)
+                self.call_next(_update_palette_styles)
         else:
             self._theme_previewing = False
 
