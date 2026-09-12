@@ -114,7 +114,7 @@ def fetch_workspace_refs(
         jobs: list[_FetchJob] = []
 
         resolved_track = resolve_fn(bare_repo_path, track_spec, alias_remotes)
-        refspec = f"{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"
+        refspec = f"+{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"
         jobs.append(_FetchJob(bare_repo, resolved_track.remote, refspec))
 
         resolved_spec = resolve_fn(bare_repo_path, spec, alias_remotes)
@@ -123,7 +123,7 @@ def fetch_workspace_refs(
         upstream_before = None
         if fetch_upstreams and not spec.is_detached:
             if resolved_spec.base_ref != resolved_track.base_ref:
-                full_refspec = f"{resolved_spec.branch}:refs/remotes/{resolved_spec.remote}/{resolved_spec.branch}"
+                full_refspec = f"+{resolved_spec.branch}:refs/remotes/{resolved_spec.remote}/{resolved_spec.branch}"
                 jobs.append(_FetchJob(bare_repo, resolved_spec.remote, full_refspec, force=True))
                 upstream_ref = resolved_spec.base_ref
                 # Read before phase 2 rewrites the ref — this is the only
@@ -136,7 +136,7 @@ def fetch_workspace_refs(
                     if len(parts) == 2:
                         already_fetched = (parts[0] == resolved_track.remote and parts[1] == resolved_track.branch)
                         if not already_fetched:
-                            upstream_refspec = f"{parts[1]}:refs/remotes/{upstream}"
+                            upstream_refspec = f"+{parts[1]}:refs/remotes/{upstream}"
                             jobs.append(_FetchJob(bare_repo, parts[0], upstream_refspec))
 
         return _ResolveResult(

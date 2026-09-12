@@ -177,3 +177,54 @@ def test_startup_with_theme_in_config_does_not_rewrite_file(dashboard_pilot):
     assert mtime_after == mtime_before, (
         "startup rewrote the config file even though the theme was already saved"
     )
+
+
+def test_theme_previews_on_highlight_in_command_palette(dashboard_pilot):
+    """Regression test: Ctrl+P → "theme" → arrow down must change app.theme
+    live (preview on highlight), and the last-highlighted theme must persist
+    to the global config file after Enter commits it.
+
+    Verifies the fix for the live-preview feature.
+    """
+    from ow.utils import paths
+
+    write_global_config(_theme_test_config())
+    config = load_global_config()
+    assert config.theme == "textual-dark"
+
+    async def _run():
+        async with dashboard_pilot(config) as (pilot, screen):
+            assert pilot.app.theme == "textual-dark"
+
+            # Open the theme-specific command palette
+            pilot.app.search_themes()
+            await pilot.pause()
+
+            # It opens a CommandPalette as the active screen; arrow down
+            # to highlight "nord" (index 2 in sorted order — after
+            # "ansi-dark" and "ansi-light").
+            await pilot.press("down")
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause()
+
+            # The preview handler should have run: app.theme should now
+            # match the highlighted theme.
+            assert pilot.app.theme != "textual-dark", (
+                "theme did not change on highlight — preview is broken"
+            )
+
+            # Press Enter to commit the selection
+            await pilot.press("enter")
+            await pilot.pause()
+
+            # The final committed theme is whatever the user picked; verify
+            # it persisted to disk. (Config may have been written on every
+            # highlight — that's fine; the final state is correct.)
+            committed = pilot.app.theme
+            reloaded = load_global_config()
+            assert reloaded.theme == committed, (
+                f"theme '{committed}' did not persist to disk after commit"
+            )
+
+    asyncio.run(_run())

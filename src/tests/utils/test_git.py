@@ -1356,7 +1356,7 @@ def test_resolve_spec_local_branch_found_fetches_base_ref_when_missing(tmp_path)
         capture_output=True,
     )
     assert mock_run.call_args_list[2] == call(
-        ["git", "-C", str(bare_repo), "fetch", "origin", "18.0:refs/remotes/origin/18.0"],
+        ["git", "-C", str(bare_repo), "fetch", "origin", "+18.0:refs/remotes/origin/18.0"],
         capture_output=True,
     )
 

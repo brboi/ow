@@ -293,8 +293,8 @@ class TestFetchJobShape:
             fetch_upstreams=True, resolve_fn=fake_resolve,
         )
 
-        upstream_call = [c for c in calls if "work:refs/remotes/dev/work" in c]
-        track_call = [c for c in calls if "master:refs/remotes/origin/master" in c]
+        upstream_call = [c for c in calls if "+work:refs/remotes/dev/work" in c]
+        track_call = [c for c in calls if "+master:refs/remotes/origin/master" in c]
         assert len(upstream_call) == 1 and "-f" in upstream_call[0]
         assert len(track_call) == 1 and "-f" not in track_call[0]
 
@@ -457,3 +457,106 @@ class TestNoFetch:
         for argv in called:
             assert "fetch" not in argv[0]
         assert outcome.specs["community"].base_ref == "origin/master"
+
+class TestForcePushFetch:
+    """Regression test: fetch must succeed after a remote force-push.
+
+    When a remote branch is force-pushed (reset to different history), the
+    fetch refspec must have the `+` force prefix, otherwise git rejects the
+    update as non-fast-forward. This test reproduces the bug: create a bare
+    repo, fetch a branch, force-push the branch in the source, then fetch
+    again. Without `+` in the refspec, the second fetch fails.
+    """
+
+    def test_fetch_succeeds_after_force_push(self, tmp_path, xdg):
+        """A force-pushed branch must be fetchable into the bare repo."""
+        from ow.utils.git import _run
+        from ow.utils.config import BranchSpec, Config, WorkspaceConfig, RemoteConfig
+        from ow.utils import refs as refs_mod, paths
+
+        # Create a "source" repo (simulates the remote on GitHub)
+        source = tmp_path / "source.git"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "master"], cwd=source, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=source, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=source, check=True)
+
+        # Create initial commit on master
+        (source / "a.txt").write_text("a")
+        subprocess.run(["git", "add", "a.txt"], cwd=source, check=True)
+        subprocess.run(["git", "commit", "-qm", "A"], cwd=source, check=True)
+
+        # Create a feature branch with two commits
+        subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=source, check=True)
+        (source / "b.txt").write_text("b1")
+        subprocess.run(["git", "add", "b.txt"], cwd=source, check=True)
+        subprocess.run(["git", "commit", "-qm", "B1"], cwd=source, check=True)
+        sha_b1 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=source, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        (source / "c.txt").write_text("c")
+        subprocess.run(["git", "add", "c.txt"], cwd=source, check=True)
+        subprocess.run(["git", "commit", "-qm", "C"], cwd=source, check=True)
+        sha_c = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=source, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # Create the bare repo (simulates ow's bare repo)
+        bare_repo = paths.repos_dir() / "community.git"
+        bare_repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "--bare", "-q"], cwd=bare_repo, check=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(source)], cwd=bare_repo, check=True
+        )
+
+        # Fetch the feature branch (creates refs/remotes/origin/feature)
+        result = subprocess.run(
+            ["git", "fetch", "origin", "+feature:refs/remotes/origin/feature"],
+            cwd=bare_repo, capture_output=True,
+        )
+        assert result.returncode == 0, f"Initial fetch failed: {result.stderr.decode()}"
+
+        # Verify the ref exists
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "refs/remotes/origin/feature"],
+            cwd=bare_repo, capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        sha_before = result.stdout.strip()
+        assert sha_before == sha_c
+
+        # Force-push: reset the feature branch to an earlier commit (B1 only, no C)
+        subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=source, check=True)
+        sha_after_reset = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=source, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # Now try to fetch again — this is where the bug manifests.
+        # Without `+` in the refspec, git rejects the update as non-fast-forward.
+        # With `+`, it succeeds.
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        (ws_dir / "community").mkdir()
+
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/feature")}, templates=[])
+        config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(source))}})
+
+        # Call fetch_workspace_refs — it should succeed even after the force-push
+        outcome = refs_mod.fetch_workspace_refs(ws, ws_dir, config, fetch=True)
+
+        # The fetch should have succeeded (no failure)
+        assert "community" not in outcome.failed, f"Fetch failed: {outcome.failed}"
+
+        # Verify the remote-tracking ref was updated to the new (force-pushed) history
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "refs/remotes/origin/feature"],
+            cwd=bare_repo, capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        sha_after_fetch = result.stdout.strip()
+
+        # The ref should now point to the reset commit (B1), not the old one (C)
+        assert sha_after_fetch != sha_before, "Ref was not updated after force-push fetch"
+        # It should match the reset commit
+        assert sha_after_fetch.startswith(sha_after_reset[:7]) or sha_after_reset.startswith(sha_after_fetch[:7])

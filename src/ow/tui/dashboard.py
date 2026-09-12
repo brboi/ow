@@ -6,12 +6,14 @@ import tomllib
 import shlex
 import subprocess
 from pathlib import Path
+import functools
 from typing import Any, Callable, Optional
 from rich.text import Text
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import CommandPalette
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
@@ -1276,6 +1278,29 @@ class DashboardApp(App[None]):
             write_global_config(self._config)
         except Exception as exc:
             self.notify(f"Failed to save theme: {exc}", severity="error")
+
+    def on_command_palette_option_highlighted(
+        self, event: CommandPalette.OptionHighlighted
+    ) -> None:
+        """Preview the highlighted theme live in the command palette.
+
+        Textual's built-in command palette (Ctrl+P → "theme") shows a list
+        of themes. When the user arrows through the list, every highlight
+        change fires OptionHighlighted on the CommandPalette, which reposts
+        as CommandPalette.OptionHighlighted to the App.
+
+        ThemeProvider sets each theme option's ``.hit.command`` to
+        ``functools.partial(set_app_theme, <theme_name>)``. Non-theme
+        commands (system commands, user providers) use plain callables.
+        Guard by checking for a ``functools.partial`` wrapping the
+        ``set_app_theme`` closure — only those are theme previews.
+        """
+        option = event.highlighted_event.option
+        if option is None or option.hit is None:
+            return
+        callable_ = option.hit.command
+        if isinstance(callable_, functools.partial) and callable_.func.__name__ == "set_app_theme":
+            callable_()
 
 
 def run_dashboard(config: Config) -> None:

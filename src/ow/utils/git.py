@@ -391,7 +391,7 @@ def _ensure_base_ref_non_fatal(bare_repo: Path, spec: BranchSpec) -> None:
     ).returncode != 0:
         _run(
             ["git", "-C", str(bare_repo), "fetch", spec.remote,
-             f"{spec.branch}:refs/remotes/{spec.remote}/{spec.branch}"],
+             f"+{spec.branch}:refs/remotes/{spec.remote}/{spec.branch}"],
             capture_output=True,
         )
 
@@ -421,7 +421,7 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
                 return BranchSpec(f"{remote}/{spec.local_branch}", spec.local_branch)
             result = _run(
                 ["git", "-C", str(bare_repo), "fetch", remote,
-                 f"{spec.local_branch}:refs/remotes/{remote}/{spec.local_branch}"],
+                 f"+{spec.local_branch}:refs/remotes/{remote}/{spec.local_branch}"],
                 capture_output=True,
             )
             if result.returncode == 0:
@@ -439,7 +439,7 @@ def resolve_spec(bare_repo: Path, spec: BranchSpec, alias_remotes: dict[str, Rem
             return BranchSpec(f"{remote}/{spec.branch}", spec.local_branch)
         result = _run(
             ["git", "-C", str(bare_repo), "fetch", remote,
-             f"{spec.branch}:refs/remotes/{remote}/{spec.branch}"],
+             f"+{spec.branch}:refs/remotes/{remote}/{spec.branch}"],
             capture_output=True,
         )
         if result.returncode == 0:
