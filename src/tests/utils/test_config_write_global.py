@@ -169,3 +169,34 @@ class TestRoundTrip:
                 assert got.url == orig.url
                 assert got.pushurl == orig.pushurl
                 assert got.fetch == orig.fetch
+
+
+# ---------------------------------------------------------------------------
+# Theme
+# ---------------------------------------------------------------------------
+
+
+class TestTheme:
+    def test_theme_survives_write_load_round_trip(self, default_config_path):
+        """The dashboard's theme picker sets `Config.theme` and calls
+        `write_global_config`; the next launch reads it back via
+        `load_global_config`. Both ends of that round trip must agree,
+        or a selected theme silently reverts to the default on restart."""
+        cfg = load_global_config()
+        assert cfg.theme == "textual-dark"
+
+        cfg.theme = "dracula"
+        write_global_config(cfg)
+
+        reloaded = load_global_config()
+        assert reloaded.theme == "dracula"
+
+    def test_theme_key_appears_in_written_file(self, default_config_path):
+        """The written config.toml must contain the new theme as a real
+        (uncommented) key, not just in the in-memory Config."""
+        cfg = load_global_config()
+        cfg.theme = "nord"
+        write_global_config(cfg)
+
+        text = default_config_path.read_text(encoding="utf-8")
+        assert "\ntheme = \"nord\"" in text

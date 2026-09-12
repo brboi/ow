@@ -11,6 +11,7 @@ section's content.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -18,9 +19,48 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, OptionList, Static
 
-from ow.utils.config import Config, RemoteConfig
-from ow.tui.widgets import LabeledInput
+from ow.utils import index
+from ow.utils.config import Config, RemoteConfig, load_workspace_config
+from ow.tui.widgets import ConfirmDialog, LabeledInput
 from ow.tui.workspace_forms import VarsEditor
+
+# The per-workspace config marker, relative to a workspace directory.
+_WS_MARKER = Path(".ow") / "config.toml"
+
+
+def _known_workspace_configs() -> list[tuple[str, "WorkspaceConfig"]]:
+    """Every known workspace's name + config, skipping ones that fail to load.
+
+    Used to answer "is this remote alias / var key actually in use anywhere"
+    before letting the user delete it — a workspace with a bad or missing
+    config must not crash that check, it just doesn't count as a user.
+    """
+    out: list[tuple[str, "WorkspaceConfig"]] = []
+    for ws_dir in index.known_workspaces():
+        try:
+            ws = load_workspace_config(ws_dir / _WS_MARKER)
+        except Exception:
+            continue
+        out.append((ws_dir.name, ws))
+    return out
+
+
+def _describe_usage(names: list[str]) -> str:
+    if not names:
+        return "Not used by any workspace."
+    return f"Used by {len(names)} workspace(s): {', '.join(sorted(names))}"
+
+
+def _describe_remote_usage(alias: str) -> str:
+    """Which known workspaces declare a repo under this remote alias."""
+    names = [name for name, ws in _known_workspace_configs() if alias in ws.repos]
+    return _describe_usage(names)
+
+
+def _describe_var_usage(key: str) -> str:
+    """Which known workspaces override this var key in their own vars."""
+    names = [name for name, ws in _known_workspace_configs() if key in ws.vars]
+    return _describe_usage(names)
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +239,7 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
 
     /* ---- header bar ---- */
     GlobalConfigScreen #gc_header {
-        height: 3;
+        height: 4;
         padding: 0 2;
         background: $primary-background;
         border-bottom: solid $primary;
@@ -326,7 +366,11 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
                     # Vars section
                     yield Vertical(
                         Static("Variables", classes="section-heading"),
-                        VarsEditor(self._config.vars, id="gc_vars"),
+                        VarsEditor(
+                            self._config.vars,
+                            id="gc_vars",
+                            usage_describer=_describe_var_usage,
+                        ),
                         id="gc_panel_vars",
                         classes="section-container",
                     )
@@ -481,29 +525,32 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
     # Button handlers
     # ------------------------------------------------------------------
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
+    def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "btn_save":
             self._try_save()
         elif bid == "btn_cancel":
             self.dismiss(None)
         elif bid == "gc_remote_add":
-            await self._add_remote()
+            self._add_remote()
         elif bid == "gc_remote_remove":
             self._remove_remote()
 
-    async def _add_remote(self) -> None:
+    def _add_remote(self) -> None:
         """Open the single-form AddRemoteScreen."""
         # Apply any pending field edits before opening the form
         self._apply_field_edits()
         sel = self._selected_remote()
         default_alias = sel[0] if sel else ""
-        result = await self.app.push_screen_wait(
+        self.app.push_screen(
             AddRemoteScreen(
                 existing_aliases=list(self._remotes),
                 default_alias=default_alias,
-            )
+            ),
+            callback=self._on_remote_added,
         )
+
+    def _on_remote_added(self, result: AddRemoteRequest | None) -> None:
         if result is None:
             return
         # Add the remote to our working copy
@@ -526,18 +573,28 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
                 break
 
     def _remove_remote(self) -> None:
-        """Remove the selected remote from the working copy."""
+        """Confirm, then remove the selected remote from the working copy."""
         # Apply field edits first so we don't lose unsaved changes
         self._apply_field_edits()
         sel = self._selected_remote()
         if sel is None:
             return
         alias, name = sel
-        if alias in self._remotes:
-            self._remotes[alias].pop(name, None)
-            if not self._remotes[alias]:
-                del self._remotes[alias]
-        self._refresh_remotes_list()
+        usage = _describe_remote_usage(alias)
+
+        def _on_confirmed(ok: bool) -> None:
+            if not ok:
+                return
+            if alias in self._remotes:
+                self._remotes[alias].pop(name, None)
+                if not self._remotes[alias]:
+                    del self._remotes[alias]
+            self._refresh_remotes_list()
+
+        self.app.push_screen(
+            ConfirmDialog(f"Remove remote '{alias}/{name}'?", details=usage),
+            callback=_on_confirmed,
+        )
 
     # ------------------------------------------------------------------
     # Save

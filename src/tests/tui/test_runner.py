@@ -1,7 +1,14 @@
 """Tests for the output-sink bridge (runner.py).
 
-Builds a minimal DashboardApp stub with the widgets the sink drives,
-then exercises run_operation through the four failure/capture paths.
+Builds a minimal dashboard stub with the widgets the sink drives, then
+exercises run_operation through the four failure/capture paths.
+
+The stub mirrors the real dashboard's shape: `#log`, `#progress`,
+`#task_label` and `#task_bar` live on a *pushed* `Screen`, never on the
+App's own default screen. `App.query_one` only ever searches the
+default screen — using it once anything is pushed on top raises
+`NoMatches`. A stub that (wrongly) hosted these widgets directly on the
+App would hide exactly that bug, so it must not be used here.
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ from pathlib import Path
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.screen import Screen
 from textual.widgets import ProgressBar, Static
 
 from ow.tui.runner import TuiSink
@@ -27,11 +35,13 @@ from ow.utils.display import console
 # ---------------------------------------------------------------------------
 
 
-class _StubApp(App[None]):
-    """A bare-bones dashboard stand-in for the runner tests.
+class _StubScreen(Screen):
+    """A bare-bones MainScreen stand-in for the runner tests.
 
     Has the widgets the sink drives (#log, #progress, #task_label,
     #task_bar) and a `run_operation` that matches the plan's contract.
+    Everything the sink touches lives here, on the pushed screen — not
+    on the App — exactly as it does in the real dashboard.
     """
 
     CSS = """
@@ -83,7 +93,7 @@ class _StubApp(App[None]):
     ) -> None:
         log = self.query_one("#log", OperationLog)
         if not quiet:
-            self.call_from_thread(log.write, f"── {label} ──")
+            self.app.call_from_thread(log.write, f"── {label} ──")
         result: Any = None
         exit_code: int | None = None
         try:
@@ -95,10 +105,10 @@ class _StubApp(App[None]):
         except Exception as exc:
             if not quiet:
                 from rich.text import Text
-                self.call_from_thread(log.write, Text(repr(exc), style="red"))
+                self.app.call_from_thread(log.write, Text(repr(exc), style="red"))
             exit_code = 1
         finally:
-            self.call_from_thread(self._finish, label, exit_code, quiet, result, then)
+            self.app.call_from_thread(self._finish, label, exit_code, quiet, result, then)
 
     def _finish(
         self,
@@ -120,6 +130,29 @@ class _StubApp(App[None]):
         self.query_one("#progress", Horizontal).styles.display = "none"
 
 
+class _StubApp(App[None]):
+    """Pushes `_StubScreen` on mount — the App's own default screen stays
+    empty, matching how `DashboardApp` only ever hosts `MainScreen` (and
+    modals on top of it)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.main_screen: _StubScreen | None = None
+
+    def on_mount(self) -> None:
+        self.main_screen = _StubScreen()
+        self.push_screen(self.main_screen)
+
+    @property
+    def _busy(self) -> bool:
+        assert self.main_screen is not None
+        return self.main_screen._busy
+
+    def run_operation(self, *args: Any, **kwargs: Any) -> None:
+        assert self.main_screen is not None
+        self.main_screen.run_operation(*args, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -127,7 +160,8 @@ class _StubApp(App[None]):
 
 def _log_lines(app: _StubApp) -> list[str]:
     """Extract plain-text lines from the log widget."""
-    log = app.query_one("#log", OperationLog)
+    assert app.main_screen is not None
+    log = app.main_screen.query_one("#log", OperationLog)
     lines: list[str] = []
     for line in log.lines:
         lines.append(line.plain if hasattr(line, "plain") else str(line))
@@ -138,6 +172,7 @@ async def _run_app(fn_body: Callable[[_StubApp], None]) -> list[str]:
     """Start the stub, run fn_body, wait for workers, return log lines."""
     app = _StubApp()
     async with app.run_test() as pilot:
+        await pilot.pause()
         fn_body(app)
         # Give the thread worker time to finish.
         await pilot.pause()
@@ -224,3 +259,29 @@ def test_busy_refuses_second_operation():
     lines = asyncio.run(_run_app(body))
     # The second operation must NOT appear.
     assert not any("second" in line and "done" in line for line in lines), f"got: {lines}"
+
+
+def test_task_progress_completes_through_pushed_screen():
+    """A fn that opens a sink task (like apply/status/reset via
+    `task_progress`) must complete without `NoMatches`, driven through a
+    *pushed* screen — never through the App's own default screen.
+
+    This is the exact shape of the dashboard bug: TuiSink used to resolve
+    `#progress`/`#task_bar`/`#task_label`/`#log` via `App.query_one`, which
+    only searches the app's default screen. The moment any screen is
+    pushed on top (as `MainScreen` always is), that lookup raised
+    `NoMatches` and the whole operation was reported as failed.
+    """
+
+    def body(app: _StubApp) -> None:
+        def fn() -> str:
+            with display.task_progress("units", 2) as advance:
+                advance()
+                advance()
+            return "ok"
+        app.run_operation("task-op", fn)
+
+    lines = asyncio.run(_run_app(body))
+    assert any("task-op: done" in line for line in lines), f"got: {lines}"
+    assert not any("NoMatches" in line for line in lines), f"got: {lines}"
+    assert not any("failed" in line for line in lines), f"got: {lines}"

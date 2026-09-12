@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tomllib
 
 import shlex
@@ -507,7 +508,7 @@ class MainScreen(Screen):
         result: Any = None
         exit_code: int | None = None
         try:
-            sink = TuiSink(self.app)
+            sink = TuiSink(self)
             with redirect_output(sink):
                 result = fn()
         except SystemExit as exc:
@@ -1166,7 +1167,20 @@ class MainScreen(Screen):
     def _do_save_global_config(self, new_cfg: Config) -> None:
         from ow.utils.config import write_global_config
         write_global_config(new_cfg)
-        self._config = load_global_config()
+        # Mutate the shared Config object in place — never replace the
+        # reference. `self._config` here is the *same object* as
+        # `self.app._config` (passed by reference at construction); the
+        # theme picker ('t') mutates that shared object directly, on the
+        # App. Reassigning `self._config` to a freshly loaded object would
+        # make MainScreen's config diverge from the App's, so a later save
+        # from this screen would carry the App's *stale* pre-divergence
+        # theme value back over whatever the picker set afterwards.
+        reloaded = load_global_config()
+        self._config.vars = reloaded.vars
+        self._config.remotes = reloaded.remotes
+        self._config.version = reloaded.version
+        self._config.editor = reloaded.editor
+        self._config.theme = reloaded.theme
         log = self.query_one("#log", OperationLog)
         log.write("global config saved")
         self.notify("Global config saved", severity="information")
@@ -1249,11 +1263,28 @@ class ThemeSelectorScreen(ModalScreen[str | None]):
                 option_list.highlighted = i
                 break
 
+    def _confirm(self, theme_id: str | None) -> None:
+        """Apply and persist `theme_id` synchronously, right here, before
+        dismissing — on every confirm path (Apply button, Enter, double
+        click).
+
+        `push_screen(..., callback=...)`'s callback is not synchronous
+        with `dismiss()`: Textual schedules it via `call_next` and only
+        runs it once the *next* message on the requester's queue is
+        dispatched. Doing the work here instead removes that gap: the
+        write completes as part of the very same message that confirmed
+        the choice, not on a later, easily-raced-past callback.
+        """
+        if theme_id is None:
+            return
+        self.app.apply_theme(theme_id)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_apply":
             option_list = self.query_one("#theme_list", OptionList)
             if option_list.highlighted is not None:
                 selected = option_list.get_option_at_index(option_list.highlighted)
+                self._confirm(selected.id)
                 self.dismiss(selected.id)
             else:
                 self.dismiss(None)
@@ -1261,7 +1292,8 @@ class ThemeSelectorScreen(ModalScreen[str | None]):
             self.dismiss(None)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        # Double-click to apply
+        # Enter, or double-click, on a highlighted option.
+        self._confirm(event.option.id)
         self.dismiss(event.option.id)
 
 class DashboardApp(App[None]):
@@ -1290,7 +1322,7 @@ class DashboardApp(App[None]):
         self.main_screen = MainScreen(self._config)
         self.push_screen(self.main_screen)
 
-    def action_cancel(self) -> None:
+    async def action_cancel(self) -> None:
         # Check explicit MainScreen reference (no private API)
         if self.main_screen is not None and self.main_screen._busy:
             from ow.utils.git import terminate_children
@@ -1301,7 +1333,27 @@ class DashboardApp(App[None]):
         # No busy MainScreen — dismiss top modal or confirm quit
         top = self.screen
         if isinstance(top, ModalScreen):
-            top.dismiss(None)
+            # Ctrl+C is a `priority=True` binding: it is checked the
+            # instant its Key event arrives, synchronously — which can, in
+            # principle, run *before* an already-forwarded but
+            # not-yet-processed message on some other widget's own queue
+            # (e.g. a confirm keypress or button click on this same modal,
+            # sent right before Ctrl+C) is even dequeued. A bounded,
+            # near-zero-cost yield gives that pending message a chance to
+            # finish first; if it did, `self.screen` is no longer `top`
+            # and there is nothing left to cancel. This is cheap insurance,
+            # not a hard guarantee: closing it completely would need
+            # Ctrl+C's own dispatch to wait on that pending message, which
+            # would make the legitimate "interrupt now" gesture laggy for
+            # every other use of Ctrl+C — not an acceptable trade for a
+            # race that in practice needs two keys delivered in the exact
+            # same terminal write, which no human keystroke sequence does.
+            for _ in range(5):
+                if self.screen is not top:
+                    return
+                await asyncio.sleep(0)
+            if self.screen is top:
+                top.dismiss(None)
         elif self.main_screen is not None and not self.main_screen._busy:
             # Confirm before quitting
             self.push_screen(
@@ -1312,19 +1364,29 @@ class DashboardApp(App[None]):
             self.exit()
 
     def action_select_theme(self) -> None:
-        """Open theme selector modal."""
-        self.push_screen(
-            ThemeSelectorScreen(self._config.theme),
-            callback=self._on_theme_selected,
-        )
+        """Open theme selector modal.
 
-    def _on_theme_selected(self, theme: str | None) -> None:
-        """Apply and persist the selected theme."""
-        if theme is None:
-            return
+        No result callback: `ThemeSelectorScreen` applies and persists the
+        choice itself, synchronously, before it ever dismisses — see
+        `apply_theme` and `ThemeSelectorScreen._confirm`.
+        """
+        self.push_screen(ThemeSelectorScreen(self._config.theme))
+
+    def apply_theme(self, theme: str) -> None:
+        """Apply and persist `theme` immediately.
+
+        Called synchronously by `ThemeSelectorScreen` at the moment the
+        user confirms a choice — not deferred to a `push_screen` result
+        callback, which runs on the next message the requester dispatches
+        and can be raced past by a fast-enough subsequent keypress,
+        silently discarding the selection.
+        """
         self.theme = theme
         self._config.theme = theme
-        write_global_config(self._config)
+        try:
+            write_global_config(self._config)
+        except Exception as exc:
+            self.notify(f"Failed to save theme: {exc}", severity="error")
 
 
 def run_dashboard(config: Config) -> None:

@@ -11,10 +11,11 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.coordinate import Coordinate
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, SelectionList, Static
@@ -26,7 +27,7 @@ from ow.utils.config import (
     parse_branch_spec,
 )
 from ow.utils.templates import available_templates
-from ow.tui.widgets import LabeledInput
+from ow.tui.widgets import ConfirmDialog, LabeledInput
 
 
 # ---------------------------------------------------------------------------
@@ -373,9 +374,16 @@ class VarsEditor(Vertical):
         Binding("enter", "edit_cell", "Edit", show=True),
     ]
 
-    def __init__(self, initial: dict[str, Any], **kwargs) -> None:
+    def __init__(
+        self,
+        initial: dict[str, Any],
+        *,
+        usage_describer: Callable[[str], str] | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self._initial = initial
+        self._usage_describer = usage_describer
 
     def compose(self) -> ComposeResult:
         table = DataTable(id="vars_table")
@@ -393,8 +401,8 @@ class VarsEditor(Vertical):
         table = self.query_one("#vars_table", DataTable)
         result: dict[str, Any] = {}
         for row_idx in range(table.row_count):
-            key = table.get_cell_at(row_idx, 0)
-            val_text = table.get_cell_at(row_idx, 1)
+            key = table.get_cell_at(Coordinate(row_idx, 0))
+            val_text = table.get_cell_at(Coordinate(row_idx, 1))
             if key is None:
                 continue
             key = str(key)
@@ -408,8 +416,7 @@ class VarsEditor(Vertical):
             self._remove_row()
 
     def _add_row(self) -> None:
-        async def _prompt() -> None:
-            result = await self.app.push_screen_wait(PromptScreen("key"))
+        def _on_result(result: str | None) -> None:
             if result is None:
                 return
             key = result.strip()
@@ -417,7 +424,7 @@ class VarsEditor(Vertical):
                 return
             table = self.query_one("#vars_table", DataTable)
             table.add_row(key, "")
-        self.app.call_later(_prompt)
+        self.app.push_screen(PromptScreen("key"), callback=_on_result)
 
     def _remove_row(self) -> None:
         table = self.query_one("#vars_table", DataTable)
@@ -427,9 +434,24 @@ class VarsEditor(Vertical):
             return
         try:
             row_key = table.coordinate_to_cell_key(cursor)[0]
-            table.remove_row(row_key)
+            key = str(table.get_cell_at(Coordinate(cursor.row, 0)))
         except Exception:
             self.app.notify("Could not remove row", severity="warning")
+            return
+
+        def _on_confirmed(ok: bool) -> None:
+            if not ok:
+                return
+            try:
+                table.remove_row(row_key)
+            except Exception:
+                self.app.notify("Could not remove row", severity="warning")
+
+        details = self._usage_describer(key) if self._usage_describer else None
+        self.app.push_screen(
+            ConfirmDialog(f"Remove var {key!r}?", details=details),
+            callback=_on_confirmed,
+        )
 
     def action_edit_cell(self) -> None:
         table = self.query_one("#vars_table", DataTable)
@@ -440,15 +462,13 @@ class VarsEditor(Vertical):
         row_idx = cursor.row
         col_idx = cursor.column
         try:
-            current = str(table.get_cell_at(row_idx, col_idx))
+            current = str(table.get_cell_at(cursor))
             row_key = table.coordinate_to_cell_key(cursor)[0]
         except Exception:
             self.app.notify("Could not read cell", severity="warning")
             return
 
-        async def _prompt() -> None:
-            label = "value" if col_idx == 1 else "key"
-            result = await self.app.push_screen_wait(PromptScreen(label, default=current))
+        def _on_result(result: str | None) -> None:
             if result is None:
                 return
             table = self.query_one("#vars_table", DataTable)
@@ -457,7 +477,8 @@ class VarsEditor(Vertical):
                 table.update_cell(row_key, table.columns[col_idx].key, result)
             except Exception:
                 pass
-        self.app.call_later(_prompt)
+        label = "value" if col_idx == 1 else "key"
+        self.app.push_screen(PromptScreen(label, default=current), callback=_on_result)
 
 
 def _format_value(v: Any) -> str:
