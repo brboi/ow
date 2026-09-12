@@ -133,3 +133,31 @@ def test_confirm_dialog_no_returns_false():
 
     result = asyncio.run(run_test())
     assert result is False
+
+
+def test_vars_editor_get_vars_reads_existing_rows():
+    """`get_vars()` must read back the rows `compose()` seeded, with their
+    original scalar types intact — an int var must stay an int, not
+    round-trip to a string. `DataTable.get_cell_at()` takes a single
+    `Coordinate`, not two positional ints; calling it the wrong way either
+    raises outright or (worse) silently reads back the wrong cell,
+    rewriting the user's config types on every save.
+    """
+    from textual.app import App
+    from ow.tui.workspace_forms import VarsEditor
+
+    class TestApp(App):
+        def compose(self):
+            yield VarsEditor({"http_port": 8069, "db_host": "localhost"})
+
+    async def run_test():
+        async with TestApp().run_test() as pilot:
+            await pilot.pause()  # let compose() seed the table's rows
+            editor = pilot.app.query_one(VarsEditor)
+            return editor.get_vars()
+
+    result = asyncio.run(run_test())
+    assert result == {"http_port": 8069, "db_host": "localhost"}
+    assert isinstance(result["http_port"], int), (
+        f"http_port round-tripped as {type(result['http_port']).__name__}, not int"
+    )

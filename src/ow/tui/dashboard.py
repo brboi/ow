@@ -542,7 +542,8 @@ class MainScreen(Screen):
         try:
             log = self.query_one("#log", OperationLog)
             if not quiet:
-                # Fix #2: exit_code=0 is success, not failure
+                # exit_code is None on a plain return; an explicit 0 means
+                # SystemExit(0), also a success — only nonzero is a failure.
                 if exit_code is not None and exit_code != 0:
                     log.write(f"{label}: failed (exit {exit_code})")
                 else:
@@ -553,7 +554,8 @@ class MainScreen(Screen):
         try:
             if invalidate is not None:
                 self._status_cache.pop(invalidate, None)
-            # Fix #2: SystemExit(0) should also trigger then()
+            # SystemExit(0) is a success like a plain return: run the
+            # callback for either, not only when nothing was raised at all.
             if exit_code in (None, 0) and then is not None:
                 then(result)
             if reload:

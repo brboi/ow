@@ -85,6 +85,7 @@ class TuiSink(OutputSink):
         lbl = self._screen.query_one("#task_label", Static)
         lbl.update(label)
         bar = self._screen.query_one("#task_bar", ProgressBar)
-        # Fix #7: Handle total=0 by using indeterminate mode
+        # A total of 0 means the item count isn't known yet; ProgressBar's
+        # indeterminate (barber-pole) mode is total=None, not total=0.
         bar.total = total if total > 0 else None
         bar.update(progress=0)
