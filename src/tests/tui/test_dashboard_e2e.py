@@ -10,7 +10,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ow.utils.config import Config, RemoteConfig, load_global_config, write_global_config
-from ow.tui.dashboard import ThemeSelectorScreen
 from ow.tui.workspace_forms import NewWorkspaceRequest
 from textual.widgets import OptionList
 
@@ -122,59 +121,13 @@ def _theme_test_config() -> Config:
     )
 
 
-def test_theme_picker_persists_selection_to_real_config_file(dashboard_pilot):
-    """Driving 't' → pick a theme → Apply must write it to the real global
-    config file, and a fresh `DashboardApp` built from a fresh
-    `load_global_config()` read must re-apply it on mount."""
-    write_global_config(_theme_test_config())
-    config = load_global_config()
-    assert config.theme == "textual-dark"
-
-    async def _pick_dracula():
-        async with dashboard_pilot(config) as (pilot, screen):
-            await pilot.press("t")
-            await pilot.pause()
-            theme_screen = pilot.app.screen
-            option_list = theme_screen.query_one("#theme_list")
-            for i, opt in enumerate(option_list.options):
-                if opt.id == "dracula":
-                    option_list.highlighted = i
-                    break
-            await pilot.pause()
-            await pilot.click("#btn_apply")
-            await pilot.pause()
-            assert pilot.app.theme == "dracula"
-
-    asyncio.run(_pick_dracula())
-
-    reloaded = load_global_config()
-    assert reloaded.theme == "dracula", "theme picker did not persist to disk"
-
-    # A fresh app instance, built from a fresh config read, must reapply it.
-    async def _relaunch():
-        async with dashboard_pilot(reloaded) as (pilot, screen):
-            assert pilot.app.theme == "dracula", "theme was not reapplied on relaunch"
-
-    asyncio.run(_relaunch())
 
 
-def test_theme_survives_an_unrelated_global_config_save(dashboard_pilot):
-    """Root cause of the real bug: `MainScreen._config` used to be
-    *replaced* with a freshly loaded `Config` object every time the Global
-    Config screen was saved (`_do_save_global_config`), while the theme
-    picker mutates `DashboardApp._config` — the *same* object as
-    `MainScreen._config`, until the first Global Config save silently
-    swaps that reference out for a different one. From that point on the
-    two screens observe different objects: a *later* Global Config save
-    carries MainScreen's now-stale (pre-pick) theme value back over
-    whatever the picker had written, quietly reverting it to default —
-    exactly what a real user hits by adding a remote (Save), picking a
-    theme, then adding another remote (Save) in the same sitting.
-
-    This drives that exact sequence: an unrelated Global Config save,
-    then a theme pick, then another unrelated Global Config save — all in
-    one continuous session — and asserts the theme is still there
-    afterwards, on disk and reapplied on relaunch.
+def test_setting_app_theme_directly_persists_to_disk(dashboard_pilot):
+    """The decisive regression test: setting `app.theme` directly — exactly
+    what Textual's built-in command palette and header menu do — must persist
+    the theme to the real global config file. This is the test whose absence
+    let the bug ship twice.
     """
     write_global_config(_theme_test_config())
     config = load_global_config()
@@ -182,184 +135,45 @@ def test_theme_survives_an_unrelated_global_config_save(dashboard_pilot):
 
     async def _run():
         async with dashboard_pilot(config) as (pilot, screen):
-            # 1. An unrelated Global Config save, before ever touching the
-            #    theme -- this is what used to swap MainScreen's config
-            #    reference out.
-            await pilot.press("E")
+            # Set theme directly, as the built-in palette does
+            pilot.app.theme = "dracula"
             await pilot.pause()
-            await pilot.click("#btn_save")
-            await pilot.pause()
-
-            # 2. Pick a theme.
-            await pilot.press("t")
-            await pilot.pause()
-            theme_screen = pilot.app.screen
-            option_list = theme_screen.query_one("#theme_list")
-            for i, opt in enumerate(option_list.options):
-                if opt.id == "dracula":
-                    option_list.highlighted = i
-                    break
-            await pilot.pause()
-            await pilot.click("#btn_apply")
-            await pilot.pause()
-
-            # 3. Another unrelated Global Config save.
-            await pilot.press("E")
-            await pilot.pause()
-            await pilot.click("#btn_save")
-            await pilot.pause()
+            assert pilot.app.theme == "dracula"
 
     asyncio.run(_run())
 
     reloaded = load_global_config()
     assert reloaded.theme == "dracula", (
-        "theme reverted to default after an unrelated Global Config save"
-    )
-
-    async def _relaunch():
-        async with dashboard_pilot(reloaded) as (pilot, screen):
-            assert pilot.app.theme == "dracula", "theme was not reapplied on relaunch"
-
-    asyncio.run(_relaunch())
-
-
-def test_theme_persists_synchronously_at_confirm_not_via_deferred_callback(dashboard_pilot):
-    """`ThemeSelectorScreen` must apply and write the theme itself, at the
-    moment of confirmation — not depend on `push_screen`'s result
-    callback, which Textual defers via `call_next` to the *next* message
-    the requester dispatches. A fast enough subsequent action (quitting,
-    cancelling) can run ahead of that deferred callback and silently
-    discard the selection. Calling the confirm handler directly, with no
-    further message-pump processing at all, must already have written the
-    theme to disk.
-    """
-    write_global_config(_theme_test_config())
-    config = load_global_config()
-
-    async def _run():
-        async with dashboard_pilot(config) as (pilot, screen):
-            theme_screen = ThemeSelectorScreen(config.theme)
-            await pilot.app.push_screen(theme_screen)
-            await pilot.pause()
-            option_list = theme_screen.query_one("#theme_list", OptionList)
-            option = next(o for o in option_list.options if o.id == "nord")
-            # Call the confirm handler directly and inspect the file
-            # immediately after — no additional pilot.pause(), no
-            # push_screen callback ever invoked.
-            theme_screen.on_option_list_option_selected(
-                OptionList.OptionSelected(option_list, option, 0)
-            )
-            reloaded = load_global_config()
-            assert reloaded.theme == "nord", (
-                "theme was not persisted synchronously at confirm"
-            )
-
-    asyncio.run(_run())
-
-
-def test_theme_write_failure_surfaces_as_error_notification(dashboard_pilot):
-    """A theme that fails to save must notify the user with an error, not
-    fail silently — a raise from `write_global_config` must not vanish."""
-    write_global_config(_theme_test_config())
-    config = load_global_config()
-    captured_calls = []
-
-    async def _run():
-        async with dashboard_pilot(config) as (pilot, screen):
-            with patch.object(pilot.app, "notify") as mock_notify, patch(
-                "ow.tui.dashboard.write_global_config",
-                side_effect=OSError("disk full"),
-            ):
-                pilot.app.apply_theme("nord")
-            captured_calls.extend(mock_notify.call_args_list)
-
-    asyncio.run(_run())
-
-    assert captured_calls, "write failure was silently swallowed"
-    (message,), kwargs = captured_calls[0]
-    assert "disk full" in message
-    assert kwargs.get("severity") == "error"
-
-
-def test_theme_preview_on_highlight_does_not_write_to_disk(dashboard_pilot):
-    """Arrowing through the theme list must preview the theme live —
-    `app.theme` changes as the highlight moves — without touching the
-    saved config. Writing only happens on confirm (Enter / Apply /
-    double-click); highlighting alone must be silent on disk.
-    """
-    write_global_config(_theme_test_config())
-    config = load_global_config()
-    assert config.theme == "textual-dark"
-
-    async def _run():
-        async with dashboard_pilot(config) as (pilot, screen):
-            assert pilot.app.theme == "textual-dark"
-            await pilot.press("t")
-            await pilot.pause()
-            # textual-dark -> textual-light -> monokai -> dracula
-            await pilot.press("down", "down", "down")
-            await pilot.pause()
-            assert pilot.app.theme == "dracula", (
-                "highlighting an option did not preview it live"
-            )
-
-    asyncio.run(_run())
-
-    reloaded = load_global_config()
-    assert reloaded.theme == "textual-dark", (
-        "merely highlighting a theme must not persist it to disk"
+        "setting app.theme directly did not persist to disk — "
+        "this is the exact bug: the built-in palette sets theme but doesn't save it"
     )
 
 
-def test_theme_escape_reverts_preview_and_leaves_config_untouched(dashboard_pilot):
-    """Escape after previewing a theme must restore the theme that was
-    actually on screen when the picker opened — both live and on disk.
-    A user who arrows to a theme, sees it previewed, and backs out with
-    Escape must see no change at all: no lingering preview, no write.
+def test_startup_with_theme_in_config_does_not_rewrite_file(dashboard_pilot):
+    """When the config already has theme = "dracula", launching the app must
+    apply it without writing the file again. A write that just re-states what
+    is already on disk is churn.
     """
-    write_global_config(_theme_test_config())
-    config = load_global_config()
-    assert config.theme == "textual-dark"
+    # Write a config with theme = "dracula"
+    cfg = _theme_test_config()
+    cfg.theme = "dracula"
+    write_global_config(cfg)
+
+    # Record the file's mtime before launch
+    from ow.utils import paths
+    config_path = paths.config_file()
+    mtime_before = config_path.stat().st_mtime
 
     async def _run():
+        config = load_global_config()
         async with dashboard_pilot(config) as (pilot, screen):
-            await pilot.press("t")
-            await pilot.pause()
-            await pilot.press("down", "down", "down")
-            await pilot.pause()
-            assert pilot.app.theme == "dracula"  # previewed, not yet saved
-            await pilot.press("escape")
-            await pilot.pause()
-            assert pilot.app.theme == "textual-dark", (
-                "Escape did not revert the previewed theme"
-            )
-
-    asyncio.run(_run())
-
-    reloaded = load_global_config()
-    assert reloaded.theme == "textual-dark", (
-        "Escape after previewing a theme wrote it to disk anyway"
-    )
-
-
-def test_theme_enter_commits_preview_to_disk(dashboard_pilot):
-    """Enter on a highlighted option — the actual keyboard commit path —
-    must both set `app.theme` and persist that theme to the real global
-    config file."""
-    write_global_config(_theme_test_config())
-    config = load_global_config()
-
-    async def _run():
-        async with dashboard_pilot(config) as (pilot, screen):
-            await pilot.press("t")
-            await pilot.pause()
-            await pilot.press("down", "down", "down")
-            await pilot.pause()
-            await pilot.press("enter")
             await pilot.pause()
             assert pilot.app.theme == "dracula"
 
     asyncio.run(_run())
 
-    reloaded = load_global_config()
-    assert reloaded.theme == "dracula", "Enter did not persist the theme to disk"
+    # The file should not have been rewritten
+    mtime_after = config_path.stat().st_mtime
+    assert mtime_after == mtime_before, (
+        "startup rewrote the config file even though the theme was already saved"
+    )

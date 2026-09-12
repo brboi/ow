@@ -97,7 +97,6 @@ bottom captures every operation's output.
 | `m` | Move workspace |
 | `A` | Archive / unarchive |
 | `x` | Remove workspace |
-| `t` | Select theme |
 | `ctrl+r` | Reload workspace list |
 | `ctrl+l` | Clear log |
 | `ctrl+c` | Cancel running operation, or quit if idle |
@@ -111,10 +110,7 @@ again when idle, it quits.
 
 ### Theme
 
-Press `t` to open the theme picker — a modal listing every built-in Textual theme. The
-selection is applied immediately and persisted to `theme` in the global config, so it
-survives across sessions. See [Configuration](configuration.md) for the config field.
-
+Press `Ctrl+P` to open Textual's command palette, then type "theme" to search and select a theme. The choice is persisted to `theme` in the global config and survives across sessions. You can also click the header icon at the top-left to open the palette. See [Configuration](configuration.md) for the config field.
 ## `ow status`
 
 Shows local branch status with behind/ahead counts — no network by default, like `git status`:

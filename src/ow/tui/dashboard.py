@@ -138,7 +138,6 @@ class HelpScreen(ModalScreen[None]):
             "  x            Remove\n"
             "\n"
             "[bold]Other[/]\n"
-            "  t            Theme\n"
             "  ctrl+r       Reload list\n"
             "  ctrl+l       Clear log\n"
             "  ctrl+c       Cancel operation (or quit if idle)\n"
@@ -1193,155 +1192,12 @@ class MainScreen(Screen):
         self.app.push_screen(HelpScreen())
 
 
-# ---------------------------------------------------------------------------
-# Theme selector screen
-# ---------------------------------------------------------------------------
-
-
-AVAILABLE_THEMES = [
-    "textual-dark",
-    "textual-light",
-    "monokai",
-    "dracula",
-    "solarized-light",
-    "nord",
-    "catppuccin-mocha",
-    "catppuccin-latte",
-    "tokyo-night",
-    "gruvbox",
-]
-
-
-class ThemeSelectorScreen(ModalScreen[str | None]):
-    """Modal screen for selecting a theme."""
-
-    DEFAULT_CSS = """
-    ThemeSelectorScreen {
-        align: center middle;
-    }
-    ThemeSelectorScreen > Vertical {
-        width: 40;
-        height: auto;
-        max-height: 95%;
-        padding: 1 2;
-        border: round $primary;
-        background: $surface;
-    }
-    ThemeSelectorScreen Static {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    ThemeSelectorScreen OptionList {
-        height: auto;
-        max-height: 20;
-    }
-    ThemeSelectorScreen #theme_hint {
-        text-style: none;
-        color: $text-muted;
-        margin: 1 0 0 0;
-    }
-    """
-
-    BINDINGS = [
-        Binding("escape", "cancel_picker", "Cancel", show=True),
-    ]
-
-    def __init__(self, current_theme: str) -> None:
-        super().__init__()
-        self._current_theme = current_theme
-        # The theme actually on screen when the modal opened — captured in
-        # `on_mount` (not from `_current_theme`) so Escape/Cancel restores
-        # exactly what was live, not merely what the config said.
-        self._original_theme: str | None = None
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static("Select Theme")
-            option_list = OptionList(id="theme_list")
-            for theme in AVAILABLE_THEMES:
-                option_list.add_option(Option(theme, id=theme))
-            yield option_list
-            yield Static("Enter apply · Esc cancel", id="theme_hint")
-            yield Horizontal(
-                Button("Apply", id="btn_apply", variant="success"),
-                Button("Cancel", id="btn_cancel", variant="error"),
-            )
-
-    def on_mount(self) -> None:
-        self._original_theme = self.app.theme
-        option_list = self.query_one("#theme_list", OptionList)
-        # Highlight current theme
-        for i, opt in enumerate(option_list.options):
-            if opt.id == self._current_theme:
-                option_list.highlighted = i
-                break
-
-    def on_option_list_option_highlighted(
-        self, event: OptionList.OptionHighlighted
-    ) -> None:
-        """Preview the highlighted theme live as the user arrows through
-        the list. This only changes what is on screen — it never writes
-        to disk; only `_confirm` does that.
-        """
-        if event.option.id is not None:
-            self.app.theme = event.option.id
-
-    def _confirm(self, theme_id: str | None) -> None:
-        """Apply and persist `theme_id` synchronously, right here, before
-        dismissing — on every confirm path (Apply button, Enter, double
-        click).
-
-        `push_screen(..., callback=...)`'s callback is not synchronous
-        with `dismiss()`: Textual schedules it via `call_next` and only
-        runs it once the *next* message on the requester's queue is
-        dispatched. Doing the work here instead removes that gap: the
-        write completes as part of the very same message that confirmed
-        the choice, not on a later, easily-raced-past callback.
-        """
-        if theme_id is None:
-            return
-        self.app.apply_theme(theme_id)
-
-    def _cancel(self) -> None:
-        """Revert the live preview and dismiss without persisting.
-
-        Arrowing through the list previews a theme on screen (see
-        `on_option_list_option_highlighted`) with nothing written to disk
-        yet. Escape/Cancel must undo that preview visibly — leaving the
-        previewed-but-unsaved theme active would be indistinguishable
-        from a save that silently succeeded.
-        """
-        if self._original_theme is not None:
-            self.app.theme = self._original_theme
-        self.dismiss(None)
-
-    def action_cancel_picker(self) -> None:
-        self._cancel()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn_apply":
-            option_list = self.query_one("#theme_list", OptionList)
-            if option_list.highlighted is not None:
-                selected = option_list.get_option_at_index(option_list.highlighted)
-                self._confirm(selected.id)
-                self.dismiss(selected.id)
-            else:
-                self._cancel()
-        else:
-            self._cancel()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        # Enter, or double-click, on a highlighted option.
-        self._confirm(event.option.id)
-        self.dismiss(event.option.id)
-
 class DashboardApp(App[None]):
     TITLE = "ow"
     CSS_PATH = None
 
     BINDINGS = [
         Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
-        Binding("t", "select_theme", "Theme", show=False),
     ]
 
     def __init__(self, config: Config) -> None:
@@ -1402,26 +1258,20 @@ class DashboardApp(App[None]):
         else:
             self.exit()
 
-    def action_select_theme(self) -> None:
-        """Open theme selector modal.
+    def watch_theme(self, old_theme: str, new_theme: str) -> None:
+        """Persist any theme change from any source.
 
-        No result callback: `ThemeSelectorScreen` applies and persists the
-        choice itself, synchronously, before it ever dismisses — see
-        `apply_theme` and `ThemeSelectorScreen._confirm`.
+        Textual's built-in command palette (Ctrl+P) and header menu set
+        `app.theme` directly. This watcher catches every source — the built-in
+        palette, a future keybinding, anything — and writes it to disk.
+
+        Guard: do not write during the initial `on_mount` application of the
+        already-loaded theme. If `new_theme == self._config.theme`, the theme
+        is already on disk and writing would be churn.
         """
-        self.push_screen(ThemeSelectorScreen(self._config.theme))
-
-    def apply_theme(self, theme: str) -> None:
-        """Apply and persist `theme` immediately.
-
-        Called synchronously by `ThemeSelectorScreen` at the moment the
-        user confirms a choice — not deferred to a `push_screen` result
-        callback, which runs on the next message the requester dispatches
-        and can be raced past by a fast-enough subsequent keypress,
-        silently discarding the selection.
-        """
-        self.theme = theme
-        self._config.theme = theme
+        if new_theme == self._config.theme:
+            return
+        self._config.theme = new_theme
         try:
             write_global_config(self._config)
         except Exception as exc:

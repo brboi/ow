@@ -107,7 +107,7 @@ resolves its target by name only (via the index), since it removes a known works
 
 `ow` without a subcommand launches a Textual-based TUI when run in a terminal.
 The TUI lives in `src/ow/tui/`:
-- `dashboard.py` — MainScreen, HelpScreen, ThemeSelectorScreen, run_dashboard()
+- `dashboard.py` — MainScreen, HelpScreen, run_dashboard()
 - `runner.py` — TuiSink, OutputSink protocol bridge
 - `widgets.py` — ConfirmDialog, OperationLog, WorkspaceDetail, LabeledInput
 - `workspace_forms.py` — NewWorkspaceScreen, WorkspaceConfigScreen, PromptScreen, VarsEditor
