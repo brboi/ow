@@ -279,3 +279,87 @@ def test_theme_write_failure_surfaces_as_error_notification(dashboard_pilot):
     (message,), kwargs = captured_calls[0]
     assert "disk full" in message
     assert kwargs.get("severity") == "error"
+
+
+def test_theme_preview_on_highlight_does_not_write_to_disk(dashboard_pilot):
+    """Arrowing through the theme list must preview the theme live —
+    `app.theme` changes as the highlight moves — without touching the
+    saved config. Writing only happens on confirm (Enter / Apply /
+    double-click); highlighting alone must be silent on disk.
+    """
+    write_global_config(_theme_test_config())
+    config = load_global_config()
+    assert config.theme == "textual-dark"
+
+    async def _run():
+        async with dashboard_pilot(config) as (pilot, screen):
+            assert pilot.app.theme == "textual-dark"
+            await pilot.press("t")
+            await pilot.pause()
+            # textual-dark -> textual-light -> monokai -> dracula
+            await pilot.press("down", "down", "down")
+            await pilot.pause()
+            assert pilot.app.theme == "dracula", (
+                "highlighting an option did not preview it live"
+            )
+
+    asyncio.run(_run())
+
+    reloaded = load_global_config()
+    assert reloaded.theme == "textual-dark", (
+        "merely highlighting a theme must not persist it to disk"
+    )
+
+
+def test_theme_escape_reverts_preview_and_leaves_config_untouched(dashboard_pilot):
+    """Escape after previewing a theme must restore the theme that was
+    actually on screen when the picker opened — both live and on disk.
+    A user who arrows to a theme, sees it previewed, and backs out with
+    Escape must see no change at all: no lingering preview, no write.
+    """
+    write_global_config(_theme_test_config())
+    config = load_global_config()
+    assert config.theme == "textual-dark"
+
+    async def _run():
+        async with dashboard_pilot(config) as (pilot, screen):
+            await pilot.press("t")
+            await pilot.pause()
+            await pilot.press("down", "down", "down")
+            await pilot.pause()
+            assert pilot.app.theme == "dracula"  # previewed, not yet saved
+            await pilot.press("escape")
+            await pilot.pause()
+            assert pilot.app.theme == "textual-dark", (
+                "Escape did not revert the previewed theme"
+            )
+
+    asyncio.run(_run())
+
+    reloaded = load_global_config()
+    assert reloaded.theme == "textual-dark", (
+        "Escape after previewing a theme wrote it to disk anyway"
+    )
+
+
+def test_theme_enter_commits_preview_to_disk(dashboard_pilot):
+    """Enter on a highlighted option — the actual keyboard commit path —
+    must both set `app.theme` and persist that theme to the real global
+    config file."""
+    write_global_config(_theme_test_config())
+    config = load_global_config()
+
+    async def _run():
+        async with dashboard_pilot(config) as (pilot, screen):
+            await pilot.press("t")
+            await pilot.pause()
+            await pilot.press("down", "down", "down")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert pilot.app.theme == "dracula"
+
+    asyncio.run(_run())
+
+    reloaded = load_global_config()
+    assert reloaded.theme == "dracula", "Enter did not persist the theme to disk"

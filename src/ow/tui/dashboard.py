@@ -1222,7 +1222,7 @@ class ThemeSelectorScreen(ModalScreen[str | None]):
     ThemeSelectorScreen > Vertical {
         width: 40;
         height: auto;
-        max-height: 80%;
+        max-height: 95%;
         padding: 1 2;
         border: round $primary;
         background: $surface;
@@ -1235,15 +1235,24 @@ class ThemeSelectorScreen(ModalScreen[str | None]):
         height: auto;
         max-height: 20;
     }
+    ThemeSelectorScreen #theme_hint {
+        text-style: none;
+        color: $text-muted;
+        margin: 1 0 0 0;
+    }
     """
 
     BINDINGS = [
-        Binding("escape", "dismiss(None)", "", show=False),
+        Binding("escape", "cancel_picker", "Cancel", show=True),
     ]
 
     def __init__(self, current_theme: str) -> None:
         super().__init__()
         self._current_theme = current_theme
+        # The theme actually on screen when the modal opened — captured in
+        # `on_mount` (not from `_current_theme`) so Escape/Cancel restores
+        # exactly what was live, not merely what the config said.
+        self._original_theme: str | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -1252,18 +1261,30 @@ class ThemeSelectorScreen(ModalScreen[str | None]):
             for theme in AVAILABLE_THEMES:
                 option_list.add_option(Option(theme, id=theme))
             yield option_list
+            yield Static("Enter apply · Esc cancel", id="theme_hint")
             yield Horizontal(
                 Button("Apply", id="btn_apply", variant="success"),
                 Button("Cancel", id="btn_cancel", variant="error"),
             )
 
     def on_mount(self) -> None:
+        self._original_theme = self.app.theme
         option_list = self.query_one("#theme_list", OptionList)
         # Highlight current theme
         for i, opt in enumerate(option_list.options):
             if opt.id == self._current_theme:
                 option_list.highlighted = i
                 break
+
+    def on_option_list_option_highlighted(
+        self, event: OptionList.OptionHighlighted
+    ) -> None:
+        """Preview the highlighted theme live as the user arrows through
+        the list. This only changes what is on screen — it never writes
+        to disk; only `_confirm` does that.
+        """
+        if event.option.id is not None:
+            self.app.theme = event.option.id
 
     def _confirm(self, theme_id: str | None) -> None:
         """Apply and persist `theme_id` synchronously, right here, before
@@ -1281,6 +1302,22 @@ class ThemeSelectorScreen(ModalScreen[str | None]):
             return
         self.app.apply_theme(theme_id)
 
+    def _cancel(self) -> None:
+        """Revert the live preview and dismiss without persisting.
+
+        Arrowing through the list previews a theme on screen (see
+        `on_option_list_option_highlighted`) with nothing written to disk
+        yet. Escape/Cancel must undo that preview visibly — leaving the
+        previewed-but-unsaved theme active would be indistinguishable
+        from a save that silently succeeded.
+        """
+        if self._original_theme is not None:
+            self.app.theme = self._original_theme
+        self.dismiss(None)
+
+    def action_cancel_picker(self) -> None:
+        self._cancel()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_apply":
             option_list = self.query_one("#theme_list", OptionList)
@@ -1289,9 +1326,9 @@ class ThemeSelectorScreen(ModalScreen[str | None]):
                 self._confirm(selected.id)
                 self.dismiss(selected.id)
             else:
-                self.dismiss(None)
+                self._cancel()
         else:
-            self.dismiss(None)
+            self._cancel()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         # Enter, or double-click, on a highlighted option.
