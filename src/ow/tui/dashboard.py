@@ -1198,6 +1198,12 @@ class DashboardApp(App[None]):
     TITLE = "ow"
     CSS_PATH = None
 
+    DEFAULT_CSS = """
+    CommandPalette > Vertical {
+        max-width: 80;
+    }
+    """
+
     BINDINGS = [
         Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
     ]
@@ -1206,6 +1212,8 @@ class DashboardApp(App[None]):
         super().__init__()
         self._config = config
         self.main_screen: MainScreen | None = None
+        self._theme_previewing = False
+        """True while the command palette is open and a theme is highlighted."""
 
     def on_mount(self) -> None:
         # Apply saved theme
@@ -1261,16 +1269,19 @@ class DashboardApp(App[None]):
             self.exit()
 
     def watch_theme(self, old_theme: str, new_theme: str) -> None:
-        """Persist any theme change from any source.
+        """Persist theme changes — but NOT during live preview.
 
-        Textual's built-in command palette (Ctrl+P) and header menu set
-        `app.theme` directly. This watcher catches every source — the built-in
-        palette, a future keybinding, anything — and writes it to disk.
+        The command palette highlights themes live as the user arrows
+        through the list. During preview, ``_theme_previewing`` is True
+        and this watcher skips persistence. Commit (Enter) and cancel
+        (Escape) are handled in ``on_command_palette_closed``.
 
-        Guard: do not write during the initial `on_mount` application of the
-        already-loaded theme. If `new_theme == self._config.theme`, the theme
-        is already on disk and writing would be churn.
+        Guard: do not write during the initial ``on_mount`` application
+        of the already-loaded theme. If ``new_theme == self._config.theme``,
+        the theme is already on disk and writing would be churn.
         """
+        if self._theme_previewing:
+            return
         if new_theme == self._config.theme:
             return
         self._config.theme = new_theme
@@ -1284,7 +1295,7 @@ class DashboardApp(App[None]):
     ) -> None:
         """Preview the highlighted theme live in the command palette.
 
-        Textual's built-in command palette (Ctrl+P → "theme") shows a list
+        Textual's built-in command palette (Ctrl+P → \"theme\") shows a list
         of themes. When the user arrows through the list, every highlight
         change fires OptionHighlighted on the CommandPalette, which reposts
         as CommandPalette.OptionHighlighted to the App.
@@ -1294,13 +1305,50 @@ class DashboardApp(App[None]):
         commands (system commands, user providers) use plain callables.
         Guard by checking for a ``functools.partial`` wrapping the
         ``set_app_theme`` closure — only those are theme previews.
+
+        Preview sets ``self.theme`` directly (NOT via the partial) and
+        raises ``_theme_previewing`` so ``watch_theme`` skips persistence.
         """
         option = event.highlighted_event.option
         if option is None or option.hit is None:
+            self._theme_previewing = False
             return
         callable_ = option.hit.command
         if isinstance(callable_, functools.partial) and callable_.func.__name__ == "set_app_theme":
-            callable_()
+            theme_name = callable_.keywords.get("name") or (callable_.args[0] if callable_.args else None)
+            if theme_name is not None:
+                self._theme_previewing = True
+                self.theme = theme_name
+        else:
+            self._theme_previewing = False
+
+    def on_command_palette_closed(
+        self, event: CommandPalette.Closed
+    ) -> None:
+        """Handle the command palette closing.
+
+        Commit (Enter): ``option_selected=True``. If a theme was being
+        previewed, persist it to disk. The ``call_later`` in Textual's
+        palette will also call ``set_app_theme(name)`` — but since the
+        reactive is already at that value, it won't re-fire, so we
+        persist here instead.
+
+        Cancel (Escape): ``option_selected=False``. Revert the display
+        to the theme that was active when the palette opened.
+        """
+        self._theme_previewing = False
+        if event.option_selected:
+            # Commit: persist the current theme (already set by preview).
+            if self.theme != self._config.theme:
+                self._config.theme = self.theme
+                try:
+                    write_global_config(self._config)
+                except Exception as exc:
+                    self.notify(f"Failed to save theme: {exc}", severity="error")
+        else:
+            # Cancel: revert to the original theme.
+            if self.theme != self._config.theme:
+                self.theme = self._config.theme
 
 
 def run_dashboard(config: Config) -> None:

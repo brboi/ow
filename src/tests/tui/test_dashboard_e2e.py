@@ -181,10 +181,11 @@ def test_startup_with_theme_in_config_does_not_rewrite_file(dashboard_pilot):
 
 def test_theme_previews_on_highlight_in_command_palette(dashboard_pilot):
     """Regression test: Ctrl+P → "theme" → arrow down must change app.theme
-    live (preview on highlight), and the last-highlighted theme must persist
-    to the global config file after Enter commits it.
+    live (preview on highlight), but must NOT write to disk. Enter commits
+    and writes to disk.
 
-    Verifies the fix for the live-preview feature.
+    Verifies the fix for the live-preview bug where every highlight wrote
+    the config to disk.
     """
     from ow.utils import paths
 
@@ -214,17 +215,82 @@ def test_theme_previews_on_highlight_in_command_palette(dashboard_pilot):
                 "theme did not change on highlight — preview is broken"
             )
 
+            # CRITICAL: preview must NOT write to disk
+            config_path = paths.config_file()
+            mtime_before_enter = config_path.stat().st_mtime
+            reloaded_during_preview = load_global_config()
+            assert reloaded_during_preview.theme == "textual-dark", (
+                "preview wrote to disk — theme should only change visually, not persist"
+            )
+
             # Press Enter to commit the selection
             await pilot.press("enter")
             await pilot.pause()
 
             # The final committed theme is whatever the user picked; verify
-            # it persisted to disk. (Config may have been written on every
-            # highlight — that's fine; the final state is correct.)
+            # it persisted to disk.
             committed = pilot.app.theme
             reloaded = load_global_config()
             assert reloaded.theme == committed, (
                 f"theme '{committed}' did not persist to disk after commit"
+            )
+
+    asyncio.run(_run())
+
+
+def test_theme_escape_reverts_without_writing(dashboard_pilot):
+    """Regression test: Ctrl+P → "theme" → arrow down → Escape must revert
+    the display to the original theme and must NOT write to disk.
+
+    Verifies the fix for the bug where Escape left the last-previewed theme
+    in the display (and had written it to disk on every highlight).
+    """
+    from ow.utils import paths
+
+    write_global_config(_theme_test_config())
+    config = load_global_config()
+    assert config.theme == "textual-dark"
+
+    async def _run():
+        async with dashboard_pilot(config) as (pilot, screen):
+            assert pilot.app.theme == "textual-dark"
+
+            # Record mtime before opening palette
+            config_path = paths.config_file()
+            mtime_before = config_path.stat().st_mtime
+
+            # Open the theme-specific command palette
+            pilot.app.search_themes()
+            await pilot.pause()
+
+            # Arrow down to highlight a different theme
+            await pilot.press("down")
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause()
+
+            # Preview should have changed the display
+            assert pilot.app.theme != "textual-dark", (
+                "theme did not change on highlight — preview is broken"
+            )
+
+            # Press Escape to cancel
+            await pilot.press("escape")
+            await pilot.pause()
+
+            # The display should revert to the original theme
+            assert pilot.app.theme == "textual-dark", (
+                f"escape did not revert theme — expected 'textual-dark', got '{pilot.app.theme}'"
+            )
+
+            # The config file should NOT have been written
+            mtime_after = config_path.stat().st_mtime
+            assert mtime_after == mtime_before, (
+                "escape wrote to disk — config should not change on cancel"
+            )
+            reloaded = load_global_config()
+            assert reloaded.theme == "textual-dark", (
+                "escape changed the config on disk — should not persist on cancel"
             )
 
     asyncio.run(_run())
