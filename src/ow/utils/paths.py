@@ -70,7 +70,3 @@ def backups_dir() -> Path:
 
 def index_file() -> Path:
     return state_home() / "workspaces"
-
-
-def template_base_dir() -> Path:
-    return state_home() / "template-base"

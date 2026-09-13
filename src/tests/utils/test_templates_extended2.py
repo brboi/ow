@@ -7,11 +7,12 @@ import pytest
 
 from ow.utils.config import BranchSpec, WorkspaceConfig
 from ow.utils.templates import (
+    TemplateSync,
     _get_packaged_templates,
     _packaged_bundle,
+    bundle_source_files,
     apply_templates,
     ensure_workspace_materialized,
-    resolve_template_files,
 )
 
 
@@ -57,10 +58,10 @@ class TestEnsureWorkspaceMaterializedExtended:
         mock_up.assert_not_called()
 
 
-class TestResolveTemplateFilesExtended:
+class TestResolveBundleFilesExtended:
 
     def test_packaged_bundle_via_name(self, xdg):
-        result = resolve_template_files("zed")
+        result = bundle_source_files("zed")
         assert result
         assert all(src.is_file() for src in result.values())
 
@@ -133,16 +134,17 @@ class TestApplyTemplatesCollision:
         ws_dir.mkdir()
         ws = WorkspaceConfig(repos={}, templates=["collider"])
 
-        # Two source files that resolve to the same output path.
+        # Two materialised files that resolve to the same output path.
         plain = tmp_path / "foo"
         plain.write_text("plain\n")
         j2 = tmp_path / "foo.j2"
         j2.write_text("j2\n")
         files = {Path("foo"): plain, Path("foo.j2"): j2}
 
-        with patch("ow.utils.templates.resolve_template_files", return_value=files):
-            with pytest.raises(ValueError, match="collision"):
-                apply_templates(ws, config, ws_dir)
+        with patch("ow.utils.templates.materialize_templates", return_value=TemplateSync()):
+            with patch("ow.utils.templates.workspace_template_files", return_value=files):
+                with pytest.raises(ValueError, match="collision"):
+                    apply_templates(ws, config, ws_dir)
 
     def test_no_collision_when_outputs_differ(self, tmp_path, config):
         """Two distinct output paths must not raise, even if the inputs look similar."""
@@ -156,8 +158,9 @@ class TestApplyTemplatesCollision:
         b.write_text("b\n")
         files = {Path("a"): a, Path("b.j2"): b}
 
-        with patch("ow.utils.templates.resolve_template_files", return_value=files):
-            with patch("ow.utils.templates.Environment") as mock_env:
-                mock_env.return_value.get_template.return_value.render.return_value = "rendered"
-                # Must not raise — outputs are distinct.
-                apply_templates(ws, config, ws_dir)
+        with patch("ow.utils.templates.materialize_templates", return_value=TemplateSync()):
+            with patch("ow.utils.templates.workspace_template_files", return_value=files):
+                with patch("ow.utils.templates.Environment") as mock_env:
+                    mock_env.return_value.get_template.return_value.render.return_value = "rendered"
+                    # Must not raise — outputs are distinct.
+                    apply_templates(ws, config, ws_dir)

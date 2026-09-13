@@ -1,9 +1,9 @@
 """Tests for ow.utils.paths.
 
-The seven path functions fall into three families, one per XDG base
+The six path functions fall into three families, one per XDG base
 directory: config (config_file, templates_dir, services_dir), data
-(repos_dir, volumes_dir) and state (index_file, template_base_dir). Each
-family is exercised once rather than writing the same test seven times.
+(repos_dir, volumes_dir) and state (index_file). Each family is exercised
+once rather than writing the same test six times.
 """
 
 from pathlib import Path
@@ -14,7 +14,7 @@ from ow.utils import paths
 
 CONFIG_FUNCS = [paths.config_file, paths.templates_dir, paths.services_dir]
 DATA_FUNCS = [paths.repos_dir, paths.volumes_dir]
-STATE_FUNCS = [paths.index_file, paths.template_base_dir]
+STATE_FUNCS = [paths.index_file]
 
 ALL_FUNCS = CONFIG_FUNCS + DATA_FUNCS + STATE_FUNCS
 
