@@ -10,7 +10,7 @@ src/
 │   │   ├── __init__.py      # re-exports cmd_* functions
 │   │   ├── init.py          # cmd_init — create a workspace, here or in ./NAME; validation, interactive questionnaire, duplicate-branch check
 │   │   ├── apply.py         # cmd_apply — make the tree match .ow/config.toml (--only narrows the git work, never the rendering)
-│   │   ├── status.py        # cmd_status + display helpers
+│   │   ├── fetch.py         # cmd_fetch — refresh refs into bare repos, report what arrived (no worktree touched)
 │   │   ├── rebase.py        # cmd_rebase + fact gathering, display, execution
 │   │   ├── pull.py          # cmd_pull + fact gathering, display, execution (fast-forward only)
 │   │   ├── reset.py         # cmd_reset + fact gathering, display, execution (git reset, per repo)
@@ -95,6 +95,7 @@ AGENTS.md
 | `ow pull` | `cmd_pull(config, workspace=None, *, only=None, dry_run=False)` | Fetch, then fast-forward each repo — or replay it on its own upstream, `git pull --rebase` style. Never moves a repo off its base ref; that stays `ow rebase` |
 | `ow reset` | `cmd_reset(config, workspace=None, *, only=None, hard=False, fetch=False, dry_run=False, yes=False)` | Put each repo back on the ref it follows — its branch's upstream, or the base ref when there is none. Plain form moves HEAD and leaves the working tree, so nothing on disk is lost; `--hard` discards it too. No fetch unless `-f`; skips a repo that is not on the branch the config names |
 | `ow switch` | `cmd_switch(config, target=None, workspace=None, *, create=None, detach=False, only=None, dry_run=False)` | `git switch` across the workspace: a branch, never a spec. DWIM included, done by ow because a `--single-branch` bare repo defeats git's own. Pre-flight is all-or-nothing; `.ow/config.toml` is rewritten afterwards from what git left on disk; templates are not re-rendered |
+| `ow fetch` | `cmd_fetch(config, workspace=None, *, only=None)` | Refresh the refs a workspace follows — `git fetch` into the bare repos, reporting what arrived (`+N`, `up to date`, `force-pushed`). No worktree moves; `--only` narrows the network work |
 | `ow prune` | `cmd_prune(config)` | Clean up stale worktree references, orphaned branches, dead index entries |
 | `ow rm` | `cmd_rm(name, *, yes=False)` | Remove a workspace: worktrees, local branches, directory, index entry |
 | `ow templates` | `cmd_templates(workspace=None, *, show_diff=False)` | List the files materialised in `<ws>/.ow/templates` with their state, or diff the outdated ones |

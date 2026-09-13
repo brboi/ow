@@ -1,6 +1,6 @@
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from ow.utils.display import err_console, print_git_result, task_progress
@@ -40,6 +40,10 @@ class FetchOutcome:
     upstreams: dict[str, str]
     specs: dict[str, BranchSpec]
     upstream_before: dict[str, str]
+    # Where each ref stood before phase 2 moved it, which is the only
+    # thing that makes "what did this fetch bring me" answerable after
+    # the fact. Read during resolution, the last moment it is observable.
+    track_before: dict[str, str] = field(default_factory=dict)
     failed: frozenset[str] = frozenset()
 
 
@@ -51,6 +55,7 @@ class _ResolveResult:
     fetch_jobs: list[_FetchJob]
     resolved_spec: BranchSpec | None = None
     upstream_before: str | None = None
+    track_before: str | None = None
 
 
 _AUTH_MARKERS = (
@@ -97,6 +102,7 @@ def fetch_workspace_refs(
     resolved_upstreams: dict[str, str] = {}
     resolved_specs: dict[str, BranchSpec] = {}
     upstream_before: dict[str, str] = {}
+    track_before: dict[str, str] = {}
     failed: set[str] = set()
     if not fetch:
         resolve_fn = resolve_spec_local
@@ -116,6 +122,9 @@ def fetch_workspace_refs(
         resolved_track = resolve_fn(bare_repo_path, track_spec, alias_remotes)
         refspec = f"+{resolved_track.branch}:refs/remotes/{resolved_track.remote}/{resolved_track.branch}"
         jobs.append(_FetchJob(bare_repo, resolved_track.remote, refspec))
+        # Same reason as upstream_before below: after phase 2 the previous
+        # value is gone, and with it any answer to "what did this bring me".
+        track_before = rev_parse(bare_repo_path, f"refs/remotes/{resolved_track.base_ref}")
 
         resolved_spec = resolve_fn(bare_repo_path, spec, alias_remotes)
 
@@ -145,6 +154,7 @@ def fetch_workspace_refs(
             fetch_jobs=jobs,
             resolved_spec=resolved_spec,
             upstream_before=upstream_before,
+            track_before=track_before,
         )
 
     resolve_tasks = {}
@@ -238,6 +248,8 @@ def fetch_workspace_refs(
             resolved_upstreams[alias] = resolve.upstream_ref
         if resolve.upstream_before:
             upstream_before[alias] = resolve.upstream_before
+        if resolve.track_before:
+            track_before[alias] = resolve.track_before
         if resolve.resolved_spec:
             resolved_specs[alias] = resolve.resolved_spec
 
@@ -268,5 +280,6 @@ def fetch_workspace_refs(
         upstreams=resolved_upstreams,
         specs=resolved_specs,
         upstream_before=upstream_before,
+        track_before=track_before,
         failed=frozenset(failed),
     )
