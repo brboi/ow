@@ -13,6 +13,7 @@ from ow.utils.config import (
     load_workspace_config,
     write_workspace_config,
 )
+from ow.utils.templates import TemplateSync
 
 
 class TestCmdApply:
@@ -30,7 +31,7 @@ class TestCmdApply:
         config = config_with_remotes
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
-                with patch("ow.commands.apply.apply_templates") as mock_apply:
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()) as mock_apply:
                     cmd_apply(config)
         mock_apply.assert_called_once()
 
@@ -43,7 +44,7 @@ class TestCmdApply:
         index.remember(ws_dir)
         config = config_with_remotes
         with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
-            with patch("ow.commands.apply.apply_templates") as mock_apply:
+            with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()) as mock_apply:
                 cmd_apply(config, workspace="test")
         assert mock_apply.call_args.args[2] == ws_dir.resolve()
 
@@ -88,7 +89,7 @@ class TestCmdApplyFailedRepos:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {"enterprise": "unreachable"}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     with pytest.raises(SystemExit) as exc:
                         cmd_apply(config_with_remotes)
 
@@ -101,7 +102,7 @@ class TestCmdApplyFailedRepos:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {"enterprise": "unreachable"}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     with pytest.raises(SystemExit) as exc:
                         cmd_apply(config_with_remotes)
 
@@ -117,7 +118,7 @@ class TestCmdApplyFailedRepos:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community", "enterprise"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     cmd_apply(config_with_remotes)
 
         assert f"Workspace '{ws_dir.name}' applied." in capsys.readouterr().out
@@ -126,10 +127,10 @@ class TestCmdApplyFailedRepos:
 class TestCmdApplyVarBackfill:
     """Global vars must NOT be written into the workspace config.
 
-    The render merge already makes globals visible to templates via
-    ``{**config.vars, **ws.vars}``, so persisting them into the workspace
-    file pins today's global values and prevents later global edits from
-    taking effect.
+    #40: global vars are only seeds at init time, copied once into ws.vars;
+    persisting them into the workspace file on every apply would instead
+    pin today's global values and prevent later global edits from ever
+    reaching a workspace that already exists.
     """
 
     def _workspace(self, tmp_path, vars):
@@ -151,7 +152,7 @@ class TestCmdApplyVarBackfill:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     cmd_apply(config)
 
     def test_apply_does_not_backfill_global_vars(self, tmp_path, config_with_remotes):
@@ -195,7 +196,7 @@ class TestCmdApplyMiseTrust:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, set(), {"community": "clone failed"}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     with patch(
                         "ow.commands.apply.run_cmd", side_effect=failure
                     ):
@@ -218,7 +219,7 @@ class TestCmdApplyMiseTrust:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     with patch(
                         "ow.commands.apply.run_cmd", side_effect=failure
                     ):
@@ -237,7 +238,7 @@ class TestCmdApplyMiseTrust:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     with patch(
                         "ow.commands.apply.run_cmd", side_effect=FileNotFoundError("mise")
                     ):
@@ -285,7 +286,7 @@ class TestCmdApplyCheck:
             with patch("ow.commands.apply.warn_if_drifted", return_value=False):
                 with patch("ow.commands.apply.outdated_templates", return_value=[]):
                     with patch("ow.commands.apply.ensure_workspace_materialized") as mock_mat:
-                        with patch("ow.commands.apply.apply_templates") as mock_tpl:
+                        with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()) as mock_tpl:
                             cmd_apply(config_with_remotes, check=True)
         mock_mat.assert_not_called()
         mock_tpl.assert_not_called()
@@ -340,7 +341,7 @@ class TestCmdApplyOrphanFiles:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     cmd_apply(config_with_remotes)
 
         out = capsys.readouterr().out
@@ -366,7 +367,7 @@ class TestCmdApplyOrphanFiles:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     cmd_apply(config_with_remotes)
 
         out = capsys.readouterr().out
@@ -382,8 +383,72 @@ class TestCmdApplyOrphanFiles:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates"):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
                     cmd_apply(config_with_remotes)
 
         out = capsys.readouterr().out
         assert "Some files may come from templates not in your config" not in out
+
+
+class TestCmdApplyTemplateSyncReport:
+    """apply reports what materialize_templates did, via the TemplateSync it returns."""
+
+    def _workspace(self, tmp_path: Path) -> Path:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+        return ws_dir
+
+    def test_reports_each_copied_file_as_materialised(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        sync = TemplateSync(copied=["common/odoorc.j2"], updated=[], outdated=[])
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
+                with patch("ow.commands.apply.apply_templates", return_value=sync):
+                    cmd_apply(config_with_remotes)
+        assert "materialised common/odoorc.j2" in capsys.readouterr().out
+
+    def test_reports_each_updated_file(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        sync = TemplateSync(copied=[], updated=["common/mise.toml.j2"], outdated=[])
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
+                with patch("ow.commands.apply.apply_templates", return_value=sync):
+                    cmd_apply(config_with_remotes)
+        assert "updated common/mise.toml.j2" in capsys.readouterr().out
+
+    def test_reports_an_outdated_warning_block_ending_with_the_diff_hint(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        sync = TemplateSync(copied=[], updated=[], outdated=["common/odoorc.j2"])
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
+                with patch("ow.commands.apply.apply_templates", return_value=sync):
+                    cmd_apply(config_with_remotes)
+        out = capsys.readouterr().out
+        assert "common/odoorc.j2" in out
+        assert "Run `ow templates --diff` to see what changed." in out
+
+    def test_stays_quiet_about_outdated_when_nothing_is(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
+                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
+                    cmd_apply(config_with_remotes)
+        assert "ow templates --diff" not in capsys.readouterr().out
+
+
+class TestCmdApplyCheckNeverMaterializes:
+    """--check is read-only: real code path, no mocked template helpers at all."""
+
+    def test_check_never_creates_the_templates_directory_or_lock(self, tmp_path, capsys, config):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["common"])
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            cmd_apply(config, check=True)
+
+        assert not (ws_dir / ".ow" / "templates").exists()
+        assert not (ws_dir / ".ow" / "templates.lock.toml").exists()

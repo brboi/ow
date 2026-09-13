@@ -1,12 +1,18 @@
 import subprocess
 import sys
 
-from ow.commands.templates import outdated_templates
 from ow.utils.drift import warn_if_drifted
 from ow.utils.config import Config
 from ow.utils.git import run_cmd
 from ow.utils.resolver import resolve_workspace
-from ow.utils.templates import apply_templates, available_templates, ensure_services_compose, ensure_workspace_materialized, resolve_template_files
+from ow.utils.templates import (
+    apply_templates,
+    available_templates,
+    bundle_source_files,
+    ensure_services_compose,
+    ensure_workspace_materialized,
+    outdated_templates,
+)
 
 
 def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = False) -> None:
@@ -30,9 +36,9 @@ def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = Fal
             for alias in missing_worktrees:
                 print(f"  {alias}", file=sys.stderr)
             drifted = True
-        outdated = outdated_templates()
+        outdated = outdated_templates(ws_dir)
         if outdated:
-            print("\nTemplate(s) ow has changed since you took them:")
+            print("\nTemplate(s) you edited that ow has changed since:")
             for name in outdated:
                 print(f"  {name}")
         if drifted or outdated:
@@ -42,7 +48,12 @@ def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = Fal
 
     _, successful, errors = ensure_workspace_materialized(ws, config, ws_dir)
     ensure_services_compose()
-    apply_templates(ws, config, ws_dir)
+    sync = apply_templates(ws, config, ws_dir)
+
+    for name in sync.copied:
+        print(f"materialised {name}")
+    for name in sync.updated:
+        print(f"updated {name}")
 
     # Report files that exist on disk but belong to template bundles not in
     # the workspace config.  Stateless: no manifest, no mutation.
@@ -50,7 +61,7 @@ def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = Fal
     orphans: list[tuple[str, str]] = []
     for bundle in sorted(inactive_bundles):
         try:
-            files = resolve_template_files(bundle)
+            files = bundle_source_files(bundle)
         except (OSError, FileNotFoundError):
             continue
         for rel, src in files.items():
@@ -78,10 +89,9 @@ def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = Fal
             print(f"\nWarning: could not trust {mise_toml}: {e}", file=sys.stderr)
             print(f"  Run it yourself when mise is happy: mise trust {mise_toml}", file=sys.stderr)
 
-    outdated = outdated_templates()
-    if outdated:
-        print("\nTemplate(s) ow has changed since you took them:")
-        for name in outdated:
+    if sync.outdated:
+        print("\nTemplate(s) you edited that ow has changed since:")
+        for name in sync.outdated:
             print(f"  {name}")
         print("Run `ow templates --diff` to see what changed.")
 

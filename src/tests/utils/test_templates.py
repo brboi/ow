@@ -1,4 +1,5 @@
 import pytest
+import hashlib
 import json
 import re
 import subprocess
@@ -8,7 +9,18 @@ from unittest.mock import MagicMock, patch
 
 from jinja2 import Environment, FileSystemLoader
 
-from ow.utils.templates import apply_templates, build_template_context, ensure_workspace_materialized, find_addon_paths
+from ow.utils.templates import (
+    TemplateSync,
+    WS_TEMPLATES,
+    WS_TEMPLATES_LOCK,
+    bundle_source_files,
+    apply_templates,
+    build_template_context,
+    ensure_workspace_materialized,
+    find_addon_paths,
+    materialize_templates,
+    workspace_template_files,
+)
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
 
 TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "common"
@@ -45,10 +57,15 @@ def setup_categorized_repo(ws_dir: Path, alias: str) -> Path:
     return repo
 
 
-def make_ws_config(aliases: list[str], templates: list[str] | None = None) -> WorkspaceConfig:
+def make_ws_config(
+    aliases: list[str],
+    templates: list[str] | None = None,
+    vars: dict | None = None,
+) -> WorkspaceConfig:
     return WorkspaceConfig(
         repos={alias: BranchSpec("origin/master") for alias in aliases},
         templates=templates or ["common"],
+        vars=vars if vars is not None else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
     )
 
 
@@ -229,7 +246,8 @@ def test_build_template_context_addons_order(tmp_path, config):
     assert ent_idx < comm_idx
 
 
-def test_build_template_context_vars_merge(tmp_path, config):
+def test_build_template_context_vars_are_ws_vars_only(tmp_path, config):
+    """#40: global vars are only seeds at init; rendering sees ws.vars alone."""
     ws_dir = tmp_path / "workspaces" / "test"
     setup_odoo_main_repo(ws_dir, "community")
     ws = WorkspaceConfig(
@@ -239,8 +257,8 @@ def test_build_template_context_vars_merge(tmp_path, config):
     )
     ctx = build_template_context(ws, config, ws_dir)
 
-    assert ctx["vars"]["http_port"] == 8070
-    assert "db_host" in ctx["vars"]
+    assert ctx["vars"] == {"http_port": 8070}
+    assert "db_host" not in ctx["vars"]
 
 
 def test_build_template_context_full_workspace(tmp_path, config):
@@ -1159,3 +1177,206 @@ def test_apply_templates_renders_once_when_nothing_appears(xdg, tmp_path, config
         apply_templates(ws, config, ws_dir)
 
     assert render.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# bundle_source_files — hybrid source resolution (local overrides packaged
+# per file, never per bundle)
+# ---------------------------------------------------------------------------
+
+class TestResolveBundleFiles:
+    def test_partial_local_bundle_does_not_hide_packaged_siblings(self, xdg):
+        """A local bundle holding one file must not hide its packaged siblings."""
+        from ow.utils import paths
+
+        local = paths.templates_dir() / "common"
+        local.mkdir(parents=True)
+        (local / "odoorc.j2").write_text("local override")
+
+        result = bundle_source_files("common")
+
+        # The customised file resolves to the local copy.
+        assert result[Path("odoorc.j2")] == local / "odoorc.j2"
+        assert result[Path("odoorc.j2")].read_text() == "local override"
+
+        # Its siblings still resolve to the packaged versions, by path.
+        packaged_dir = (
+            Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "common"
+        )
+        assert result[Path("pyrightconfig.json.j2")] == packaged_dir / "pyrightconfig.json.j2"
+        assert result[Path("requirements-dev.txt")] == packaged_dir / "requirements-dev.txt"
+        assert result[Path("mise.toml.j2")] == packaged_dir / "mise.toml.j2"
+        assert result[Path("odools.toml.j2")] == packaged_dir / "odools.toml.j2"
+
+    def test_purely_local_bundle_resolves(self, xdg):
+        from ow.utils import paths
+
+        local = paths.templates_dir() / "my-custom"
+        local.mkdir(parents=True)
+        (local / "only.txt").write_text("only file")
+
+        result = bundle_source_files("my-custom")
+
+        assert result == {Path("only.txt"): local / "only.txt"}
+
+    def test_purely_packaged_bundle_resolves(self, xdg):
+        result = bundle_source_files("vscode")
+
+        packaged_dir = (
+            Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "vscode"
+        )
+        expected_rel = Path(".vscode") / "settings.json.j2"
+        assert result[expected_rel] == packaged_dir / ".vscode" / "settings.json.j2"
+
+    def test_unknown_bundle_resolves_to_empty(self, xdg):
+        assert bundle_source_files("does-not-exist") == {}
+
+
+# ---------------------------------------------------------------------------
+# materialize_templates (#41) — copy sources into <ws>/.ow/templates, lock
+# what was copied, and never clobber an edit.
+# ---------------------------------------------------------------------------
+
+class TestMaterializeTemplates:
+    def _local_bundle(self, content: str = "hello\n") -> Path:
+        from ow.utils import paths
+
+        local = paths.templates_dir() / "mine"
+        local.mkdir(parents=True)
+        (local / "greeting.txt").write_text(content)
+        return local
+
+    def _dest(self, ws_dir: Path) -> Path:
+        return ws_dir / WS_TEMPLATES / "mine" / "greeting.txt"
+
+    def test_first_apply_materialises_and_locks(self, xdg, tmp_path):
+        self._local_bundle()
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["mine"])
+
+        sync = materialize_templates(ws, ws_dir)
+
+        assert self._dest(ws_dir).read_text() == "hello\n"
+        assert sync.copied == ["mine/greeting.txt"]
+        assert sync.updated == []
+        assert sync.outdated == []
+        lock = tomllib.loads((ws_dir / WS_TEMPLATES_LOCK).read_text())
+        assert lock["mine/greeting.txt"] == hashlib.sha256(b"hello\n").hexdigest()
+
+    def test_pre_2_4_0_workspace_has_neither_dir_nor_lock_and_behaves_like_first_apply(self, xdg, tmp_path):
+        """No `.ow/templates`, no lock: exactly the 'dest missing' branch."""
+        self._local_bundle()
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["mine"])
+
+        assert not (ws_dir / WS_TEMPLATES).exists()
+        assert not (ws_dir / WS_TEMPLATES_LOCK).exists()
+
+        sync = materialize_templates(ws, ws_dir)
+
+        assert sync.copied == ["mine/greeting.txt"]
+        assert self._dest(ws_dir).is_file()
+
+    def test_second_apply_with_changed_source_overwrites_untouched_file(self, xdg, tmp_path):
+        local = self._local_bundle()
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["mine"])
+        materialize_templates(ws, ws_dir)
+
+        (local / "greeting.txt").write_text("goodbye\n")
+
+        sync = materialize_templates(ws, ws_dir)
+
+        assert self._dest(ws_dir).read_text() == "goodbye\n"
+        assert sync.copied == []
+        assert sync.updated == ["mine/greeting.txt"]
+        assert sync.outdated == []
+
+    def test_edited_file_left_alone_and_reported_outdated_when_source_also_moved(self, xdg, tmp_path):
+        local = self._local_bundle()
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["mine"])
+        materialize_templates(ws, ws_dir)
+
+        self._dest(ws_dir).write_text("my own edits\n")
+        (local / "greeting.txt").write_text("goodbye\n")
+
+        sync = materialize_templates(ws, ws_dir)
+
+        assert self._dest(ws_dir).read_text() == "my own edits\n", "an edited file must never be overwritten"
+        assert sync.outdated == ["mine/greeting.txt"]
+        assert sync.copied == []
+        assert sync.updated == []
+
+    def test_edited_file_with_unchanged_source_is_silent(self, xdg, tmp_path):
+        self._local_bundle()
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["mine"])
+        materialize_templates(ws, ws_dir)
+
+        self._dest(ws_dir).write_text("my own edits\n")
+
+        sync = materialize_templates(ws, ws_dir)
+
+        assert self._dest(ws_dir).read_text() == "my own edits\n"
+        assert sync.copied == sync.updated == sync.outdated == []
+
+    def test_hand_added_file_is_left_alone_and_never_reported(self, xdg, tmp_path):
+        self._local_bundle()
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["mine"])
+        materialize_templates(ws, ws_dir)
+
+        extra = ws_dir / WS_TEMPLATES / "mine" / "extra.txt"
+        extra.write_text("hand added\n")
+
+        sync = materialize_templates(ws, ws_dir)
+
+        assert extra.read_text() == "hand added\n"
+        assert sync.copied == sync.updated == sync.outdated == []
+        lock = tomllib.loads((ws_dir / WS_TEMPLATES_LOCK).read_text())
+        assert "mine/extra.txt" not in lock
+
+    def test_missing_bundle_raises_before_writing_the_lock_content(self, xdg, tmp_path):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["nonexistent-template"])
+        with pytest.raises(FileNotFoundError, match="not found"):
+            materialize_templates(ws, ws_dir)
+
+    def test_lock_file_has_the_managed_by_ow_header(self, xdg, tmp_path):
+        self._local_bundle()
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["mine"])
+        materialize_templates(ws, ws_dir)
+        content = (ws_dir / WS_TEMPLATES_LOCK).read_text()
+        assert content.startswith("# Managed by ow.\n")
+
+
+class TestWorkspaceTemplateFiles:
+    def test_returns_materialised_files_keyed_by_relative_path(self, xdg, tmp_path):
+        from ow.utils import paths
+
+        local = paths.templates_dir() / "mine"
+        local.mkdir(parents=True)
+        (local / "greeting.txt").write_text("hi\n")
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ws = WorkspaceConfig(repos={}, templates=["mine"])
+        materialize_templates(ws, ws_dir)
+
+        result = workspace_template_files(ws_dir, "mine")
+
+        assert result == {Path("greeting.txt"): ws_dir / WS_TEMPLATES / "mine" / "greeting.txt"}
+
+    def test_unmaterialised_bundle_is_empty(self, xdg, tmp_path):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        assert workspace_template_files(ws_dir, "never-applied") == {}

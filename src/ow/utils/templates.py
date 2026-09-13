@@ -1,9 +1,14 @@
+import hashlib
+import os
 import shutil
 import subprocess
 import sys
+import tomllib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+import tomli_w
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from ow.utils.display import print_git_result, task_progress
@@ -151,7 +156,7 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
         "ws_dir": str(ws_dir),
         "main_repo_alias": main_repo_alias,
         "repos": list(ws.repos.keys()),
-        "vars": {**config.vars, **ws.vars},
+        "vars": dict(ws.vars),
         "addons_paths": addons_paths + main_addons_paths,
         "odools_path_items": odools_path_items + odools_main_items,
         "services_compose": str(paths.services_dir() / "compose.yml"),
@@ -219,19 +224,13 @@ def _files_under(root: Path | None) -> dict[Path, Path]:
     }
 
 
-def packaged_files(bundle: str) -> dict[str, Path]:
-    """Every file the packaged bundle ships, keyed by its relative posix path."""
-    return {
-        rel.as_posix(): src for rel, src in _files_under(_packaged_bundle(bundle)).items()
-    }
+def bundle_source_files(bundle: str) -> dict[Path, Path]:
+    """Every source file of a bundle, local copy winning per file.
 
-
-def resolve_template_files(bundle: str) -> dict[Path, Path]:
-    """Every file of a bundle, local copy winning per file.
-
-    Per file, not per bundle: taking one file must not silently drop the
-    others. That is the difference between owning a file and forking a
-    bundle.
+    Per file, not per bundle: a local override of one file must not
+    silently drop its packaged siblings. This is the source side of
+    materialisation, used both to populate the workspace and to diff a
+    materialised file against what ow would copy today.
     """
     files: dict[Path, Path] = {}
     for root in (_packaged_bundle(bundle), paths.templates_dir() / bundle):
@@ -240,12 +239,196 @@ def resolve_template_files(bundle: str) -> dict[Path, Path]:
 
 
 # ---------------------------------------------------------------------------
+# Template materialisation (#41)
+#
+# Templates are no longer rendered straight from the packaged/local source
+# trees. They are first copied into <ws_dir>/.ow/templates/<bundle>, and a
+# lock file records the sha256 of the source each copy came from. Rendering
+# reads only from that copy. The lock is what makes "did the user edit
+# this, and did ow's copy move since?" answerable without a third baseline
+# file: the lock IS the baseline.
+# ---------------------------------------------------------------------------
+
+WS_TEMPLATES = Path(".ow") / "templates"
+WS_TEMPLATES_LOCK = Path(".ow") / "templates.lock.toml"
+
+_LOCK_HEADER = "# Managed by ow.\n"
+
+
+@dataclass
+class TemplateSync:
+    """What materialize_templates did, by `bundle/relpath` name."""
+    copied: list[str] = field(default_factory=list)
+    updated: list[str] = field(default_factory=list)
+    outdated: list[str] = field(default_factory=list)
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _read_lock(ws_dir: Path) -> dict[str, str]:
+    lock_path = ws_dir / WS_TEMPLATES_LOCK
+    if not lock_path.is_file():
+        return {}
+    with lock_path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def _write_lock(ws_dir: Path, lock: dict[str, str]) -> None:
+    lock_path = ws_dir / WS_TEMPLATES_LOCK
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    content = _LOCK_HEADER + tomli_w.dumps(dict(sorted(lock.items())))
+    tmp = lock_path.with_suffix(".toml.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, lock_path)
+
+
+def workspace_template_files(ws_dir: Path, bundle: str) -> dict[Path, Path]:
+    """The materialised files of one bundle, keyed by bundle-relative path."""
+    return _files_under(ws_dir / WS_TEMPLATES / bundle)
+
+
+def materialize_templates(ws: WorkspaceConfig, ws_dir: Path) -> TemplateSync:
+    """Copy/upgrade `<ws_dir>/.ow/templates` from the packaged+local sources.
+
+    Per file, against the lock:
+      - dest missing: copied, locked at the source's hash.
+      - dest present, untouched since the lock (its hash still matches the
+        lock): silently re-copied if the source moved, and relocked.
+      - dest present, edited by hand, AND the source also moved: left
+        alone, reported outdated — `ow templates --diff` explains why.
+      - dest present, edited by hand, source unchanged: left alone, silent.
+      - dest present with no lock entry (hand-added file): left alone,
+        never reported.
+    Never overwrites an edited file and never writes conflict markers. A
+    workspace with no `.ow/templates` yet (pre-2.4.0, or brand new) hits
+    only the first branch: the first `ow apply` copies everything.
+    """
+    lock = _read_lock(ws_dir)
+    sync = TemplateSync()
+
+    for bundle in ws.templates:
+        files = bundle_source_files(bundle)
+        if not files:
+            local_dir = paths.templates_dir() / bundle
+            packaged_dir = _packaged_bundle(bundle)
+            existing_dir = next(
+                (d for d in (local_dir, packaged_dir) if d is not None and d.is_dir()),
+                None,
+            )
+            if existing_dir is not None:
+                raise FileNotFoundError(
+                    f"Template '{bundle}' found in {existing_dir} but it is empty"
+                )
+            raise FileNotFoundError(
+                f"Template '{bundle}' not found in local or packaged templates"
+            )
+
+        bundle_dir = ws_dir / WS_TEMPLATES / bundle
+        for rel, src in sorted(files.items()):
+            name = f"{bundle}/{rel.as_posix()}"
+            dest = bundle_dir / rel
+            src_hash = _sha256_file(src)
+            locked = lock.get(name)
+
+            if not dest.is_file():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                lock[name] = src_hash
+                sync.copied.append(name)
+                continue
+
+            if locked is None:
+                # Hand-added file: not ours to touch or to report.
+                continue
+
+            dest_hash = _sha256_file(dest)
+            if dest_hash == locked:
+                if src_hash != locked:
+                    shutil.copy2(src, dest)
+                    lock[name] = src_hash
+                    sync.updated.append(name)
+                # else: nothing to do, already current.
+            elif src_hash != locked:
+                sync.outdated.append(name)
+            # else: edited by hand, source did not move — nothing to do.
+
+    _write_lock(ws_dir, lock)
+    return sync
+
+
+UP_TO_DATE = "up to date"
+MODIFIED = "modified"
+OUTDATED = "outdated"
+UNLOCKED = "unlocked"
+
+
+@dataclass
+class TemplateState:
+    """One materialised file, and how it compares to the source today."""
+    name: str
+    state: str
+    copy: Path
+    source: Path | None
+
+
+def template_states(ws_dir: Path) -> list[TemplateState]:
+    """Every materialised file of a workspace, with its state, sorted by name.
+
+    Read-only: never copies, never writes the lock. A file the lock does not
+    know about was added by hand and is `unlocked`, never reported as
+    anything else. Otherwise the state is `modified` when the working copy no
+    longer matches the lock, `outdated` when it was also edited AND the source
+    moved since (the case `--diff` explains), and `up to date` whenever the
+    working copy is untouched — including when the source has moved, since the
+    next `ow apply` fixes that silently.
+
+    Read from disk, not from `ws.templates`: a bundle dropped from the config
+    leaves its copies behind, and hiding them would hide exactly the files
+    `ow apply` already reports as orphans.
+    """
+    templates_root = ws_dir / WS_TEMPLATES
+    if not templates_root.is_dir():
+        return []
+
+    lock = _read_lock(ws_dir)
+    states: list[TemplateState] = []
+    for bundle_dir in sorted(p for p in templates_root.iterdir() if p.is_dir()):
+        bundle = bundle_dir.name
+        sources = bundle_source_files(bundle)
+        for rel, copy in workspace_template_files(ws_dir, bundle).items():
+            name = f"{bundle}/{rel.as_posix()}"
+            source = sources.get(rel)
+            locked = lock.get(name)
+            if locked is None:
+                states.append(TemplateState(name, UNLOCKED, copy, source))
+                continue
+
+            edited = _sha256_file(copy) != locked
+            moved = source is not None and _sha256_file(source) != locked
+            if edited and moved:
+                state = OUTDATED
+            elif edited:
+                state = MODIFIED
+            else:
+                state = UP_TO_DATE
+            states.append(TemplateState(name, state, copy, source))
+    return sorted(states, key=lambda s: s.name)
+
+
+def outdated_templates(ws_dir: Path) -> list[str]:
+    """`bundle/relpath` of every materialised file edited AND moved since."""
+    return [s.name for s in template_states(ws_dir) if s.state == OUTDATED]
+
+
+# ---------------------------------------------------------------------------
 # Template application helpers (shared between cmd_init and cmd_apply)
 # ---------------------------------------------------------------------------
 
 
-def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
-    """Apply templates in order to ws_dir (later templates override earlier ones).
+def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> TemplateSync:
+    """Materialise, then render, every template of `ws` into ws_dir.
 
     Rendered twice when the first pass changed what the addon scan can see: a
     template bundle may itself materialise an Odoo addon, and
@@ -254,6 +437,8 @@ def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
     pass is skipped whenever the rescan agrees with the first, which is the
     normal case.
     """
+    sync = materialize_templates(ws, ws_dir)
+
     context = build_template_context(ws, config, ws_dir)
     _render_bundles(ws, context, ws_dir)
 
@@ -264,40 +449,24 @@ def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> None:
     ):
         _render_bundles(ws, rescanned, ws_dir)
 
+    return sync
+
 
 def _render_bundles(ws: WorkspaceConfig, context: dict, ws_dir: Path) -> None:
-    """Render every bundle of `ws` into ws_dir against a fixed context.
+    """Render every bundle of `ws` from its materialised copy into ws_dir.
 
     Every write here is a deterministic function of `context`, which is what
-    lets apply_templates run this twice.
+    lets apply_templates run this twice. materialize_templates has already
+    guaranteed each bundle is materialised and non-empty by this point.
     """
     for template_name in ws.templates:
-        files = resolve_template_files(template_name)
-        local_dir = paths.templates_dir() / template_name
-        if not files:
-            packaged_dir = _packaged_bundle(template_name)
-            existing_dir = next(
-                (d for d in (local_dir, packaged_dir) if d is not None and d.is_dir()),
-                None,
-            )
-            if existing_dir is not None:
-                raise FileNotFoundError(
-                    f"Template '{template_name}' found in {existing_dir} but it is empty"
-                )
-            raise FileNotFoundError(
-                f"Template '{template_name}' not found in local or packaged templates"
-            )
+        bundle_dir = ws_dir / WS_TEMPLATES / template_name
+        files = workspace_template_files(ws_dir, template_name)
 
-        # Local wins per file, but an include/extends/import inside a local
-        # file must still be able to reach a packaged sibling. A search-path
-        # loader (local first) resolves that per file, exactly like
-        # resolve_template_files does for the non-Jinja operations below.
-        search_path = [local_dir]
-        packaged_dir = _packaged_bundle(template_name)
-        if packaged_dir is not None:
-            search_path.append(packaged_dir)
+        # The whole bundle was copied into bundle_dir, so a single search
+        # path resolves every {% include/extends/import %} inside it.
         env = Environment(
-            loader=FileSystemLoader(search_path),
+            loader=FileSystemLoader([bundle_dir]),
             undefined=StrictUndefined,
             keep_trailing_newline=True,
             trim_blocks=True,
