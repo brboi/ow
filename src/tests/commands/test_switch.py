@@ -105,6 +105,25 @@ def test_a_plain_switch_moves_every_repo_and_rewrites_the_specs(tmp_path, capsys
     assert new_ws.repos["enterprise"] == parse_branch_spec("feature-x..feature-x")
 
 
+def test_a_repo_with_no_configured_remote_still_fetches_its_own(tmp_path, capsys, xdg):
+    """The global `[remotes.<alias>]` table describes what new workspaces
+    get, not what a repo has: an alias missing from it must still reach the
+    remotes its bare repo carries, or a branch that plainly exists is
+    reported as nowhere to be found without a single fetch attempted."""
+    bare, src = _make_repo(tmp_path, "enterprise")
+    _branch_only_on_source(src, "feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt = _add_worktree(bare, ws_dir, "enterprise")
+    _workspace_config(ws_dir, {"enterprise": "master..featA"})
+
+    cmd_switch(Config(vars={}, remotes={}), "feature-x", workspace=str(ws_dir))
+
+    assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    new_ws = load_workspace_config(ws_dir / ".ow" / "config.toml")
+    assert new_ws.repos["enterprise"] == parse_branch_spec("feature-x..feature-x")
+
+
 def test_a_target_missing_in_one_repo_aborts_the_whole_switch(tmp_path, capsys, xdg):
     bare_c, src_c = _make_repo(tmp_path, "community")
     bare_e, src_e = _make_repo(tmp_path, "enterprise")

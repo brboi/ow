@@ -265,9 +265,12 @@ branch — the DWIM `git switch --guess` performs. `ow` does that guessing itsel
 are cloned `--single-branch` and extra branches are fetched outside the remote's configured
 refspec, which makes git's own `--guess` refuse to find them.
 
-No fetch happens by default. When the target isn't already known locally, `ow` fetches it once
-by its explicit refspec and, for a tag or a commit sha, falls back to one ordinary fetch; if it
-still cannot resolve the target after that, it gives up.
+No fetch happens by default. When the target isn't already known locally, `ow` asks each remote
+the repository actually has — not the ones `[remotes.<alias>]` happens to declare, since a
+workspace outlives its config entries — for that one branch, by explicit refspec. A name no
+remote carries therefore costs one instant refusal per remote rather than a full fetch, and the
+run says so in the terms that fix it: `no branch named 'X' here or on any remote — create it
+with ow switch -c X`.
 
 Pre-flight is all-or-nothing, unlike `ow rebase`, `ow pull`, and `ow reset`, which skip a bad
 repo and continue: every selected repo must have its worktree present, no git operation already

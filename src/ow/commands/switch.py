@@ -17,6 +17,7 @@ from ow.utils.git import (
     in_progress_operation,
     ordered_remotes,
     parallel_per_repo,
+    repo_remotes,
     rev_parse,
     set_branch_upstream,
 )
@@ -59,10 +60,18 @@ def _fetch_target(worktree: Path, target: str, alias_remotes: dict) -> None:
     only refreshes the branches the remote's refspec already maps: a branch
     nobody has ever fetched stays invisible however often it runs. Every
     other command in ow fetches such a branch by explicit refspec, and so
-    does this one. A tag or a sha has no `refs/heads/*` mapping, so the
-    ordinary fetch stays as the last resort.
+    does this one — which also means a name that exists nowhere costs one
+    instant refusal per remote instead of a full fetch of an Odoo-sized
+    repository.
+
+    The remotes come from the repo first, and only then from the global
+    config: a bare repo keeps every remote it was set up with, while the
+    config describes what new workspaces should get. A workspace whose
+    alias has no `[remotes.<alias>]` entry any more would otherwise be
+    told its branch does not exist, without a single fetch being attempted.
     """
-    remotes = ordered_remotes(alias_remotes)
+    remotes = repo_remotes(worktree)
+    remotes += [r for r in ordered_remotes(alias_remotes) if r not in remotes]
     qualifier, _, branch = target.partition("/")
     if branch and qualifier in remotes:
         candidates = [(qualifier, branch)]
@@ -70,16 +79,15 @@ def _fetch_target(worktree: Path, target: str, alias_remotes: dict) -> None:
         candidates = [(remote, target) for remote in remotes]
 
     for remote, branch_name in candidates:
+        # A remote that does not have the branch answers `fatal: couldn't
+        # find remote ref`, which is a probe result here, not an error to
+        # show: the run either resolves the target from another remote or
+        # reports the miss itself, in one line that says what to do.
         git(
             worktree, "fetch", remote,
             f"+refs/heads/{branch_name}:refs/remotes/{remote}/{branch_name}",
-            quiet=True,
+            quiet=True, capture_output=True, text=True,
         )
-        if _resolves(worktree, target):
-            return
-
-    for remote in remotes:
-        git(worktree, "fetch", remote, quiet=True)
         if _resolves(worktree, target):
             return
 
