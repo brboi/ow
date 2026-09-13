@@ -326,12 +326,13 @@ def switch(
     detach: bool = typer.Option(False, "--detach", help="Switch to a detached HEAD at TARGET"),
     only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to switch (default: all)", autocompletion=complete_gen_repos),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
+    include_detached: bool = typer.Option(False, "--include-detached-specs", help="Switch repos configured detached (bare refs) too; they are pins and left alone by default"),
 ) -> None:
     """Switch every repo in a workspace to a branch."""
     config = _load_config()
     cmd_switch(
         config, target=target, workspace=workspace_opt,
-        create=create, detach=detach, only=only, dry_run=dry_run,
+        create=create, detach=detach, only=only, dry_run=dry_run, include_detached=include_detached,
     )
 
 

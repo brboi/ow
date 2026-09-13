@@ -315,3 +315,84 @@ def test_creating_a_branch_one_repo_already_has_moves_nothing(tmp_path, capsys, 
     captured = capsys.readouterr()
     assert "already exists" in captured.out
     assert "ow switch feature-x" in captured.err
+
+
+def _pin_workspace(tmp_path, capsys, xdg):  # noqa: ANN001
+    """A workspace of one attached repo and one pinned (detached-spec) repo."""
+    bare_c, src_c = _make_repo(tmp_path, "community")
+    bare_e, src_e = _make_repo(tmp_path, "enterprise")
+    _branch_only_on_source(src_c, "feature-x")
+    _branch_only_on_source(src_e, "feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt_c = _add_worktree(bare_c, ws_dir, "community")
+    wt_e = ws_dir / "enterprise"
+    _git(bare_e, "worktree", "add", "-q", "--detach", str(wt_e), "master")
+    _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master"})
+
+    config = Config(vars={}, remotes={
+        "community": {"origin": RemoteConfig(url=str(src_c))},
+        "enterprise": {"origin": RemoteConfig(url=str(src_e))},
+    })
+    return config, ws_dir, wt_c, wt_e
+
+
+def test_a_detached_spec_is_left_alone_by_default(tmp_path, capsys, xdg):
+    """A bare ref in the config is a pin — the config names the exact ref that
+    repo should sit on, and a run that moves the workspace's branches has no
+    business rewriting it."""
+    config, ws_dir, wt_c, wt_e = _pin_workspace(tmp_path, capsys, xdg)
+    head_e = _git(wt_e, "rev-parse", "HEAD")
+
+    cmd_switch(config, "feature-x", workspace=str(ws_dir))
+
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    assert _git(wt_e, "rev-parse", "HEAD") == head_e
+    new_ws = load_workspace_config(ws_dir / ".ow" / "config.toml")
+    assert new_ws.repos["enterprise"] == parse_branch_spec("master")
+    out = capsys.readouterr().out
+    assert "left alone" in out
+    assert "--include-detached-specs" in out
+
+
+def test_include_detached_specs_switches_the_pins_too(tmp_path, capsys, xdg):
+    """With the flag, a pinned repo gets git's semantics like any other:
+    a branch target that exists only remotely attaches it as a tracking
+    branch, and the config records exactly that."""
+    config, ws_dir, wt_c, wt_e = _pin_workspace(tmp_path, capsys, xdg)
+
+    cmd_switch(config, "feature-x", workspace=str(ws_dir), include_detached=True)
+
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    new_ws = load_workspace_config(ws_dir / ".ow" / "config.toml")
+    assert new_ws.repos["enterprise"] == parse_branch_spec("feature-x..feature-x")
+    assert "left alone" not in capsys.readouterr().out
+
+
+def test_only_naming_a_pinned_repo_includes_it(tmp_path, capsys, xdg):
+    """`--only` naming a repo is insisting on it: the policy must not
+    silently drop the one repo the user asked for by name."""
+    config, ws_dir, wt_c, wt_e = _pin_workspace(tmp_path, capsys, xdg)
+
+    cmd_switch(config, "feature-x", workspace=str(ws_dir), only="enterprise")
+
+    assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "featA"
+
+
+def test_a_workspace_of_only_pins_switches_nothing(tmp_path, capsys, xdg):
+    """Every repo excluded is a run with nothing to run: it must report the
+    pins and exit cleanly, not crash on an empty pre-flight."""
+    bare, src = _make_repo(tmp_path, "enterprise")
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt = ws_dir / "enterprise"
+    _git(bare, "worktree", "add", "-q", "--detach", str(wt), "master")
+    _workspace_config(ws_dir, {"enterprise": "master"})
+    head = _git(wt, "rev-parse", "HEAD")
+    before = (ws_dir / ".ow" / "config.toml").read_text()
+
+    cmd_switch(Config(vars={}, remotes={}), "feature-x", workspace=str(ws_dir))
+
+    assert (ws_dir / ".ow" / "config.toml").read_text() == before
+    assert "left alone" in capsys.readouterr().out
