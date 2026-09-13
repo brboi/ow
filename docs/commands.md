@@ -11,7 +11,7 @@
 | `ow rebase` | `[workspace]`, `-w/--workspace`, `--only`, `--autostash`, `--dry-run`, `-y/--yes`, `--no-fetch` | Fetch and rebase repos in a workspace |
 | `ow pull` | `[workspace]`, `-w/--workspace`, `--only`, `--dry-run` | Fetch and fast-forward repos in a workspace |
 | `ow reset` | `[workspace]`, `-w/--workspace`, `--only`, `--hard`, `-f/--fetch`, `--dry-run`, `-y/--yes` | Put repos back on the refs they follow |
-| `ow switch` | `[target]`, `-w/--workspace`, `-c/--create`, `--detach`, `--only`, `--dry-run` | Switch every repo in a workspace to a branch |
+| `ow switch` | `[target]`, `-w/--workspace`, `-c/--create`, `--detach`, `--only`, `--dry-run`, `--include-detached-specs` | Switch every repo in a workspace to a branch; repos configured detached are pins and left alone by default |
 | `ow mv` | `<source>`, `<dest>`, `-y/--yes` | Move a workspace to a new path, repairing its worktrees |
 | `ow archive` | `<name>`, `-y/--yes` | Park a workspace without losing its worktrees or branches |
 | `ow unarchive` | `<name>`, `[dest]`, `-y/--yes` | Restore an archived workspace |
@@ -289,7 +289,15 @@ workspace that already exists, it does not define one.
 ow switch 18.0                              # every repo of the current workspace
 ow switch -c feat-x origin/master           # create feat-x from origin/master and switch to it
 ow switch --detach origin/master            # detached HEAD at origin/master
+ow switch 18.0 --include-detached-specs     # ... including the repos pinned to a bare ref
 ```
+
+A repo configured detached — a bare ref in `.ow/config.toml`, no `..branch` — is a **pin**: the
+config names the exact ref it should sit on, and a run that moves the workspace's branches has no
+business rewriting it. Pins are left alone by default, reported as such in the summary, and join
+the run only when you insist: `--include-detached-specs` for all of them, or `--only` naming one
+(with a branch target they switch like any other repo and become attached specs; with `--detach`
+they are re-pinned at the new ref).
 
 A branch that exists on exactly one remote is created locally and switched to as a tracking
 branch — the DWIM `git switch --guess` performs. `ow` does that guessing itself: its bare repos
@@ -304,12 +312,12 @@ the target costs nothing: it is reported as `already there`, nothing is run for 
 is left exactly as it was.
 
 The run opens with the same summary the other commands print, before anything moves:
-
 ```
 [voip] switch to 18.0
   community   master..master  new branch tracking origin/18.0
   enterprise  18.0..18.0      already there
   voip        master..voip    local branch
+  upgrade     master          left alone — detached spec
 ```
 
 Pre-flight is all-or-nothing, unlike `ow rebase`, `ow pull`, and `ow reset`, which skip a bad

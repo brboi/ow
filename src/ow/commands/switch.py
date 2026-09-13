@@ -195,21 +195,30 @@ def _summary_line(plan: SwitchPlan, alias_width: int, current: str, spec_width: 
 
 
 def _display_summary(
-    ws_name: str, plans: list[SwitchPlan], repos: dict[str, BranchSpec], *,
+    ws_name: str, aliases: list[str], plans: list[SwitchPlan], repos: dict[str, BranchSpec], *,
     target: str | None, create: str | None, detach: bool,
 ) -> None:
     """What each repo is on, and what this run would make of it.
 
     Printed before anything runs, like `ow reset` and `ow pull` do: a
     switch moves the whole workspace, so what it is about to do to every
-    repo belongs above git's output, not after it.
+    repo belongs above git's output, not after it. A repo the policy
+    leaves out appears here too — in the table it belongs to, at the
+    order the config lists it in — because a repo that silently drops
+    out of the run reads as a bug, not as a decision made on its behalf.
     """
     console.print(_header(ws_name, target=target, create=create, detach=detach))
-    specs = {p.alias: repos[p.alias].to_spec_str() for p in plans}
-    alias_width = max((len(p.alias) for p in plans), default=0)
+    plan_by_alias = {p.alias: p for p in plans}
+    specs = {a: repos[a].to_spec_str() for a in aliases}
+    alias_width = max((len(a) for a in aliases), default=0)
     spec_width = max((len(s) for s in specs.values()), default=0)
-    for plan in plans:
-        console.print(_summary_line(plan, alias_width, specs[plan.alias], spec_width))
+    for alias in aliases:
+        plan = plan_by_alias.get(alias)
+        if plan is not None:
+            console.print(_summary_line(plan, alias_width, specs[alias], spec_width))
+        else:
+            state = "[dim]left alone — detached spec[/]"
+            console.print(f"  {alias.ljust(alias_width)}  {escape(specs[alias].ljust(spec_width))}  {state}")
 
 
 def _report_refusals(refused: list[SwitchPlan]) -> None:
@@ -297,6 +306,7 @@ def cmd_switch(
     detach: bool = False,
     only: str | None = None,
     dry_run: bool = False,
+    include_detached: bool = False,
 ) -> None:
     """`git switch`, one repo at a time, across a workspace.
 
@@ -307,6 +317,12 @@ def cmd_switch(
     the rest leaves it straddling two states. Resolution tries local
     refs first and only fetches, once per repo, when the target is not
     already known.
+
+    A repo configured detached (a bare ref, no `..branch`) is a pin: the
+    config names the exact ref it should sit on, and a run that moves the
+    workspace's branches has no business rewriting it. Such repos are
+    left alone, unless `--include-detached-specs` says otherwise — or a
+    `--only` names one, because naming a repo is insisting on it.
 
     What each repo is about to do is printed first, as a table, the way
     every other multi-repo command here reports; a repo already on the
@@ -329,8 +345,18 @@ def cmd_switch(
     aliases = select_aliases(list(ws.repos), only)
     if not aliases:
         return
-
     needs_resolution = target is not None
+
+    # A detached spec is a pin, not a laggard: the config names the exact
+    # ref that repo should sit on, and moving the workspace's branches is
+    # no reason to rewrite it. Pins join the run only when asked for —
+    # `--include-detached-specs` for all of them, or a `--only` naming one,
+    # because naming a repo is insisting on it.
+    if include_detached:
+        included = aliases
+    else:
+        named = {a.strip() for a in only.split(",") if a.strip()} if only else set()
+        included = [a for a in aliases if not ws.repos[a].is_detached or a in named]
 
     tasks: dict[str, Any] = {
         alias: (
@@ -339,15 +365,17 @@ def cmd_switch(
                 alias_remotes=config.remotes.get(alias, {}),
             )
         )
-        for alias in aliases
+        for alias in included
     }
     # The pre-flight can reach the network — a target nobody fetched yet is
     # looked up on every remote — and silence for that long reads as a hang.
-    with task_progress("Checking repo(s)", len(tasks)) as advance:
-        results = parallel_per_repo(tasks, on_done=lambda _alias: advance())
+    results: dict[str, Any] = {}
+    if tasks:
+        with task_progress("Checking repo(s)", len(tasks)) as advance:
+            results = parallel_per_repo(tasks, on_done=lambda _alias: advance())
 
     plans: list[SwitchPlan] = []
-    for alias in aliases:
+    for alias in included:
         result = results[alias]
         if isinstance(result, Exception):
             plan = SwitchPlan(alias=alias, skip_reason=f"could not analyse — {result}")
@@ -355,12 +383,22 @@ def cmd_switch(
             plan = plan_switch(result, target=target, create=create, detach=detach)
         plans.append(plan)
 
-    _display_summary(ws_dir.name, plans, ws.repos, target=target, create=create, detach=detach)
+    _display_summary(ws_dir.name, aliases, plans, ws.repos, target=target, create=create, detach=detach)
 
     refused = [p for p in plans if p.is_skipped]
     if refused:
         _report_refusals(refused)
         sys.exit(2)
+
+    excluded = [a for a in aliases if a not in {p.alias for p in plans}]
+    if excluded and not include_detached:
+        # The table already says "left alone" per repo; what it cannot teach
+        # is the flag that includes them, and a policy nobody can discover
+        # is indistinguishable from a bug.
+        console.print(
+            f"\n[dim]{len(excluded)} detached repo(s) left alone — "
+            "pass --include-detached-specs to switch them too.[/]"
+        )
 
     if dry_run:
         _display_dry_run(plans, ws_dir)
