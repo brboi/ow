@@ -18,7 +18,7 @@ from textual.binding import Binding
 from textual.coordinate import Coordinate
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Label, SelectionList, Static
+from textual.widgets import Button, Checkbox, DataTable, Label, SelectionList, Static
 
 from ow.utils.config import (
     BranchSpec,
@@ -48,6 +48,9 @@ _FORM_SCREEN_CSS = """
 {cls} .section-heading {{
     text-style: bold;
     margin: 1 0 0 0;
+}}
+{cls} .section-hint {{
+    color: $text-muted;
 }}
 {cls} > VerticalScroll > Horizontal {{
     align: center middle;
@@ -291,6 +294,12 @@ class WorkspaceConfigScreen(ModalScreen[WorkspaceConfig | None]):
                 yield LabeledInput(alias, value=value, id=f"wc_spec_{alias}")
 
             yield Static("Vars", classes="section-heading")
+            yield Static(
+                "Copied from the global config when this workspace was created; "
+                "these values are now this workspace's own — editing global vars "
+                "later won't change them.",
+                classes="section-hint",
+            )
             yield VarsEditor(self._ws.vars, id="wc_vars")
 
             yield Horizontal(
@@ -337,6 +346,97 @@ class WorkspaceConfigScreen(ModalScreen[WorkspaceConfig | None]):
             vars=vars_dict,
             version=self._ws.version,
         ))
+
+
+# ---------------------------------------------------------------------------
+# SwitchRequest / SwitchScreen — `ow switch` form
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SwitchRequest:
+    """What the user filled in on the switch form."""
+
+    target: str | None
+    create: str | None
+    detach: bool
+
+
+class SwitchScreen(ModalScreen[SwitchRequest | None]):
+    """Form for `ow switch`: target branch, optional new-branch name (-c),
+    and a --detach checkbox.
+
+    Dismisses with a `SwitchRequest` on Switch, None on Cancel.
+    """
+
+    DEFAULT_CSS = """
+    SwitchScreen {
+        align: center middle;
+    }
+    SwitchScreen > Vertical {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    SwitchScreen Checkbox {
+        margin: 1 0 0 4;
+    }
+    SwitchScreen > Vertical > Horizontal {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+    SwitchScreen Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", "", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            LabeledInput(
+                "target branch",
+                placeholder="e.g. main, or a start point with -c below",
+                id="sw_target",
+            ),
+            LabeledInput(
+                "-c new branch",
+                placeholder="(optional) create this branch and switch to it",
+                id="sw_create",
+            ),
+            Checkbox("detach", id="sw_detach"),
+            Horizontal(
+                Button("Switch", id="btn_switch", variant="success"),
+                Button("Cancel", id="btn_cancel", variant="error"),
+            ),
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn_switch":
+            self._try_submit()
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._try_submit()
+
+    def _try_submit(self) -> None:
+        target_input = self.query_one("#sw_target", LabeledInput)
+        target = target_input.value.strip() or None
+        create = self.query_one("#sw_create", LabeledInput).value.strip() or None
+        detach = self.query_one("#sw_detach", Checkbox).value
+
+        if target is None and create is None:
+            target_input.set_error("target branch or -c new branch is required")
+            return
+        target_input.set_error(None)
+
+        self.dismiss(SwitchRequest(target=target, create=create, detach=detach))
 
 
 # ---------------------------------------------------------------------------
