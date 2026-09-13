@@ -127,6 +127,7 @@ class HelpScreen(ModalScreen[None]):
             "  a            Apply\n"
             "  R            Rebase\n"
             "  P            Pull\n"
+            "  S            Switch\n"
             "  r            Reset\n"
             "  p            Prune\n"
             "\n"
@@ -184,6 +185,7 @@ class MainScreen(Screen):
         Binding("a", "apply", "Apply", show=True),
         Binding("R", "rebase", "Rebase", show=True),
         Binding("P", "pull", "Pull", show=True),
+        Binding("S", "switch", "Switch", show=True),
         Binding("r", "reset", "Reset", show=True),
         Binding("n", "new_workspace", "New", show=True),
         Binding("e", "edit_config", "Edit", show=True),
@@ -750,6 +752,46 @@ class MainScreen(Screen):
         self.run_operation(
             f"pull {entry.name}",
             lambda: cmd_pull(self._config, workspace=str(entry.path)),
+            invalidate=entry.path,
+        )
+
+    # ---- switch (§4.3d) -------------------------------------------------
+
+    def action_switch(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self.notify("No workspace selected", severity="warning")
+            return
+        if entry.archived:
+            self.notify("Cannot switch archived workspace", severity="warning")
+            return
+        if entry.ws is None:
+            self.notify("Workspace config not loaded", severity="warning")
+            return
+        from ow.tui.workspace_forms import SwitchScreen
+        self.app.push_screen(
+            SwitchScreen(),
+            callback=lambda req: req and self._do_switch(entry, req),
+        )
+
+    def _do_switch(self, entry: WorkspaceEntry, req: Any) -> None:
+        from ow.commands import cmd_switch
+
+        def _then(_result: Any) -> None:
+            self.notify(f"Switched {entry.name}", severity="information")
+
+        self.run_operation(
+            f"switch {entry.name}",
+            lambda: cmd_switch(
+                self._config,
+                target=req.target,
+                workspace=str(entry.path),
+                create=req.create,
+                detach=req.detach,
+                only=None,
+                dry_run=False,
+            ),
+            then=_then,
             invalidate=entry.path,
         )
 

@@ -12,6 +12,7 @@ from ow.commands.reset import cmd_reset
 from ow.commands.rm import cmd_rm
 from ow.commands.shell_init import cmd_shell_init
 from ow.commands.status import cmd_status
+from ow.commands.switch import cmd_switch
 from ow.commands.templates import cmd_templates
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "cmd_rm",
     "cmd_shell_init",
     "cmd_status",
+    "cmd_switch",
     "cmd_templates",
     "cmd_unarchive",
 ]

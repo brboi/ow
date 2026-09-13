@@ -19,7 +19,7 @@ from ow.utils import paths
 from ow.utils.config import BranchSpec, WorkspaceConfig, write_workspace_config
 from ow.tui.dashboard import MainScreen
 from ow.tui.widgets import ConfirmDialog
-from ow.tui.workspace_forms import NewWorkspaceScreen
+from ow.tui.workspace_forms import NewWorkspaceScreen, SwitchScreen
 
 
 # ---------------------------------------------------------------------------
@@ -65,8 +65,13 @@ def test_workspace_list_active_and_archived(dashboard_pilot, seed_workspace, tmp
 def test_detail_renders_config_without_git(dashboard_pilot, seed_workspace, tmp_path: Path):
     """Highlighting a workspace renders its repos/templates/vars straight
     from config — the alias, its branch spec and its template all show up
-    in the detail pane — before the debounced status refresh ever calls
-    git."""
+    in the detail pane — and git is only ever *scheduled*, never run by the
+    highlight itself.
+
+    The debounce timer is neutralised rather than raced against: armed at
+    250 ms, it fires on its own under a loaded test suite and repaints the
+    pane from a real status, which is not what this test is about.
+    """
     seed_workspace(
         tmp_path,
         "test-ws",
@@ -75,8 +80,11 @@ def test_detail_renders_config_without_git(dashboard_pilot, seed_workspace, tmp_
     )
 
     async def _run():
-        async with dashboard_pilot() as (pilot, screen):
-            with patch("ow.tui.dashboard.gather_workspace_status") as mock_gather:
+        with (
+            patch.object(MainScreen, "_arm_status_debounce") as armed,
+            patch("ow.tui.dashboard.gather_workspace_status") as mock_gather,
+        ):
+            async with dashboard_pilot() as (pilot, screen):
                 option_list = screen.query_one("#ws_list")
                 option_list.highlighted = 0
                 await pilot.pause()
@@ -89,8 +97,9 @@ def test_detail_renders_config_without_git(dashboard_pilot, seed_workspace, tmp_
                 assert "master" in rendered, rendered
                 assert "common" in rendered, rendered
 
-                # The debounced git-backed status refresh must not have
-                # fired yet from a mere highlight.
+                # A highlight schedules the status refresh and nothing more:
+                # it never calls git itself.
+                assert armed.called
                 mock_gather.assert_not_called()
 
     asyncio.run(_run())
@@ -190,5 +199,76 @@ def test_quit_action(dashboard_pilot):
             # The app decided to exit cleanly — `return_code` is the
             # public, documented value `App.exit()` was called with.
             assert pilot.app.return_code == 0
+
+    asyncio.run(_run())
+
+
+def test_switch_key_opens_form_and_validates_empty_submission(
+    dashboard_pilot, seed_workspace, tmp_path: Path
+):
+    """S opens SwitchScreen; submitting with no target and no new branch
+    name shows a validation error instead of dismissing."""
+    seed_workspace(tmp_path, "test-ws", repos={"community": "origin/master"})
+
+    async def _run():
+        async with dashboard_pilot() as (pilot, screen):
+            option_list = screen.query_one("#ws_list")
+            option_list.highlighted = 0
+            await pilot.pause()
+
+            await pilot.press("S")
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, SwitchScreen)
+
+            await pilot.click("#btn_switch")
+            await pilot.pause()
+
+            # Still on the form — the empty submission was rejected.
+            assert isinstance(pilot.app.screen, SwitchScreen)
+            target_field = pilot.app.screen.query_one("#sw_target")
+            assert target_field.error_message
+
+    asyncio.run(_run())
+
+
+def test_switch_submits_target_and_runs_cmd_switch(
+    dashboard_pilot, seed_workspace, tmp_path: Path
+):
+    """Filling the target field and pressing Switch calls cmd_switch with
+    the selected workspace and the form's values."""
+    ws_dir = seed_workspace(tmp_path, "test-ws", repos={"community": "origin/master"})
+
+    async def _run():
+        async with dashboard_pilot() as (pilot, screen):
+            option_list = screen.query_one("#ws_list")
+            option_list.highlighted = 0
+            await pilot.pause()
+
+            await pilot.press("S")
+            await pilot.pause()
+            sw_screen = pilot.app.screen
+            assert isinstance(sw_screen, SwitchScreen)
+
+            target_inner = sw_screen.query_one("#sw_target").query_one("#li_input")
+            target_inner.value = "feature-branch"
+
+            with patch("ow.commands.cmd_switch") as mock_switch:
+                await pilot.click("#btn_switch")
+                await pilot.pause()
+
+                for _ in range(100):
+                    if not screen._busy:
+                        break
+                    await pilot.pause()
+                await pilot.pause()
+
+                mock_switch.assert_called_once()
+                _, kwargs = mock_switch.call_args
+                assert kwargs["target"] == "feature-branch"
+                assert kwargs["workspace"] == str(ws_dir)
+                assert kwargs["create"] is None
+                assert kwargs["detach"] is False
+                assert kwargs["only"] is None
+                assert kwargs["dry_run"] is False
 
     asyncio.run(_run())
