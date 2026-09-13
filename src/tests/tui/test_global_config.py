@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from textual.widgets import Button, DataTable
+from textual.widgets import Button, DataTable, Static
 
 from ow.utils.config import Config, RemoteConfig
 from ow.tui.global_config import AddRemoteScreen, GlobalConfigScreen
@@ -183,5 +183,26 @@ def test_gc_header_save_button_not_clipped(dashboard_pilot):
                 f"shorter than the Save button ({save_button.region.height}) "
                 "— it will be clipped"
             )
+
+    asyncio.run(_run())
+
+
+def test_global_config_vars_section_explains_they_are_copied_not_linked(dashboard_pilot):
+    """The vars panel must say these are initial values copied into new
+    workspaces, and that editing them here does not touch existing ones —
+    not that the workspace stays linked to the global config."""
+
+    async def _run():
+        async with dashboard_pilot(size=(120, 40)) as (pilot, screen):
+            await pilot.press("E")
+            await pilot.pause()
+            gc_screen = pilot.app.screen
+            gc_screen._show_section(1)
+            await pilot.pause()
+            panel = gc_screen.query_one("#gc_panel_vars")
+            rendered = "\n".join(str(s.render()) for s in panel.query(Static)).lower()
+            assert "copied" in rendered
+            assert "new workspace" in rendered
+            assert "does not affect" in rendered
 
     asyncio.run(_run())

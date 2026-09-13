@@ -262,6 +262,50 @@ def test_init_without_a_tty_takes_everything_from_a_configuration(tmp_path, monk
     assert "from-source" in (target / ".ow" / "config.toml").read_text()
 
 
+def test_init_seeds_workspace_vars_from_global_config(tmp_path, monkeypatch, config_with_remotes):
+    """A new workspace's vars start as a full copy of the global [vars] —
+    the written .ow/config.toml owns them outright, so a later edit to the
+    global config must not retroactively change what's already on disk."""
+    config_with_remotes.vars = {"http_port": 8069, "db_host": "localhost"}
+    monkeypatch.chdir(tmp_path)
+
+    with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
+        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+
+    ws = load_workspace_config(tmp_path / "parrot" / ".ow" / "config.toml")
+    assert ws.vars == {"http_port": 8069, "db_host": "localhost"}
+
+    # Mutate the global config after the fact — the workspace's own copy on
+    # disk must be unaffected.
+    config_with_remotes.vars["http_port"] = 9999
+    config_with_remotes.vars["new_key"] = "added-later"
+
+    ws_after = load_workspace_config(tmp_path / "parrot" / ".ow" / "config.toml")
+    assert ws_after.vars == {"http_port": 8069, "db_host": "localhost"}
+
+
+def test_init_with_configuration_vars_override_global_vars(tmp_path, monkeypatch, config_with_remotes):
+    """-c's own vars take precedence over the global ones they diverged
+    from, but a global key absent from the source is still seeded in."""
+    config_with_remotes.vars = {"http_port": 8069, "db_host": "localhost"}
+    source = tmp_path / "source"
+    (source / ".ow").mkdir(parents=True)
+    (source / ".ow" / "config.toml").write_text(
+        'templates = ["common"]\n\n'
+        '[repos]\ncommunity = "master..from-source"\n\n'
+        '[vars]\nhttp_port = 9999\n'
+    )
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.chdir(target)
+
+    with _tty(False), _prompt_answers(), _no_git(target):
+        cmd_init(config_with_remotes, configuration=str(source))
+
+    ws = load_workspace_config(target / ".ow" / "config.toml")
+    assert ws.vars == {"http_port": 9999, "db_host": "localhost"}
+
+
 def test_init_with_a_tty_asks(tmp_path, monkeypatch, config_with_remotes):
     monkeypatch.chdir(tmp_path)
 
@@ -768,6 +812,7 @@ def test_init_lists_the_vars_one_per_line(tmp_path, monkeypatch, capsys, config_
 
     out = capsys.readouterr().out
     assert "  Vars:" in out
+    assert "copied from the global config" in out
     assert "    http_port: 8069" in out
     assert "    db_host: localhost" in out
     assert "{" not in out
