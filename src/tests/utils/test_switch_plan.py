@@ -56,7 +56,7 @@ def test_a_missing_worktree_points_at_ow_apply():
 
     assert result.is_skipped
     assert result.args == ()
-    assert "ow apply" in result.skip_reason
+    assert "ow apply" in result.hint
 
 
 def test_a_busy_repo_is_skipped_with_its_resume_commands():
@@ -75,7 +75,7 @@ def test_an_unresolvable_target_says_how_to_create_it():
 
     assert result.is_skipped
     assert "feature-x" in result.skip_reason
-    assert "ow switch -c feature-x" in result.skip_reason
+    assert result.hint == "create it with `ow switch -c feature-x`"
 
 
 def test_detach_does_not_suggest_creating_a_branch():
@@ -83,7 +83,35 @@ def test_detach_does_not_suggest_creating_a_branch():
     result = plan(SwitchFacts(alias="community", target_resolvable=False), detach=True)
 
     assert "feature-x" in result.skip_reason
-    assert "-c" not in result.skip_reason
+    assert result.hint is None
+
+
+def test_creating_a_branch_that_already_exists_is_refused_before_anything_moves():
+    """git refuses `switch -c` on an existing branch, so a repo that already
+    has it would fail mid-run — after its siblings had already moved."""
+    result = plan(SwitchFacts(alias="community", create_exists=True), create="feature-x")
+
+    assert result.is_skipped
+    assert result.args == ()
+    assert result.hint == "switch to it with `ow switch feature-x`"
+
+
+def test_a_repo_already_on_the_target_runs_nothing():
+    """`git switch x` on a repo already on x only answers "Already on 'x'",
+    and rewriting its spec would churn the config of a repo that never moved."""
+    result = plan(SwitchFacts(alias="community", current_branch="feature-x"))
+
+    assert result.is_noop
+    assert not result.is_skipped
+    assert result.args == ()
+
+
+def test_detaching_is_never_a_noop_even_on_the_target_branch():
+    """Being on branch x is not being detached at x: the run has work to do."""
+    result = plan(SwitchFacts(alias="community", current_branch="feature-x"), detach=True)
+
+    assert not result.is_noop
+    assert result.args == ("switch", "--detach", "feature-x")
 
 
 def test_worktree_missing_takes_priority_over_a_busy_check_that_never_happened():
@@ -91,7 +119,7 @@ def test_worktree_missing_takes_priority_over_a_busy_check_that_never_happened()
     cannot be probed for a rebase-in-progress marker at all."""
     result = plan(SwitchFacts(alias="community", worktree_missing=True, busy=None))
 
-    assert "ow apply" in result.skip_reason
+    assert "worktree not found" in result.skip_reason
 
 
 def test_a_busy_repo_beats_an_unresolvable_target():

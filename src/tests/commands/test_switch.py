@@ -151,7 +151,12 @@ def test_a_target_missing_in_one_repo_aborts_the_whole_switch(tmp_path, capsys, 
     unchanged = load_workspace_config(ws_dir / ".ow" / "config.toml")
     assert unchanged.repos["community"] == parse_branch_spec("master..featA")
     assert unchanged.repos["enterprise"] == parse_branch_spec("master..featA")
-    assert "enterprise" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    # The table names the repo that blocked the run; stderr says the run did
+    # nothing at all, which no per-repo line can say.
+    assert "enterprise" in captured.out
+    assert "no branch named 'feature-x'" in captured.out
+    assert "Nothing was switched" in captured.err
 
 
 def test_create_makes_the_branch_from_the_given_start_point(tmp_path, capsys, xdg):
@@ -259,3 +264,54 @@ def test_a_dirty_worktree_still_switches_when_git_allows_it(tmp_path, capsys, xd
 
     assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
     assert (wt / "a.txt").read_text() == "edited, uncommitted"
+
+
+def test_a_repo_already_on_the_target_is_left_alone(tmp_path, capsys, xdg):
+    """Switching a workspace to the branch part of it is already on must not
+    re-derive the spec of the repos that never moved: an upstream ow wrote
+    once would be rewritten from whatever git reports today."""
+    bare, src = _make_repo(tmp_path, "community")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt = _add_worktree(bare, ws_dir, "community")
+    _workspace_config(ws_dir, {"community": "some-base..featA"})
+    before = (ws_dir / ".ow" / "config.toml").read_text()
+    head_before = _git(wt, "rev-parse", "HEAD")
+
+    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+
+    cmd_switch(config, "featA", workspace=str(ws_dir))
+
+    assert (ws_dir / ".ow" / "config.toml").read_text() == before
+    assert _git(wt, "rev-parse", "HEAD") == head_before
+    out = capsys.readouterr().out
+    assert "already there" in out
+    assert "git switch" not in out
+
+
+def test_creating_a_branch_one_repo_already_has_moves_nothing(tmp_path, capsys, xdg):
+    """git refuses `switch -c` on an existing branch. Caught during execution
+    that would leave the workspace half-switched, so it is caught before."""
+    bare_c, src_c = _make_repo(tmp_path, "community")
+    bare_e, src_e = _make_repo(tmp_path, "enterprise")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt_c = _add_worktree(bare_c, ws_dir, "community")
+    wt_e = _add_worktree(bare_e, ws_dir, "enterprise")
+    _git(bare_e, "branch", "feature-x", "master")  # enterprise already has it
+    _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master..featA"})
+
+    config = Config(vars={}, remotes={
+        "community": {"origin": RemoteConfig(url=str(src_c))},
+        "enterprise": {"origin": RemoteConfig(url=str(src_e))},
+    })
+
+    with pytest.raises(SystemExit) as exit_info:
+        cmd_switch(config, workspace=str(ws_dir), create="feature-x")
+
+    assert exit_info.value.code == 2
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "featA"
+    assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "featA"
+    captured = capsys.readouterr()
+    assert "already exists" in captured.out
+    assert "ow switch feature-x" in captured.err
