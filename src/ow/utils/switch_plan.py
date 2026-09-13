@@ -25,12 +25,19 @@ class SwitchFacts:
     # Only meaningful when the command's target needed resolving at all —
     # `-c NEW` with no start point never sets this to False.
     target_resolvable: bool = True
+    # The remote whose refs/remotes/<remote>/<target> is the only match for
+    # a target that is not already a local branch or a direct ref — the
+    # DWIM ow has to perform itself (see plan_switch).
+    dwim_remote: str | None = None
 
 
 @dataclass(frozen=True)
 class SwitchPlan:
     alias: str
     args: tuple[str, ...] = ()
+    # (remote, branch) to record as the new branch's upstream once the
+    # switch succeeded; only set for the DWIM form.
+    upstream: tuple[str, str] | None = None
     skip_reason: str | None = None
     resume: tuple[str, str] | None = None
 
@@ -39,13 +46,23 @@ class SwitchPlan:
         return self.skip_reason is not None
 
 
-def plan_switch(f: SwitchFacts, args: tuple[str, ...]) -> SwitchPlan:
+def plan_switch(
+    f: SwitchFacts, *, target: str | None, create: str | None, detach: bool,
+) -> SwitchPlan:
     """Turn observed facts into the exact `git switch` invocation, or the
     reason this repo cannot run it.
 
-    `args` is the `git switch` invocation the command's own flags settled
-    on — identical for every repo of the run; only whether it is safe to
-    run here varies per repo.
+    The invocation is per repo, not per run: the same short name can be a
+    local branch in one repo and remote-only in another.
+
+    The DWIM is ow's own rather than git's `--guess`. ow's bare repos are
+    cloned `--single-branch` and every other branch is fetched by explicit
+    refspec, deliberately outside the remote's fetch refspec; git refuses
+    to auto-create a branch from a remote-tracking ref its refspec does
+    not map, exactly as `git branch --set-upstream-to` refuses to track
+    one. So the branch is created from the unique remote-tracking ref and
+    the upstream is written afterwards, which is what ow does everywhere
+    else it attaches a worktree.
     """
     if f.worktree_missing:
         return SwitchPlan(alias=f.alias, skip_reason="worktree not found — run `ow apply`")
@@ -54,4 +71,18 @@ def plan_switch(f: SwitchFacts, args: tuple[str, ...]) -> SwitchPlan:
         return SwitchPlan(alias=f.alias, skip_reason=f"{operation} in progress", resume=(cont, abort))
     if not f.target_resolvable:
         return SwitchPlan(alias=f.alias, skip_reason="target not found, even after fetching")
-    return SwitchPlan(alias=f.alias, args=args)
+
+    if create is not None:
+        args = ("switch", "-c", create) + ((target,) if target else ())
+        return SwitchPlan(alias=f.alias, args=args)
+
+    assert target is not None  # cmd_switch refuses a run with neither
+    if detach:
+        return SwitchPlan(alias=f.alias, args=("switch", "--detach", target))
+    if f.dwim_remote is not None:
+        return SwitchPlan(
+            alias=f.alias,
+            args=("switch", "-c", target, f"{f.dwim_remote}/{target}"),
+            upstream=(f.dwim_remote, target),
+        )
+    return SwitchPlan(alias=f.alias, args=("switch", target))

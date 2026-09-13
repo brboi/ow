@@ -5,10 +5,12 @@ from typing import Any
 from rich.markup import escape
 from rich.text import Text
 
+from ow.utils import paths
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, select_aliases, write_workspace_config
 from ow.utils.display import console, err_console
 from ow.utils.git import (
     get_all_remote_refs,
+    get_configured_upstream,
     get_upstream,
     get_worktree_branch,
     git,
@@ -16,37 +18,70 @@ from ow.utils.git import (
     ordered_remotes,
     parallel_per_repo,
     rev_parse,
+    set_branch_upstream,
 )
 from ow.utils.resolver import resolve_workspace
 from ow.utils.switch_plan import SwitchFacts, SwitchPlan, plan_switch
 
 
-def _switch_args(target: str | None, create: str | None, detach: bool) -> tuple[str, ...]:
-    """The `git switch` invocation, decided once for the whole run.
+def _tracking_matches(worktree: Path, ref: str) -> list[str]:
+    """Remote-tracking branches whose short name is exactly `ref`."""
+    return [
+        r for r in get_all_remote_refs(worktree) if r.rsplit("/", 1)[-1] == ref
+    ]
 
-    `--guess` is passed explicitly for the plain form rather than relied
-    on as git's default, so a user's `checkout.guess = false` cannot
-    silently turn DWIM off underneath `ow switch`.
+
+def _dwim_remote(worktree: Path, ref: str) -> str | None:
+    """The single remote `ref` could be branched off, or None.
+
+    None both when `ref` already resolves here — a local branch, a tag, a
+    sha, a fully-qualified remote branch — and when no unique
+    remote-tracking branch carries that short name, which is git's own
+    rule for refusing to guess.
     """
-    if create is not None:
-        return ("switch", "-c", create) + ((target,) if target else ())
-    assert target is not None  # validated by cmd_switch before this is ever called
-    if detach:
-        return ("switch", "--detach", target)
-    return ("switch", "--guess", target)
+    if rev_parse(worktree, ref) is not None:
+        return None
+    matches = _tracking_matches(worktree, ref)
+    if len(matches) != 1:
+        return None
+    return matches[0].rsplit("/", 1)[0]
 
 
 def _resolves(worktree: Path, ref: str) -> bool:
-    """Would `git switch` find `ref` here, without ourselves fetching?
+    """Would a switch to `ref` find anything here, without fetching first?"""
+    return rev_parse(worktree, ref) is not None or len(_tracking_matches(worktree, ref)) == 1
 
-    A direct ref (local branch, tag, sha, fully-qualified remote branch)
-    resolves on its own; otherwise this mirrors git's own DWIM — a short
-    name that matches exactly one already-known remote-tracking branch.
+
+def _fetch_target(worktree: Path, target: str, alias_remotes: dict) -> None:
+    """Bring `target` into this repo's refs, once, before giving up on it.
+
+    Bare repos are cloned `--single-branch`, so a plain `git fetch <remote>`
+    only refreshes the branches the remote's refspec already maps: a branch
+    nobody has ever fetched stays invisible however often it runs. Every
+    other command in ow fetches such a branch by explicit refspec, and so
+    does this one. A tag or a sha has no `refs/heads/*` mapping, so the
+    ordinary fetch stays as the last resort.
     """
-    if rev_parse(worktree, ref) is not None:
-        return True
-    matches = [r for r in get_all_remote_refs(worktree) if r.rsplit("/", 1)[-1] == ref]
-    return len(matches) == 1
+    remotes = ordered_remotes(alias_remotes)
+    qualifier, _, branch = target.partition("/")
+    if branch and qualifier in remotes:
+        candidates = [(qualifier, branch)]
+    else:
+        candidates = [(remote, target) for remote in remotes]
+
+    for remote, branch_name in candidates:
+        git(
+            worktree, "fetch", remote,
+            f"+refs/heads/{branch_name}:refs/remotes/{remote}/{branch_name}",
+            quiet=True,
+        )
+        if _resolves(worktree, target):
+            return
+
+    for remote in remotes:
+        git(worktree, "fetch", remote, quiet=True)
+        if _resolves(worktree, target):
+            return
 
 
 def gather_switch_facts(
@@ -75,12 +110,15 @@ def gather_switch_facts(
 
     assert target is not None
     if _resolves(worktree, target):
-        return SwitchFacts(alias=alias)
+        return SwitchFacts(alias=alias, dwim_remote=_dwim_remote(worktree, target))
 
-    for remote in ordered_remotes(alias_remotes):
-        git(worktree, "fetch", remote, quiet=True)
+    _fetch_target(worktree, target, alias_remotes)
 
-    return SwitchFacts(alias=alias, target_resolvable=_resolves(worktree, target))
+    return SwitchFacts(
+        alias=alias,
+        target_resolvable=_resolves(worktree, target),
+        dwim_remote=_dwim_remote(worktree, target),
+    )
 
 
 def _repro_hint(target: str | None, create: str | None, detach: bool, alias: str) -> str:
@@ -112,19 +150,22 @@ def _display_dry_run(ws_name: str, plans: list[SwitchPlan], ws_dir: Path) -> Non
 
 
 def _execute(
-    alias: str, worktree: Path, args: tuple[str, ...], *, target: str | None, create: str | None, detach: bool,
+    plan: SwitchPlan, worktree: Path, *, target: str | None, create: str | None, detach: bool,
 ) -> bool:
-    """Run the switch. Returns True on success."""
-    console.print(f"  {alias}:", markup=False)
-    result = git(worktree, *args)
+    """Run the switch, and record the upstream a DWIM implies. True on success."""
+    console.print(f"  {plan.alias}:", markup=False)
+    result = git(worktree, *plan.args)
     if result.returncode != 0:
         err_console.print(
-            f"\n  [red]Error[/] in [bold]{escape(alias)}[/]: git {escape(' '.join(args))} failed"
+            f"\n  [red]Error[/] in [bold]{escape(plan.alias)}[/]: git {escape(' '.join(plan.args))} failed"
         )
         err_console.print("    git's output above says why", markup=False)
         err_console.print(f"    cd {worktree}", markup=False)
-        err_console.print(f"    then re-run: {_repro_hint(target, create, detach, alias)}\n", markup=False)
+        err_console.print(f"    then re-run: {_repro_hint(target, create, detach, plan.alias)}\n", markup=False)
         return False
+    if plan.upstream is not None:
+        remote, branch = plan.upstream
+        set_branch_upstream(paths.repos_dir() / f"{plan.alias}.git", branch, remote, branch)
     console.print("    Done.")
     return True
 
@@ -139,7 +180,10 @@ def _new_spec(worktree: Path, *, target: str | None, create: str | None, old: Br
         assert target is not None
         return BranchSpec(base_ref=target)
 
-    upstream = get_upstream(worktree)
+    # `@{u}` is blind to the branches ow attached itself — they track a ref
+    # fetched outside the remote's refspec — so the config pair answers
+    # when git's own shorthand cannot.
+    upstream = get_upstream(worktree) or get_configured_upstream(worktree)
     if upstream:
         return BranchSpec(base_ref=upstream, local_branch=branch)
 
@@ -198,7 +242,6 @@ def cmd_switch(
     if not aliases:
         return
 
-    args = _switch_args(target, create, detach)
     needs_resolution = target is not None
 
     tasks: dict[str, Any] = {
@@ -218,7 +261,7 @@ def cmd_switch(
         if isinstance(result, Exception):
             plan = SwitchPlan(alias=alias, skip_reason=f"could not analyse — {result}")
         else:
-            plan = plan_switch(result, args)
+            plan = plan_switch(result, target=target, create=create, detach=detach)
         plans.append(plan)
         if plan.is_skipped:
             preflight_failed = True
@@ -238,7 +281,7 @@ def cmd_switch(
     for plan in plans:
         worktree = ws_dir / plan.alias
         old = ws.repos[plan.alias]
-        if not _execute(plan.alias, worktree, plan.args, target=target, create=create, detach=detach):
+        if not _execute(plan, worktree, target=target, create=create, detach=detach):
             exec_failed = True
             continue
         touched[plan.alias] = _new_spec(worktree, target=target, create=create, old=old)

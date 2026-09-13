@@ -591,6 +591,34 @@ def get_upstream(worktree_path: Path) -> str | None:
         return None
     return result.stdout.strip()
 
+
+def get_configured_upstream(worktree_path: Path) -> str | None:
+    """The upstream recorded in branch.<name>.remote / branch.<name>.merge.
+
+    `git rev-parse @{u}` answers only when the upstream is also a
+    remote-tracking ref the remote's fetch refspec maps. ow fetches every
+    branch beyond the clone's initial one by explicit refspec, deliberately
+    outside that mapping, so for the branches ow itself attached `@{u}`
+    fails while the config pair set_branch_upstream wrote is right there.
+    """
+    branch = get_worktree_branch(worktree_path)
+    if branch is None:
+        return None
+    values = []
+    for key in (f"branch.{branch}.remote", f"branch.{branch}.merge"):
+        result = _run(
+            ["git", "-C", str(worktree_path), "config", "--get", key],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        if result.returncode != 0:
+            return None
+        values.append(result.stdout.strip())
+    remote, merge = values
+    if not remote or not merge:
+        return None
+    return f"{remote}/{merge.removeprefix('refs/heads/')}"
+
+
 def worktree_is_detached(worktree_path: Path) -> bool:
     """True if HEAD is detached (no symbolic ref)."""
     result = _run(
