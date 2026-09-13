@@ -7,7 +7,7 @@ from rich.text import Text
 
 from ow.utils import paths
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, select_aliases, write_workspace_config
-from ow.utils.display import console, err_console
+from ow.utils.display import console, err_console, task_progress
 from ow.utils.git import (
     get_all_remote_refs,
     get_configured_upstream,
@@ -53,16 +53,29 @@ def _resolves(worktree: Path, ref: str) -> bool:
     return rev_parse(worktree, ref) is not None or len(_tracking_matches(worktree, ref)) == 1
 
 
+def _remote_has(worktree: Path, remote: str, branch: str) -> bool:
+    """Does `remote` publish `branch`? One round trip, writing nothing."""
+    result = git(
+        worktree, "ls-remote", "--heads", remote, f"refs/heads/{branch}",
+        quiet=True, capture_output=True, text=True,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def _fetch_target(worktree: Path, target: str, alias_remotes: dict) -> None:
     """Bring `target` into this repo's refs, once, before giving up on it.
 
     Bare repos are cloned `--single-branch`, so a plain `git fetch <remote>`
     only refreshes the branches the remote's refspec already maps: a branch
-    nobody has ever fetched stays invisible however often it runs. Every
-    other command in ow fetches such a branch by explicit refspec, and so
-    does this one — which also means a name that exists nowhere costs one
-    instant refusal per remote instead of a full fetch of an Odoo-sized
-    repository.
+    nobody has ever fetched stays invisible however often it runs. ow
+    fetches it by explicit refspec instead, like every other command here,
+    which also spares a full fetch of an Odoo-sized repository.
+
+    Which remote to ask is settled first, by asking all of them at once:
+    `ls-remote` is a single round trip that writes nothing, so the probes
+    can run concurrently without two fetches contending for the same
+    packed-refs lock — and a branch that exists nowhere costs one round
+    trip in total rather than one per remote, in series.
 
     The remotes come from the repo first, and only then from the global
     config: a bare repo keeps every remote it was set up with, while the
@@ -78,11 +91,18 @@ def _fetch_target(worktree: Path, target: str, alias_remotes: dict) -> None:
     else:
         candidates = [(remote, target) for remote in remotes]
 
+    probes = {
+        remote: (lambda w=worktree, r=remote, b=branch_name: _remote_has(w, r, b))
+        for remote, branch_name in candidates
+    }
+    # parallel_per_repo is keyed by a label, not by an alias: here one label
+    # per remote of a single repo. It is used for its interrupt handling —
+    # a Ctrl-C must kill the git children, not join them.
+    carriers = parallel_per_repo(probes)
+
     for remote, branch_name in candidates:
-        # A remote that does not have the branch answers `fatal: couldn't
-        # find remote ref`, which is a probe result here, not an error to
-        # show: the run either resolves the target from another remote or
-        # reports the miss itself, in one line that says what to do.
+        if carriers.get(remote) is not True:
+            continue
         git(
             worktree, "fetch", remote,
             f"+refs/heads/{branch_name}:refs/remotes/{remote}/{branch_name}",
@@ -260,7 +280,10 @@ def cmd_switch(
         )
         for alias in aliases
     }
-    results = parallel_per_repo(tasks)
+    # The pre-flight can reach the network — a target nobody fetched yet is
+    # looked up on every remote — and silence for that long reads as a hang.
+    with task_progress(f"Checking {target or create}", len(tasks)) as advance:
+        results = parallel_per_repo(tasks, on_done=lambda _alias: advance())
 
     plans: list[SwitchPlan] = []
     preflight_failed = False
