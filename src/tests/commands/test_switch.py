@@ -220,7 +220,7 @@ def test_dry_run_prints_the_command_and_writes_nothing(tmp_path, capsys, xdg):
     unchanged = load_workspace_config(ws_dir / ".ow" / "config.toml")
     assert unchanged.repos["community"] == parse_branch_spec("master..featA")
     out = capsys.readouterr().out
-    assert "git switch --guess feature-x" in out
+    assert "git switch -c feature-x origin/feature-x" in out
 
 
 def test_a_dirty_worktree_still_switches_when_git_allows_it(tmp_path, capsys, xdg):
