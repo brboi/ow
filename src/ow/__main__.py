@@ -20,14 +20,17 @@ from ow.commands import (
     cmd_rm,
     cmd_shell_init,
     cmd_status,
+    cmd_switch,
     cmd_templates,
     cmd_unarchive,
 )
-from ow.utils import askpass, index
+from ow.utils import askpass, index, paths
 from ow.utils.config import Config, load_global_config, parse_branch_spec
 from ow.utils.display import err_console
+from ow.utils.git import get_all_remote_refs, git
 from ow.utils.legacy import check_legacy_layout
 from ow.utils.paths import config_file
+from ow.utils.resolver import resolve_workspace
 from ow.utils.templates import available_templates
 
 try:
@@ -172,6 +175,31 @@ def complete_archived_name(ctx: typer.Context, incomplete: str) -> list[str]:
     ]
 
 
+def complete_branch_name(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Tab completion for `ow switch`'s TARGET: local and remote-tracking branches.
+
+    Resolves the workspace the same way the command itself will — the -w
+    value already typed, if any, else the same cwd/env walk resolve_workspace()
+    always does — then lists every one of its repos' local branches and
+    remote-tracking refs.
+    """
+    try:
+        _, ws = resolve_workspace(ctx.params.get("workspace_opt"))
+        names: set[str] = set()
+        for alias in ws.repos:
+            bare_repo = paths.repos_dir() / f"{alias}.git"
+            names.update(get_all_remote_refs(bare_repo))
+            result = git(
+                bare_repo, "for-each-ref", "refs/heads", "--format=%(refname:short)",
+                capture_output=True, text=True, encoding="utf-8", quiet=True,
+            )
+            names.update(line for line in result.stdout.strip().split("\n") if line)
+    except (Exception, SystemExit):
+        # Completion must never crash the shell, whatever state the repos are in.
+        return []
+    return sorted(name for name in names if name.startswith(incomplete))
+
+
 # The four forms resolve_workspace() accepts, in the order it tries them.
 # Naming only the first two is how someone fresh out of the migration — with
 # workspaces on disk that the index has never seen — reads "Workspace name",
@@ -180,6 +208,23 @@ WORKSPACE_HELP = (
     "Workspace to act on: a name ow ls knows, or a path such as ./myws "
     "(default: $OW_WORKSPACE, else the workspace holding the current directory)"
 )
+
+
+def _pick_workspace(positional: Optional[str], option: Optional[str]) -> Optional[str]:
+    """Reconcile a positional WORKSPACE argument with -w/--workspace.
+
+    Either alone is fine. Both together must agree, or say so instead of
+    silently picking one; identical values are accepted.
+    """
+    if option is None:
+        return positional
+    if positional is None:
+        return option
+    if option != positional:
+        raise typer.BadParameter(
+            f"workspace given twice and disagrees: {positional!r} (positional) vs {option!r} (-w/--workspace)"
+        )
+    return positional
 
 
 @app.command()
@@ -197,26 +242,29 @@ def init(
 @app.command()
 def apply(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     check: bool = typer.Option(False, "--check", help="Report drift and outdated templates without modifying anything; exit non-zero if either is found"),
 ) -> None:
     """Re-render templates and materialize worktrees."""
     config = _load_config()
-    cmd_apply(config, workspace=workspace, check=check)
+    cmd_apply(config, workspace=_pick_workspace(workspace, workspace_opt), check=check)
 
 
 @app.command()
 def status(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     fetch: bool = typer.Option(False, "--fetch", "-f", help="Fetch refs before showing status."),
 ) -> None:
     """Show workspace status."""
     config = _load_config()
-    cmd_status(config, workspace=workspace, fetch=fetch)
+    cmd_status(config, workspace=_pick_workspace(workspace, workspace_opt), fetch=fetch)
 
 
 @app.command()
 def rebase(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to rebase (default: all)"),
     autostash: bool = typer.Option(False, "--autostash", help="Stash and restore uncommitted changes around each rebase"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
@@ -226,7 +274,7 @@ def rebase(
     """Fetch and rebase workspace branches."""
     config = _load_config()
     cmd_rebase(
-        config, workspace=workspace, only=only,
+        config, workspace=_pick_workspace(workspace, workspace_opt), only=only,
         autostash=autostash, dry_run=dry_run, yes=yes, no_fetch=no_fetch,
     )
 
@@ -234,17 +282,19 @@ def rebase(
 @app.command()
 def pull(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to pull (default: all)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
 ) -> None:
     """Fetch and fast-forward workspace branches."""
     config = _load_config()
-    cmd_pull(config, workspace=workspace, only=only, dry_run=dry_run)
+    cmd_pull(config, workspace=_pick_workspace(workspace, workspace_opt), only=only, dry_run=dry_run)
 
 
 @app.command()
 def reset(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to reset (default: all)"),
     hard: bool = typer.Option(False, "--hard", help="Discard the working tree too, not just the commits"),
     fetch: bool = typer.Option(False, "--fetch", "-f", help="Refresh the refs first, instead of resetting to what is already cached"),
@@ -253,7 +303,24 @@ def reset(
 ) -> None:
     """Put workspace repos back on the refs they follow."""
     config = _load_config()
-    cmd_reset(config, workspace=workspace, only=only, hard=hard, fetch=fetch, dry_run=dry_run, yes=yes)
+    cmd_reset(config, workspace=_pick_workspace(workspace, workspace_opt), only=only, hard=hard, fetch=fetch, dry_run=dry_run, yes=yes)
+
+
+@app.command()
+def switch(
+    target: Optional[str] = typer.Argument(None, help="Branch to switch to, or the start point with -c", autocompletion=complete_branch_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    create: Optional[str] = typer.Option(None, "-c", "--create", help="Create this branch and switch to it"),
+    detach: bool = typer.Option(False, "--detach", help="Switch to a detached HEAD at TARGET"),
+    only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to switch (default: all)", autocompletion=complete_gen_repos),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
+) -> None:
+    """Switch every repo in a workspace to a branch."""
+    config = _load_config()
+    cmd_switch(
+        config, target=target, workspace=workspace_opt,
+        create=create, detach=detach, only=only, dry_run=dry_run,
+    )
 
 
 @app.command()
@@ -266,13 +333,17 @@ def ls(
 
 @app.command()
 def rm(
-    name: str = typer.Argument(..., help="Workspace name (as shown by ow ls)", autocompletion=complete_workspace_name),
+    name: Optional[str] = typer.Argument(None, help="Workspace name (as shown by ow ls)", autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help="Workspace name (as shown by ow ls) — an alias for the positional NAME", autocompletion=complete_workspace_name),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
 ) -> None:
     """Remove a workspace: worktrees, local branches, directory, and index entry."""
     # Same as prune and ls: no global config needed, no bootstrap.
     check_legacy_layout()
-    cmd_rm(name=name, yes=yes)
+    target = _pick_workspace(name, workspace_opt)
+    if target is None:
+        raise typer.BadParameter("Name the workspace to remove: `ow rm NAME` or `ow rm -w NAME`.")
+    cmd_rm(name=target, yes=yes)
 
 
 @app.command()
@@ -323,21 +394,23 @@ def prune(
 
 @app.command()
 def templates(
-    take: Optional[str] = typer.Option(None, "--take", help="Copy a packaged template file (BUNDLE/PATH) into your config, keeping a pristine baseline"),
-    diff: bool = typer.Option(False, "--diff", help="Show what ow changed in the files you took, baseline against packaged (ignored if --take is also given)"),
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    diff: bool = typer.Option(False, "--diff", help="Show what ow changed in the files it materialized, against the packaged baseline"),
 ) -> None:
-    """List template files and their state, or take one."""
-    cmd_templates(take=take, show_diff=diff)
+    """List template files and their state."""
+    cmd_templates(workspace=_pick_workspace(workspace, workspace_opt), show_diff=diff)
 
 
 @app.command()
 def cd(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
 ) -> None:
     """Print a workspace path — with `ow shell-init`, changes directory."""
     # Warn, never stop: cd is read-only and is where a lost user is sent.
     check_legacy_layout(fatal=False)
-    cmd_cd(workspace)
+    cmd_cd(_pick_workspace(workspace, workspace_opt))
 
 
 @app.command(name="shell-init")
@@ -351,10 +424,11 @@ def shell_init(
 @app.command(name="open")
 def open_ws(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
 ) -> None:
     """Open a workspace in the configured editor."""
     config = _load_config()
-    cmd_open(config, workspace=workspace)
+    cmd_open(config, workspace=_pick_workspace(workspace, workspace_opt))
 
 
 def main() -> None:

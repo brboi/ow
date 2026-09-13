@@ -1,5 +1,6 @@
 import re
 import shutil
+import subprocess
 import tomllib
 from unittest.mock import patch
 
@@ -191,6 +192,108 @@ def test_rebase_with_workspace(xdg):
     assert result.exit_code == 0
     mock_rebase.assert_called_once()
     assert mock_rebase.call_args.kwargs["workspace"] == "myws"
+
+
+@pytest.mark.parametrize("command,mock_target", [("apply", "cmd_apply"), ("status", "cmd_status")])
+@pytest.mark.parametrize("flag", ["-w", "--workspace"])
+def test_workspace_option_reaches_command(xdg, command, mock_target, flag):
+    """-w/--workspace is a synonym for the positional WORKSPACE."""
+    with patch(f"ow.__main__.{mock_target}", autospec=True) as mock_cmd:
+        result = runner.invoke(app, [command, flag, "myws"])
+
+    assert result.exit_code == 0
+    assert mock_cmd.call_args.kwargs["workspace"] == "myws"
+
+
+def test_workspace_positional_and_option_agreeing_is_accepted(xdg):
+    """Naming the same workspace twice is redundant, not an error."""
+    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
+        result = runner.invoke(app, ["apply", "myws", "-w", "myws"])
+
+    assert result.exit_code == 0
+    assert mock_apply.call_args.kwargs["workspace"] == "myws"
+
+
+def test_workspace_positional_and_option_disagreeing_is_rejected(xdg):
+    """Two different workspaces named at once must fail loudly, not pick one."""
+    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
+        result = runner.invoke(app, ["apply", "myws", "-w", "otherws"])
+
+    assert result.exit_code != 0
+    assert "myws" in result.output
+    assert "otherws" in result.output
+    mock_apply.assert_not_called()
+
+
+def test_rm_requires_a_name(xdg):
+    """Neither the positional nor -w given: rm must not guess."""
+    with patch("ow.__main__.cmd_rm", autospec=True) as mock_rm:
+        result = runner.invoke(app, ["rm"])
+
+    assert result.exit_code != 0
+    mock_rm.assert_not_called()
+
+
+def test_rm_accepts_workspace_option_as_alias(xdg):
+    """-w NAME works on its own, with no positional given."""
+    with patch("ow.__main__.cmd_rm", autospec=True) as mock_rm:
+        result = runner.invoke(app, ["rm", "-w", "myws"])
+
+    assert result.exit_code == 0
+    assert mock_rm.call_args.kwargs["name"] == "myws"
+
+
+def test_rm_rejects_disagreeing_forms(xdg):
+    with patch("ow.__main__.cmd_rm", autospec=True) as mock_rm:
+        result = runner.invoke(app, ["rm", "myws", "-w", "otherws"])
+
+    assert result.exit_code != 0
+    mock_rm.assert_not_called()
+
+
+class TestSwitchCommand:
+    def test_flags_reach_cmd_switch(self):
+        with (
+            patch("ow.__main__.cmd_switch", autospec=True) as mock,
+            patch("ow.__main__._load_config"),
+        ):
+            runner.invoke(
+                app,
+                ["switch", "feature-x", "-w", "myws", "--only", "community", "--dry-run"],
+            )
+        _, kwargs = mock.call_args
+        assert kwargs["target"] == "feature-x"
+        assert kwargs["workspace"] == "myws"
+        assert kwargs["only"] == "community"
+        assert kwargs["dry_run"] is True
+        assert kwargs["create"] is None
+        assert kwargs["detach"] is False
+
+    def test_create_reaches_cmd_switch(self):
+        with (
+            patch("ow.__main__.cmd_switch", autospec=True) as mock,
+            patch("ow.__main__._load_config"),
+        ):
+            runner.invoke(app, ["switch", "start-point", "-c", "new-branch"])
+        _, kwargs = mock.call_args
+        assert kwargs["target"] == "start-point"
+        assert kwargs["create"] == "new-branch"
+
+    def test_detach_reaches_cmd_switch(self):
+        with (
+            patch("ow.__main__.cmd_switch", autospec=True) as mock,
+            patch("ow.__main__._load_config"),
+        ):
+            runner.invoke(app, ["switch", "abc123", "--detach"])
+        _, kwargs = mock.call_args
+        assert kwargs["detach"] is True
+
+    def test_detach_and_create_together_is_rejected(self, xdg):
+        """cmd_switch itself validates this before touching any workspace —
+        exercised for real, unmocked, against a directory that is not even
+        a workspace, to prove the rejection happens before resolution.
+        """
+        result = runner.invoke(app, ["switch", "x", "--detach", "-c", "y"])
 
 
 def test_prune(xdg):
@@ -543,6 +646,57 @@ def test_complete_workspace_name_does_not_mutate_index(xdg, tmp_path):
     before = paths.index_file().read_text()
     _complete(["status"], "")
     assert paths.index_file().read_text() == before
+
+
+def _make_bare_repo_with_refs(bare_path, heads=(), remotes=()):
+    """A real bare repo with the given local and remote-tracking refs.
+
+    Built via a throwaway working clone: a fresh bare repo has no objects
+    at all, so there is no commit to point a fabricated ref at without one.
+    """
+    bare_path.parent.mkdir(parents=True, exist_ok=True)
+    work = bare_path.parent / f"{bare_path.stem}-work"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+    (work / "f.txt").write_text("x")
+    subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(work), "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-q", "-m", "c"],
+        check=True,
+    )
+    subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare_path)], check=True)
+    sha = subprocess.run(
+        ["git", "-C", str(bare_path), "rev-parse", "main"], check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    for name in heads:
+        subprocess.run(["git", "-C", str(bare_path), "update-ref", f"refs/heads/{name}", sha], check=True)
+    for name in remotes:
+        subprocess.run(["git", "-C", str(bare_path), "update-ref", f"refs/remotes/{name}", sha], check=True)
+    shutil.rmtree(work)
+
+
+def test_complete_branch_name_lists_local_branches(xdg, workspace_dir):
+    ws_dir = workspace_dir(repos={"community": "master"})
+    bare = paths.repos_dir() / "community.git"
+    _make_bare_repo_with_refs(bare, heads=["feature-x", "feature-y"])
+
+    names = _complete(["switch", "-w", str(ws_dir)], "feature")
+
+    assert sorted(names) == ["feature-x", "feature-y"]
+
+
+def test_complete_branch_name_includes_remote_tracking_refs(xdg, workspace_dir):
+    ws_dir = workspace_dir(repos={"community": "master"})
+    bare = paths.repos_dir() / "community.git"
+    _make_bare_repo_with_refs(bare, heads=["main"], remotes=["origin/staging"])
+
+    names = _complete(["switch", "-w", str(ws_dir)], "origin/")
+
+    assert names == ["origin/staging"]
+
+
+def test_complete_branch_name_returns_empty_list_outside_a_workspace(xdg, tmp_path):
+    """Completion must never crash the shell, whatever state the repos are in."""
+    assert _complete(["switch", "-w", str(tmp_path / "not-a-workspace")], "") == []
 
 
 class TestRebaseFlags:
