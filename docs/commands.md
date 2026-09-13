@@ -267,16 +267,35 @@ refspec, which makes git's own `--guess` refuse to find them.
 
 No fetch happens by default. When the target isn't already known locally, `ow` asks each remote
 the repository actually has — not the ones `[remotes.<alias>]` happens to declare, since a
-workspace outlives its config entries — for that one branch, by explicit refspec. A name no
-remote carries therefore costs one instant refusal per remote rather than a full fetch, and the
-run says so in the terms that fix it: `no branch named 'X' here or on any remote — create it
-with ow switch -c X`.
+workspace outlives its config entries — for that one branch, and asks them all at once. A name
+no remote carries therefore costs a single round trip and no fetch at all, and a repo already on
+the target costs nothing: it is reported as `already there`, nothing is run for it, and its spec
+is left exactly as it was.
+
+The run opens with the same summary the other commands print, before anything moves:
+
+```
+[voip] switch to 18.0
+  community   master..master  new branch tracking origin/18.0
+  enterprise  18.0..18.0      already there
+  voip        master..voip    local branch
+```
 
 Pre-flight is all-or-nothing, unlike `ow rebase`, `ow pull`, and `ow reset`, which skip a bad
 repo and continue: every selected repo must have its worktree present, no git operation already
-in progress, and a resolvable target, or nothing is switched at all and the command exits 2,
-listing every offending repo. A workspace half on 17.0 and half on 18.0 is exactly what `ow`
-exists to prevent, and there is no `ow unswitch` to walk it back.
+in progress, a resolvable target, and — with `-c` — no branch of that name yet, or nothing is
+switched at all and the command exits 2. The table marks every offending repo `refused`, and the
+way out is printed once rather than once per repo:
+
+```
+  enterprise  18.0..18.0  refused — no branch named 'master-voip-2' here or on any remote
+
+Nothing was switched: a switch moves the whole workspace or none of it.
+  create it with `ow switch -c master-voip-2`
+```
+
+A workspace half on 17.0 and half on 18.0 is exactly what `ow` exists to prevent, and there is
+no `ow unswitch` to walk it back.
 
 A dirty worktree is not a reason to refuse: `git switch` carries uncommitted changes across when
 it can, and `ow` does not second-guess it.
@@ -284,10 +303,12 @@ it can, and `ow` does not second-guess it.
 Once a repo has actually moved, `.ow/config.toml` is rewritten from what git left on disk, not
 from what was asked for: an attached branch with an upstream gets `<upstream>..<branch>`, an
 attached branch without one keeps its start point (`-c`) or the repo's previous base ref, and a
-detached repo gets the bare ref you asked for. Templates are deliberately not re-rendered — the
-run ends by telling you to run `ow apply` if you need them refreshed.
+detached repo gets the bare ref you asked for. Each repo's `Done.` line carries the spec that
+was written for it. Templates are deliberately not re-rendered — the run ends by telling you to
+run `ow apply` if you need them refreshed.
 
-`--dry-run` prints the exact `git switch` invocation per repo and writes nothing.
+`--dry-run` prints the same summary, then the exact `git switch` invocation per repo, and writes
+nothing.
 
 ## `ow prune`
 

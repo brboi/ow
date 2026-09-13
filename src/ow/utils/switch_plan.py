@@ -29,21 +29,44 @@ class SwitchFacts:
     # a target that is not already a local branch or a direct ref — the
     # DWIM ow has to perform itself (see plan_switch).
     dwim_remote: str | None = None
+    # The branch the worktree is on, None when it is detached. A repo
+    # already on the target has nothing to do: git would only answer
+    # "Already on 'x'", and rewriting its spec would churn the config of
+    # a repo that never moved.
+    current_branch: str | None = None
+    # `-c NEW` where NEW is already a branch here. git refuses it, so the
+    # run must refuse too — before any repo moves, rather than halfway
+    # through, which is the whole point of an all-or-nothing pre-flight.
+    create_exists: bool = False
 
 
 @dataclass(frozen=True)
 class SwitchPlan:
     alias: str
     args: tuple[str, ...] = ()
+    # What this repo is about to do, for the summary: "switch" onto an
+    # existing local branch, "track" a remote-only one, "create" a new
+    # one, "detach", or "noop" for a repo already on the target — which
+    # is reported and never run.
+    action: str = "switch"
     # (remote, branch) to record as the new branch's upstream once the
     # switch succeeded; only set for the DWIM form.
     upstream: tuple[str, str] | None = None
     skip_reason: str | None = None
+    # The command that would make this run possible. Kept apart from the
+    # reason because a whole workspace usually fails for the same cause,
+    # and advice repeated once per repo stops being read.
+    hint: str | None = None
+    # (continue, abort) for a repo caught mid-rebase or mid-merge.
     resume: tuple[str, str] | None = None
 
     @property
     def is_skipped(self) -> bool:
         return self.skip_reason is not None
+
+    @property
+    def is_noop(self) -> bool:
+        return self.action == "noop"
 
 
 def plan_switch(
@@ -65,7 +88,9 @@ def plan_switch(
     else it attaches a worktree.
     """
     if f.worktree_missing:
-        return SwitchPlan(alias=f.alias, skip_reason="worktree not found — run `ow apply`")
+        return SwitchPlan(
+            alias=f.alias, skip_reason="worktree not found", hint="run `ow apply` to create it",
+        )
     if f.busy is not None:
         operation, cont, abort = f.busy
         return SwitchPlan(alias=f.alias, skip_reason=f"{operation} in progress", resume=(cont, abort))
@@ -74,22 +99,35 @@ def plan_switch(
         # reason a branch is nowhere to be found is that it does not exist
         # yet, and the user meant to start it. git says as much when it
         # refuses a plain `git switch`, and so does ow.
-        reason = f"no branch named '{target}' here or on any remote"
-        if create is None and not detach:
-            reason += f" — create it with `ow switch -c {target}`"
-        return SwitchPlan(alias=f.alias, skip_reason=reason)
+        return SwitchPlan(
+            alias=f.alias,
+            skip_reason=f"no branch named '{target}' here or on any remote",
+            hint=(f"create it with `ow switch -c {target}`" if create is None and not detach else None),
+        )
 
     if create is not None:
+        if f.create_exists:
+            return SwitchPlan(
+                alias=f.alias,
+                skip_reason=f"branch '{create}' already exists here",
+                hint=f"switch to it with `ow switch {create}`",
+            )
         args = ("switch", "-c", create) + ((target,) if target else ())
-        return SwitchPlan(alias=f.alias, args=args)
+        return SwitchPlan(alias=f.alias, args=args, action="create")
 
     assert target is not None  # cmd_switch refuses a run with neither
     if detach:
-        return SwitchPlan(alias=f.alias, args=("switch", "--detach", target))
+        return SwitchPlan(alias=f.alias, args=("switch", "--detach", target), action="detach")
+    if target == f.current_branch:
+        # Nothing to run: git would answer "Already on 'x'", and a repo
+        # that never moved must keep the spec it already has — an
+        # upstream ow wrote once is not worth re-deriving.
+        return SwitchPlan(alias=f.alias, action="noop")
     if f.dwim_remote is not None:
         return SwitchPlan(
             alias=f.alias,
             args=("switch", "-c", target, f"{f.dwim_remote}/{target}"),
+            action="track",
             upstream=(f.dwim_remote, target),
         )
     return SwitchPlan(alias=f.alias, args=("switch", target))

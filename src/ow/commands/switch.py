@@ -119,12 +119,15 @@ def gather_switch_facts(
     *,
     needs_resolution: bool,
     alias_remotes: dict,
+    create: str | None = None,
 ) -> SwitchFacts:
     """Observe one repo. No decisions are taken here.
 
     Resolution is local-first: a fetch only happens when `target` is
-    unknown here, and at most once, against every remote configured for
-    this repo.
+    unknown here, and at most once, against every remote this repo has.
+    A repo already on the target is the cheapest case of all — no
+    resolution, no network — which is what `ow switch master` on a
+    workspace that never left master should cost.
     """
     if not worktree.exists():
         return SwitchFacts(alias=alias, worktree_missing=True)
@@ -133,19 +136,20 @@ def gather_switch_facts(
     if busy is not None:
         return SwitchFacts(alias=alias, busy=busy)
 
-    if not needs_resolution:
-        return SwitchFacts(alias=alias)
-
-    assert target is not None
-    if _resolves(worktree, target):
-        return SwitchFacts(alias=alias, dwim_remote=_dwim_remote(worktree, target))
-
-    _fetch_target(worktree, target, alias_remotes)
+    branch = get_worktree_branch(worktree)
+    resolvable, dwim = True, None
+    if needs_resolution and target is not None and target != branch:
+        if not _resolves(worktree, target):
+            _fetch_target(worktree, target, alias_remotes)
+            resolvable = _resolves(worktree, target)
+        dwim = _dwim_remote(worktree, target)
 
     return SwitchFacts(
         alias=alias,
-        target_resolvable=_resolves(worktree, target),
-        dwim_remote=_dwim_remote(worktree, target),
+        target_resolvable=resolvable,
+        dwim_remote=dwim,
+        current_branch=branch,
+        create_exists=create is not None and rev_parse(worktree, f"refs/heads/{create}") is not None,
     )
 
 
@@ -161,18 +165,80 @@ def _repro_hint(target: str | None, create: str | None, detach: bool, alias: str
     return " ".join(parts)
 
 
-def _report_skip(plan: SwitchPlan) -> None:
-    err_console.print(f"  {plan.alias}: {plan.skip_reason}", markup=False)
-    if plan.resume:
-        cont, abort = plan.resume
-        err_console.print(f"    resume with: {cont}", markup=False)
-        err_console.print(f"    or abort:    {abort}", markup=False)
+def _header(ws_name: str, *, target: str | None, create: str | None, detach: bool) -> Text:
+    """`[ws] what this run is about`, in the shape every command uses."""
+    if create is not None:
+        what = f"create {create}" + (f" from {target}" if target else "")
+    elif detach:
+        what = f"detach at {target}"
+    else:
+        what = f"switch to {target}"
+    return Text(f"[{ws_name}] {what}", style="bold cyan")
 
 
-def _display_dry_run(ws_name: str, plans: list[SwitchPlan], ws_dir: Path) -> None:
-    console.print(Text(f"[{ws_name}]", style="bold cyan"))
-    console.print("\n[dim]Would run:[/]")
+def _summary_line(plan: SwitchPlan, alias_width: int, current: str, spec_width: int) -> str:
+    if plan.is_skipped:
+        state = f"[yellow]refused[/] — {escape(plan.skip_reason or '')}"
+    elif plan.is_noop:
+        state = "[dim]already there[/]"
+    elif plan.action == "track":
+        remote, branch = plan.upstream or ("", "")
+        state = f"new branch tracking {remote}/{branch}"
+    elif plan.action == "create":
+        start = plan.args[3] if len(plan.args) > 3 else None
+        state = f"new branch from {start}" if start else "new branch from HEAD"
+    elif plan.action == "detach":
+        state = "detach"
+    else:
+        state = "local branch"
+    return f"  {plan.alias.ljust(alias_width)}  {escape(current.ljust(spec_width))}  {state}"
+
+
+def _display_summary(
+    ws_name: str, plans: list[SwitchPlan], repos: dict[str, BranchSpec], *,
+    target: str | None, create: str | None, detach: bool,
+) -> None:
+    """What each repo is on, and what this run would make of it.
+
+    Printed before anything runs, like `ow reset` and `ow pull` do: a
+    switch moves the whole workspace, so what it is about to do to every
+    repo belongs above git's output, not after it.
+    """
+    console.print(_header(ws_name, target=target, create=create, detach=detach))
+    specs = {p.alias: repos[p.alias].to_spec_str() for p in plans}
+    alias_width = max((len(p.alias) for p in plans), default=0)
+    spec_width = max((len(s) for s in specs.values()), default=0)
     for plan in plans:
+        console.print(_summary_line(plan, alias_width, specs[plan.alias], spec_width))
+
+
+def _report_refusals(refused: list[SwitchPlan]) -> None:
+    """Why nothing ran, and the one command that would change that.
+
+    The table above already names every repo and its reason; what is left
+    is the part a per-repo list cannot say — that the run did nothing at
+    all — and the advice, deduplicated: a whole workspace usually fails
+    for the same cause, and the same sentence five times is scrolled past.
+    """
+    for plan in refused:
+        if plan.resume:
+            cont, abort = plan.resume
+            err_console.print(f"\n  {plan.alias}: resume with: {cont}", markup=False)
+            err_console.print(f"    or abort:      {abort}", markup=False)
+
+    err_console.print("\n[red]Nothing was switched[/]: a switch moves the whole workspace or none of it.")
+    for hint in dict.fromkeys(p.hint for p in refused if p.hint):
+        err_console.print(f"  {hint}", markup=False)
+
+
+def _display_dry_run(plans: list[SwitchPlan], ws_dir: Path) -> None:
+    actionable = [p for p in plans if not p.is_noop]
+    if not actionable:
+        console.print("\n[dim]Would run: nothing to do[/]")
+        return
+
+    console.print("\n[dim]Would run:[/]")
+    for plan in actionable:
         console.print(f"  [{plan.alias}] cd {ws_dir / plan.alias}", markup=False)
         console.print(f"  [{plan.alias}] git {' '.join(plan.args)}", markup=False)
 
@@ -180,7 +246,11 @@ def _display_dry_run(ws_name: str, plans: list[SwitchPlan], ws_dir: Path) -> Non
 def _execute(
     plan: SwitchPlan, worktree: Path, *, target: str | None, create: str | None, detach: bool,
 ) -> bool:
-    """Run the switch, and record the upstream a DWIM implies. True on success."""
+    """Run the switch, and record the upstream a DWIM implies. True on success.
+
+    The closing `Done.` is the caller's: it carries the spec that was
+    written for this repo, which is only known once git has moved it.
+    """
     console.print(f"  {plan.alias}:", markup=False)
     result = git(worktree, *plan.args)
     if result.returncode != 0:
@@ -194,7 +264,6 @@ def _execute(
     if plan.upstream is not None:
         remote, branch = plan.upstream
         set_branch_upstream(paths.repos_dir() / f"{plan.alias}.git", branch, remote, branch)
-    console.print("    Done.")
     return True
 
 
@@ -219,20 +288,6 @@ def _new_spec(worktree: Path, *, target: str | None, create: str | None, old: Br
     return BranchSpec(base_ref=start, local_branch=branch)
 
 
-def _display_summary(
-    ws_name: str, plans: list[SwitchPlan], touched: dict[str, BranchSpec], old_repos: dict[str, BranchSpec],
-) -> None:
-    console.print(Text(f"[{ws_name}]", style="bold cyan"))
-    width = max((len(p.alias) for p in plans), default=0)
-    for plan in plans:
-        old = old_repos[plan.alias].to_spec_str()
-        if plan.alias in touched:
-            new = touched[plan.alias].to_spec_str()
-            console.print(f"  {plan.alias.ljust(width)}  {old} → {new}")
-        else:
-            console.print(f"  {plan.alias.ljust(width)}  {old}  [red]failed[/]")
-
-
 def cmd_switch(
     config: Config,
     target: str | None = None,
@@ -246,11 +301,16 @@ def cmd_switch(
     """`git switch`, one repo at a time, across a workspace.
 
     Every repo is pre-flighted — worktree present, no operation already
-    in progress, target resolvable — before any of them is touched: this
-    is not `ow reset`'s skip-and-continue, because switching half a
-    workspace and refusing the rest leaves it straddling two states.
-    Resolution tries local refs first and only fetches, once per repo,
-    when the target is not already known.
+    in progress, target resolvable, and for `-c` no branch of that name
+    yet — before any of them is touched: this is not `ow reset`'s
+    skip-and-continue, because switching half a workspace and refusing
+    the rest leaves it straddling two states. Resolution tries local
+    refs first and only fetches, once per repo, when the target is not
+    already known.
+
+    What each repo is about to do is printed first, as a table, the way
+    every other multi-repo command here reports; a repo already on the
+    target appears in it and is then left entirely alone.
 
     Once a repo has actually moved, `.ow/config.toml` is rewritten from
     what git now reports for it — an upstream when the branch tracks
@@ -275,18 +335,18 @@ def cmd_switch(
     tasks: dict[str, Any] = {
         alias: (
             lambda w=ws_dir / alias, a=alias: gather_switch_facts(
-                w, a, target, needs_resolution=needs_resolution, alias_remotes=config.remotes.get(alias, {}),
+                w, a, target, needs_resolution=needs_resolution, create=create,
+                alias_remotes=config.remotes.get(alias, {}),
             )
         )
         for alias in aliases
     }
     # The pre-flight can reach the network — a target nobody fetched yet is
     # looked up on every remote — and silence for that long reads as a hang.
-    with task_progress(f"Checking {target or create}", len(tasks)) as advance:
+    with task_progress("Checking repo(s)", len(tasks)) as advance:
         results = parallel_per_repo(tasks, on_done=lambda _alias: advance())
 
     plans: list[SwitchPlan] = []
-    preflight_failed = False
     for alias in aliases:
         result = results[alias]
         if isinstance(result, Exception):
@@ -294,41 +354,53 @@ def cmd_switch(
         else:
             plan = plan_switch(result, target=target, create=create, detach=detach)
         plans.append(plan)
-        if plan.is_skipped:
-            preflight_failed = True
 
-    if preflight_failed:
-        for plan in plans:
-            if plan.is_skipped:
-                _report_skip(plan)
+    _display_summary(ws_dir.name, plans, ws.repos, target=target, create=create, detach=detach)
+
+    refused = [p for p in plans if p.is_skipped]
+    if refused:
+        _report_refusals(refused)
         sys.exit(2)
 
     if dry_run:
-        _display_dry_run(ws_dir.name, plans, ws_dir)
+        _display_dry_run(plans, ws_dir)
         return
 
+    runnable = [p for p in plans if not p.is_noop]
+    if not runnable:
+        return
+
+    console.print()
     touched: dict[str, BranchSpec] = {}
     exec_failed = False
-    for plan in plans:
+    for plan in runnable:
         worktree = ws_dir / plan.alias
         old = ws.repos[plan.alias]
         if not _execute(plan, worktree, target=target, create=create, detach=detach):
             exec_failed = True
             continue
-        touched[plan.alias] = _new_spec(worktree, target=target, create=create, old=old)
+        spec = _new_spec(worktree, target=target, create=create, old=old)
+        touched[plan.alias] = spec
+        # The spec, next to the repo that produced it: it is what was just
+        # written to the config, and it is only knowable after the switch.
+        console.print(f"    Done. [dim]now {escape(spec.to_spec_str())}[/]")
 
     if touched:
         new_repos = dict(ws.repos)
         new_repos.update(touched)
         new_ws = WorkspaceConfig(repos=new_repos, templates=ws.templates, vars=ws.vars)
         write_workspace_config(ws_dir / ".ow" / "config.toml", new_ws)
-
-    _display_summary(ws_dir.name, plans, touched, ws.repos)
-
-    if touched:
         console.print(
             "\n[dim]Templates are not re-rendered by a switch — run `ow apply` if you need them refreshed.[/]"
         )
 
     if exec_failed:
+        if touched:
+            # A failure here is the one case the pre-flight cannot prevent,
+            # and it leaves exactly what the pre-flight exists to avoid.
+            stranded = ", ".join(p.alias for p in runnable if p.alias not in touched)
+            err_console.print(
+                f"  [yellow]The workspace is split[/]: {escape(', '.join(touched))} moved, "
+                f"{escape(stranded)} did not."
+            )
         sys.exit(1)
