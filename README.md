@@ -21,7 +21,8 @@ gigabytes of history.
 - **Setup boilerplate** — `mise.toml`, `odoorc`, `odools.toml`, `pyrightconfig.json`, and IDE
   configs are generated from [templates](docs/templates.md) every time.
 - **Branch juggling** — concise `base..feature` branch specs control detached vs attached
-  worktrees; `ow rebase` keeps them up to date idempotently.
+  worktrees; `ow rebase` keeps them up to date idempotently, and `ow switch` moves every repo in
+  a workspace to a branch at once.
 - **Workspace discovery** — workspaces live anywhere; an index remembers where, so `ow status
   myfeature` finds it by name.
 
