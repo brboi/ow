@@ -1,6 +1,7 @@
 from ow.commands.apply import cmd_apply
 from ow.commands.archive import cmd_archive, cmd_unarchive
 from ow.commands.cd import cmd_cd
+from ow.commands.fetch import cmd_fetch
 from ow.commands.init import cmd_init
 from ow.commands.ls import cmd_ls
 from ow.commands.mv import cmd_mv
@@ -19,6 +20,7 @@ __all__ = [
     "cmd_apply",
     "cmd_archive",
     "cmd_cd",
+    "cmd_fetch",
     "cmd_init",
     "cmd_ls",
     "cmd_mv",

@@ -5,17 +5,23 @@
 | Command | Flags | Description |
 |---------|-------|-------------|
 | `ow init` | `[NAME]`, `-c/--configuration`, `-t/--template`, `-r/--repo` | Create a workspace here, or in `./NAME` |
-| `ow apply` | `[workspace]`, `-w/--workspace` | Re-render templates and materialize worktrees |
+| `ow apply` | `[workspace]`, `-w/--workspace`, `--check` | Re-render templates and materialize worktrees |
 | `ow status` | `[workspace]`, `-w/--workspace`, `-f/--fetch` | Show branch status with behind/ahead counts |
-| `ow rebase` | `[workspace]`, `-w/--workspace`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
+| `ow fetch` | `[workspace]`, `-w/--workspace`, `--only` | Refresh the refs a workspace follows, without touching any worktree |
+| `ow rebase` | `[workspace]`, `-w/--workspace`, `--only`, `--autostash`, `--dry-run`, `-y/--yes`, `--no-fetch` | Fetch and rebase repos in a workspace |
 | `ow pull` | `[workspace]`, `-w/--workspace`, `--only`, `--dry-run` | Fetch and fast-forward repos in a workspace |
 | `ow reset` | `[workspace]`, `-w/--workspace`, `--only`, `--hard`, `-f/--fetch`, `--dry-run`, `-y/--yes` | Put repos back on the refs they follow |
 | `ow switch` | `[target]`, `-w/--workspace`, `-c/--create`, `--detach`, `--only`, `--dry-run` | Switch every repo in a workspace to a branch |
-| `ow prune` | `--dry-run`, `-y/--yes` | Clean up stale worktree references, orphaned branches, and dead index entries |
+| `ow mv` | `<source>`, `<dest>`, `-y/--yes` | Move a workspace to a new path, repairing its worktrees |
+| `ow archive` | `<name>`, `-y/--yes` | Park a workspace without losing its worktrees or branches |
+| `ow unarchive` | `<name>`, `[dest]`, `-y/--yes` | Restore an archived workspace |
 | `ow rm` | `<name>`, `-w/--workspace` (alias for `<name>`), `-y/--yes` | Remove a workspace: worktrees, local branches, directory, and index entry |
-| `ow ls` | — | List every known workspace, its path, and its repos |
+| `ow prune` | `--dry-run`, `-y/--yes`, `--also-backups` | Clean up stale worktree references, orphaned branches, dead index entries |
+| `ow ls` | `--archived` | List every known workspace, its path, and its repos |
+| `ow cd` | `[workspace]`, `-w/--workspace` | Print a workspace path — with `ow shell-init`, changes directory |
+| `ow shell-init` | `<shell>` | Print the shell snippet that makes `ow cd` change directory |
+| `ow open` | `[workspace]`, `-w/--workspace` | Open a workspace in the configured editor |
 | `ow templates` | `[workspace]`, `-w/--workspace`, `--diff` | List a workspace's template files and their state, or diff the outdated ones |
-
 A command that takes a `[workspace]` resolves it in exactly one of four forms, never falling
 back from one to the next:
 
@@ -62,7 +68,9 @@ the command exits non-zero — the workspace exists, but it is not the one you a
 
 Re-renders templates and materializes worktrees for a workspace: creates any missing worktree,
 reconciles attached/detached state for existing ones, and renders the services compose file.
-Useful after changing templates or the global config without recreating the workspace.
+Useful after changing templates or the global config without recreating the workspace. `--check`
+reports drift and outdated templates without modifying anything, and exits non-zero if either is
+found — for scripts and pre-commit hooks.
 
 Each template file is copied into `<ws>/.ow/templates/<bundle>/<relpath>` before it is rendered;
 `ow apply` prints `materialised <name>` the first time a file lands there, and `updated <name>`
@@ -140,6 +148,26 @@ Shows local branch status with behind/ahead counts — no network by default, li
 Pass `-f`/`--fetch` to fetch latest refs before showing status. Behind/ahead counts are then
 relative to fresh remote-tracking refs; without it, they reflect the last fetch.
 
+## `ow fetch`
+
+Refreshes the refs a workspace follows — `git fetch`, into the bare repos, one repo at a time —
+and reports what arrived. The network half of `ow pull` and `ow rebase`, on its own: no worktree
+moves, no branch changes, nothing but the bare repos' remote-tracking refs.
+
+```sh
+ow fetch                                    # every repo of the current workspace
+ow fetch parrot --only community            # one repo of a named workspace
+```
+
+What each ref is after the fetch is compared to what it was before, which is the one thing
+`git fetch`'s own output does not say: `+34` means the ref advanced by 34 commits, `up to date`
+means it did not move, `force-pushed +N -M` means the remote rewrote it under you — which is
+what `ow rebase` will have to replay around and what `ow reset -f` exists to adopt.
+
+Each repo follows its base ref and, when its branch is pushed somewhere, its upstream — two
+refs, two rows, because a fetch moves them independently. A repo whose worktree is missing or
+whose remote is unreachable is reported and skipped; the run exits non-zero if any fetch failed.
+
 ## `ow rebase`
 
 Fetches the latest refs and rebases each repo of a workspace onto its base branch.
@@ -168,6 +196,9 @@ worktree has uncommitted changes, or when the worktree is missing. `--autostash`
 On conflict, resolve, `git rebase --continue`, then re-run `ow rebase --only <alias>`. Nothing is
 ever pushed: the `git push --force-with-lease` stays yours.
 
+
+`--no-fetch` rebases against the refs already in the bare repos rather than fetching first —
+for a workspace whose remotes are unreachable, or for replaying the same rebase the second time.
 `--dry-run` fetches refs to show you what would happen, but runs no command that
 touches your worktrees.
 
@@ -325,7 +356,8 @@ Deleting a branch is the one step that can lose work, so it is confirmed first,
 defaulting to no; `-y/--yes` skips the prompt and `--dry-run` stops after the
 survey. A branch holding commits no remote has is never deleted — it is listed,
 with the command to delete it by hand.
-
+`--also-backups` lists every `.ow/config.toml` backup `ow rm` has saved over time, and deletes
+them with the same prompt — the last safety net before they go.
 
 ## `ow rm`
 
@@ -344,11 +376,71 @@ uncommitted changes in the working tree. Confirmation defaults to no — `-y/--y
 
 A workspace whose bare repo is missing still has its directory and index entry cleaned up.
 
+## `ow mv`
+
+Moves a workspace to a new path, repairing what `mv` alone would break: the bare repos still
+point at the old worktree paths, the discovery index still names the old directory, and the
+rendered templates hold absolute paths that only `ow apply` can regenerate. All three are
+fixed, in that order — the worktrees have to work again before the addon scan that re-renders
+`odoorc` can see anything.
+
+```sh
+ow mv parrot ~/odoo/parrot          # rename
+ow mv ./parrot ..                    # move into the parent (mv(1) semantics)
+```
+
+`mv(1)` semantics: an existing directory means "move into it", anything else is the new path
+itself. Renaming changes `db_name` and `dbfilter` in `odoorc` to the new name — the existing
+Odoo database is not renamed. A `.venv` holds absolute paths and must be rebuilt at the new
+location (`mise install`); the move warns when one is present.
+
+## `ow archive` / `ow unarchive`
+
+Parks a workspace without losing it, then brings it back. Archiving is relocation to a
+canonical place (`$XDG_DATA_HOME/ow/archives/<name>`) plus dropping the index entry; the
+worktrees stay registered — repaired at the archive path — and the local branches stay, which
+is the whole point: an archived workspace comes back exactly as it left.
+
+```sh
+ow archive parrot                    # park it
+ow ls --archived                     # see what's parked
+ow unarchive parrot                  # restore it to ./parrot
+ow unarchive parrot ~/odoo/parrot   # ... or somewhere else
+```
+
+Unarchiving is the same move in reverse, plus a re-render so the absolute paths in `odoorc`
+name wherever it landed. `ow ls --archived` lists the archive — it is not in the index by
+design, so it is read straight off the filesystem.
+
+## `ow cd` / `ow shell-init`
+
+A process cannot change its parent shell's directory, so `ow cd` prints a path and a shell
+function — installed by `ow shell-init` — does the actual `cd`. Add the integration to your
+shell rc:
+
+```sh
+eval "$(ow shell-init bash)"    # or zsh, or: ow shell-init fish | source
+```
+
+Then `ow cd parrot` changes directory; without the snippet, the same command prints the path.
+
+## `ow open`
+
+Opens a workspace in the configured editor — `editor` in the global config, defaulting to `code`.
+No `xdg-open`, `$EDITOR`, or `$VISUAL` cascade: a cascade makes the command's behaviour depend on
+ambient environment, which is the opposite of what a workspace manager should do.
+
+```sh
+ow open parrot                       # opens ~/odoo/parrot in `code`
+ow open                               # the current workspace (OW_WORKSPACE or walk-up)
+```
+
 ## `ow ls`
 
 Lists every workspace `ow` currently knows about, in name order — name, path (home-relative), and its repos
 with their branch specs — read from the discovery index and each workspace's own
-`.ow/config.toml`. No git, no network: this is local files only. A workspace config that fails
+`.ow/config.toml`. No git, no network: this is local files only. `--archived` lists the archive
+instead, which is not in the index by design — see `ow archive`. A workspace config that fails
 to parse shows as an error in place of its repos rather than aborting the listing.
 
 ## `ow templates`

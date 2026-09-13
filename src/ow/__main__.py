@@ -9,6 +9,7 @@ from ow.commands import (
     cmd_apply,
     cmd_archive,
     cmd_cd,
+    cmd_fetch,
     cmd_init,
     cmd_ls,
     cmd_mv,
@@ -259,6 +260,17 @@ def status(
     """Show workspace status."""
     config = _load_config()
     cmd_status(config, workspace=_pick_workspace(workspace, workspace_opt), fetch=fetch)
+
+
+@app.command(name="fetch")
+def fetch_cmd(
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    only: Optional[str] = typer.Option(None, "--only", help="Comma-separated repo aliases to fetch (default: all)", autocompletion=complete_gen_repos),
+) -> None:
+    """Refresh the refs a workspace follows, without touching any worktree."""
+    config = _load_config()
+    cmd_fetch(config, workspace=_pick_workspace(workspace, workspace_opt), only=only)
 
 
 @app.command()
