@@ -162,6 +162,26 @@ def ordered_remotes(alias_remotes: dict[str, RemoteConfig]) -> list[str]:
     return result
 
 
+def repo_remotes(repo: Path) -> list[str]:
+    """The remotes the repository really has, origin first then alphabetical.
+
+    The global config is not the truth here: a bare repo keeps every remote
+    it was ever set up with, and a workspace can outlive the `[remotes]`
+    entry that created it. Anything that has to reach a remote — rather
+    than merely describe the intended setup — asks the repo.
+    """
+    result = _run(
+        ["git", "-C", str(repo), "remote"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    if result.returncode != 0:
+        return []
+    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    ordered = ["origin"] if "origin" in names else []
+    ordered.extend(sorted(n for n in names if n != "origin"))
+    return ordered
+
+
 def _get_bare_config(bare_repo: Path) -> dict[str, str]:
     """Read all local git config as a dict via a single subprocess."""
     result = _run(

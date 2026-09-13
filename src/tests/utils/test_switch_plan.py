@@ -68,11 +68,22 @@ def test_a_busy_repo_is_skipped_with_its_resume_commands():
     assert result.resume == ("git rebase --continue", "git rebase --abort")
 
 
-def test_an_unresolvable_target_is_skipped():
+def test_an_unresolvable_target_says_how_to_create_it():
+    """The usual reason a branch is nowhere to be found is that it does not
+    exist yet, so the refusal names `-c` rather than just saying no."""
     result = plan(SwitchFacts(alias="community", target_resolvable=False))
 
     assert result.is_skipped
-    assert "not found" in result.skip_reason
+    assert "feature-x" in result.skip_reason
+    assert "ow switch -c feature-x" in result.skip_reason
+
+
+def test_detach_does_not_suggest_creating_a_branch():
+    """`--detach` asks for a ref that exists; `-c` would answer another question."""
+    result = plan(SwitchFacts(alias="community", target_resolvable=False), detach=True)
+
+    assert "feature-x" in result.skip_reason
+    assert "-c" not in result.skip_reason
 
 
 def test_worktree_missing_takes_priority_over_a_busy_check_that_never_happened():

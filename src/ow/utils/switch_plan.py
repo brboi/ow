@@ -70,7 +70,14 @@ def plan_switch(
         operation, cont, abort = f.busy
         return SwitchPlan(alias=f.alias, skip_reason=f"{operation} in progress", resume=(cont, abort))
     if not f.target_resolvable:
-        return SwitchPlan(alias=f.alias, skip_reason="target not found, even after fetching")
+        # Naming the fix matters more here than anywhere else: the common
+        # reason a branch is nowhere to be found is that it does not exist
+        # yet, and the user meant to start it. git says as much when it
+        # refuses a plain `git switch`, and so does ow.
+        reason = f"no branch named '{target}' here or on any remote"
+        if create is None and not detach:
+            reason += f" — create it with `ow switch -c {target}`"
+        return SwitchPlan(alias=f.alias, skip_reason=reason)
 
     if create is not None:
         args = ("switch", "-c", create) + ((target,) if target else ())
