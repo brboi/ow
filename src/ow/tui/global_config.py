@@ -289,6 +289,10 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
     GlobalConfigScreen .section-container {
         height: 1fr;
     }
+    GlobalConfigScreen .section-hint {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
 
     /* ---- remotes section ---- */
     GlobalConfigScreen #gc_remotes_list {
@@ -366,6 +370,12 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
                     # Vars section
                     yield Vertical(
                         Static("Variables", classes="section-heading"),
+                        Static(
+                            "These are only initial values: they are copied into every new "
+                            "workspace at creation. Changing them here does not affect any "
+                            "workspace that already exists.",
+                            classes="section-hint",
+                        ),
                         VarsEditor(
                             self._config.vars,
                             id="gc_vars",

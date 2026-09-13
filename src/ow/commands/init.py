@@ -185,7 +185,12 @@ def _workspace_config_from_flags(
 
     chosen_templates, chosen_repos = _preselection(source_ws, templates, repos)
 
-    ws_vars = dict(source_ws.vars) if source_ws is not None else dict(config.vars)
+    # New workspaces always start with a full, self-contained copy of the
+    # global vars — after 2.4.0 the render context reads only ws.vars, so
+    # anything not copied here is simply absent from this workspace forever.
+    # A -c source's own vars take precedence over the global ones they were
+    # copied from at that source's own creation time.
+    ws_vars = {**config.vars, **(source_ws.vars if source_ws is not None else {})}
     return WorkspaceConfig(repos=chosen_repos, templates=chosen_templates, vars=ws_vars)
 
 
@@ -303,7 +308,9 @@ def _gather_workspace_config_interactive(
         err_console.print("Aborted.")
         sys.exit(1)
 
-    ws_vars: dict[str, Any] = dict(source_ws.vars) if source_ws is not None else dict(config.vars)
+    # Same copy-not-link rule as the non-interactive path: the global vars
+    # are the defaults, a -c source's vars override them.
+    ws_vars: dict[str, Any] = {**config.vars, **(source_ws.vars if source_ws is not None else {})}
 
     return WorkspaceConfig(repos=final_repos, templates=selected_templates, vars=ws_vars)
 
@@ -392,7 +399,7 @@ def cmd_init(
         # Labelled, and indented one step further than the repo lines above:
         # without that, a var named like a repo alias is indistinguishable
         # from one on the screen someone reads before typing `y`.
-        print("  Vars:")
+        print("  Vars: (copied from the global config; this workspace now owns its own copy)")
         for var_name, value in ws.vars.items():
             print(f"    {var_name}: {value}")
 
