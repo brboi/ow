@@ -5,15 +5,16 @@
 | Command | Flags | Description |
 |---------|-------|-------------|
 | `ow init` | `[NAME]`, `-c/--configuration`, `-t/--template`, `-r/--repo` | Create a workspace here, or in `./NAME` |
-| `ow apply` | `[workspace]` | Re-render templates and materialize worktrees |
-| `ow status` | `[workspace]`, `-f/--fetch` | Show branch status with behind/ahead counts |
-| `ow rebase` | `[workspace]`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
-| `ow pull` | `[workspace]`, `--only`, `--dry-run` | Fetch and fast-forward repos in a workspace |
-| `ow reset` | `[workspace]`, `--only`, `--hard`, `-f/--fetch`, `--dry-run`, `-y/--yes` | Put repos back on the refs they follow |
+| `ow apply` | `[workspace]`, `-w/--workspace` | Re-render templates and materialize worktrees |
+| `ow status` | `[workspace]`, `-w/--workspace`, `-f/--fetch` | Show branch status with behind/ahead counts |
+| `ow rebase` | `[workspace]`, `-w/--workspace`, `--only`, `--autostash`, `--dry-run`, `-y/--yes` | Fetch and rebase repos in a workspace |
+| `ow pull` | `[workspace]`, `-w/--workspace`, `--only`, `--dry-run` | Fetch and fast-forward repos in a workspace |
+| `ow reset` | `[workspace]`, `-w/--workspace`, `--only`, `--hard`, `-f/--fetch`, `--dry-run`, `-y/--yes` | Put repos back on the refs they follow |
+| `ow switch` | `[target]`, `-w/--workspace`, `-c/--create`, `--detach`, `--only`, `--dry-run` | Switch every repo in a workspace to a branch |
 | `ow prune` | `--dry-run`, `-y/--yes` | Clean up stale worktree references, orphaned branches, and dead index entries |
-| `ow rm` | `<name>`, `-y/--yes` | Remove a workspace: worktrees, local branches, directory, and index entry |
+| `ow rm` | `<name>`, `-w/--workspace` (alias for `<name>`), `-y/--yes` | Remove a workspace: worktrees, local branches, directory, and index entry |
 | `ow ls` | — | List every known workspace, its path, and its repos |
-| `ow templates` | `--take`, `--diff` | List template files and their state, take one, or diff the stale ones |
+| `ow templates` | `[workspace]`, `-w/--workspace`, `--diff` | List a workspace's template files and their state, or diff the outdated ones |
 
 A command that takes a `[workspace]` resolves it in exactly one of four forms, never falling
 back from one to the next:
@@ -26,6 +27,12 @@ back from one to the next:
   relative); `mise` exports it as such automatically inside a generated workspace
 - no argument, **`OW_WORKSPACE` unset** — walk up from the current directory looking for
   `.ow/config.toml`
+
+Every one of these commands also accepts `-w/--workspace` naming the same workspace as the
+positional form. Passing both with different values is an error; passing both with the same
+value is accepted. `ow rm` is the exception: `-w` is a plain alias for its mandatory `<name>`
+argument rather than another way to spell the same resolution, and `ow rm` never resolves a
+workspace implicitly — it is the destructive command, so it insists on being told.
 
 `ow init` doesn't go through this: it resolves its *target* directory itself (the current
 directory, or `./NAME`), since the workspace doesn't exist yet.
@@ -57,8 +64,11 @@ Re-renders templates and materializes worktrees for a workspace: creates any mis
 reconciles attached/detached state for existing ones, and renders the services compose file.
 Useful after changing templates or the global config without recreating the workspace.
 
-If any template file you took has since changed upstream, `ow apply` lists it and points at
-`ow templates --diff`.
+Each template file is copied into `<ws>/.ow/templates/<bundle>/<relpath>` before it is rendered;
+`ow apply` prints `materialised <name>` the first time a file lands there, and `updated <name>`
+when it overwrites a copy you never touched whose source has since moved. A copy you edited
+yourself is never touched — silently, if `ow`'s source hasn't moved either, or flagged with a
+pointer to `ow templates --diff` if it has.
 Files left over from a template bundle you've since removed from your config are listed as
 orphans — remove them manually if stale.
 Like `ow init` and `ow rebase`, `ow apply` exits non-zero when any repo failed, even though
@@ -88,6 +98,7 @@ bottom captures every operation's output.
 | `a` | Apply |
 | `R` | Rebase |
 | `P` | Pull |
+| `S` | Switch |
 | `r` | Reset |
 | `p` | Prune |
 | `n` | New workspace |
@@ -237,6 +248,44 @@ locally, or when it is not on the branch the config names. That last one
 matters: resetting whatever else happens to be checked out would throw away
 work ow was never told about, and realigning is `ow apply`'s job.
 
+## `ow switch`
+
+Switches every repo of a workspace to a branch — `git switch`, one repo at a time. Unlike
+`ow init`'s `base..feature` specs, the argument here is always a branch: `ow switch` moves a
+workspace that already exists, it does not define one.
+
+```sh
+ow switch 18.0                              # every repo of the current workspace
+ow switch -c feat-x origin/master           # create feat-x from origin/master and switch to it
+ow switch --detach origin/master            # detached HEAD at origin/master
+```
+
+A branch that exists on exactly one remote is created locally and switched to as a tracking
+branch — the DWIM `git switch --guess` performs. `ow` does that guessing itself: its bare repos
+are cloned `--single-branch` and extra branches are fetched outside the remote's configured
+refspec, which makes git's own `--guess` refuse to find them.
+
+No fetch happens by default. When the target isn't already known locally, `ow` fetches it once
+by its explicit refspec and, for a tag or a commit sha, falls back to one ordinary fetch; if it
+still cannot resolve the target after that, it gives up.
+
+Pre-flight is all-or-nothing, unlike `ow rebase`, `ow pull`, and `ow reset`, which skip a bad
+repo and continue: every selected repo must have its worktree present, no git operation already
+in progress, and a resolvable target, or nothing is switched at all and the command exits 2,
+listing every offending repo. A workspace half on 17.0 and half on 18.0 is exactly what `ow`
+exists to prevent, and there is no `ow unswitch` to walk it back.
+
+A dirty worktree is not a reason to refuse: `git switch` carries uncommitted changes across when
+it can, and `ow` does not second-guess it.
+
+Once a repo has actually moved, `.ow/config.toml` is rewritten from what git left on disk, not
+from what was asked for: an attached branch with an upstream gets `<upstream>..<branch>`, an
+attached branch without one keeps its start point (`-c`) or the repo's previous base ref, and a
+detached repo gets the bare ref you asked for. Templates are deliberately not re-rendered — the
+run ends by telling you to run `ow apply` if you need them refreshed.
+
+`--dry-run` prints the exact `git switch` invocation per repo and writes nothing.
+
 ## `ow prune`
 
 Cleans up stale worktree references and orphaned local branches from every bare repo, and drops
@@ -280,15 +329,19 @@ to parse shows as an error in place of its repos rather than aborting the listin
 
 ## `ow templates`
 
-Lists every template file `ow` can use, with its state:
+Lists every template file materialised into one workspace, with its state:
 
-- `packaged` — shipped inside `ow`, unmodified
-- `taken` — you have a local override
-- `taken, outdated` — the packaged file changed since you took it
+- `up to date` — your copy matches what `ow` copied it from
+- `modified` — you edited it, and `ow`'s source hasn't moved since
+- `outdated` — you edited it, and `ow`'s source has moved since; `ow apply` leaves it alone
+  either way, so this is the one state you have to reconcile by hand
+- `unlocked` — the file has no lock entry, because you (or something else) added it directly;
+  `ow` never touches it and never reports it as anything else
 
-`--take BUNDLE/PATH` copies one packaged file into your local overrides, plus a pristine
-baseline used later to detect drift. `--diff` prints a unified diff (baseline vs. current
-packaged) for every outdated file. See [Template System](templates.md).
+Owning a template now means editing its copy directly, under
+`<ws>/.ow/templates/<bundle>/<relpath>`. `--diff` prints a unified diff, from your copy
+(`(yours)`) to `ow`'s current source (`(ow)`), for every outdated file. See
+[Template System](templates.md).
 
 ## Tab Completion
 

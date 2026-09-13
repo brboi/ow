@@ -9,17 +9,21 @@
 | What | Path | Notes |
 |------|------|-------|
 | Global config | `$XDG_CONFIG_HOME/ow/config.toml` | `[vars]` + `[remotes]`; bootstrapped with a commented default the first time any command needs it |
-| Template overrides | `$XDG_CONFIG_HOME/ow/templates/` | populated one file at a time, by `ow templates --take` |
+| Template overrides | `$XDG_CONFIG_HOME/ow/templates/` | a bundle tree you create yourself; overrides the packaged bundles per file when a workspace materialises its templates |
 | Services | `$XDG_CONFIG_HOME/ow/services/` | rendered by `ow init` and `ow apply` from the packaged `compose.yml.j2` |
 | Bare repos | `$XDG_DATA_HOME/ow/repos/` | one `<alias>.git` per remote, shared by every workspace on the machine |
 | Container volumes | `$XDG_DATA_HOME/ow/volumes/` | used by the rendered `compose.yml` for postgres and mailpit data |
 | Workspace index | `$XDG_STATE_HOME/ow/workspaces` | plain list of paths `ow ls` and name lookup read; self-healing, never the source of truth |
-| Template baselines | `$XDG_STATE_HOME/ow/template-base/` | pristine copies written by `ow templates --take`, used to detect `taken, outdated` |
 
 A workspace's own config lives inside it, at `.ow/config.toml` — it stores that workspace's
 `templates`, `repos`, and `vars`. Its name isn't stored there; it's the directory's own name.
 Both config files start with `version = 1`; a file with a newer version is refused with an
 upgrade message.
+
+A workspace's templates are materialised inside it too: `.ow/templates/<bundle>/<relpath>` holds
+the working copy that rendering reads from, and `.ow/templates.lock.toml` records the sha256 of
+the source file each copy came from — see [Template System](templates.md) for the upgrade rules
+that lock drives.
 
 ## Remotes
 
@@ -46,6 +50,13 @@ db_port = 5432
 db_user = "odoo"
 db_password = "odoo"
 ```
+
+The render context reads only the workspace's own `vars`, never the global table directly: the
+global `[vars]` are just the initial values `ow init` copies into a new workspace's
+`.ow/config.toml` (a `-c/--configuration` source workspace's vars win over the global ones for
+keys both define). Editing `$XDG_CONFIG_HOME/ow/config.toml` afterwards therefore only affects
+workspaces created from then on; an existing workspace keeps its own copy, and you edit that
+copy directly, in its own `.ow/config.toml`.
 
 Templates use `{{ vars.key | default(fallback) }}` so undefined variables get safe defaults.
 
