@@ -28,11 +28,32 @@ def test_a_remote_only_branch_is_created_and_tracked():
     assert result.upstream == ("origin", "feature-x")
 
 
-def test_detach_passes_the_ref_through_untouched():
+def test_detaching_at_a_remote_only_branch_names_the_remote_ref():
+    """`git switch --detach feature-x` on a branch that exists only on a
+    remote does not detach: git guesses a branch creation and then refuses
+    "'--detach' cannot be used with -b/-B/--orphan". The remote-tracking
+    ref is what the user meant, and naming it is the only way to say it."""
     result = plan(SwitchFacts(alias="community", dwim_remote="origin"), detach=True)
 
-    assert result.args == ("switch", "--detach", "feature-x")
+    assert result.args == ("switch", "--detach", "origin/feature-x")
+    assert result.resolved_target == "origin/feature-x"
+    # A detached HEAD tracks nothing; the ref is a pin, not an upstream.
     assert result.upstream is None
+
+
+def test_detaching_at_a_ref_that_resolves_here_passes_it_through():
+    result = plan(SwitchFacts(alias="community"), target="origin/18.0", detach=True)
+
+    assert result.args == ("switch", "--detach", "origin/18.0")
+
+
+def test_a_remote_only_start_point_is_named_by_its_remote_ref():
+    """git guesses nothing for a start point: `switch -c fix feature-x`
+    fails outright unless feature-x resolves."""
+    result = plan(SwitchFacts(alias="community", dwim_remote="upstream"), create="fix")
+
+    assert result.args == ("switch", "-c", "fix", "upstream/feature-x")
+    assert result.resolved_target == "upstream/feature-x"
 
 
 def test_create_from_a_start_point():

@@ -417,7 +417,10 @@ def cmd_switch(
         if not _execute(plan, worktree, target=target, create=create, detach=detach):
             exec_failed = True
             continue
-        spec = _new_spec(worktree, target=target, create=create, old=old)
+        # What git was actually given, not what was typed: a remote-only
+        # `master` was detached at `<remote>/master`, and that is the ref
+        # this repo is pinned to now.
+        spec = _new_spec(worktree, target=plan.resolved_target or target, create=create, old=old)
         touched[plan.alias] = spec
         # The spec, next to the repo that produced it: it is what was just
         # written to the config, and it is only knowable after the switch.

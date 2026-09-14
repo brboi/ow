@@ -52,6 +52,11 @@ class SwitchPlan:
     # (remote, branch) to record as the new branch's upstream once the
     # switch succeeded; only set for the DWIM form.
     upstream: tuple[str, str] | None = None
+    # The ref the args really name, once ow's DWIM has qualified it: the
+    # caller writes the config from what was switched to, not from what
+    # was typed, and `master` resolved through the `upstream` remote is
+    # not `origin/master`.
+    resolved_target: str | None = None
     skip_reason: str | None = None
     # The command that would make this run possible. Kept apart from the
     # reason because a whole workspace usually fails for the same cause,
@@ -67,6 +72,19 @@ class SwitchPlan:
     @property
     def is_noop(self) -> bool:
         return self.action == "noop"
+
+
+def _qualify(f: SwitchFacts, target: str | None) -> str | None:
+    """`target`, named the way git will actually find it here.
+
+    A short name that only exists as one remote-tracking ref is replaced
+    by `<remote>/<name>`; anything that already resolves locally — a
+    branch, a tag, a sha, an already-qualified ref — is left as typed,
+    since `dwim_remote` is None for those.
+    """
+    if target is None or f.dwim_remote is None:
+        return target
+    return f"{f.dwim_remote}/{target}"
 
 
 def plan_switch(
@@ -86,6 +104,11 @@ def plan_switch(
     one. So the branch is created from the unique remote-tracking ref and
     the upstream is written afterwards, which is what ow does everywhere
     else it attaches a worktree.
+
+    The same guess settles `--detach` and `-c NEW <start>`, where git
+    does not guess at all: it either refuses the ref outright, or — with
+    `--detach` — turns it into a branch creation and then rejects its own
+    combination. Both get the remote-tracking ref by name instead.
     """
     if f.worktree_missing:
         return SwitchPlan(
@@ -112,12 +135,22 @@ def plan_switch(
                 skip_reason=f"branch '{create}' already exists here",
                 hint=f"switch to it with `ow switch {create}`",
             )
-        args = ("switch", "-c", create) + ((target,) if target else ())
-        return SwitchPlan(alias=f.alias, args=args, action="create")
+        # A start point is a ref, and git guesses nothing for one: it
+        # resolves `master` or it fails. Qualifying it here is what makes
+        # `ow switch -c fix master` work off a remote-only branch.
+        start = _qualify(f, target)
+        args = ("switch", "-c", create) + ((start,) if start else ())
+        return SwitchPlan(alias=f.alias, args=args, action="create", resolved_target=start)
 
     assert target is not None  # cmd_switch refuses a run with neither
     if detach:
-        return SwitchPlan(alias=f.alias, args=("switch", "--detach", target), action="detach")
+        # `git switch --detach master` on a branch that is only remote does
+        # not detach: git's own guess turns it into a branch creation and
+        # then refuses itself with "'--detach' cannot be used with -b". The
+        # remote-tracking ref is what the user meant, so name it outright.
+        ref = _qualify(f, target)
+        assert ref is not None
+        return SwitchPlan(alias=f.alias, args=("switch", "--detach", ref), action="detach", resolved_target=ref)
     if target == f.current_branch:
         # Nothing to run: git would answer "Already on 'x'", and a repo
         # that never moved must keep the spec it already has — an

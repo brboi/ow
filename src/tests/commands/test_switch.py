@@ -396,3 +396,45 @@ def test_a_workspace_of_only_pins_switches_nothing(tmp_path, capsys, xdg):
 
     assert (ws_dir / ".ow" / "config.toml").read_text() == before
     assert "left alone" in capsys.readouterr().out
+
+
+def test_detaching_at_a_remote_only_branch_detaches_at_the_remote_ref(tmp_path, capsys, xdg):
+    """git's own guess turns `switch --detach feature-x` into a branch
+    creation and then refuses it ("'--detach' cannot be used with -b"), so
+    ow names the remote-tracking ref itself — and pins the repo to that ref,
+    not to the short name, which would mean origin's."""
+    bare, src = _make_repo(tmp_path, "community")
+    _branch_only_on_source(src, "feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt = _add_worktree(bare, ws_dir, "community")
+    _workspace_config(ws_dir, {"community": "master..featA"})
+    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+
+    cmd_switch(config, "feature-x", workspace=str(ws_dir), detach=True)
+
+    assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+    assert _git(wt, "rev-parse", "HEAD") == _git(wt, "rev-parse", "refs/remotes/origin/feature-x")
+    spec = load_workspace_config(ws_dir / ".ow" / "config.toml").repos["community"]
+    assert spec.is_detached
+    assert spec.base_ref == "origin/feature-x"
+
+
+def test_creating_from_a_remote_only_start_point(tmp_path, capsys, xdg):
+    """git guesses nothing for a start point either: `-c fix feature-x`
+    fails outright unless the short name resolves locally."""
+    bare, src = _make_repo(tmp_path, "community")
+    _branch_only_on_source(src, "feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt = _add_worktree(bare, ws_dir, "community")
+    _workspace_config(ws_dir, {"community": "master..featA"})
+    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+
+    cmd_switch(config, "feature-x", workspace=str(ws_dir), create="fix")
+
+    assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "fix"
+    assert _git(wt, "rev-parse", "HEAD") == _git(wt, "rev-parse", "refs/remotes/origin/feature-x")
+    spec = load_workspace_config(ws_dir / ".ow" / "config.toml").repos["community"]
+    assert spec.local_branch == "fix"
+    assert spec.base_ref == "origin/feature-x"
