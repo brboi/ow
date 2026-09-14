@@ -21,7 +21,7 @@ from ow.utils.git import (
     rev_parse,
     set_branch_upstream,
 )
-from ow.utils.resolver import resolve_workspace
+from ow.utils.resolver import repo_from_cwd, resolve_workspace
 from ow.utils.switch_plan import SwitchFacts, SwitchPlan, plan_switch
 
 
@@ -196,7 +196,7 @@ def _summary_line(plan: SwitchPlan, alias_width: int, current: str, spec_width: 
 
 def _display_summary(
     ws_name: str, aliases: list[str], plans: list[SwitchPlan], repos: dict[str, BranchSpec], *,
-    target: str | None, create: str | None, detach: bool,
+    target: str | None, create: str | None, detach: bool, narrowed: str | None = None,
 ) -> None:
     """What each repo is on, and what this run would make of it.
 
@@ -219,6 +219,12 @@ def _display_summary(
         else:
             state = "[dim]left alone — detached spec[/]"
             console.print(f"  {alias.ljust(alias_width)}  {escape(specs[alias].ljust(spec_width))}  {state}")
+    if narrowed is not None:
+        # A run that quietly touched one repo out of five would read as a
+        # bug the first time the other four turn out not to have moved.
+        console.print(
+            f"[dim]  narrowed to {escape(narrowed)} — you are inside it; pass --all for every repo.[/]"
+        )
 
 
 def _report_refusals(refused: list[SwitchPlan]) -> None:
@@ -305,6 +311,7 @@ def cmd_switch(
     create: str | None = None,
     detach: bool = False,
     only: str | None = None,
+    all_repos: bool = False,
     dry_run: bool = False,
     include_detached: bool = False,
 ) -> None:
@@ -324,6 +331,14 @@ def cmd_switch(
     left alone, unless `--include-detached-specs` says otherwise — or a
     `--only` names one, because naming a repo is insisting on it.
 
+    Run from inside one of the repos, with no workspace and no `--only`
+    named, the run narrows to that repo: `cd community && ow switch 18.0`
+    is the question git would have answered there, and answering it for
+    the whole workspace instead moves four repos nobody mentioned.
+    `--all` says the whole workspace anyway. A pin narrowed to this way is
+    still left alone — standing in a directory is not insisting on it, and
+    `--only` or `--include-detached-specs` still are.
+
     What each repo is about to do is printed first, as a table, the way
     every other multi-repo command here reports; a repo already on the
     target appears in it and is then left entirely alone.
@@ -340,11 +355,23 @@ def cmd_switch(
     if target is None and create is None:
         err_console.print("Error: a TARGET or -c NEW is required", markup=False)
         sys.exit(2)
+    if all_repos and only is not None:
+        err_console.print("Error: --all cannot be combined with --only", markup=False)
+        sys.exit(2)
 
     ws_dir, ws = resolve_workspace(name=workspace)
     aliases = select_aliases(list(ws.repos), only)
     if not aliases:
         return
+
+    # Only when the workspace itself came from the cwd: naming one (here or
+    # from the TUI, which always passes a path) asks about all of it.
+    narrowed = None
+    if only is None and workspace is None and not all_repos:
+        narrowed = repo_from_cwd(ws_dir, aliases)
+        if narrowed is not None:
+            aliases = [narrowed]
+
     needs_resolution = target is not None
 
     # A detached spec is a pin, not a laggard: the config names the exact
@@ -383,7 +410,10 @@ def cmd_switch(
             plan = plan_switch(result, target=target, create=create, detach=detach)
         plans.append(plan)
 
-    _display_summary(ws_dir.name, aliases, plans, ws.repos, target=target, create=create, detach=detach)
+    _display_summary(
+        ws_dir.name, aliases, plans, ws.repos,
+        target=target, create=create, detach=detach, narrowed=narrowed,
+    )
 
     refused = [p for p in plans if p.is_skipped]
     if refused:

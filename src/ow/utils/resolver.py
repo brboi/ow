@@ -117,3 +117,20 @@ def resolve_workspace(name: str | None = None) -> tuple[Path, WorkspaceConfig]:
         return _from_env(env_val)
 
     return _from_cwd()
+
+
+def repo_from_cwd(ws_dir: Path, aliases: list[str]) -> str | None:
+    """The repo of `ws_dir` the current directory sits in, or None.
+
+    The same walk-up `_from_cwd` does, stopped one level lower: a command
+    run from `<ws>/community/addons` is about `community` in a way that a
+    command run from `<ws>` is not. Only callers that resolved the
+    workspace from the cwd have any business asking — a workspace named
+    explicitly is the whole workspace.
+    """
+    cwd = Path.cwd().resolve()
+    for alias in aliases:
+        repo = (ws_dir / alias).resolve()
+        if cwd == repo or cwd.is_relative_to(repo):
+            return alias
+    return None

@@ -11,7 +11,7 @@
 | `ow rebase` | `[workspace]`, `-w/--workspace`, `--only`, `--autostash`, `--dry-run`, `-y/--yes`, `--no-fetch` | Fetch and rebase repos in a workspace |
 | `ow pull` | `[workspace]`, `-w/--workspace`, `--only`, `--dry-run` | Fetch and fast-forward repos in a workspace |
 | `ow reset` | `[workspace]`, `-w/--workspace`, `--only`, `--hard`, `-f/--fetch`, `--dry-run`, `-y/--yes` | Put repos back on the refs they follow |
-| `ow switch` | `[target]`, `-w/--workspace`, `-c/--create`, `--detach`, `--only`, `--dry-run`, `--include-detached-specs` | Switch every repo in a workspace to a branch; repos configured detached are pins and left alone by default |
+| `ow switch` | `[target]`, `-w/--workspace`, `-c/--create`, `--detach`, `--only`, `-a/--all`, `--dry-run`, `--include-detached-specs` | Switch every repo in a workspace to a branch; repos configured detached are pins and left alone by default |
 | `ow mv` | `<source>`, `<dest>`, `-y/--yes` | Move a workspace to a new path, repairing its worktrees |
 | `ow archive` | `<name>`, `-y/--yes` | Park a workspace without losing its worktrees or branches |
 | `ow unarchive` | `<name>`, `[dest]`, `-y/--yes` | Restore an archived workspace |
@@ -290,6 +290,8 @@ ow switch 18.0                              # every repo of the current workspac
 ow switch -c feat-x origin/master           # create feat-x from origin/master and switch to it
 ow switch --detach origin/master            # detached HEAD at origin/master
 ow switch 18.0 --include-detached-specs     # ... including the repos pinned to a bare ref
+cd community && ow switch 18.0              # only community — you are standing in it
+cd community && ow switch 18.0 --all        # ... the whole workspace anyway
 ```
 
 A repo configured detached — a bare ref in `.ow/config.toml`, no `..branch` — is a **pin**: the
@@ -303,6 +305,20 @@ A branch that exists on exactly one remote is created locally and switched to as
 branch — the DWIM `git switch --guess` performs. `ow` does that guessing itself: its bare repos
 are cloned `--single-branch` and extra branches are fetched outside the remote's configured
 refspec, which makes git's own `--guess` refuse to find them.
+
+The same guess settles the two forms git does not guess for at all. `git switch --detach 18.0`
+on a branch that is only remote does not detach — git turns it into a branch creation and then
+refuses its own combination with `'--detach' cannot be used with -b/-B/--orphan` — and
+`git switch -c fix 18.0` simply fails with `invalid reference: 18.0`. Both get the
+remote-tracking ref by name, so `--detach 18.0` detaches at `origin/18.0` and pins the repo to
+that ref, not to the short name (which would always mean `origin`'s).
+
+Run from inside one of the repos, with no workspace and no `--only` named, the run narrows to
+that repo and says so: `cd community && ow switch 18.0` is the question `git` would have answered
+there, and answering it for the whole workspace instead moves repos nobody mentioned. `-a/--all`
+asks for the whole workspace anyway, and naming a workspace (`-w`, a path, or `$OW_WORKSPACE`)
+never narrows. A pin narrowed to this way is still left alone: standing in a directory is not
+insisting on it, `--only` and `--include-detached-specs` are.
 
 No fetch happens by default. When the target isn't already known locally, `ow` asks each remote
 the repository actually has — not the ones `[remotes.<alias>]` happens to declare, since a
