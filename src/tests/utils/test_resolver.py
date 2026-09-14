@@ -16,7 +16,7 @@ import pytest
 
 from ow.utils import index
 from ow.utils.config import WorkspaceConfig, write_workspace_config
-from ow.utils.resolver import resolve_workspace
+from ow.utils.resolver import repo_from_cwd, resolve_workspace
 
 
 def _make_ws(base: Path, name: str, *, templates: list[str] | None = None) -> Path:
@@ -512,3 +512,47 @@ def test_a_bare_tilde_is_a_path_not_a_name(
 
     assert resolved_dir == home.resolve()
     assert ws.templates == ["tilde-home"]
+
+
+# ---------------------------------------------------------------------------
+# 5. repo_from_cwd: the walk-up, one level lower
+# ---------------------------------------------------------------------------
+
+
+def test_a_repo_that_shares_a_prefix_with_another_is_not_mistaken_for_it(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The comparison is component-wise, not a string prefix: written as
+    `str(cwd).startswith(str(repo))`, `cd odoo-extra` would answer `odoo`
+    and the command would move the wrong repo."""
+    ws_dir = _make_ws(xdg, "prefixes")
+    (ws_dir / "odoo-extra").mkdir(parents=True)
+    monkeypatch.chdir(ws_dir / "odoo-extra")
+
+    assert repo_from_cwd(ws_dir, ["odoo", "odoo-extra"]) == "odoo-extra"
+
+
+def test_the_workspace_root_is_in_no_repo(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws_dir = _make_ws(xdg, "root")
+    (ws_dir / "community").mkdir(parents=True)
+    monkeypatch.chdir(ws_dir)
+
+    assert repo_from_cwd(ws_dir, ["community"]) is None
+
+
+def test_a_deleted_working_directory_narrows_to_nothing(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ow switch -w <ws>` and `$OW_WORKSPACE` both work from a directory
+    that has been removed under the shell — nothing before this asks the
+    OS where it is. An absent cwd is an absent answer, not a traceback."""
+    ws_dir = _make_ws(xdg, "gone")
+    (ws_dir / "community").mkdir(parents=True)
+    scratch = xdg / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    scratch.rmdir()
+
+    assert repo_from_cwd(ws_dir, ["community"]) is None

@@ -42,9 +42,14 @@ def test_detaching_at_a_remote_only_branch_names_the_remote_ref():
 
 
 def test_detaching_at_a_ref_that_resolves_here_passes_it_through():
+    """No DWIM, so the ref reaches git as typed — and `resolved_target`
+    still carries it, because the caller writes the config from that field
+    and a repo pinned at `origin/18.0` must not be recorded as anything
+    else."""
     result = plan(SwitchFacts(alias="community"), target="origin/18.0", detach=True)
 
     assert result.args == ("switch", "--detach", "origin/18.0")
+    assert result.resolved_target == "origin/18.0"
 
 
 def test_a_remote_only_start_point_is_named_by_its_remote_ref():

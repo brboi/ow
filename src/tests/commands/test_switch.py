@@ -440,6 +440,41 @@ def test_creating_from_a_remote_only_start_point(tmp_path, capsys, xdg):
     assert spec.base_ref == "origin/feature-x"
 
 
+def _second_remote(tmp_path, bare: Path, src: Path, *, name: str, branch: str) -> Path:
+    """A second remote carrying a branch `origin` does not have.
+
+    Everything else in this file is single-remote, which is precisely the
+    case where writing the short name instead of the resolved ref is
+    invisible: `feature-x` re-reads as `origin/feature-x`. Under another
+    remote it re-reads as the wrong ref entirely."""
+    other = tmp_path / name
+    subprocess.run(["git", "clone", "-q", str(src), str(other)], check=True)
+    _git(other, "branch", branch, "master")
+    _git(bare, "remote", "add", name, str(other))
+    return other
+
+
+def test_detaching_through_a_non_origin_remote_pins_that_remotes_ref(tmp_path, capsys, xdg):
+    """The config records where the repo actually sits. `feature-x` found on
+    `upstream` must be written `upstream/feature-x`: the bare short name
+    re-reads as origin's branch, and a later `ow apply` or `ow reset` would
+    move the repo somewhere it has never been."""
+    bare, src = _make_repo(tmp_path, "community")
+    _second_remote(tmp_path, bare, src, name="upstream", branch="feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt = _add_worktree(bare, ws_dir, "community")
+    _workspace_config(ws_dir, {"community": "master..featA"})
+
+    cmd_switch(Config(vars={}, remotes={}), "feature-x", workspace=str(ws_dir), detach=True)
+
+    assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+    assert _git(wt, "rev-parse", "HEAD") == _git(wt, "rev-parse", "refs/remotes/upstream/feature-x")
+    spec = load_workspace_config(ws_dir / ".ow" / "config.toml").repos["community"]
+    assert spec.is_detached
+    assert spec.base_ref == "upstream/feature-x"
+
+
 def _two_repo_workspace(tmp_path):  # noqa: ANN001
     bare_c, src_c = _make_repo(tmp_path, "community")
     bare_e, src_e = _make_repo(tmp_path, "enterprise")
@@ -483,6 +518,8 @@ def test_running_from_the_workspace_root_switches_everything(tmp_path, capsys, x
 
 
 def test_all_overrides_the_narrowing(tmp_path, capsys, xdg, monkeypatch):
+    """The escape hatch: standing in a repo must not cost the whole-workspace
+    switch, which is what every `ow switch` did before narrowing existed."""
     config, ws_dir, wt_c, wt_e = _two_repo_workspace(tmp_path)
     monkeypatch.chdir(wt_c)
 
@@ -490,6 +527,20 @@ def test_all_overrides_the_narrowing(tmp_path, capsys, xdg, monkeypatch):
 
     assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
     assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+
+
+def test_all_with_only_is_refused_before_anything_is_resolved(tmp_path, capsys, xdg, monkeypatch):
+    """One says every repo, the other says these repos. Guessing which the
+    user meant would move repos on a coin toss, so neither runs."""
+    config, ws_dir, wt_c, wt_e = _two_repo_workspace(tmp_path)
+    monkeypatch.chdir(wt_c)
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_switch(config, "feature-x", only="community", all_repos=True)
+
+    assert exc.value.code == 2
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "featA"
+    assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "featA"
 
 
 def test_a_named_workspace_is_never_narrowed_by_the_cwd(tmp_path, capsys, xdg, monkeypatch):

@@ -227,13 +227,18 @@ def _display_summary(
         )
 
 
-def _report_refusals(refused: list[SwitchPlan]) -> None:
+def _report_refusals(refused: list[SwitchPlan], *, narrowed: str | None = None) -> None:
     """Why nothing ran, and the one command that would change that.
 
     The table above already names every repo and its reason; what is left
     is the part a per-repo list cannot say — that the run did nothing at
     all — and the advice, deduplicated: a whole workspace usually fails
     for the same cause, and the same sentence five times is scrolled past.
+
+    The all-or-nothing sentence is the justification for holding back
+    repos that were fine; a run narrowed to the repo the user is standing
+    in held nothing back, and saying otherwise sends them looking for a
+    policy that did not apply.
     """
     for plan in refused:
         if plan.resume:
@@ -241,7 +246,10 @@ def _report_refusals(refused: list[SwitchPlan]) -> None:
             err_console.print(f"\n  {plan.alias}: resume with: {cont}", markup=False)
             err_console.print(f"    or abort:      {abort}", markup=False)
 
-    err_console.print("\n[red]Nothing was switched[/]: a switch moves the whole workspace or none of it.")
+    if narrowed is None:
+        err_console.print("\n[red]Nothing was switched[/]: a switch moves the whole workspace or none of it.")
+    else:
+        err_console.print(f"\n[red]Nothing was switched[/] in {escape(narrowed)}.")
     for hint in dict.fromkeys(p.hint for p in refused if p.hint):
         err_console.print(f"  {hint}", markup=False)
 
@@ -331,10 +339,13 @@ def cmd_switch(
     left alone, unless `--include-detached-specs` says otherwise — or a
     `--only` names one, because naming a repo is insisting on it.
 
-    Run from inside one of the repos, with no workspace and no `--only`
-    named, the run narrows to that repo: `cd community && ow switch 18.0`
-    is the question git would have answered there, and answering it for
-    the whole workspace instead moves four repos nobody mentioned.
+    Run from inside one of the repos, with no workspace named on the
+    command line and no `--only`, the run narrows to that repo:
+    `cd community && ow switch 18.0` is the question git would have
+    answered there, and answering it for the whole workspace instead
+    moves four repos nobody mentioned. `$OW_WORKSPACE` narrows too — it
+    is an ambient default, not a naming, and the cwd still has to be
+    inside the workspace it points at for the question to have an answer.
     `--all` says the whole workspace anyway. A pin narrowed to this way is
     still left alone — standing in a directory is not insisting on it, and
     `--only` or `--include-detached-specs` still are.
@@ -364,8 +375,8 @@ def cmd_switch(
     if not aliases:
         return
 
-    # Only when the workspace itself came from the cwd: naming one (here or
-    # from the TUI, which always passes a path) asks about all of it.
+    # Only when this command line named no workspace: naming one (`-w`, or
+    # the TUI, which always passes a path) asks about all of it.
     narrowed = None
     if only is None and workspace is None and not all_repos:
         narrowed = repo_from_cwd(ws_dir, aliases)
@@ -417,7 +428,7 @@ def cmd_switch(
 
     refused = [p for p in plans if p.is_skipped]
     if refused:
-        _report_refusals(refused)
+        _report_refusals(refused, narrowed=narrowed)
         sys.exit(2)
 
     excluded = [a for a in aliases if a not in {p.alias for p in plans}]

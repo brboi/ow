@@ -72,6 +72,10 @@ def test_parse_branch_spec_rejects_degenerate(spec):
     "18.0",
     "master..master-feature",
     "dev/master-phoenix..fix",
+    # An origin branch whose own name has a slash keeps its prefix: written
+    # bare, `dev/18.0-fix` would re-read as the `dev` remote's `18.0-fix`.
+    "origin/dev/18.0-fix",
+    "origin/dev/18.0-fix..fix",
 ])
 def test_to_spec_str_round_trip(s):
     assert parse_branch_spec(s).to_spec_str() == s

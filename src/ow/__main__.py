@@ -329,7 +329,7 @@ def switch(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the git commands without running them"),
     include_detached: bool = typer.Option(False, "--include-detached-specs", help="Switch repos configured detached (bare refs) too; they are pins and left alone by default"),
 ) -> None:
-    """Switch every repo in a workspace to a branch."""
+    """Switch a workspace to a branch — or just the repo you are standing in."""
     config = _load_config()
     cmd_switch(
         config, target=target, workspace=workspace_opt,
