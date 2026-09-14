@@ -30,7 +30,13 @@ class BranchSpec:
         return "/".join(self.base_ref.split("/")[1:])
 
     def to_spec_str(self) -> str:
-        base = self.branch if self.remote == "origin" else self.base_ref
+        # `origin/` is implicit in a spec — but only for a branch whose own
+        # name carries no slash. Dropping it from `origin/dev/18.0-fix`
+        # writes `dev/18.0-fix`, which parse_branch_spec reads back as the
+        # `dev` remote: a different ref, on any machine that has one. A spec
+        # that does not re-read as itself is worse than a verbose one.
+        implicit = self.remote == "origin" and "/" not in self.branch
+        base = self.branch if implicit else self.base_ref
         if self.local_branch is None:
             return base
         return f"{base}..{self.local_branch}"

@@ -124,13 +124,23 @@ def repo_from_cwd(ws_dir: Path, aliases: list[str]) -> str | None:
 
     The same walk-up `_from_cwd` does, stopped one level lower: a command
     run from `<ws>/community/addons` is about `community` in a way that a
-    command run from `<ws>` is not. Only callers that resolved the
-    workspace from the cwd have any business asking — a workspace named
-    explicitly is the whole workspace.
+    command run from `<ws>` is not. For callers whose command line named
+    no workspace — naming one asks about all of it. `$OW_WORKSPACE` is not
+    a naming in that sense but an ambient default, and the question only
+    has an answer when the cwd really is inside that workspace anyway.
+
+    A deleted working directory is not an error here, only an absence:
+    every other form of this command still works from one, and refusing to
+    narrow is exactly what a directory that no longer exists should do.
     """
-    cwd = Path.cwd().resolve()
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError:
+        return None
     for alias in aliases:
         repo = (ws_dir / alias).resolve()
+        # Whole components, never a string prefix: `<ws>/odoo-extra` must
+        # not read as being inside `<ws>/odoo`.
         if cwd == repo or cwd.is_relative_to(repo):
             return alias
     return None

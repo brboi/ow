@@ -55,7 +55,10 @@ class SwitchPlan:
     # The ref the args really name, once ow's DWIM has qualified it: the
     # caller writes the config from what was switched to, not from what
     # was typed, and `master` resolved through the `upstream` remote is
-    # not `origin/master`.
+    # not `origin/master`. Deliberately None on the `track` and plain
+    # paths: those end up on a branch, and the spec is then read back from
+    # git's own `branch.<name>.remote/merge` — the ref this field carries
+    # would be the same one, spelled twice.
     resolved_target: str | None = None
     skip_reason: str | None = None
     # The command that would make this run possible. Kept apart from the

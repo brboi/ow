@@ -281,12 +281,13 @@ work ow was never told about, and realigning is `ow apply`'s job.
 
 ## `ow switch`
 
-Switches every repo of a workspace to a branch — `git switch`, one repo at a time. Unlike
-`ow init`'s `base..feature` specs, the argument here is always a branch: `ow switch` moves a
-workspace that already exists, it does not define one.
+Switches a workspace to a branch — `git switch`, one repo at a time — or just the repo you are
+standing in, if you run it from inside one. Unlike `ow init`'s `base..feature` specs, the
+argument here is always a branch: `ow switch` moves a workspace that already exists, it does not
+define one.
 
 ```sh
-ow switch 18.0                              # every repo of the current workspace
+ow switch 18.0                              # every repo, run from the workspace root
 ow switch -c feat-x origin/master           # create feat-x from origin/master and switch to it
 ow switch --detach origin/master            # detached HEAD at origin/master
 ow switch 18.0 --include-detached-specs     # ... including the repos pinned to a bare ref
@@ -313,11 +314,13 @@ refuses its own combination with `'--detach' cannot be used with -b/-B/--orphan`
 remote-tracking ref by name, so `--detach 18.0` detaches at `origin/18.0` and pins the repo to
 that ref, not to the short name (which would always mean `origin`'s).
 
-Run from inside one of the repos, with no workspace and no `--only` named, the run narrows to
-that repo and says so: `cd community && ow switch 18.0` is the question `git` would have answered
-there, and answering it for the whole workspace instead moves repos nobody mentioned. `-a/--all`
-asks for the whole workspace anyway, and naming a workspace (`-w`, a path, or `$OW_WORKSPACE`)
-never narrows. A pin narrowed to this way is still left alone: standing in a directory is not
+Run from inside one of the repos, with no workspace named on the command line and no `--only`,
+the run narrows to that repo and says so: `cd community && ow switch 18.0` is the question `git`
+would have answered there, and answering it for the whole workspace instead moves repos nobody
+mentioned. `-a/--all` asks for the whole workspace anyway, and `-w` never narrows — naming a
+workspace asks about all of it. `$OW_WORKSPACE` does narrow: it is an ambient default rather
+than a naming, and the narrowing can only fire when the cwd really is inside the workspace it
+points at. A pin narrowed to this way is still left alone: standing in a directory is not
 insisting on it, `--only` and `--include-detached-specs` are.
 
 No fetch happens by default. When the target isn't already known locally, `ow` asks each remote
