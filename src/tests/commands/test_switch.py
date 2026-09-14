@@ -438,3 +438,82 @@ def test_creating_from_a_remote_only_start_point(tmp_path, capsys, xdg):
     spec = load_workspace_config(ws_dir / ".ow" / "config.toml").repos["community"]
     assert spec.local_branch == "fix"
     assert spec.base_ref == "origin/feature-x"
+
+
+def _two_repo_workspace(tmp_path):  # noqa: ANN001
+    bare_c, src_c = _make_repo(tmp_path, "community")
+    bare_e, src_e = _make_repo(tmp_path, "enterprise")
+    _branch_only_on_source(src_c, "feature-x")
+    _branch_only_on_source(src_e, "feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt_c = _add_worktree(bare_c, ws_dir, "community")
+    wt_e = _add_worktree(bare_e, ws_dir, "enterprise")
+    _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master..featA"})
+    config = Config(vars={}, remotes={
+        "community": {"origin": RemoteConfig(url=str(src_c))},
+        "enterprise": {"origin": RemoteConfig(url=str(src_e))},
+    })
+    return config, ws_dir, wt_c, wt_e
+
+
+def test_running_from_inside_a_repo_switches_only_that_repo(tmp_path, capsys, xdg, monkeypatch):
+    """`cd community && ow switch feature-x` is the question git would have
+    answered there; answering it for every repo moves ones nobody named."""
+    config, ws_dir, wt_c, wt_e = _two_repo_workspace(tmp_path)
+    (wt_c / "addons").mkdir()
+    monkeypatch.chdir(wt_c / "addons")
+
+    cmd_switch(config, "feature-x")
+
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "featA"
+    assert "narrowed to community" in capsys.readouterr().out
+
+
+def test_running_from_the_workspace_root_switches_everything(tmp_path, capsys, xdg, monkeypatch):
+    config, ws_dir, wt_c, wt_e = _two_repo_workspace(tmp_path)
+    monkeypatch.chdir(ws_dir)
+
+    cmd_switch(config, "feature-x")
+
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    assert "narrowed to" not in capsys.readouterr().out
+
+
+def test_all_overrides_the_narrowing(tmp_path, capsys, xdg, monkeypatch):
+    config, ws_dir, wt_c, wt_e = _two_repo_workspace(tmp_path)
+    monkeypatch.chdir(wt_c)
+
+    cmd_switch(config, "feature-x", all_repos=True)
+
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+
+
+def test_a_named_workspace_is_never_narrowed_by_the_cwd(tmp_path, capsys, xdg, monkeypatch):
+    """The TUI always passes a path, and so does `-w`: naming a workspace
+    asks about all of it, whatever directory the shell happens to be in."""
+    config, ws_dir, wt_c, wt_e = _two_repo_workspace(tmp_path)
+    monkeypatch.chdir(wt_c)
+
+    cmd_switch(config, "feature-x", workspace=str(ws_dir))
+
+    assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+
+
+def test_standing_in_a_pinned_repo_is_not_insisting_on_it(tmp_path, capsys, xdg, monkeypatch):
+    """`--only enterprise` insists; being in its directory only narrows. A
+    pin moved by a cd is a pin nobody asked to move."""
+    config, ws_dir, wt_c, wt_e = _pin_workspace(tmp_path, capsys, xdg)
+    head_e = _git(wt_e, "rev-parse", "HEAD")
+    monkeypatch.chdir(wt_e)
+
+    cmd_switch(config, "feature-x")
+
+    assert _git(wt_e, "rev-parse", "HEAD") == head_e
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "featA"
+    out = capsys.readouterr().out
+    assert "left alone" in out
+    assert "--include-detached-specs" in out
