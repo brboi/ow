@@ -1,6 +1,7 @@
 {
-  "file_scan_inclusions": [{% for alias in repos %}"{{ alias }}/**", {% endfor %}"mise.toml", "odools.toml", "pyrightconfig.json"],
+  "file_scan_inclusions": [{% for alias in repos %}"{{ alias }}/**", {% endfor %}"mise.toml"{% if main_repo_alias %}, "odools.toml", "pyrightconfig.json"{% endif %}],
   "file_scan_exclusions": ["**/.git", "**/.svn", "**/.hg", "**/.jj", "**/CVS", "**/.DS_Store", "**/Thumbs.db", "**/.classpath", "**/.settings", "**/*.po", "**/*.pot", "**/node_modules", "**/.venv"],
+{% if main_repo_alias %}
   "lsp": {
     "odoo": {
       "settings": {
@@ -8,4 +9,5 @@
       },
     },
   },
+{% endif %}
 }

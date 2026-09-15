@@ -126,10 +126,20 @@ class TestApplyTemplates:
         (repo / "addons").mkdir(parents=True)
         (repo / "odoo" / "addons").mkdir(parents=True)
 
-    def test_applies_common_to_workspace(self, tmp_path, config):
+    def test_applies_common_but_not_odoo_without_a_core_repo(self, tmp_path, config):
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(repos={}, templates=["common"])
+        ws = WorkspaceConfig(repos={}, templates=[])
+        apply_templates(ws, config, ws_dir)
+
+        assert (ws_dir / "mise" / "conf.d" / "00-ow.toml").is_file()
+        assert not (ws_dir / "odoorc").exists(), "odoo files never render without a core repo"
+
+    def test_applies_odoo_bundle_once_a_core_repo_is_present(self, tmp_path, config):
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        self._make_main_repo(ws_dir)
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[])
         apply_templates(ws, config, ws_dir)
 
         assert (ws_dir / "odoorc").exists()
@@ -139,7 +149,8 @@ class TestApplyTemplates:
     def test_template_uses_context(self, tmp_path, config):
         ws_dir = tmp_path / "workspaces" / "my-test-ws"
         ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(repos={}, templates=["common"])
+        self._make_main_repo(ws_dir)
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[])
         apply_templates(ws, config, ws_dir)
         odoorc = (ws_dir / "odoorc").read_text()
         assert "my-test-ws" in odoorc
@@ -192,13 +203,14 @@ class TestApplyTemplates:
 
     def test_local_override_can_include_packaged_sibling(self, tmp_path, config):
         """A loader-less environment cannot resolve {% include %} — this must work."""
-        local = paths.templates_dir() / "common"
+        local = paths.templates_dir() / "odoo"
         local.mkdir(parents=True)
         (local / "pyrightconfig.json.j2").write_text("{% include 'requirements-dev.txt' %}")
 
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(repos={}, templates=["common"])
+        self._make_main_repo(ws_dir)
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[])
         apply_templates(ws, config, ws_dir)
 
         # The include pulls the packaged sibling's content.
@@ -206,13 +218,14 @@ class TestApplyTemplates:
 
     def test_partial_local_bundle_does_not_hide_packaged_siblings(self, tmp_path, config):
         """Owning one file of a bundle must not fork the whole bundle."""
-        local = paths.templates_dir() / "common"
+        local = paths.templates_dir() / "odoo"
         local.mkdir(parents=True)
         (local / "odoorc.j2").write_text("[options]\ncustom = true\n")
 
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(repos={}, templates=["common"])
+        self._make_main_repo(ws_dir)
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[])
         apply_templates(ws, config, ws_dir)
 
         # The customised file comes from the local override.

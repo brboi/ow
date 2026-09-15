@@ -71,7 +71,7 @@ def seed_workspace() -> Callable[..., Path]:
         }
         ws = WorkspaceConfig(
             repos=parsed_repos,
-            templates=templates or ["common"],
+            templates=templates if templates is not None else [],
             vars=vars or {},
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)

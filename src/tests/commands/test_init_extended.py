@@ -4,7 +4,6 @@ import pytest
 
 from ow.commands import cmd_init
 from ow.commands.init import _validate_init_inputs
-from ow.utils import paths
 from ow.utils.config import BranchSpec
 
 
@@ -16,7 +15,6 @@ class TestValidateInitInputs:
 
     def test_rejects_unknown_template(self, tmp_path, monkeypatch, capsys, config):
         monkeypatch.chdir(tmp_path)
-        (paths.templates_dir() / "common").mkdir(parents=True)
         with pytest.raises(SystemExit) as exc:
             _validate_init_inputs(config, "test", ["nonexistent"], {}, configuration=None)
         assert exc.value.code == 1
@@ -35,7 +33,7 @@ class TestValidateInitInputs:
         monkeypatch.chdir(tmp_path)
         src_config = tmp_path / "src" / ".ow" / "config.toml"
         src_config.parent.mkdir(parents=True)
-        src_config.write_text('templates = ["common"]\n\n[repos]\ncommunity = "master..my-branch"\n')
+        src_config.write_text('templates = ["vscode"]\n\n[repos]\ncommunity = "master..my-branch"\n')
 
         source_ws, ws_dir = _validate_init_inputs(
             config_with_remotes, "test", None, None, configuration=str(tmp_path / "src")
@@ -50,7 +48,7 @@ class TestValidateInitInputs:
         monkeypatch.chdir(tmp_path)
         src_config = tmp_path / "src" / ".ow" / "config.toml"
         src_config.parent.mkdir(parents=True)
-        src_config.write_text('templates = ["common"]\n\n[repos]\ncommunity = "master..my-branch"\n')
+        src_config.write_text('templates = ["vscode"]\n\n[repos]\ncommunity = "master..my-branch"\n')
 
         source_ws, _ = _validate_init_inputs(
             config_with_remotes, "test", None, None, configuration=str(src_config)
@@ -63,7 +61,7 @@ class TestValidateInitInputs:
         monkeypatch.chdir(tmp_path)
         src_config = tmp_path / "src" / ".ow" / "config.toml"
         src_config.parent.mkdir(parents=True)
-        src_config.write_text('templates = ["common", "nonexistent"]\n\n[repos]\ncommunity = "master"\n')
+        src_config.write_text('templates = ["vscode", "nonexistent"]\n\n[repos]\ncommunity = "master"\n')
         with pytest.raises(SystemExit) as exc:
             _validate_init_inputs(config_with_remotes, "test", None, None, configuration=str(tmp_path / "src"))
         assert exc.value.code == 1

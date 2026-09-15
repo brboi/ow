@@ -26,7 +26,7 @@ from ow.utils.config import (
     WorkspaceConfig,
     parse_branch_spec,
 )
-from ow.utils.templates import available_templates
+from ow.utils.templates import selectable_templates
 from ow.tui.widgets import ConfirmDialog, LabeledInput
 
 
@@ -164,7 +164,7 @@ class NewWorkspaceScreen(ModalScreen[NewWorkspaceRequest | None]):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self._config = config
-        self._templates = available_templates()
+        self._templates = selectable_templates()
         self._aliases = list(config.remotes.keys())
 
     def compose(self) -> ComposeResult:
@@ -177,7 +177,7 @@ class NewWorkspaceScreen(ModalScreen[NewWorkspaceRequest | None]):
             yield Static("Templates", classes="section-heading")
             sel = SelectionList[str](id="nw_templates")
             for t in self._templates:
-                sel.add_option((t, t, t == "common"))
+                sel.add_option((t, t, False))
             yield sel
 
             yield Static("Repos", classes="section-heading")
@@ -283,7 +283,7 @@ class WorkspaceConfigScreen(ModalScreen[WorkspaceConfig | None]):
         with VerticalScroll():
             yield Static("Templates", classes="section-heading")
             sel = SelectionList[str](id="wc_templates")
-            for t in available_templates():
+            for t in selectable_templates():
                 sel.add_option((t, t, t in self._ws.templates))
             yield sel
 

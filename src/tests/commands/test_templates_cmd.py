@@ -1,11 +1,10 @@
-"""`ow templates`: the materialised states, and the outdated diff.
+"""`ow templates`: the files ow manages in a workspace, and their state.
 
 Every test here writes under the XDG directories, so every test takes the
 `xdg` fixture — directly, or through `config`/`workspace_dir`, which
 require it.
 """
 
-import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,52 +14,18 @@ from typer.testing import CliRunner
 
 from ow.__main__ import app
 from ow.commands.templates import cmd_templates
-from ow.utils import paths
-from ow.utils.config import WorkspaceConfig, load_workspace_config, write_workspace_config
-from ow.utils.templates import WS_TEMPLATES, materialize_templates, outdated_templates
+from ow.utils.config import WorkspaceConfig, write_workspace_config
+from ow.utils.templates import OUTDATED, UP_TO_DATE, YOURS, RenderedFile
 
 runner = CliRunner()
 
-BUNDLE = "common"
-REL = "mise.toml.j2"
-NAME = f"{BUNDLE}/{REL}"
 
-
-
-def make_workspace(tmp_path: Path, *, templates: list[str] | None = None) -> Path:
+def make_workspace(tmp_path: Path) -> Path:
     ws_dir = tmp_path / "ws"
     ws_dir.mkdir(parents=True)
-    ws = WorkspaceConfig(repos={}, templates=templates or [BUNDLE])
+    ws = WorkspaceConfig(repos={}, templates=[])
     write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
     return ws_dir
-
-
-def apply_to(ws_dir: Path) -> WorkspaceConfig:
-    """Materialise `ws_dir`'s own config into `.ow/templates`."""
-    ws = load_workspace_config(ws_dir / ".ow" / "config.toml")
-    materialize_templates(ws, ws_dir)
-    return ws
-
-
-def make_outdated_workspace(tmp_path: Path) -> Path:
-    """Materialise, then edit the workspace copy and move the source."""
-    ws_dir = make_workspace(tmp_path)
-    apply_to(ws_dir)
-    (ws_dir / WS_TEMPLATES / BUNDLE / REL).write_text("my own edits\n")
-    local = paths.templates_dir() / BUNDLE
-    local.mkdir(parents=True)
-    (local / REL).write_text("what ow ships now\n")
-    return ws_dir
-
-
-def states(output: str) -> dict[str, str]:
-    """Parse the listing into {template name: state}."""
-    parsed = {}
-    for line in output.splitlines():
-        parts = re.split(r"\s{2,}", line.strip())
-        if len(parts) == 2:
-            parsed[parts[0]] = parts[1]
-    return parsed
 
 
 class TestLegacy:
@@ -70,11 +35,11 @@ class TestLegacy:
     migrate.
     """
 
-    def test_detects_legacy_layout(self, xdg, tmp_path, capsys):
+    def test_detects_legacy_layout(self, xdg, tmp_path, config, capsys):
         (tmp_path / "ow.toml").write_text("")
 
         with pytest.raises(typer.Exit) as exc:
-            cmd_templates()
+            cmd_templates(config)
 
         assert exc.value.exit_code == 1
         err = capsys.readouterr().err
@@ -83,107 +48,106 @@ class TestLegacy:
 
 class TestListing:
 
-    def test_a_freshly_created_workspace_has_nothing_materialised(self, xdg, tmp_path, capsys):
-        """Before the first `ow apply`, there is nothing to list yet."""
+    def test_nothing_to_render_is_stated_not_silent(self, xdg, tmp_path, config, capsys):
         ws_dir = make_workspace(tmp_path)
-        cmd_templates(workspace=str(ws_dir))
+        with patch("ow.commands.templates.rendered_states", return_value=[]):
+            cmd_templates(config, workspace=str(ws_dir))
+        assert "nothing to render." in capsys.readouterr().out
+
+    def test_listing_prints_path_and_state_for_every_file(self, xdg, tmp_path, config, capsys):
+        ws_dir = make_workspace(tmp_path)
+        states = [
+            RenderedFile(path="common/odoorc.j2", state=UP_TO_DATE, ow_text="a", your_text="a"),
+            RenderedFile(path="mise/conf.d/00-ow.toml", state=YOURS, ow_text="b", your_text="b (mine)"),
+        ]
+        with patch("ow.commands.templates.rendered_states", return_value=states):
+            cmd_templates(config, workspace=str(ws_dir))
+
         out = capsys.readouterr().out
-        assert "No templates materialised" in out
+        assert "common/odoorc.j2" in out
+        assert UP_TO_DATE in out
+        assert "mise/conf.d/00-ow.toml" in out
+        assert YOURS in out
 
-    def test_a_materialised_untouched_file_is_listed_up_to_date(self, xdg, tmp_path, capsys):
+    def test_listing_columns_are_aligned_on_the_widest_path(self, xdg, tmp_path, config, capsys):
         ws_dir = make_workspace(tmp_path)
-        apply_to(ws_dir)
-        cmd_templates(workspace=str(ws_dir))
-        assert states(capsys.readouterr().out)[NAME] == "up to date"
+        longest = "common/much/longer/path.j2"
+        states = [
+            RenderedFile(path="a", state=UP_TO_DATE, ow_text="x", your_text="x"),
+            RenderedFile(path=longest, state=YOURS, ow_text="x", your_text="y"),
+        ]
+        with patch("ow.commands.templates.rendered_states", return_value=states):
+            cmd_templates(config, workspace=str(ws_dir))
 
-    def test_an_edited_file_with_unchanged_source_is_listed_modified(self, xdg, tmp_path, capsys):
-        ws_dir = make_workspace(tmp_path)
-        apply_to(ws_dir)
-        (ws_dir / WS_TEMPLATES / BUNDLE / REL).write_text("my own edits\n")
-
-        cmd_templates(workspace=str(ws_dir))
-
-        assert states(capsys.readouterr().out)[NAME] == "modified"
-
-    def test_an_edited_file_whose_source_also_moved_is_listed_outdated(self, xdg, tmp_path, capsys):
-        ws_dir = make_outdated_workspace(tmp_path)
-
-        cmd_templates(workspace=str(ws_dir))
-
-        assert states(capsys.readouterr().out)[NAME] == "outdated"
-
-    def test_a_hand_added_file_is_listed_unlocked(self, xdg, tmp_path, capsys):
-        ws_dir = make_workspace(tmp_path)
-        apply_to(ws_dir)
-        extra = ws_dir / WS_TEMPLATES / BUNDLE / "extra.txt"
-        extra.write_text("hand added\n")
-
-        cmd_templates(workspace=str(ws_dir))
-
-        assert states(capsys.readouterr().out)[f"{BUNDLE}/extra.txt"] == "unlocked"
-
-    def test_the_other_files_of_a_bundle_stay_up_to_date_when_one_is_edited(self, xdg, tmp_path, capsys):
-        """Editing one file is not forking a bundle."""
-        ws_dir = make_workspace(tmp_path)
-        apply_to(ws_dir)
-        (ws_dir / WS_TEMPLATES / BUNDLE / REL).write_text("my own edits\n")
-
-        cmd_templates(workspace=str(ws_dir))
-
-        listed = states(capsys.readouterr().out)
-        assert listed[f"{BUNDLE}/odools.toml.j2"] == "up to date"
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        columns = {line.index(state) for line, state in zip(lines, (UP_TO_DATE, YOURS))}
+        assert columns == {len(longest) + 2}, "states must start in the same column"
 
 
 class TestDiff:
 
-    def test_diff_shows_the_lines_that_differ_between_yours_and_ow(self, xdg, tmp_path, capsys):
-        ws_dir = make_outdated_workspace(tmp_path)
-        cmd_templates(workspace=str(ws_dir), show_diff=True)
+    def test_diff_shows_the_lines_that_differ_for_a_file_the_user_edited(self, xdg, tmp_path, config, capsys):
+        ws_dir = make_workspace(tmp_path)
+        states = [
+            RenderedFile(
+                path="mise/conf.d/00-ow.toml",
+                state=YOURS,
+                ow_text="what ow ships now\n",
+                your_text="my own edits\n",
+            ),
+        ]
+        with patch("ow.commands.templates.rendered_states", return_value=states):
+            cmd_templates(config, workspace=str(ws_dir), show_diff=True)
+
         out = capsys.readouterr().out
         assert "-my own edits" in out
         assert "+what ow ships now" in out
 
-    def test_diff_names_the_yours_and_the_ow_side(self, xdg, tmp_path, capsys):
-        ws_dir = make_outdated_workspace(tmp_path)
-        cmd_templates(workspace=str(ws_dir), show_diff=True)
-        out = capsys.readouterr().out
-        assert f"--- {NAME} (yours)" in out
-        assert f"+++ {NAME} (ow)" in out
+    def test_diff_names_the_yours_and_the_ow_side(self, xdg, tmp_path, config, capsys):
+        ws_dir = make_workspace(tmp_path)
+        states = [
+            RenderedFile(
+                path="mise/conf.d/00-ow.toml",
+                state=OUTDATED,
+                ow_text="what ow ships now\n",
+                your_text="my own edits\n",
+            ),
+        ]
+        with patch("ow.commands.templates.rendered_states", return_value=states):
+            cmd_templates(config, workspace=str(ws_dir), show_diff=True)
 
-    def test_diff_reports_that_nothing_is_outdated_instead_of_staying_silent(self, xdg, tmp_path, capsys):
+        out = capsys.readouterr().out
+        assert "--- mise/conf.d/00-ow.toml (yours)" in out
+        assert "+++ mise/conf.d/00-ow.toml (ow)" in out
+
+    def test_diff_reports_that_nothing_differs_instead_of_staying_silent(self, xdg, tmp_path, config, capsys):
         """Silence is indistinguishable from a command that did not run.
 
         `ow templates` answers its own empty case; --diff must too.
         """
         ws_dir = make_workspace(tmp_path)
-        apply_to(ws_dir)
-        cmd_templates(workspace=str(ws_dir), show_diff=True)
-        out = capsys.readouterr().out
-        assert out.strip(), "--diff must say something when nothing is outdated"
-        assert "outdated" in out
-
-    def test_diff_says_nothing_about_a_file_that_is_merely_modified_not_outdated(self, xdg, tmp_path, capsys):
-        ws_dir = make_workspace(tmp_path)
-        apply_to(ws_dir)
-        (ws_dir / WS_TEMPLATES / BUNDLE / REL).write_text("my own edits\n")
-
-        cmd_templates(workspace=str(ws_dir), show_diff=True)
+        states = [
+            RenderedFile(path="common/odoorc.j2", state=UP_TO_DATE, ow_text="a", your_text="a"),
+        ]
+        with patch("ow.commands.templates.rendered_states", return_value=states):
+            cmd_templates(config, workspace=str(ws_dir), show_diff=True)
 
         out = capsys.readouterr().out
-        assert "@@" not in out
-        assert NAME not in out
+        assert out.strip(), "--diff must say something when nothing differs"
+        assert "nothing differs from what ow would write." in out
 
-
-class TestOutdatedTemplates:
-
-    def test_outdated_names_the_bundle_and_the_relative_path(self, xdg, tmp_path):
-        ws_dir = make_outdated_workspace(tmp_path)
-        assert outdated_templates(ws_dir) == [NAME]
-
-    def test_a_current_untouched_file_is_not_outdated(self, xdg, tmp_path):
+    def test_diff_says_nothing_about_a_file_that_is_up_to_date(self, xdg, tmp_path, config, capsys):
         ws_dir = make_workspace(tmp_path)
-        apply_to(ws_dir)
-        assert outdated_templates(ws_dir) == []
+        states = [
+            RenderedFile(path="common/odoorc.j2", state=UP_TO_DATE, ow_text="a", your_text="a"),
+            RenderedFile(path="mise/conf.d/00-ow.toml", state=YOURS, ow_text="b", your_text="b (mine)"),
+        ]
+        with patch("ow.commands.templates.rendered_states", return_value=states):
+            cmd_templates(config, workspace=str(ws_dir), show_diff=True)
+
+        out = capsys.readouterr().out
+        assert "common/odoorc.j2" not in out
+        assert "mise/conf.d/00-ow.toml" in out
 
 
 class TestCli:
