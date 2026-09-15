@@ -60,20 +60,20 @@ def test_short_v_is_not_version():
 
 
 def test_init_with_args(xdg):
-    """ow init myws -r community:master..x -t common calls cmd_init with correct args."""
+    """ow init myws -r community:master..x -t vscode calls cmd_init with correct args."""
     with patch("ow.__main__.cmd_init", autospec=True) as mock_init:
         result = runner.invoke(app, [
             "init",
             "myws",
             "-r", "community:master..x",
-            "-t", "common",
+            "-t", "vscode",
         ])
 
     assert result.exit_code == 0
     mock_init.assert_called_once()
     call_kwargs = mock_init.call_args
     assert call_kwargs.kwargs["name"] == "myws"
-    assert call_kwargs.kwargs["templates"] == ["common"]
+    assert call_kwargs.kwargs["templates"] == ["vscode"]
     assert "community" in call_kwargs.kwargs["repos"]
     assert call_kwargs.kwargs["repos"]["community"] == BranchSpec("origin/master", "x")
 
@@ -81,7 +81,7 @@ def test_init_with_args(xdg):
 def test_init_without_name_passes_none(xdg):
     """`ow init` with no argument means "here" — the name must reach cmd_init as None."""
     with patch("ow.__main__.cmd_init", autospec=True) as mock_init:
-        result = runner.invoke(app, ["init", "-r", "community:master..x", "-t", "common"])
+        result = runner.invoke(app, ["init", "-r", "community:master..x", "-t", "vscode"])
 
     assert result.exit_code == 0
     assert mock_init.call_args.kwargs["name"] is None
@@ -525,10 +525,10 @@ def _write_remotes(*names):
 
 
 def test_complete_gen_templates(xdg):
-    """Template completion returns correct template names."""
+    """Template completion returns selectable names, but never common."""
     _make_templates("common", "vscode", "zed")
     names = _complete(["init", "-t"], "")
-    assert "common" in names
+    assert "common" not in names
     assert "vscode" in names
     assert "zed" in names
 
@@ -542,7 +542,8 @@ def test_complete_gen_templates_with_prefix(xdg):
 def test_complete_gen_templates_none_taken(xdg):
     """Template completion still offers the packaged templates when nothing local exists."""
     names = _complete(["init", "-t"], "")
-    assert "common" in names
+    assert "common" not in names
+    assert "odoo" not in names
     assert "vscode" in names
 
 

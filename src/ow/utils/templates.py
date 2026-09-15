@@ -1,6 +1,5 @@
 import hashlib
 import os
-import shutil
 import subprocess
 import sys
 import tomllib
@@ -116,15 +115,12 @@ def find_addon_paths(path: Path, exclude: Iterable[Path] = ()) -> list[Path]:
 
 def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> dict:
     """Build Jinja2 template context for a workspace."""
-    main_repo_alias = next(
-        (alias for alias in ws.repos if is_odoo_main_repo(ws_dir / alias)),
-        None,
-    )
+    main_repo_alias = odoo_main_alias(ws, ws_dir)
 
-    addons_paths: list[str] = []
+    repo_addons_paths: list[str] = []
+    repo_odools_items: list[str] = []
     main_addons_paths: list[str] = []
-    odools_path_items: list[str] = []
-    odools_main_items: list[str] = []
+    main_odools_items: list[str] = []
 
     for alias in ws.repos:
         repo_dir = ws_dir / alias
@@ -133,32 +129,42 @@ def build_template_context(ws: WorkspaceConfig, config: Config, ws_dir: Path) ->
                 str(repo_dir / "addons"),
                 str(repo_dir / "odoo" / "addons"),
             ]
-            odools_main_items = [
+            main_odools_items = [
                 f"{alias}/addons",
                 f"{alias}/odoo/addons",
             ]
         else:
-            found = find_addon_paths(repo_dir)
-            addons_paths.extend(str(p) for p in found)
-            for p in found:
-                odools_path_items.append(str(p.relative_to(ws_dir)))
+            for p in find_addon_paths(repo_dir):
+                repo_addons_paths.append(str(p))
+                repo_odools_items.append(str(p.relative_to(ws_dir)))
 
     # Addons that belong to no repo: a template bundle may ship one of its
     # own, and it lands next to the worktrees rather than inside them —
     # writing into a worktree would show up as a dirty git checkout (#42).
     # The alias directories are excluded because the loop above owns them.
-    for p in find_addon_paths(ws_dir, exclude=[ws_dir / alias for alias in ws.repos]):
-        addons_paths.append(str(p))
-        odools_path_items.append(str(p.relative_to(ws_dir)))
+    loose = find_addon_paths(ws_dir, exclude=[ws_dir / alias for alias in ws.repos])
+    # `.local` is where the bundled `local` template drops its addon, and the
+    # walk above never descends into a hidden directory — a .venv or a .odoo
+    # is not an addons_path, and naming them one by one only postpones the
+    # next one. Handing `.local` over as a root is how it gets looked at at
+    # all: find_addon_paths never prunes the root it was given.
+    loose = find_addon_paths(ws_dir / ".local") + loose
 
+    # Loose addons come first in the path: one exists to shadow the module it
+    # replaces, and Odoo resolves a module from the first addons_path holding
+    # it. The main repo comes last for the same reason, as it always has.
     return {
         "ws_name": ws_dir.name,
         "ws_dir": str(ws_dir),
         "main_repo_alias": main_repo_alias,
         "repos": list(ws.repos.keys()),
         "vars": dict(ws.vars),
-        "addons_paths": addons_paths + main_addons_paths,
-        "odools_path_items": odools_path_items + odools_main_items,
+        "addons_paths": [str(p) for p in loose] + repo_addons_paths + main_addons_paths,
+        "odools_path_items": (
+            [str(p.relative_to(ws_dir)) for p in loose]
+            + repo_odools_items
+            + main_odools_items
+        ),
         "services_compose": str(paths.services_dir() / "compose.yml"),
         "volumes_dir": str(paths.volumes_dir()),
     }
@@ -239,187 +245,298 @@ def bundle_source_files(bundle: str) -> dict[Path, Path]:
 
 
 # ---------------------------------------------------------------------------
-# Template materialisation (#41)
+# Rendering (#45)
 #
-# Templates are no longer rendered straight from the packaged/local source
-# trees. They are first copied into <ws_dir>/.ow/templates/<bundle>, and a
-# lock file records the sha256 of the source each copy came from. Rendering
-# reads only from that copy. The lock is what makes "did the user edit
-# this, and did ow's copy move since?" answerable without a third baseline
-# file: the lock IS the baseline.
+# Nothing is copied into the workspace: a bundle is rendered straight from
+# its sources — the packaged tree, overridden per file by the user-local one
+# — and `<ws>/.ow/rendered.lock.toml` records the sha256 of the *output* ow
+# wrote. Locking the output rather than the template is what makes the file
+# you actually open (odoorc, launch.json) the file ow protects: an output
+# that no longer matches the lock is yours, and ow never writes it again.
 # ---------------------------------------------------------------------------
 
-WS_TEMPLATES = Path(".ow") / "templates"
-WS_TEMPLATES_LOCK = Path(".ow") / "templates.lock.toml"
+RENDERED_LOCK = Path(".ow") / "rendered.lock.toml"
+
+# The two bundles a workspace never declares: `common` is the floor every
+# workspace stands on, `odoo` follows from what the repos turn out to be.
+IMPLICIT_BUNDLE = "common"
+ODOO_BUNDLE = "odoo"
+_UNDECLARED = (IMPLICIT_BUNDLE, ODOO_BUNDLE)
 
 _LOCK_HEADER = "# Managed by ow.\n"
 
+UP_TO_DATE = "up to date"
+OUTDATED = "outdated"
+YOURS = "yours"
+ABSENT = "absent"
+NOT_RENDERED = "not rendered"
+
 
 @dataclass
-class TemplateSync:
-    """What materialize_templates did, by `bundle/relpath` name."""
-    copied: list[str] = field(default_factory=list)
+class RenderResult:
+    """What apply_templates did, by workspace-relative path.
+
+    `managed` is every path ow renders, whatever the verdict was — the four
+    other lists only carry what changed hands this run, and a caller that
+    needs to know which files ow speaks for (to trust a mise fragment, say)
+    would otherwise have to render everything a second time to find out.
+    """
+    wrote: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
-    outdated: list[str] = field(default_factory=list)
+    yours: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    managed: list[str] = field(default_factory=list)
 
 
-def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+@dataclass
+class RenderedFile:
+    """One output of this workspace's bundles, and how it compares today."""
+    path: str
+    state: str
+    ow_text: str | None
+    your_text: str | None
+
+
+@dataclass
+class _Output:
+    """What a bundle wants at one path: bytes, or None to write nothing."""
+    data: bytes | None
+    mode: int
+
+
+def odoo_main_alias(ws: WorkspaceConfig, ws_dir: Path) -> str | None:
+    """The alias of this workspace's Odoo core checkout, or None."""
+    return next(
+        (alias for alias in ws.repos if is_odoo_main_repo(ws_dir / alias)),
+        None,
+    )
+
+
+def is_odoo_workspace(ws: WorkspaceConfig, ws_dir: Path) -> bool:
+    """Whether this workspace has an Odoo to run — the odoo bundle's trigger."""
+    return odoo_main_alias(ws, ws_dir) is not None
+
+
+def selectable_templates() -> list[str]:
+    """Bundle names a workspace can declare.
+
+    `common` and `odoo` are not among them: one is applied to every
+    workspace, the other follows from the repos. Offering either in a picker
+    would advertise a choice that does not exist.
+    """
+    return [name for name in available_templates() if name not in _UNDECLARED]
+
+
+def effective_bundles(ws: WorkspaceConfig, ws_dir: Path) -> list[str]:
+    """Bundles this workspace renders, in override order.
+
+    `common` first so anything can override it, `odoo` next when there is an
+    Odoo to serve, then the declared ones in their declared order. A config
+    that still names `common` is not an error: the name is already there.
+    """
+    bundles = [IMPLICIT_BUNDLE]
+    if is_odoo_workspace(ws, ws_dir):
+        bundles.append(ODOO_BUNDLE)
+    for name in ws.templates:
+        if name not in bundles:
+            bundles.append(name)
+    return bundles
+
+
+def legacy_mise_toml(ws_dir: Path) -> Path | None:
+    """`<ws>/mise.toml` left behind by a pre-#45 ow, or None.
+
+    ow writes `mise/conf.d/00-ow.toml` now, and mise loads that *below*
+    `mise.toml` — so a leftover silently shadows it. Recognised by the one
+    key ow's old template always wrote; anything else is the user's own file
+    and none of ow's business.
+    """
+    path = ws_dir / "mise.toml"
+    if not path.is_file():
+        return None
+    try:
+        return path if "OW_WORKSPACE" in path.read_text(encoding="utf-8") else None
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _as_text(data: bytes | None) -> str | None:
+    """utf-8 text, or None for bytes nobody can usefully diff."""
+    if data is None:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _read_lock(ws_dir: Path) -> dict[str, str]:
-    lock_path = ws_dir / WS_TEMPLATES_LOCK
+    lock_path = ws_dir / RENDERED_LOCK
     if not lock_path.is_file():
         return {}
-    with lock_path.open("rb") as f:
+    with open(lock_path, "rb") as f:
         return tomllib.load(f)
 
 
 def _write_lock(ws_dir: Path, lock: dict[str, str]) -> None:
-    lock_path = ws_dir / WS_TEMPLATES_LOCK
+    lock_path = ws_dir / RENDERED_LOCK
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    content = _LOCK_HEADER + tomli_w.dumps(dict(sorted(lock.items())))
-    tmp = lock_path.with_suffix(".toml.tmp")
-    tmp.write_text(content, encoding="utf-8")
+    body = tomli_w.dumps(dict(sorted(lock.items())))
+    tmp = lock_path.with_suffix(".tmp")
+    tmp.write_text(_LOCK_HEADER + body, encoding="utf-8")
     os.replace(tmp, lock_path)
 
 
-def workspace_template_files(ws_dir: Path, bundle: str) -> dict[Path, Path]:
-    """The materialised files of one bundle, keyed by bundle-relative path."""
-    return _files_under(ws_dir / WS_TEMPLATES / bundle)
+def _bundle_search_path(bundle: str) -> list[str]:
+    """Where a bundle's templates are looked up, local copy winning.
 
-
-def materialize_templates(ws: WorkspaceConfig, ws_dir: Path) -> TemplateSync:
-    """Copy/upgrade `<ws_dir>/.ow/templates` from the packaged+local sources.
-
-    Per file, against the lock:
-      - dest missing: copied, locked at the source's hash.
-      - dest present, untouched since the lock (its hash still matches the
-        lock): silently re-copied if the source moved, and relocked.
-      - dest present, edited by hand, AND the source also moved: left
-        alone, reported outdated — `ow templates --diff` explains why.
-      - dest present, edited by hand, source unchanged: left alone, silent.
-      - dest present with no lock entry (hand-added file): left alone,
-        never reported.
-    Never overwrites an edited file and never writes conflict markers. A
-    workspace with no `.ow/templates` yet (pre-2.4.0, or brand new) hits
-    only the first branch: the first `ow apply` copies everything.
+    Both roots stay on the search path so an `{% include %}` still resolves
+    when only one of the two files it spans was overridden locally.
     """
-    lock = _read_lock(ws_dir)
-    sync = TemplateSync()
+    roots = [paths.templates_dir() / bundle, _packaged_bundle(bundle)]
+    return [str(r) for r in roots if r is not None and r.is_dir()]
 
-    for bundle in ws.templates:
+
+def _missing_bundle(bundle: str) -> FileNotFoundError:
+    local_dir = paths.templates_dir() / bundle
+    packaged_dir = _packaged_bundle(bundle)
+    existing_dir = next(
+        (d for d in (local_dir, packaged_dir) if d is not None and d.is_dir()),
+        None,
+    )
+    if existing_dir is not None:
+        return FileNotFoundError(
+            f"Template '{bundle}' found in {existing_dir} but it is empty"
+        )
+    return FileNotFoundError(
+        f"Template '{bundle}' not found in local or packaged templates"
+    )
+
+
+def _render_outputs(ws: WorkspaceConfig, ws_dir: Path, context: dict) -> dict[Path, _Output]:
+    """Every file this workspace's bundles want, keyed by workspace-relative path.
+
+    A `.j2` renders to text, a plain file is taken byte for byte, and a `.j2`
+    that renders to nothing but whitespace asks for no file at all — which is
+    how an editor bundle keeps its Odoo debug config out of a workspace that
+    has no Odoo, and how emptying a file makes ow forget it. Later bundles
+    override earlier ones per path, as they always have.
+    """
+    outputs: dict[Path, _Output] = {}
+    for bundle in effective_bundles(ws, ws_dir):
         files = bundle_source_files(bundle)
         if not files:
-            local_dir = paths.templates_dir() / bundle
-            packaged_dir = _packaged_bundle(bundle)
-            existing_dir = next(
-                (d for d in (local_dir, packaged_dir) if d is not None and d.is_dir()),
-                None,
-            )
-            if existing_dir is not None:
-                raise FileNotFoundError(
-                    f"Template '{bundle}' found in {existing_dir} but it is empty"
-                )
-            raise FileNotFoundError(
-                f"Template '{bundle}' not found in local or packaged templates"
-            )
+            raise _missing_bundle(bundle)
 
-        bundle_dir = ws_dir / WS_TEMPLATES / bundle
+        env = Environment(
+            loader=FileSystemLoader(_bundle_search_path(bundle)),
+            undefined=StrictUndefined,
+            keep_trailing_newline=True,
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
+
+        seen: dict[Path, str] = {}
         for rel, src in sorted(files.items()):
-            name = f"{bundle}/{rel.as_posix()}"
-            dest = bundle_dir / rel
-            src_hash = _sha256_file(src)
-            locked = lock.get(name)
+            out_rel = rel.with_suffix("") if src.suffix == ".j2" else rel
+            if out_rel in seen:
+                raise ValueError(
+                    f"Template output collision: {rel} and {seen[out_rel]} "
+                    f"both write to {out_rel}"
+                )
+            seen[out_rel] = str(rel)
 
-            if not dest.is_file():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest)
-                lock[name] = src_hash
-                sync.copied.append(name)
-                continue
+            if src.suffix == ".j2":
+                text = env.get_template(rel.as_posix()).render(context)
+                data = text.encode("utf-8") if text.strip() else None
+            else:
+                data = src.read_bytes()
+            outputs[out_rel] = _Output(data, src.stat().st_mode)
+    return outputs
 
-            if locked is None:
-                # Hand-added file: not ours to touch or to report.
-                continue
 
-            dest_hash = _sha256_file(dest)
-            if dest_hash == locked:
-                if src_hash != locked:
-                    shutil.copy2(src, dest)
-                    lock[name] = src_hash
-                    sync.updated.append(name)
-                # else: nothing to do, already current.
-            elif src_hash != locked:
-                sync.outdated.append(name)
-            # else: edited by hand, source did not move — nothing to do.
+def _write_file(dest: Path, out: _Output) -> None:
+    assert out.data is not None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(out.data)
+    dest.chmod(out.mode)
+
+
+def _write_outputs(ws_dir: Path, outputs: dict[Path, _Output]) -> RenderResult:
+    """Write what ow owns, leave what you touched, per the lock.
+
+    Four cases, and the third is the one that earns the lock: a file whose
+    hash still matches it is ow's to update, a file that drifted from it is
+    yours and is never written again. A file already equal to the render is
+    adopted without a write — that is how a workspace from before the lock
+    comes under management without losing anything. A file you deleted comes
+    back: ow cannot tell it from one it never wrote, and a tombstone would be
+    a state file about a state file.
+    """
+    lock = _read_lock(ws_dir)
+    result = RenderResult()
+    for rel, out in sorted(outputs.items()):
+        name = rel.as_posix()
+        dest = ws_dir / rel
+
+        if out.data is None:
+            result.skipped.append(name)
+            continue
+
+        result.managed.append(name)
+
+        if not dest.exists():
+            _write_file(dest, out)
+            lock[name] = _sha256_bytes(out.data)
+            result.wrote.append(name)
+            continue
+
+        current = dest.read_bytes()
+        if current == out.data:
+            lock[name] = _sha256_bytes(current)
+        elif lock.get(name) == _sha256_bytes(current):
+            _write_file(dest, out)
+            lock[name] = _sha256_bytes(out.data)
+            result.updated.append(name)
+        else:
+            result.yours.append(name)
 
     _write_lock(ws_dir, lock)
-    return sync
+    return result
 
 
-UP_TO_DATE = "up to date"
-MODIFIED = "modified"
-OUTDATED = "outdated"
-UNLOCKED = "unlocked"
+def _first_verdict(first: RenderResult, second: RenderResult) -> RenderResult:
+    """Merge two render passes, keeping each path's first verdict.
 
-
-@dataclass
-class TemplateState:
-    """One materialised file, and how it compares to the source today."""
-    name: str
-    state: str
-    copy: Path
-    source: Path | None
-
-
-def template_states(ws_dir: Path) -> list[TemplateState]:
-    """Every materialised file of a workspace, with its state, sorted by name.
-
-    Read-only: never copies, never writes the lock. A file the lock does not
-    know about was added by hand and is `unlocked`, never reported as
-    anything else. Otherwise the state is `modified` when the working copy no
-    longer matches the lock, `outdated` when it was also edited AND the source
-    moved since (the case `--diff` explains), and `up to date` whenever the
-    working copy is untouched — including when the source has moved, since the
-    next `ow apply` fixes that silently.
-
-    Read from disk, not from `ws.templates`: a bundle dropped from the config
-    leaves its copies behind, and hiding them would hide exactly the files
-    `ow apply` already reports as orphans.
+    A file the first pass created and the second rewrote was still created by
+    this run; reporting it twice, under two names, would only puzzle whoever
+    reads the output.
     """
-    templates_root = ws_dir / WS_TEMPLATES
-    if not templates_root.is_dir():
-        return []
-
-    lock = _read_lock(ws_dir)
-    states: list[TemplateState] = []
-    for bundle_dir in sorted(p for p in templates_root.iterdir() if p.is_dir()):
-        bundle = bundle_dir.name
-        sources = bundle_source_files(bundle)
-        for rel, copy in workspace_template_files(ws_dir, bundle).items():
-            name = f"{bundle}/{rel.as_posix()}"
-            source = sources.get(rel)
-            locked = lock.get(name)
-            if locked is None:
-                states.append(TemplateState(name, UNLOCKED, copy, source))
-                continue
-
-            edited = _sha256_file(copy) != locked
-            moved = source is not None and _sha256_file(source) != locked
-            if edited and moved:
-                state = OUTDATED
-            elif edited:
-                state = MODIFIED
-            else:
-                state = UP_TO_DATE
-            states.append(TemplateState(name, state, copy, source))
-    return sorted(states, key=lambda s: s.name)
-
-
-def outdated_templates(ws_dir: Path) -> list[str]:
-    """`bundle/relpath` of every materialised file edited AND moved since."""
-    return [s.name for s in template_states(ws_dir) if s.state == OUTDATED]
+    merged = RenderResult(
+        list(first.wrote),
+        list(first.updated),
+        list(first.yours),
+        list(first.skipped),
+        list(first.managed),
+    )
+    seen = set(first.wrote) | set(first.updated) | set(first.yours) | set(first.skipped)
+    for names, target in (
+        (second.wrote, merged.wrote),
+        (second.updated, merged.updated),
+        (second.yours, merged.yours),
+        (second.skipped, merged.skipped),
+    ):
+        for name in names:
+            if name not in seen:
+                target.append(name)
+    for name in second.managed:
+        if name not in merged.managed:
+            merged.managed.append(name)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -427,73 +544,54 @@ def outdated_templates(ws_dir: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> TemplateSync:
-    """Materialise, then render, every template of `ws` into ws_dir.
+def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> RenderResult:
+    """Render every bundle of `ws` into ws_dir, and report what happened.
 
     Rendered twice when the first pass changed what the addon scan can see: a
-    template bundle may itself materialise an Odoo addon, and
-    build_template_context reads the filesystem — so on the first pass that
-    addon does not exist yet and never reaches addons_path (#42). The second
-    pass is skipped whenever the rescan agrees with the first, which is the
-    normal case.
+    bundle may ship an Odoo addon of its own, and build_template_context
+    reads the filesystem — so on the first pass that addon does not exist yet
+    and never reaches addons_path (#42). The second pass is skipped whenever
+    the rescan agrees with the first, which is the normal case.
     """
-    sync = materialize_templates(ws, ws_dir)
-
     context = build_template_context(ws, config, ws_dir)
-    _render_bundles(ws, context, ws_dir)
+    result = _write_outputs(ws_dir, _render_outputs(ws, ws_dir, context))
 
     rescanned = build_template_context(ws, config, ws_dir)
     if any(
         rescanned[key] != context[key]
         for key in ("addons_paths", "odools_path_items")
     ):
-        _render_bundles(ws, rescanned, ws_dir)
+        second = _write_outputs(ws_dir, _render_outputs(ws, ws_dir, rescanned))
+        result = _first_verdict(result, second)
 
-    return sync
+    return result
 
 
-def _render_bundles(ws: WorkspaceConfig, context: dict, ws_dir: Path) -> None:
-    """Render every bundle of `ws` from its materialised copy into ws_dir.
+def rendered_states(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> list[RenderedFile]:
+    """Every output of this workspace's bundles, with its state. Writes nothing."""
+    context = build_template_context(ws, config, ws_dir)
+    outputs = _render_outputs(ws, ws_dir, context)
+    lock = _read_lock(ws_dir)
 
-    Every write here is a deterministic function of `context`, which is what
-    lets apply_templates run this twice. materialize_templates has already
-    guaranteed each bundle is materialised and non-empty by this point.
-    """
-    for template_name in ws.templates:
-        bundle_dir = ws_dir / WS_TEMPLATES / template_name
-        files = workspace_template_files(ws_dir, template_name)
+    states: list[RenderedFile] = []
+    for rel, out in sorted(outputs.items()):
+        name = rel.as_posix()
+        dest = ws_dir / rel
+        current = dest.read_bytes() if dest.is_file() else None
 
-        # The whole bundle was copied into bundle_dir, so a single search
-        # path resolves every {% include/extends/import %} inside it.
-        env = Environment(
-            loader=FileSystemLoader([bundle_dir]),
-            undefined=StrictUndefined,
-            keep_trailing_newline=True,
-            trim_blocks=True,
-            lstrip_blocks=True,
-        )
+        if out.data is None:
+            state = NOT_RENDERED
+        elif current is None:
+            state = ABSENT
+        elif current == out.data:
+            state = UP_TO_DATE
+        elif lock.get(name) == _sha256_bytes(current):
+            state = OUTDATED
+        else:
+            state = YOURS
 
-        # Detect output-path collisions before rendering.
-        seen_outputs: dict[Path, str] = {}
-        for rel, src in sorted(files.items()):
-            out_rel = rel.with_suffix("") if src.suffix == ".j2" else rel
-            if out_rel in seen_outputs:
-                raise ValueError(
-                    f"Template output collision: {rel} and {seen_outputs[out_rel]} "
-                    f"both write to {out_rel}"
-                )
-            seen_outputs[out_rel] = str(rel)
-
-        for rel, src in sorted(files.items()):
-            if src.suffix == ".j2":
-                out_path = ws_dir / rel.with_suffix("")
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(env.get_template(rel.as_posix()).render(context), encoding="utf-8")
-                out_path.chmod(src.stat().st_mode)
-            else:
-                out_path = ws_dir / rel
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, out_path)
+        states.append(RenderedFile(name, state, _as_text(out.data), _as_text(current)))
+    return states
 
 
 def ensure_services_compose() -> Path:

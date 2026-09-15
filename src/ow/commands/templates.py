@@ -1,55 +1,54 @@
-"""`ow templates` — see what ow materialised, and hear when it drifted.
+"""`ow templates` — see what ow would write into a workspace, and diff it.
 
-Every template file lives twice: the working copy under
-`<ws>/.ow/templates/<bundle>/<relpath>` that rendering reads from and the
-user is free to edit, and an entry in `<ws>/.ow/templates.lock.toml` that
-records the sha256 of the source it was copied from. The lock is what makes
-"did I edit this, and did ow's source move since?" answerable at all —
-diffing the working copy against today's source only ever shows edits made
-on purpose, appearing at every hop whether or not ow ever touched the file.
+ow no longer copies template sources into the workspace. It renders
+directly from the packaged bundles (`src/ow/_static/templates/<bundle>/`),
+optionally overridden file-by-file from `$XDG_CONFIG_HOME/ow/templates/<bundle>/`,
+and keeps the sha256 of what it wrote in `<ws>/.ow/rendered.lock.toml`. A
+file on disk that no longer matches its lock entry is the user's: ow will
+never overwrite it again, and this command is how you see that has
+happened, and what ow would have written instead.
 """
 
 import difflib
-from pathlib import Path
 
+from ow.utils.config import Config
 from ow.utils.legacy import check_legacy_layout
 from ow.utils.resolver import resolve_workspace
-from ow.utils.templates import OUTDATED, TemplateState, template_states
+from ow.utils.templates import OUTDATED, YOURS, RenderedFile, rendered_states
 
 
-def _list(states: list[TemplateState]) -> None:
+def _list(states: list[RenderedFile]) -> None:
     if not states:
-        print("No templates materialised. Run `ow apply` first.")
+        print("nothing to render.")
         return
-    width = max(len(s.name) for s in states)
+    width = max(len(s.path) for s in states)
     for s in states:
-        print(f"{s.name.ljust(width)}  {s.state}")
+        print(f"{s.path.ljust(width)}  {s.state}")
 
 
-def _diff(states: list[TemplateState]) -> None:
-    outdated = [s for s in states if s.state == OUTDATED]
-    if not outdated:
-        print("No materialised template is outdated.")
+def _diff(states: list[RenderedFile]) -> None:
+    diffable = [s for s in states if s.state in (YOURS, OUTDATED)]
+    if not diffable:
+        print("nothing differs from what ow would write.")
         return
-    for s in outdated:
-        assert s.source is not None  # OUTDATED implies a source to compare to
+    for s in diffable:
+        assert s.your_text is not None and s.ow_text is not None
         lines = difflib.unified_diff(
-            s.copy.read_text().splitlines(keepends=True),
-            s.source.read_text().splitlines(keepends=True),
-            fromfile=f"{s.name} (yours)",
-            tofile=f"{s.name} (ow)",
+            s.your_text.splitlines(keepends=True),
+            s.ow_text.splitlines(keepends=True),
+            fromfile=f"{s.path} (yours)",
+            tofile=f"{s.path} (ow)",
         )
         for line in lines:
             print(line, end="" if line.endswith("\n") else "\n")
 
 
-def cmd_templates(workspace: str | None = None, *, show_diff: bool = False) -> None:
-    """List materialised template files with their state, or diff the outdated ones."""
+def cmd_templates(config: Config, workspace: str | None = None, *, show_diff: bool = False) -> None:
+    """List the files ow manages in the workspace with their state, or diff the ones that differ."""
     check_legacy_layout()
-    ws_dir: Path
-    ws_dir, _ = resolve_workspace(name=workspace)
+    ws_dir, ws = resolve_workspace(name=workspace)
 
-    states = template_states(ws_dir)
+    states = rendered_states(ws, config, ws_dir)
     if show_diff:
         _diff(states)
         return

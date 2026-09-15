@@ -6,7 +6,7 @@ import pytest
 
 from ow.commands import cmd_init
 from ow.commands.init import _check_duplicate_branches, _cleanup_failed_workspace
-from ow.utils import index, paths
+from ow.utils import index
 from ow.utils.config import (
     BranchSpec,
     Config,
@@ -36,7 +36,7 @@ def _tty(present: bool):
 
 
 @contextmanager
-def _prompt_answers(templates=("common",), aliases=("community",), spec="master", confirm=True, cancelled=False):
+def _prompt_answers(templates=("vscode",), aliases=("community",), spec="master", confirm=True, cancelled=False):
     """Make every Rich prompt answerable, and record what was asked.
 
     Patches ow.commands.init.Prompt.ask with a side effect keyed on the
@@ -95,7 +95,7 @@ def _remembered_workspace(at, alias, spec):
     at.mkdir(parents=True, exist_ok=True)
     write_workspace_config(
         at / ".ow" / "config.toml",
-        WorkspaceConfig(repos={alias: parse_branch_spec(spec)}, templates=["common"]),
+        WorkspaceConfig(repos={alias: parse_branch_spec(spec)}, templates=[]),
     )
     index.remember(at)
     return at
@@ -111,7 +111,7 @@ def test_init_without_a_name_uses_the_current_directory(tmp_path, monkeypatch, c
     monkeypatch.chdir(here)
 
     with _tty(False), _prompt_answers(), _no_git(here):
-        cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
 
     assert (here / ".ow" / "config.toml").exists()
     assert [p.name for p in here.iterdir()] == [".ow"]
@@ -121,7 +121,7 @@ def test_init_with_a_name_creates_the_subdirectory(tmp_path, monkeypatch, config
     monkeypatch.chdir(tmp_path)
 
     with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert (tmp_path / "parrot" / ".ow" / "config.toml").exists()
 
@@ -133,7 +133,7 @@ def test_init_with_a_name_accepts_an_existing_directory(tmp_path, monkeypatch, c
     (tmp_path / "parrot" / "notes.txt").write_text("mine")
 
     with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert (tmp_path / "parrot" / ".ow" / "config.toml").exists()
     assert (tmp_path / "parrot" / "notes.txt").read_text() == "mine"
@@ -146,7 +146,7 @@ def test_init_here_accepts_a_directory_name_it_would_reject_as_an_argument(tmp_p
     monkeypatch.chdir(here)
 
     with _tty(False), _prompt_answers(), _no_git(here):
-        cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
 
     assert (here / ".ow" / "config.toml").exists()
 
@@ -175,7 +175,7 @@ def test_init_refuses_a_named_directory_that_is_already_a_workspace(tmp_path, mo
         _no_git(tmp_path / "parrot"),
         pytest.raises(SystemExit) as exc,
     ):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert exc.value.code == 1
     err = capsys.readouterr().err
@@ -195,7 +195,7 @@ def test_init_refuses_the_current_directory_when_it_is_already_a_workspace(tmp_p
         _no_git(tmp_path),
         pytest.raises(SystemExit) as exc,
     ):
-        cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
 
     assert exc.value.code == 1
     err = capsys.readouterr().err
@@ -227,10 +227,10 @@ def test_init_without_a_tty_succeeds_with_only_a_template(tmp_path, monkeypatch,
     monkeypatch.chdir(tmp_path)
 
     with _tty(False), _prompt_answers(), _no_git(tmp_path):
-        cmd_init(config_with_remotes, templates=["common"])
+        cmd_init(config_with_remotes, templates=["vscode"])
 
     ws = load_workspace_config(tmp_path / ".ow" / "config.toml")
-    assert ws.templates == ["common"]
+    assert ws.templates == ["vscode"]
     assert ws.repos == {}
 
 
@@ -238,7 +238,7 @@ def test_init_without_a_tty_asks_nothing(tmp_path, monkeypatch, config_with_remo
     monkeypatch.chdir(tmp_path)
 
     with _tty(False), _prompt_answers() as asked, _no_git(tmp_path):
-        cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
 
     assert asked == []
     assert (tmp_path / ".ow" / "config.toml").exists()
@@ -249,7 +249,7 @@ def test_init_without_a_tty_takes_everything_from_a_configuration(tmp_path, monk
     source = tmp_path / "source"
     (source / ".ow").mkdir(parents=True)
     (source / ".ow" / "config.toml").write_text(
-        'templates = ["common"]\n\n[repos]\ncommunity = "master..from-source"\n'
+        'templates = ["vscode"]\n\n[repos]\ncommunity = "master..from-source"\n'
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -270,7 +270,7 @@ def test_init_seeds_workspace_vars_from_global_config(tmp_path, monkeypatch, con
     monkeypatch.chdir(tmp_path)
 
     with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     ws = load_workspace_config(tmp_path / "parrot" / ".ow" / "config.toml")
     assert ws.vars == {"http_port": 8069, "db_host": "localhost"}
@@ -291,7 +291,7 @@ def test_init_with_configuration_vars_override_global_vars(tmp_path, monkeypatch
     source = tmp_path / "source"
     (source / ".ow").mkdir(parents=True)
     (source / ".ow" / "config.toml").write_text(
-        'templates = ["common"]\n\n'
+        'templates = ["vscode"]\n\n'
         '[repos]\ncommunity = "master..from-source"\n\n'
         '[vars]\nhttp_port = 9999\n'
     )
@@ -310,7 +310,7 @@ def test_init_with_a_tty_asks(tmp_path, monkeypatch, config_with_remotes):
     monkeypatch.chdir(tmp_path)
 
     with _tty(True), _prompt_answers() as asked, _no_git(tmp_path):
-        cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
 
     # The Rich prompts were called.
     assert any("Templates" in message or "Select" in message for message in asked)
@@ -321,7 +321,7 @@ def test_init_with_a_tty_stops_when_the_confirmation_is_declined(tmp_path, monke
     monkeypatch.chdir(tmp_path)
 
     with _tty(True), _prompt_answers(confirm=False), _no_git(tmp_path):
-        cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
 
     assert "Aborted." in capsys.readouterr().out
     assert not (tmp_path / ".ow" / "config.toml").exists()
@@ -335,7 +335,7 @@ def test_init_with_a_tty_stops_when_the_prompt_is_cancelled(tmp_path, monkeypatc
 
     with _tty(True), _prompt_answers(cancelled=True) as asked, _no_git(tmp_path):
         with pytest.raises(SystemExit) as exc:
-            cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+            cmd_init(config_with_remotes, repos=dict(ONE_REPO))
     assert exc.value.code != 0
 
     assert "Aborted." in capsys.readouterr().err
@@ -347,13 +347,36 @@ def test_init_with_a_tty_stops_when_the_prompt_is_cancelled(tmp_path, monkeypatc
 
 def test_init_rejects_invalid_template(tmp_path, monkeypatch, capsys, config):
     monkeypatch.chdir(tmp_path)
-    (paths.templates_dir() / "common").mkdir(parents=True)
     with _tty(False), pytest.raises(SystemExit) as exc:
         cmd_init(config, name="test", templates=["nonexistent"])
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "unknown template" in captured.err.lower()
-    assert "common" in captured.err
+    assert "vscode" in captured.err
+
+
+def test_init_without_a_template_declares_none(tmp_path, monkeypatch, config_with_remotes):
+    """No -t means nothing declared: common is always applied and odoo is
+    detected from the repos, so there is nothing left to name."""
+    monkeypatch.chdir(tmp_path)
+    with _tty(False), _prompt_answers(), _no_git(tmp_path):
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
+
+    ws = load_workspace_config(tmp_path / ".ow" / "config.toml")
+    assert ws.templates == []
+
+
+def test_init_rejects_common_as_a_declared_template(tmp_path, monkeypatch, capsys, config):
+    """common is the always-applied socle: -t common must fail, with an
+    explanation, not silently succeed or silently drop it."""
+    monkeypatch.chdir(tmp_path)
+    with _tty(False), pytest.raises(SystemExit) as exc:
+        cmd_init(config, name="test", templates=["common"])
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "unknown template" in err.lower()
+    assert "common is always applied" in err
+    assert "odoo is detected" in err
 
 
 def test_init_rejects_invalid_repo_alias(tmp_path, monkeypatch, capsys, config_with_remotes):
@@ -374,7 +397,7 @@ def test_init_configuration_rejects_unknown_remote(tmp_path, monkeypatch, capsys
     src_ws = tmp_path / "source"
     (src_ws / ".ow").mkdir(parents=True)
     (src_ws / ".ow" / "config.toml").write_text(
-        'templates = ["common"]\n\n'
+        'templates = ["vscode"]\n\n'
         '[repos]\ncommunity = "master"\nenterprise = "master"\n'
     )
     config = _make_config(
@@ -418,7 +441,7 @@ def test_init_remembers_the_new_workspace(tmp_path, monkeypatch, config_with_rem
     monkeypatch.chdir(tmp_path)
 
     with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [(tmp_path / "parrot").resolve()]
 
@@ -439,7 +462,7 @@ def test_init_here_survives_every_repo_failing(tmp_path, monkeypatch, capsys, co
         _no_git(here, errors={"community": "boom"}),
         pytest.raises(SystemExit) as exc,
     ):
-        cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
 
     assert exc.value.code == 1
     assert here.exists()
@@ -455,7 +478,7 @@ def test_init_removes_the_directory_it_created_when_every_repo_fails(tmp_path, m
         _no_git(tmp_path / "parrot", errors={"community": "boom"}),
         pytest.raises(SystemExit) as exc,
     ):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert exc.value.code == 1
     assert not (tmp_path / "parrot").exists()
@@ -476,7 +499,7 @@ def test_init_keeps_going_when_only_some_repos_fail(tmp_path, monkeypatch, capsy
         _no_git(tmp_path, errors={"community": "boom"}),
         pytest.raises(SystemExit) as exc,
     ):
-        cmd_init(config_full, templates=["common"], repos=repos)
+        cmd_init(config_full, repos=repos)
 
     assert exc.value.code == 1
     assert (tmp_path / ".ow" / "config.toml").exists()
@@ -497,7 +520,7 @@ def test_init_leaves_workspace_visible_when_template_fails(tmp_path, monkeypatch
         patch("ow.commands.init.apply_templates", side_effect=RuntimeError("jinja boom")),
         pytest.raises(SystemExit) as exc,
     ):
-        cmd_init(config_with_remotes, templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
 
     assert exc.value.code == 1
     assert (tmp_path / ".ow" / "config.toml").exists()
@@ -522,7 +545,7 @@ def test_init_exits_non_zero_when_any_repo_failed(tmp_path, monkeypatch, capsys,
         _no_git(tmp_path, errors={"community": "boom"}),
         pytest.raises(SystemExit) as exc,
     ):
-        cmd_init(config_full, templates=["common"], repos=repos)
+        cmd_init(config_full, repos=repos)
 
     assert exc.value.code == 1
 
@@ -584,7 +607,7 @@ def test_check_duplicate_branches_lets_an_unremembered_neighbour_through(tmp_pat
     neighbour.mkdir()
     write_workspace_config(
         neighbour / ".ow" / "config.toml",
-        WorkspaceConfig(repos={"community": parse_branch_spec("master..shared-branch")}, templates=["common"]),
+        WorkspaceConfig(repos={"community": parse_branch_spec("master..shared-branch")}, templates=[]),
     )
     monkeypatch.chdir(tmp_path)
 
@@ -624,7 +647,6 @@ def test_init_rejects_a_duplicate_branch(tmp_path, monkeypatch, capsys, config_w
         cmd_init(
             config_with_remotes,
             name="new-ws",
-            templates=["common"],
             repos={"community": BranchSpec("origin/master", "master-parrot")},
         )
 
@@ -643,7 +665,6 @@ def test_init_duplicate_branch_error_names_the_override_flag(tmp_path, monkeypat
         cmd_init(
             config_with_remotes,
             name="new-ws",
-            templates=["common"],
             repos={"community": BranchSpec("origin/master", "master-parrot")},
         )
 
@@ -660,7 +681,6 @@ def test_init_accepts_a_different_branch(tmp_path, monkeypatch, config_with_remo
         cmd_init(
             config_with_remotes,
             name="new-ws",
-            templates=["common"],
             repos={"community": BranchSpec("origin/master", "master-new")},
         )
 
@@ -713,7 +733,6 @@ def test_init_still_finds_a_real_collision_past_a_broken_workspace(tmp_path, mon
         cmd_init(
             config_with_remotes,
             name="new-ws",
-            templates=["common"],
             repos={"community": BranchSpec("origin/master", "master-parrot")},
         )
 
@@ -732,7 +751,6 @@ def test_init_survives_an_indexed_workspace_with_a_corrupt_config(tmp_path, monk
         cmd_init(
             config_with_remotes,
             name="new-ws",
-            templates=["common"],
             repos={"community": BranchSpec("origin/master", "master-new")},
         )
 
@@ -763,7 +781,7 @@ def test_init_keeps_the_workspace_when_mise_trust_fails(tmp_path, monkeypatch, c
     failure = subprocess.CalledProcessError(1, ["mise", "trust"])
 
     with _tty(False), _prompt_answers(), _workspace_with_a_mise_toml(ws_dir, failure):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [ws_dir.resolve()]
     err = capsys.readouterr().err
@@ -776,7 +794,7 @@ def test_init_survives_mise_not_being_installed(tmp_path, monkeypatch, capsys, c
     monkeypatch.chdir(tmp_path)
 
     with _tty(False), _prompt_answers(), _workspace_with_a_mise_toml(ws_dir, FileNotFoundError("mise")):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [ws_dir.resolve()]
     assert "mise trust" in capsys.readouterr().err
@@ -793,7 +811,7 @@ def test_init_remembers_the_workspace_before_it_reaches_mise(tmp_path, monkeypat
         _workspace_with_a_mise_toml(ws_dir, KeyboardInterrupt),
         pytest.raises(KeyboardInterrupt),
     ):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [ws_dir.resolve()]
 
@@ -808,7 +826,7 @@ def test_init_lists_the_vars_one_per_line(tmp_path, monkeypatch, capsys, config_
     monkeypatch.chdir(tmp_path)
 
     with _tty(False), _prompt_answers(), _no_git(tmp_path / "parrot"):
-        cmd_init(config_with_remotes, name="parrot", templates=["common"], repos=dict(ONE_REPO))
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     out = capsys.readouterr().out
     assert "  Vars:" in out

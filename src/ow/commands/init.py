@@ -19,10 +19,12 @@ from rich.prompt import Prompt
 from ow.utils import index
 from ow.utils.display import console, err_console
 from ow.utils.templates import (
+    IMPLICIT_BUNDLE,
+    ODOO_BUNDLE,
     apply_templates,
-    available_templates,
     ensure_services_compose,
     ensure_workspace_materialized,
+    selectable_templates,
 )
 from ow.utils.config import (
     BranchSpec,
@@ -71,14 +73,18 @@ def _validate_init_inputs(
     # Packaged templates are always available even when the user hasn't taken
     # (and thus doesn't have a local copy of) any — nothing is copied at
     # bootstrap, so listing paths.templates_dir() alone would wrongly treat a
-    # fresh install as having no templates.
-    available = available_templates()
+    # fresh install as having no templates. common and odoo are excluded:
+    # neither is ever declared here — common always applies, odoo is
+    # detected from the repos.
+    available = selectable_templates()
 
     if templates is not None:
         invalid = [t for t in templates if t not in available]
         if invalid:
             avail = ", ".join(available)
             print(f"Error: unknown template(s): {', '.join(invalid)}. Available: {avail}", file=sys.stderr)
+            if any(t in (IMPLICIT_BUNDLE, ODOO_BUNDLE) for t in invalid):
+                print("       common is always applied, and odoo is detected from the repos", file=sys.stderr)
             sys.exit(1)
 
     known_aliases = list(config.remotes.keys())
@@ -151,7 +157,7 @@ def _preselection(
         chosen_templates = list(templates) if templates else list(source_ws.templates)
         chosen_repos: dict[str, BranchSpec] = dict(source_ws.repos)
     else:
-        chosen_templates = list(templates) if templates else ["common"]
+        chosen_templates = list(templates) if templates else []
         chosen_repos = {}
     if repos:
         chosen_repos.update(repos)
@@ -171,11 +177,11 @@ def _workspace_config_from_flags(
     """
     # Refuse only when nothing at all was given. A repo-less workspace is
     # legitimate here too — the interactive path already allows ticking no
-    # repo, so `ow init tools -t common` in a script has to be allowed as
+    # repo, so `ow init tools -t vscode` in a script has to be allowed as
     # well. This guard exists solely to catch the accidental bare `ow init`
     # in a non-interactive context.
     if templates is None and repos is None and source_ws is None:
-        avail_t = ", ".join(available_templates())
+        avail_t = ", ".join(selectable_templates())
         avail_r = ", ".join(config.remotes) or "(none configured)"
         print("Error: stdin is not a terminal, so ow init cannot ask. Nothing was given:", file=sys.stderr)
         print(f"         -t/--template NAME     available: {avail_t}", file=sys.stderr)
@@ -286,7 +292,7 @@ def _gather_workspace_config_interactive(
     try:
         selected_templates = _ask_multi(
             "Templates",
-            available_templates(),
+            selectable_templates(),
             set(pre_selected_templates),
         )
 

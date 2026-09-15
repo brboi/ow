@@ -6,12 +6,14 @@ from ow.utils.config import Config
 from ow.utils.git import run_cmd
 from ow.utils.resolver import resolve_workspace
 from ow.utils.templates import (
+    ABSENT,
+    OUTDATED,
+    YOURS,
     apply_templates,
-    available_templates,
-    bundle_source_files,
     ensure_services_compose,
     ensure_workspace_materialized,
-    outdated_templates,
+    legacy_mise_toml,
+    rendered_states,
 )
 
 
@@ -36,64 +38,61 @@ def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = Fal
             for alias in missing_worktrees:
                 print(f"  {alias}", file=sys.stderr)
             drifted = True
-        outdated = outdated_templates(ws_dir)
-        if outdated:
-            print("\nTemplate(s) you edited that ow has changed since:")
-            for name in outdated:
-                print(f"  {name}")
-        if drifted or outdated:
+
+        states = rendered_states(ws, config, ws_dir)
+        stale = [s for s in states if s.state in (OUTDATED, ABSENT)]
+        yours = [s for s in states if s.state == YOURS]
+
+        if stale:
+            print("\ntemplate(s) ow would write:")
+            for s in stale:
+                print(f"  {s.path}  {s.state}")
+        if yours:
+            print("\nyours, left alone: " + ", ".join(s.path for s in yours))
+
+        if drifted or stale:
             sys.exit(1)
         print(f"\nWorkspace '{ws_dir.name}' is up to date.")
         return
 
     _, successful, errors = ensure_workspace_materialized(ws, config, ws_dir)
     ensure_services_compose()
-    sync = apply_templates(ws, config, ws_dir)
+    result = apply_templates(ws, config, ws_dir)
 
-    for name in sync.copied:
-        print(f"materialised {name}")
-    for name in sync.updated:
-        print(f"updated {name}")
+    for path in result.wrote:
+        print(f"wrote {path}")
+    for path in result.updated:
+        print(f"updated {path}")
+    if result.yours:
+        print("yours, left alone: " + ", ".join(result.yours))
+        print("run `ow templates --diff` to see what ow would write instead.")
+    if result.skipped:
+        print("not rendered (empty): " + ", ".join(result.skipped))
 
-    # Report files that exist on disk but belong to template bundles not in
-    # the workspace config.  Stateless: no manifest, no mutation.
-    inactive_bundles = set(available_templates()) - set(ws.templates)
-    orphans: list[tuple[str, str]] = []
-    for bundle in sorted(inactive_bundles):
-        try:
-            files = bundle_source_files(bundle)
-        except (OSError, FileNotFoundError):
-            continue
-        for rel, src in files.items():
-            out_rel = rel.with_suffix("") if src.suffix == ".j2" else rel
-            if (ws_dir / out_rel).exists():
-                orphans.append((out_rel.as_posix(), bundle))
-    if orphans:
+    legacy = legacy_mise_toml(ws_dir)
+    if legacy is not None:
         print(
-            "\nSome files may come from templates not in your config. "
-            "Remove them manually if stale:"
+            f"warning: {legacy} was written by an older ow and overrides mise/conf.d/00-ow.toml",
+            file=sys.stderr,
         )
-        for file_path, bundle_name in orphans:
-            print(f"  {file_path}  [{bundle_name}]")
+        print("         delete it, or move what you want to keep into mise.local.toml", file=sys.stderr)
 
     if errors:
         print("\nWarning: repo(s) failed to set up:", file=sys.stderr)
         for alias, err in errors.items():
             print(f"  {alias}: {err}", file=sys.stderr)
 
-    mise_toml = ws_dir / "mise.toml"
-    if mise_toml.exists():
+    # The fragments ow renders under mise/ need trusting, and `managed` names
+    # them without rendering the workspace a second time.
+    mise_fragments = [
+        ws_dir / path for path in result.managed if path.startswith("mise/")
+    ]
+    for mise_toml in mise_fragments:
         try:
             run_cmd(["mise", "trust", str(mise_toml)], check=True)
         except (OSError, subprocess.CalledProcessError) as e:
             print(f"\nWarning: could not trust {mise_toml}: {e}", file=sys.stderr)
             print(f"  Run it yourself when mise is happy: mise trust {mise_toml}", file=sys.stderr)
-
-    if sync.outdated:
-        print("\nTemplate(s) you edited that ow has changed since:")
-        for name in sync.outdated:
-            print(f"  {name}")
-        print("Run `ow templates --diff` to see what changed.")
 
     if errors:
         # Everything above still ran — the templates are rendered — but a

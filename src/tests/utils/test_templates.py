@@ -1,29 +1,34 @@
 import pytest
-import hashlib
 import json
 import re
 import subprocess
 import tomllib
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from jinja2 import Environment, FileSystemLoader
 
 from ow.utils.templates import (
-    TemplateSync,
-    WS_TEMPLATES,
-    WS_TEMPLATES_LOCK,
-    bundle_source_files,
+    ABSENT,
+    NOT_RENDERED,
+    OUTDATED,
+    RENDERED_LOCK,
+    UP_TO_DATE,
+    YOURS,
     apply_templates,
+    bundle_source_files,
     build_template_context,
+    effective_bundles,
     ensure_workspace_materialized,
     find_addon_paths,
-    materialize_templates,
-    workspace_template_files,
+    legacy_mise_toml,
+    rendered_states,
+    selectable_templates,
 )
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
+from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 
 TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "common"
+ODOO_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "odoo"
 VSCODE_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "vscode"
 ZED_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "zed"
 
@@ -64,7 +69,7 @@ def make_ws_config(
 ) -> WorkspaceConfig:
     return WorkspaceConfig(
         repos={alias: BranchSpec("origin/master") for alias in aliases},
-        templates=templates or ["common"],
+        templates=templates if templates is not None else [],
         vars=vars if vars is not None else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
     )
 
@@ -313,7 +318,7 @@ def test_render_odoorc_community_only(tmp_path, config):
     setup_odoo_main_repo(ws_dir, "community")
     ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("odoorc.j2", ctx)
+    result = render_template("odoorc.j2", ctx, ODOO_TEMPLATE_DIR)
 
     assert "[options]" in result
     assert "http_port = 8069" in result
@@ -330,7 +335,7 @@ def test_render_odoorc_enterprise_before_community(tmp_path, config):
     setup_flat_repo(ws_dir, "enterprise")
     ws = make_ws_config(["community", "enterprise"])
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("odoorc.j2", ctx)
+    result = render_template("odoorc.j2", ctx, ODOO_TEMPLATE_DIR)
 
     lines = result.split("\n")
     addons_line = next(l for l in lines if l.startswith("addons_path"))
@@ -349,7 +354,7 @@ def test_render_odoorc_workspace_overrides_global(tmp_path, config):
         vars={"http_port": 8070},
     )
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("odoorc.j2", ctx)
+    result = render_template("odoorc.j2", ctx, ODOO_TEMPLATE_DIR)
 
     assert "http_port = 8070" in result
     assert "http_port = 8069" not in result
@@ -360,7 +365,7 @@ def test_render_odoorc_no_quotes_on_string_values(tmp_path, config):
     setup_odoo_main_repo(ws_dir, "community")
     ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("odoorc.j2", ctx)
+    result = render_template("odoorc.j2", ctx, ODOO_TEMPLATE_DIR)
 
     assert 'db_host = "localhost"' not in result
     assert "db_host = localhost" in result
@@ -386,7 +391,7 @@ def test_render_odools_community_only(tmp_path, config):
     setup_odoo_main_repo(ws_dir, "community")
     ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("odools.toml.j2", ctx)
+    result = render_template("odools.toml.j2", ctx, ODOO_TEMPLATE_DIR)
 
     assert "[[config]]" in result
     assert "[Odoo Workspace] test" in result
@@ -403,7 +408,7 @@ def test_render_odools_enterprise_before_community(tmp_path, config):
     setup_flat_repo(ws_dir, "enterprise")
     ws = make_ws_config(["community", "enterprise"])
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("odools.toml.j2", ctx)
+    result = render_template("odools.toml.j2", ctx, ODOO_TEMPLATE_DIR)
 
     assert "./enterprise" in result
     ent_idx = result.index("./enterprise")
@@ -417,7 +422,7 @@ def test_render_odools_categorized_repo(tmp_path, config):
     setup_categorized_repo(ws_dir, "partner-addons")
     ws = make_ws_config(["community", "partner-addons"])
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("odools.toml.j2", ctx)
+    result = render_template("odools.toml.j2", ctx, ODOO_TEMPLATE_DIR)
 
     assert "./partner-addons/messaging" in result
     assert "./partner-addons/telephony" in result
@@ -436,7 +441,7 @@ def test_render_mise_toml(tmp_path, config):
     setup_odoo_main_repo(ws_dir, "community")
     ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("mise.toml.j2", ctx)
+    result = render_template("mise/conf.d/00-ow.toml.j2", ctx)
 
     assert "[tools]" in result
     assert "python" in result
@@ -457,7 +462,7 @@ def test_render_mise_toml_exports_an_absolute_ow_workspace(tmp_path, config):
     setup_odoo_main_repo(ws_dir, "community")
     ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("mise.toml.j2", ctx)
+    result = render_template("mise/conf.d/00-ow.toml.j2", ctx)
 
     exported = re.search(r'^OW_WORKSPACE = "(.*)"$', result, re.M)
     assert exported, "the common bundle must export OW_WORKSPACE"
@@ -473,7 +478,7 @@ def test_render_mise_toml_with_compose_file(tmp_path, config, xdg):
     ws = make_ws_config(["community"])
     ensure_services_compose()
     apply_templates(ws, config, ws_dir)
-    content = (ws_dir / "mise.toml").read_text()
+    content = (ws_dir / "mise" / "conf.d" / "00-ow.toml").read_text()
     assert "COMPOSE_FILE" in content
     assert str(paths.services_dir() / "compose.yml") in content
 
@@ -487,7 +492,7 @@ def test_render_pyrightconfig(tmp_path, config):
     setup_odoo_main_repo(ws_dir, "community")
     ws = make_ws_config(["community"])
     ctx = build_template_context(ws, config, ws_dir)
-    result = render_template("pyrightconfig.json.j2", ctx)
+    result = render_template("pyrightconfig.json.j2", ctx, ODOO_TEMPLATE_DIR)
     data = json.loads(result)
 
     assert data["venvPath"] == "."
@@ -658,15 +663,31 @@ def test_render_zed_debug_custom_args(tmp_path, config):
 
 
 # ---------------------------------------------------------------------------
-# A workspace with no Odoo core repo
+# A workspace with no Odoo core repo — issue #45's acceptance test
 #
 # `main_repo_alias` is None whenever nothing in the workspace ships odoo-bin —
 # an enterprise-only or addons-only workspace, or a core worktree that is not
-# materialised yet. Every packaged template must degrade to something valid in
-# its own format instead of naming a directory called "None".
+# materialised yet. The `odoo` bundle is never declared by hand: it renders
+# only once a repo turns out to have odoo-bin, so a workspace that never runs
+# Odoo receives none of its files at all.
 # ---------------------------------------------------------------------------
 
-PACKAGED_BUNDLES = ["bwrap", "common", "vscode", "zed"]
+PACKAGED_BUNDLES = ["bwrap", "vscode", "zed"]
+
+ODOO_ONLY_OUTPUTS = (
+    "odoorc",
+    "odools.toml",
+    "pyrightconfig.json",
+    "requirements-dev.txt",
+    Path(".vscode") / "launch.json",
+    Path(".zed") / "debug.json",
+)
+
+ALWAYS_RENDERED_OUTPUTS = (
+    Path("mise") / "conf.d" / "00-ow.toml",
+    Path(".vscode") / "settings.json",
+    Path(".zed") / "settings.json",
+)
 
 
 def strip_jsonc(text: str) -> str:
@@ -675,13 +696,18 @@ def strip_jsonc(text: str) -> str:
     return re.sub(r",(\s*[}\]])", r"\1", "\n".join(lines))
 
 
-def render_every_bundle_without_core(tmp_path: Path, config: Config) -> Path:
-    """Apply every packaged bundle to a workspace holding no Odoo core repo."""
-    ws_dir = tmp_path / "workspaces" / "plainws"
+def render_every_bundle(tmp_path: Path, config: Config, with_core: bool) -> Path:
+    """Apply every packaged bundle to a workspace with, or without, an Odoo core repo."""
+    ws_dir = tmp_path / "workspaces" / ("odoows" if with_core else "plainws")
     ws_dir.mkdir(parents=True)
-    setup_flat_repo(ws_dir, "plain")
-    ws = make_ws_config(["plain"], templates=PACKAGED_BUNDLES)
-    assert build_template_context(ws, config, ws_dir)["main_repo_alias"] is None
+    if with_core:
+        setup_odoo_main_repo(ws_dir, "community")
+        ws = make_ws_config(["community"], templates=PACKAGED_BUNDLES)
+    else:
+        setup_flat_repo(ws_dir, "plain")
+        ws = make_ws_config(["plain"], templates=PACKAGED_BUNDLES)
+    ctx = build_template_context(ws, config, ws_dir)
+    assert (ctx["main_repo_alias"] == "community") is with_core
     apply_templates(ws, config, ws_dir)
     return ws_dir
 
@@ -691,12 +717,30 @@ def rendered_files(ws_dir: Path) -> list[Path]:
     return [
         p
         for p in sorted(ws_dir.rglob("*"))
-        if p.is_file() and p.relative_to(ws_dir).parts[0] != "plain"
+        if p.is_file() and p.relative_to(ws_dir).parts[0] not in ("plain", "community")
     ]
 
 
+def test_no_odoo_file_exists_without_a_core_repo(tmp_path, config):
+    ws_dir = render_every_bundle(tmp_path, config, with_core=False)
+    for rel in ODOO_ONLY_OUTPUTS:
+        assert not (ws_dir / rel).exists(), f"{rel} must not exist without an Odoo core repo"
+
+
+def test_common_and_editor_files_still_render_without_a_core_repo(tmp_path, config):
+    ws_dir = render_every_bundle(tmp_path, config, with_core=False)
+    for rel in ALWAYS_RENDERED_OUTPUTS:
+        assert (ws_dir / rel).is_file(), f"{rel} must be rendered for every workspace"
+
+
+def test_odoo_files_appear_once_a_core_repo_is_present(tmp_path, config):
+    ws_dir = render_every_bundle(tmp_path, config, with_core=True)
+    for rel in ODOO_ONLY_OUTPUTS:
+        assert (ws_dir / rel).is_file(), f"{rel} must exist once an Odoo core repo is present"
+
+
 def test_no_packaged_template_renders_a_literal_none(tmp_path, config):
-    ws_dir = render_every_bundle_without_core(tmp_path, config)
+    ws_dir = render_every_bundle(tmp_path, config, with_core=False)
     written = rendered_files(ws_dir)
     assert written, "the bundles must write something"
     for path in written:
@@ -705,60 +749,39 @@ def test_no_packaged_template_renders_a_literal_none(tmp_path, config):
         )
 
 
-def test_mise_toml_parses_and_installs_only_what_exists(tmp_path, config):
-    ws_dir = render_every_bundle_without_core(tmp_path, config)
-    data = tomllib.loads((ws_dir / "mise.toml").read_text())
+def test_mise_fragment_parses_and_carries_no_odoo_wiring_without_core(tmp_path, config):
+    ws_dir = render_every_bundle(tmp_path, config, with_core=False)
+    content = (ws_dir / "mise" / "conf.d" / "00-ow.toml").read_text()
+    data = tomllib.loads(content)
 
-    assert "requirements-dev.txt" in data["hooks"]["postinstall"]
-    assert "requirements.txt" not in data["hooks"]["postinstall"].replace(
-        "requirements-dev.txt", ""
-    )
+    assert "ODOO_RC" not in content
+    assert "osh" not in content
     assert data["env"]["_"]["path"] == ["{{config_root}}"]
-    # odoo-bin is never on PATH without a core repo, so an `osh` alias could
-    # only ever fail.
-    assert "shell_alias" not in data
 
 
-def test_odools_toml_parses_and_omits_the_odoo_path(tmp_path, config):
-    ws_dir = render_every_bundle_without_core(tmp_path, config)
-    data = tomllib.loads((ws_dir / "odools.toml").read_text())
+def test_mise_fragment_wires_odoo_once_a_core_repo_is_present(tmp_path, config):
+    ws_dir = render_every_bundle(tmp_path, config, with_core=True)
+    content = (ws_dir / "mise" / "conf.d" / "00-ow.toml").read_text()
+    data = tomllib.loads(content)
 
-    entry = data["config"][0]
-    assert "odoo_path" not in entry
-    assert entry["addons_paths"] == ["./plain"]
-
-
-def test_pyrightconfig_parses_with_no_core_extra_path(tmp_path, config):
-    ws_dir = render_every_bundle_without_core(tmp_path, config)
-    data = json.loads((ws_dir / "pyrightconfig.json").read_text())
-
-    assert data["extraPaths"] == []
-    assert data["venv"] == ".venv"
+    assert "ODOO_RC" in content
+    assert data["shell_alias"]["osh"]
 
 
-def test_vscode_launch_parses_with_no_configurations(tmp_path, config):
-    ws_dir = render_every_bundle_without_core(tmp_path, config)
-    data = json.loads((ws_dir / ".vscode" / "launch.json").read_text())
+def test_vscode_settings_parses_strict_json_and_never_mentions_odoo_without_core(tmp_path, config):
+    ws_dir = render_every_bundle(tmp_path, config, with_core=False)
+    content = (ws_dir / ".vscode" / "settings.json").read_text()
 
-    # Both configurations run odoo-bin out of the core repo. Without one there
-    # is nothing to launch, and a half-filled entry would only fail on use.
-    assert data["configurations"] == []
-
-
-def test_zed_debug_parses_with_no_configurations(tmp_path, config):
-    ws_dir = render_every_bundle_without_core(tmp_path, config)
-    data = json.loads(strip_jsonc((ws_dir / ".zed" / "debug.json").read_text()))
-
-    assert data == []
+    json.loads(content)  # strict JSON: no trailing commas, no comments
+    assert "Odoo" not in content
 
 
-def test_odoorc_still_lists_the_non_core_addons(tmp_path, config):
-    """Degrading is not blanking: what does not need core is still written."""
-    ws_dir = render_every_bundle_without_core(tmp_path, config)
-    rendered = (ws_dir / "odoorc").read_text()
+def test_zed_settings_parses_after_stripping_jsonc_and_never_mentions_odoo_without_core(tmp_path, config):
+    ws_dir = render_every_bundle(tmp_path, config, with_core=False)
+    content = (ws_dir / ".zed" / "settings.json").read_text()
 
-    assert f"addons_path = {ws_dir / 'plain'}" in rendered
-    assert "db_name = plainws" in rendered
+    json.loads(strip_jsonc(content))
+    assert "Odoo" not in content
 
 
 # ---------------------------------------------------------------------------
@@ -1172,7 +1195,7 @@ def test_apply_templates_renders_once_when_nothing_appears(xdg, tmp_path, config
         templates=["local"],
     )
     with patch.object(
-        templates_mod, "_render_bundles", wraps=templates_mod._render_bundles,
+        templates_mod, "_render_outputs", wraps=templates_mod._render_outputs,
     ) as render:
         apply_templates(ws, config, ws_dir)
 
@@ -1189,11 +1212,11 @@ class TestResolveBundleFiles:
         """A local bundle holding one file must not hide its packaged siblings."""
         from ow.utils import paths
 
-        local = paths.templates_dir() / "common"
+        local = paths.templates_dir() / "odoo"
         local.mkdir(parents=True)
         (local / "odoorc.j2").write_text("local override")
 
-        result = bundle_source_files("common")
+        result = bundle_source_files("odoo")
 
         # The customised file resolves to the local copy.
         assert result[Path("odoorc.j2")] == local / "odoorc.j2"
@@ -1201,11 +1224,10 @@ class TestResolveBundleFiles:
 
         # Its siblings still resolve to the packaged versions, by path.
         packaged_dir = (
-            Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "common"
+            Path(__file__).parent.parent.parent / "ow" / "_static" / "templates" / "odoo"
         )
         assert result[Path("pyrightconfig.json.j2")] == packaged_dir / "pyrightconfig.json.j2"
         assert result[Path("requirements-dev.txt")] == packaged_dir / "requirements-dev.txt"
-        assert result[Path("mise.toml.j2")] == packaged_dir / "mise.toml.j2"
         assert result[Path("odools.toml.j2")] == packaged_dir / "odools.toml.j2"
 
     def test_purely_local_bundle_resolves(self, xdg):
@@ -1233,11 +1255,14 @@ class TestResolveBundleFiles:
 
 
 # ---------------------------------------------------------------------------
-# materialize_templates (#41) — copy sources into <ws>/.ow/templates, lock
-# what was copied, and never clobber an edit.
+# The rendered lock (#45) — apply_templates locks *what ow wrote*, not the
+# template it wrote it from. A local bundle stands in for a packaged one:
+# the rule under test is the lock's four-way split on an output path,
+# independent of which bundle produced it.
 # ---------------------------------------------------------------------------
 
-class TestMaterializeTemplates:
+
+class TestRenderedLock:
     def _local_bundle(self, content: str = "hello\n") -> Path:
         from ow.utils import paths
 
@@ -1246,137 +1271,254 @@ class TestMaterializeTemplates:
         (local / "greeting.txt").write_text(content)
         return local
 
-    def _dest(self, ws_dir: Path) -> Path:
-        return ws_dir / WS_TEMPLATES / "mine" / "greeting.txt"
-
-    def test_first_apply_materialises_and_locks(self, xdg, tmp_path):
-        self._local_bundle()
+    def _ws(self, tmp_path: Path) -> tuple[WorkspaceConfig, Path]:
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
-        ws = WorkspaceConfig(repos={}, templates=["mine"])
+        return WorkspaceConfig(repos={}, templates=["mine"]), ws_dir
 
-        sync = materialize_templates(ws, ws_dir)
+    def _own(self, names: list[str]) -> list[str]:
+        """This bundle's own output, filtered from the common bundle's mise
+        fragment — every workspace renders it too, first-apply included."""
+        return [n for n in names if n == "greeting.txt"]
 
-        assert self._dest(ws_dir).read_text() == "hello\n"
-        assert sync.copied == ["mine/greeting.txt"]
-        assert sync.updated == []
-        assert sync.outdated == []
-        lock = tomllib.loads((ws_dir / WS_TEMPLATES_LOCK).read_text())
-        assert lock["mine/greeting.txt"] == hashlib.sha256(b"hello\n").hexdigest()
-
-    def test_pre_2_4_0_workspace_has_neither_dir_nor_lock_and_behaves_like_first_apply(self, xdg, tmp_path):
-        """No `.ow/templates`, no lock: exactly the 'dest missing' branch."""
+    def test_first_apply_writes_and_locks(self, xdg, tmp_path, config):
         self._local_bundle()
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir()
-        ws = WorkspaceConfig(repos={}, templates=["mine"])
+        ws, ws_dir = self._ws(tmp_path)
 
-        assert not (ws_dir / WS_TEMPLATES).exists()
-        assert not (ws_dir / WS_TEMPLATES_LOCK).exists()
+        result = apply_templates(ws, config, ws_dir)
 
-        sync = materialize_templates(ws, ws_dir)
+        assert (ws_dir / "greeting.txt").read_text() == "hello\n"
+        assert self._own(result.wrote) == ["greeting.txt"]
+        assert (ws_dir / RENDERED_LOCK).is_file()
 
-        assert sync.copied == ["mine/greeting.txt"]
-        assert self._dest(ws_dir).is_file()
-
-    def test_second_apply_with_changed_source_overwrites_untouched_file(self, xdg, tmp_path):
+    def test_untouched_output_follows_a_moved_source(self, xdg, tmp_path, config):
         local = self._local_bundle()
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir()
-        ws = WorkspaceConfig(repos={}, templates=["mine"])
-        materialize_templates(ws, ws_dir)
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
 
         (local / "greeting.txt").write_text("goodbye\n")
+        result = apply_templates(ws, config, ws_dir)
 
-        sync = materialize_templates(ws, ws_dir)
+        assert (ws_dir / "greeting.txt").read_text() == "goodbye\n"
+        assert result.updated == ["greeting.txt"]
 
-        assert self._dest(ws_dir).read_text() == "goodbye\n"
-        assert sync.copied == []
-        assert sync.updated == ["mine/greeting.txt"]
-        assert sync.outdated == []
-
-    def test_edited_file_left_alone_and_reported_outdated_when_source_also_moved(self, xdg, tmp_path):
+    def test_hand_edited_output_survives_a_moved_source(self, xdg, tmp_path, config):
         local = self._local_bundle()
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir()
-        ws = WorkspaceConfig(repos={}, templates=["mine"])
-        materialize_templates(ws, ws_dir)
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
 
-        self._dest(ws_dir).write_text("my own edits\n")
+        (ws_dir / "greeting.txt").write_text("my own words\n")
         (local / "greeting.txt").write_text("goodbye\n")
+        result = apply_templates(ws, config, ws_dir)
 
-        sync = materialize_templates(ws, ws_dir)
+        assert (ws_dir / "greeting.txt").read_text() == "my own words\n"
+        assert result.yours == ["greeting.txt"]
 
-        assert self._dest(ws_dir).read_text() == "my own edits\n", "an edited file must never be overwritten"
-        assert sync.outdated == ["mine/greeting.txt"]
-        assert sync.copied == []
-        assert sync.updated == []
+        # A second apply still leaves it alone.
+        again = apply_templates(ws, config, ws_dir)
+        assert (ws_dir / "greeting.txt").read_text() == "my own words\n"
+        assert again.yours == ["greeting.txt"]
 
-    def test_edited_file_with_unchanged_source_is_silent(self, xdg, tmp_path):
+    def test_preexisting_identical_file_is_adopted_silently(self, xdg, tmp_path, config):
+        local = self._local_bundle()
+        ws, ws_dir = self._ws(tmp_path)
+        (ws_dir / "greeting.txt").write_text("hello\n")  # a file from before the lock existed
+
+        result = apply_templates(ws, config, ws_dir)
+
+        assert self._own(result.wrote) == []
+        assert self._own(result.updated) == []
+        assert self._own(result.yours) == []
+        assert self._own(result.skipped) == []
+        assert (ws_dir / "greeting.txt").read_text() == "hello\n"
+
+        # The lock now protects it exactly as if ow had written it itself:
+        # moving the source updates it on the next apply.
+        (local / "greeting.txt").write_text("goodbye\n")
+        second = apply_templates(ws, config, ws_dir)
+        assert (ws_dir / "greeting.txt").read_text() == "goodbye\n"
+        assert second.updated == ["greeting.txt"]
+
+    def test_deleted_output_is_rewritten_on_next_apply(self, xdg, tmp_path, config):
         self._local_bundle()
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir()
-        ws = WorkspaceConfig(repos={}, templates=["mine"])
-        materialize_templates(ws, ws_dir)
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
+        (ws_dir / "greeting.txt").unlink()
 
-        self._dest(ws_dir).write_text("my own edits\n")
+        result = apply_templates(ws, config, ws_dir)
 
-        sync = materialize_templates(ws, ws_dir)
+        assert (ws_dir / "greeting.txt").read_text() == "hello\n"
+        assert result.wrote == ["greeting.txt"]
 
-        assert self._dest(ws_dir).read_text() == "my own edits\n"
-        assert sync.copied == sync.updated == sync.outdated == []
-
-    def test_hand_added_file_is_left_alone_and_never_reported(self, xdg, tmp_path):
-        self._local_bundle()
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir()
-        ws = WorkspaceConfig(repos={}, templates=["mine"])
-        materialize_templates(ws, ws_dir)
-
-        extra = ws_dir / WS_TEMPLATES / "mine" / "extra.txt"
-        extra.write_text("hand added\n")
-
-        sync = materialize_templates(ws, ws_dir)
-
-        assert extra.read_text() == "hand added\n"
-        assert sync.copied == sync.updated == sync.outdated == []
-        lock = tomllib.loads((ws_dir / WS_TEMPLATES_LOCK).read_text())
-        assert "mine/extra.txt" not in lock
-
-    def test_missing_bundle_raises_before_writing_the_lock_content(self, xdg, tmp_path):
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir()
-        ws = WorkspaceConfig(repos={}, templates=["nonexistent-template"])
-        with pytest.raises(FileNotFoundError, match="not found"):
-            materialize_templates(ws, ws_dir)
-
-    def test_lock_file_has_the_managed_by_ow_header(self, xdg, tmp_path):
-        self._local_bundle()
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir()
-        ws = WorkspaceConfig(repos={}, templates=["mine"])
-        materialize_templates(ws, ws_dir)
-        content = (ws_dir / WS_TEMPLATES_LOCK).read_text()
-        assert content.startswith("# Managed by ow.\n")
-
-
-class TestWorkspaceTemplateFiles:
-    def test_returns_materialised_files_keyed_by_relative_path(self, xdg, tmp_path):
+    def test_whitespace_only_render_writes_nothing(self, xdg, tmp_path, config):
         from ow.utils import paths
 
         local = paths.templates_dir() / "mine"
         local.mkdir(parents=True)
-        (local / "greeting.txt").write_text("hi\n")
+        (local / "greeting.txt.j2").write_text("   \n\n")
+
+        ws, ws_dir = self._ws(tmp_path)
+        result = apply_templates(ws, config, ws_dir)
+
+        assert not (ws_dir / "greeting.txt").exists()
+        assert result.skipped == ["greeting.txt"]
+
+
+# ---------------------------------------------------------------------------
+# rendered_states — the read-only view `ow templates` shows, never writing.
+# ---------------------------------------------------------------------------
+
+
+class TestRenderedStates:
+    def _local_bundle(self) -> Path:
+        from ow.utils import paths
+
+        local = paths.templates_dir() / "mine"
+        local.mkdir(parents=True)
+        (local / "up_to_date.txt").write_text("keep me\n")
+        (local / "yours.txt").write_text("original\n")
+        (local / "outdated.txt").write_text("original\n")
+        (local / "absent.txt").write_text("original\n")
+        (local / "blank.txt.j2").write_text("   \n")
+        return local
+
+    def _ws(self, tmp_path: Path) -> tuple[WorkspaceConfig, Path]:
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
-        ws = WorkspaceConfig(repos={}, templates=["mine"])
-        materialize_templates(ws, ws_dir)
+        return WorkspaceConfig(repos={}, templates=["mine"]), ws_dir
 
-        result = workspace_template_files(ws_dir, "mine")
+    def _states_by_path(self, ws, config, ws_dir) -> dict[str, str]:
+        return {f.path: f.state for f in rendered_states(ws, config, ws_dir)}
 
-        assert result == {Path("greeting.txt"): ws_dir / WS_TEMPLATES / "mine" / "greeting.txt"}
+    def test_every_state_is_produced(self, xdg, tmp_path, config):
+        local = self._local_bundle()
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
 
-    def test_unmaterialised_bundle_is_empty(self, xdg, tmp_path):
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir()
-        assert workspace_template_files(ws_dir, "never-applied") == {}
+        (ws_dir / "yours.txt").write_text("hand edited\n")
+        (local / "outdated.txt").write_text("moved\n")
+        (ws_dir / "absent.txt").unlink()
+
+        states = self._states_by_path(ws, config, ws_dir)
+
+        assert states["up_to_date.txt"] == UP_TO_DATE
+        assert states["yours.txt"] == YOURS
+        assert states["outdated.txt"] == OUTDATED
+        assert states["absent.txt"] == ABSENT
+        assert states["blank.txt"] == NOT_RENDERED
+
+    def test_writes_nothing(self, xdg, tmp_path, config):
+        self._local_bundle()
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
+
+        file_before = (ws_dir / "up_to_date.txt").read_bytes()
+        file_mtime_before = (ws_dir / "up_to_date.txt").stat().st_mtime_ns
+        lock_before = (ws_dir / RENDERED_LOCK).read_bytes()
+        lock_mtime_before = (ws_dir / RENDERED_LOCK).stat().st_mtime_ns
+
+        rendered_states(ws, config, ws_dir)
+
+        assert (ws_dir / "up_to_date.txt").read_bytes() == file_before
+        assert (ws_dir / "up_to_date.txt").stat().st_mtime_ns == file_mtime_before
+        assert (ws_dir / RENDERED_LOCK).read_bytes() == lock_before
+        assert (ws_dir / RENDERED_LOCK).stat().st_mtime_ns == lock_mtime_before
+
+
+# ---------------------------------------------------------------------------
+# effective_bundles / selectable_templates / legacy_mise_toml
+# ---------------------------------------------------------------------------
+
+
+def test_effective_bundles_orders_common_then_odoo_then_declared(tmp_path):
+    ws_dir = tmp_path / "ws"
+    setup_odoo_main_repo(ws_dir, "community")
+    ws = make_ws_config(["community"], templates=["zed", "vscode"])
+
+    assert effective_bundles(ws, ws_dir) == ["common", "odoo", "zed", "vscode"]
+
+
+def test_effective_bundles_has_no_odoo_bundle_without_a_core_repo(tmp_path):
+    ws_dir = tmp_path / "ws"
+    setup_flat_repo(ws_dir, "plain")
+    ws = make_ws_config(["plain"], templates=["zed"])
+
+    assert effective_bundles(ws, ws_dir) == ["common", "zed"]
+
+
+def test_effective_bundles_does_not_duplicate_a_still_declared_common(tmp_path):
+    ws_dir = tmp_path / "ws"
+    ws = make_ws_config([], templates=["common", "zed"])
+
+    assert effective_bundles(ws, ws_dir) == ["common", "zed"]
+
+
+def test_selectable_templates_excludes_common_and_odoo_but_offers_zed(xdg):
+    names = selectable_templates()
+
+    assert "common" not in names
+    assert "odoo" not in names
+    assert "zed" in names
+
+
+def test_legacy_mise_toml_recognises_ows_own_marker(tmp_path):
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    (ws_dir / "mise.toml").write_text('OW_WORKSPACE = "/some/path"\n')
+
+    assert legacy_mise_toml(ws_dir) == ws_dir / "mise.toml"
+
+
+def test_legacy_mise_toml_ignores_a_users_own_file(tmp_path):
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    (ws_dir / "mise.toml").write_text('[tools]\npython = "3.12"\n')
+
+    assert legacy_mise_toml(ws_dir) is None
+
+
+def test_legacy_mise_toml_absent_when_there_is_no_file(tmp_path):
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+
+    assert legacy_mise_toml(ws_dir) is None
+
+
+# ---------------------------------------------------------------------------
+# .local — a workspace-owned addon precedes every repo in the context (#45's
+# regression: without this, an addon under development had to be named by
+# hand in a manually edited odoorc).
+# ---------------------------------------------------------------------------
+
+
+def test_dot_local_addon_precedes_repo_addons_in_context(tmp_path, config):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    (ws_dir / ".local" / "odoo_addons" / "dev_module").mkdir(parents=True)
+    (ws_dir / ".local" / "odoo_addons" / "dev_module" / "__manifest__.py").write_text("{}\n")
+
+    ws = make_ws_config(["community"])
+    ctx = build_template_context(ws, config, ws_dir)
+
+    local_path = str(ws_dir / ".local" / "odoo_addons")
+    community_path = str(ws_dir / "community" / "addons")
+    assert ctx["addons_paths"].index(local_path) < ctx["addons_paths"].index(community_path)
+
+    local_item = ".local/odoo_addons"
+    assert local_item in ctx["odools_path_items"]
+    assert ctx["odools_path_items"].index(local_item) < ctx["odools_path_items"].index("community/addons")
+
+
+def test_dot_local_addon_scan_ignores_venv_and_dot_odoo(tmp_path, config):
+    ws_dir = tmp_path / "workspaces" / "test"
+    setup_odoo_main_repo(ws_dir, "community")
+    (ws_dir / ".venv" / "x" / "y").mkdir(parents=True)
+    (ws_dir / ".venv" / "x" / "y" / "__manifest__.py").write_text("{}\n")
+    (ws_dir / ".odoo" / "a" / "b").mkdir(parents=True)
+    (ws_dir / ".odoo" / "a" / "b" / "__manifest__.py").write_text("{}\n")
+
+    ws = make_ws_config(["community"])
+    ctx = build_template_context(ws, config, ws_dir)
+
+    assert not any(".venv" in p for p in ctx["addons_paths"])
+    assert not any(".odoo" in p for p in ctx["addons_paths"])

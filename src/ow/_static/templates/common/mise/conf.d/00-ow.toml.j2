@@ -1,19 +1,19 @@
 [tools]
-python = "3.12"
+python = "{{ vars.python | default('3.12') }}"
 
 [hooks]
 {% if main_repo_alias %}
 postinstall = "python -m ensurepip --default-pip && pip install -r {% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}/requirements.txt -r {% raw %}{{config_root}}{% endraw %}/requirements-dev.txt"
 {% else %}
-postinstall = "python -m ensurepip --default-pip && pip install -r {% raw %}{{config_root}}{% endraw %}/requirements-dev.txt"
+postinstall = "python -m ensurepip --default-pip"
 {% endif %}
 
 [env]
 OW_WORKSPACE = "{% raw %}{{config_root}}{% endraw %}"
-ODOO_RC = "{% raw %}{{config_root}}{% endraw %}/odoorc"
 COMPOSE_FILE = "{{ services_compose }}"
 _.python.venv = { path = ".venv", create = true }
 {% if main_repo_alias %}
+ODOO_RC = "{% raw %}{{config_root}}{% endraw %}/odoorc"
 _.path = ["{% raw %}{{config_root}}{% endraw %}", "{% raw %}{{config_root}}{% endraw %}/{{ main_repo_alias }}"]
 {% else %}
 _.path = ["{% raw %}{{config_root}}{% endraw %}"]

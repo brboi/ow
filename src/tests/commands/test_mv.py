@@ -36,6 +36,14 @@ def _bare_repo(tmp_path: Path, alias: str = "community") -> Path:
     _git(src, "config", "user.email", "t@t")
     _git(src, "config", "user.name", "T")
     (src / "a.txt").write_text("a")
+    # An Odoo core checkout: `odoorc` is this test file's witness that the
+    # absolute paths were rewritten, and ow only renders it for a workspace
+    # that has an Odoo to run.
+    (src / "odoo-bin").write_text("#!/usr/bin/env python3\n")
+    (src / "addons" / "sale").mkdir(parents=True)
+    (src / "addons" / "sale" / "__manifest__.py").write_text("{}\n")
+    (src / "odoo" / "addons" / "base").mkdir(parents=True)
+    (src / "odoo" / "addons" / "base" / "__manifest__.py").write_text("{}\n")
     _git(src, "add", "-A")
     _git(src, "commit", "-qm", "A")
 

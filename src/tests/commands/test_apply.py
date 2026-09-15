@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import subprocess
@@ -13,7 +13,14 @@ from ow.utils.config import (
     load_workspace_config,
     write_workspace_config,
 )
-from ow.utils.templates import TemplateSync
+from ow.utils.templates import (
+    ABSENT,
+    OUTDATED,
+    RENDERED_LOCK,
+    YOURS,
+    RenderedFile,
+    RenderResult,
+)
 
 
 class TestCmdApply:
@@ -31,8 +38,9 @@ class TestCmdApply:
         config = config_with_remotes
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()) as mock_apply:
-                    cmd_apply(config)
+                with patch("ow.commands.apply.apply_templates", return_value=RenderResult()) as mock_apply:
+                    with patch("ow.commands.apply.rendered_states", return_value=[]):
+                        cmd_apply(config)
         mock_apply.assert_called_once()
 
     def test_cmd_apply_with_a_remembered_workspace_name(self, tmp_path, capsys, config_with_remotes):
@@ -44,8 +52,9 @@ class TestCmdApply:
         index.remember(ws_dir)
         config = config_with_remotes
         with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
-            with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()) as mock_apply:
-                cmd_apply(config, workspace="test")
+            with patch("ow.commands.apply.apply_templates", return_value=RenderResult()) as mock_apply:
+                with patch("ow.commands.apply.rendered_states", return_value=[]):
+                    cmd_apply(config, workspace="test")
         assert mock_apply.call_args.args[2] == ws_dir.resolve()
 
     def test_cmd_apply_with_workspace_name_not_found(self, tmp_path, capsys, config):
@@ -89,9 +98,10 @@ class TestCmdApplyFailedRepos:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {"enterprise": "unreachable"}),
             ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    with pytest.raises(SystemExit) as exc:
-                        cmd_apply(config_with_remotes)
+                with patch("ow.commands.apply.apply_templates", return_value=RenderResult()):
+                    with patch("ow.commands.apply.rendered_states", return_value=[]):
+                        with pytest.raises(SystemExit) as exc:
+                            cmd_apply(config_with_remotes)
 
         assert exc.value.code == 1
 
@@ -102,9 +112,10 @@ class TestCmdApplyFailedRepos:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {"enterprise": "unreachable"}),
             ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    with pytest.raises(SystemExit) as exc:
-                        cmd_apply(config_with_remotes)
+                with patch("ow.commands.apply.apply_templates", return_value=RenderResult()):
+                    with patch("ow.commands.apply.rendered_states", return_value=[]):
+                        with pytest.raises(SystemExit) as exc:
+                            cmd_apply(config_with_remotes)
 
         assert exc.value.code == 1
         out = capsys.readouterr().out
@@ -118,8 +129,9 @@ class TestCmdApplyFailedRepos:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community", "enterprise"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    cmd_apply(config_with_remotes)
+                with patch("ow.commands.apply.apply_templates", return_value=RenderResult()):
+                    with patch("ow.commands.apply.rendered_states", return_value=[]):
+                        cmd_apply(config_with_remotes)
 
         assert f"Workspace '{ws_dir.name}' applied." in capsys.readouterr().out
 
@@ -152,8 +164,9 @@ class TestCmdApplyVarBackfill:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    cmd_apply(config)
+                with patch("ow.commands.apply.apply_templates", return_value=RenderResult()):
+                    with patch("ow.commands.apply.rendered_states", return_value=[]):
+                        cmd_apply(config)
 
     def test_apply_does_not_backfill_global_vars(self, tmp_path, config_with_remotes):
         """A var only the global config knows must not land in the workspace file."""
@@ -170,9 +183,13 @@ class TestCmdApplyVarBackfill:
         assert written.vars["http_port"] == 8069
 
 
-
 class TestCmdApplyMiseTrust:
-    """mise trust is a convenience, not a condition of the command succeeding."""
+    """mise trust is a convenience, not a condition of the command succeeding.
+
+    ow no longer writes a single <ws>/mise.toml; it writes fragments under
+    <ws>/mise/ (e.g. mise/conf.d/00-ow.toml). Trust follows whatever the
+    render reports as a file it manages under that prefix.
+    """
 
     def _workspace(self, tmp_path):
         ws_dir = tmp_path / "ws"
@@ -182,8 +199,10 @@ class TestCmdApplyMiseTrust:
             templates=["common"],
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-        (ws_dir / "mise.toml").write_text("[tools]\n")
         return ws_dir
+
+    def _mise_result(self):
+        return RenderResult(managed=["mise/conf.d/00-ow.toml"])
 
     def test_mise_trust_failure_warns_and_still_exits_non_zero_on_repo_error(
         self, tmp_path, capsys, config_with_remotes
@@ -196,16 +215,14 @@ class TestCmdApplyMiseTrust:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, set(), {"community": "clone failed"}),
             ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    with patch(
-                        "ow.commands.apply.run_cmd", side_effect=failure
-                    ):
+                with patch("ow.commands.apply.apply_templates", return_value=self._mise_result()):
+                    with patch("ow.commands.apply.run_cmd", side_effect=failure):
                         with pytest.raises(SystemExit) as exc:
                             cmd_apply(config_with_remotes)
 
         assert exc.value.code == 1
         err = capsys.readouterr().err
-        assert str(ws_dir / "mise.toml") in err
+        assert str(ws_dir / "mise" / "conf.d" / "00-ow.toml") in err
         assert "mise trust" in err
 
     def test_mise_trust_failure_warns_and_still_reports_success_when_no_errors(
@@ -219,15 +236,13 @@ class TestCmdApplyMiseTrust:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    with patch(
-                        "ow.commands.apply.run_cmd", side_effect=failure
-                    ):
+                with patch("ow.commands.apply.apply_templates", return_value=self._mise_result()):
+                    with patch("ow.commands.apply.run_cmd", side_effect=failure):
                         cmd_apply(config_with_remotes)
 
         captured = capsys.readouterr()
         assert "Workspace 'ws' applied." in captured.out
-        assert str(ws_dir / "mise.toml") in captured.err
+        assert str(ws_dir / "mise" / "conf.d" / "00-ow.toml") in captured.err
         assert "mise trust" in captured.err
 
     def test_mise_not_installed_warns_and_carries_on(self, tmp_path, capsys, config_with_remotes):
@@ -238,13 +253,68 @@ class TestCmdApplyMiseTrust:
                 "ow.commands.apply.ensure_workspace_materialized",
                 return_value=(ws_dir, {"community"}, {}),
             ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
+                with patch("ow.commands.apply.apply_templates", return_value=self._mise_result()):
                     with patch(
                         "ow.commands.apply.run_cmd", side_effect=FileNotFoundError("mise")
                     ):
                         cmd_apply(config_with_remotes)
 
         assert "mise trust" in capsys.readouterr().err
+
+    def test_files_outside_mise_are_never_trusted(self, tmp_path, capsys, config_with_remotes):
+        """Only the mise/ prefix is trusted; another managed file must not be."""
+        ws_dir = self._workspace(tmp_path)
+        result = RenderResult(managed=["odoorc", ".zed/settings.json"])
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch(
+                "ow.commands.apply.ensure_workspace_materialized",
+                return_value=(ws_dir, {"community"}, {}),
+            ):
+                with patch("ow.commands.apply.apply_templates", return_value=result):
+                    with patch("ow.commands.apply.run_cmd") as mock_run:
+                        cmd_apply(config_with_remotes)
+
+        mock_run.assert_not_called()
+
+
+class TestCmdApplyLegacyMiseWarning:
+    """A root mise.toml from a pre-rewrite ow shadows mise/conf.d/00-ow.toml."""
+
+    def _workspace(self, tmp_path):
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir(parents=True)
+        ws = WorkspaceConfig(repos={}, templates=["common"])
+        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
+        return ws_dir
+
+    def test_warns_when_an_older_ow_left_a_root_mise_toml(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        legacy_path = ws_dir / "mise.toml"
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
+                with patch("ow.commands.apply.apply_templates", return_value=RenderResult()):
+                    with patch("ow.commands.apply.rendered_states", return_value=[]):
+                        with patch("ow.commands.apply.legacy_mise_toml", return_value=legacy_path):
+                            cmd_apply(config_with_remotes)
+
+        err = capsys.readouterr().err
+        assert f"warning: {legacy_path} was written by an older ow" in err
+        assert "mise/conf.d/00-ow.toml" in err
+        assert "mise.local.toml" in err
+
+    def test_does_not_warn_when_there_is_no_legacy_file(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
+                with patch("ow.commands.apply.apply_templates", return_value=RenderResult()):
+                    with patch("ow.commands.apply.rendered_states", return_value=[]):
+                        with patch("ow.commands.apply.legacy_mise_toml", return_value=None):
+                            cmd_apply(config_with_remotes)
+
+        assert "written by an older ow" not in capsys.readouterr().err
 
 
 class TestCmdApplyCheck:
@@ -267,7 +337,7 @@ class TestCmdApplyCheck:
         ws_dir = self._workspace(tmp_path)
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.apply.warn_if_drifted", return_value=True):
-                with patch("ow.commands.apply.outdated_templates", return_value=[]):
+                with patch("ow.commands.apply.rendered_states", return_value=[]):
                     with pytest.raises(SystemExit) as exc:
                         cmd_apply(config_with_remotes, check=True)
         assert exc.value.code == 1
@@ -276,7 +346,7 @@ class TestCmdApplyCheck:
         ws_dir = self._workspace(tmp_path)
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.apply.warn_if_drifted", return_value=False):
-                with patch("ow.commands.apply.outdated_templates", return_value=[]):
+                with patch("ow.commands.apply.rendered_states", return_value=[]):
                     cmd_apply(config_with_remotes, check=True)
         assert "up to date" in capsys.readouterr().out
 
@@ -284,22 +354,38 @@ class TestCmdApplyCheck:
         ws_dir = self._workspace(tmp_path)
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.apply.warn_if_drifted", return_value=False):
-                with patch("ow.commands.apply.outdated_templates", return_value=[]):
+                with patch("ow.commands.apply.rendered_states", return_value=[]):
                     with patch("ow.commands.apply.ensure_workspace_materialized") as mock_mat:
-                        with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()) as mock_tpl:
+                        with patch("ow.commands.apply.apply_templates", return_value=RenderResult()) as mock_tpl:
                             cmd_apply(config_with_remotes, check=True)
         mock_mat.assert_not_called()
         mock_tpl.assert_not_called()
 
     def test_check_reports_outdated_templates(self, tmp_path, capsys, config_with_remotes):
         ws_dir = self._workspace(tmp_path)
+        stale = [
+            RenderedFile(path="common/odools.toml.j2", state=OUTDATED, ow_text="new", your_text="old"),
+        ]
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.apply.warn_if_drifted", return_value=False):
-                with patch("ow.commands.apply.outdated_templates", return_value=["common/odools.toml.j2"]):
+                with patch("ow.commands.apply.rendered_states", return_value=stale):
                     with pytest.raises(SystemExit) as exc:
                         cmd_apply(config_with_remotes, check=True)
         assert exc.value.code == 1
         assert "common/odools.toml.j2" in capsys.readouterr().out
+
+    def test_check_reports_absent_templates(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        missing = [
+            RenderedFile(path="common/mise/conf.d/00-ow.toml.j2", state=ABSENT, ow_text="new", your_text=None),
+        ]
+        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
+            with patch("ow.commands.apply.warn_if_drifted", return_value=False):
+                with patch("ow.commands.apply.rendered_states", return_value=missing):
+                    with pytest.raises(SystemExit) as exc:
+                        cmd_apply(config_with_remotes, check=True)
+        assert exc.value.code == 1
+        assert "common/mise/conf.d/00-ow.toml.j2" in capsys.readouterr().out
 
     def test_check_exits_nonzero_when_worktree_missing(self, tmp_path, capsys, config_with_remotes):
         """--check exits 1 when a configured repo has no worktree directory."""
@@ -307,7 +393,7 @@ class TestCmdApplyCheck:
         # Workspace has repos configured but no worktree directories exist
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.apply.warn_if_drifted", return_value=False):
-                with patch("ow.commands.apply.outdated_templates", return_value=[]):
+                with patch("ow.commands.apply.rendered_states", return_value=[]):
                     with pytest.raises(SystemExit) as exc:
                         cmd_apply(config_with_remotes, check=True)
         assert exc.value.code == 1
@@ -315,83 +401,23 @@ class TestCmdApplyCheck:
         assert "missing" in err.lower()
         assert "community" in err
 
-
-class TestCmdApplyOrphanFiles:
-    """Files from inactive template bundles must be reported as orphans."""
-
-    def _workspace(self, tmp_path):
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(
-            repos={"community": BranchSpec("origin/master")},
-            templates=["common"],
-        )
-        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-        return ws_dir
-
-    def test_apply_reports_orphan_files_from_inactive_bundles(self, tmp_path, capsys, config_with_remotes):
-        """A file on disk that belongs to a bundle NOT in ws.templates is listed."""
+    def test_check_does_not_fail_on_files_the_user_edited(self, tmp_path, capsys, config_with_remotes):
+        """YOURS is a stable, intended state, not drift: --check must stay green."""
         ws_dir = self._workspace(tmp_path)
-        # Simulate a prior apply that included the vscode template:
-        (ws_dir / ".vscode").mkdir()
-        (ws_dir / ".vscode" / "launch.json").write_text("{}")
-
+        yours = [
+            RenderedFile(path="mise/conf.d/00-ow.toml", state=YOURS, ow_text="ow version", your_text="my version"),
+        ]
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch(
-                "ow.commands.apply.ensure_workspace_materialized",
-                return_value=(ws_dir, {"community"}, {}),
-            ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    cmd_apply(config_with_remotes)
-
+            with patch("ow.commands.apply.warn_if_drifted", return_value=False):
+                with patch("ow.commands.apply.rendered_states", return_value=yours):
+                    cmd_apply(config_with_remotes, check=True)
         out = capsys.readouterr().out
-        assert "Some files may come from templates not in your config" in out
-        assert ".vscode/launch.json" in out
-        assert "[vscode]" in out
-
-    def test_apply_does_not_report_orphans_when_all_bundles_active(self, tmp_path, capsys, config_with_remotes):
-        """No orphan message when every file belongs to an active template."""
-        ws_dir = tmp_path / "ws"
-        ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(
-            repos={"community": BranchSpec("origin/master")},
-            templates=["common", "vscode", "zed", "bwrap"],
-        )
-        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-        # Create a file that belongs to vscode — but vscode IS active
-        (ws_dir / ".vscode").mkdir()
-        (ws_dir / ".vscode" / "launch.json").write_text("{}")
-
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch(
-                "ow.commands.apply.ensure_workspace_materialized",
-                return_value=(ws_dir, {"community"}, {}),
-            ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    cmd_apply(config_with_remotes)
-
-        out = capsys.readouterr().out
-        assert "Some files may come from templates not in your config" not in out
-
-    def test_apply_does_not_report_nonexistent_orphan_files(self, tmp_path, capsys, config_with_remotes):
-        """No orphan message when no files from inactive bundles exist on disk."""
-        ws_dir = self._workspace(tmp_path)
-        # No stale files on disk — workspace is clean
-
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch(
-                "ow.commands.apply.ensure_workspace_materialized",
-                return_value=(ws_dir, {"community"}, {}),
-            ):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    cmd_apply(config_with_remotes)
-
-        out = capsys.readouterr().out
-        assert "Some files may come from templates not in your config" not in out
+        assert "up to date" in out
+        assert "yours, left alone: mise/conf.d/00-ow.toml" in out
 
 
-class TestCmdApplyTemplateSyncReport:
-    """apply reports what materialize_templates did, via the TemplateSync it returns."""
+class TestCmdApplyRenderReport:
+    """apply reports what apply_templates did, via the RenderResult it returns."""
 
     def _workspace(self, tmp_path: Path) -> Path:
         ws_dir = tmp_path / "ws"
@@ -400,55 +426,56 @@ class TestCmdApplyTemplateSyncReport:
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         return ws_dir
 
-    def test_reports_each_copied_file_as_materialised(self, tmp_path, capsys, config_with_remotes):
-        ws_dir = self._workspace(tmp_path)
-        sync = TemplateSync(copied=["common/odoorc.j2"], updated=[], outdated=[])
+    def _apply(self, ws_dir, config, result):
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
             with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
-                with patch("ow.commands.apply.apply_templates", return_value=sync):
-                    cmd_apply(config_with_remotes)
-        assert "materialised common/odoorc.j2" in capsys.readouterr().out
+                with patch("ow.commands.apply.apply_templates", return_value=result):
+                    with patch("ow.commands.apply.rendered_states", return_value=[]):
+                        cmd_apply(config)
+
+    def test_reports_each_written_file(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        self._apply(ws_dir, config_with_remotes, RenderResult(wrote=["common/odoorc.j2"]))
+        assert "wrote common/odoorc.j2" in capsys.readouterr().out
 
     def test_reports_each_updated_file(self, tmp_path, capsys, config_with_remotes):
         ws_dir = self._workspace(tmp_path)
-        sync = TemplateSync(copied=[], updated=["common/mise.toml.j2"], outdated=[])
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
-                with patch("ow.commands.apply.apply_templates", return_value=sync):
-                    cmd_apply(config_with_remotes)
+        self._apply(ws_dir, config_with_remotes, RenderResult(updated=["common/mise.toml.j2"]))
         assert "updated common/mise.toml.j2" in capsys.readouterr().out
 
-    def test_reports_an_outdated_warning_block_ending_with_the_diff_hint(self, tmp_path, capsys, config_with_remotes):
+    def test_reports_files_the_user_edited_and_points_at_diff(self, tmp_path, capsys, config_with_remotes):
         ws_dir = self._workspace(tmp_path)
-        sync = TemplateSync(copied=[], updated=[], outdated=["common/odoorc.j2"])
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
-                with patch("ow.commands.apply.apply_templates", return_value=sync):
-                    cmd_apply(config_with_remotes)
+        self._apply(ws_dir, config_with_remotes, RenderResult(yours=["common/odoorc.j2"]))
         out = capsys.readouterr().out
-        assert "common/odoorc.j2" in out
-        assert "Run `ow templates --diff` to see what changed." in out
+        assert "yours, left alone: common/odoorc.j2" in out
+        assert "run `ow templates --diff` to see what ow would write instead." in out
 
-    def test_stays_quiet_about_outdated_when_nothing_is(self, tmp_path, capsys, config_with_remotes):
+    def test_reports_files_that_rendered_blank(self, tmp_path, capsys, config_with_remotes):
         ws_dir = self._workspace(tmp_path)
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, {"community"}, {})):
-                with patch("ow.commands.apply.apply_templates", return_value=TemplateSync()):
-                    cmd_apply(config_with_remotes)
-        assert "ow templates --diff" not in capsys.readouterr().out
+        self._apply(ws_dir, config_with_remotes, RenderResult(skipped=["vscode/launch.json.j2"]))
+        assert "not rendered (empty): vscode/launch.json.j2" in capsys.readouterr().out
+
+    def test_stays_quiet_about_categories_that_are_empty(self, tmp_path, capsys, config_with_remotes):
+        ws_dir = self._workspace(tmp_path)
+        self._apply(ws_dir, config_with_remotes, RenderResult())
+        out = capsys.readouterr().out
+        assert "ow templates --diff" not in out
+        assert "not rendered" not in out
 
 
 class TestCmdApplyCheckNeverMaterializes:
     """--check is read-only: real code path, no mocked template helpers at all."""
 
-    def test_check_never_creates_the_templates_directory_or_lock(self, tmp_path, capsys, config):
+    def test_check_never_writes_the_rendered_lock(self, tmp_path, capsys, config):
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir(parents=True)
         ws = WorkspaceConfig(repos={}, templates=["common"])
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
 
+        # Nothing is rendered yet, so --check reports what it would write and
+        # goes red. What it must not do is write anything on the way out.
         with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            cmd_apply(config, check=True)
+            with pytest.raises(SystemExit):
+                cmd_apply(config, check=True)
 
-        assert not (ws_dir / ".ow" / "templates").exists()
-        assert not (ws_dir / ".ow" / "templates.lock.toml").exists()
+        assert not (ws_dir / RENDERED_LOCK).exists()

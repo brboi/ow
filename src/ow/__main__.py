@@ -32,7 +32,7 @@ from ow.utils.git import get_all_remote_refs, git
 from ow.utils.legacy import check_legacy_layout
 from ow.utils.paths import config_file
 from ow.utils.resolver import resolve_workspace
-from ow.utils.templates import available_templates
+from ow.utils.templates import selectable_templates
 
 try:
     from ow._version import version as __version__
@@ -132,7 +132,7 @@ def _parse_repo_value(value: list[str] | None) -> dict[str, Any] | None:
 def complete_gen_templates(ctx: typer.Context, incomplete: str) -> list[str]:
     """Tab completion for -t/--template."""
     try:
-        templates = available_templates()
+        templates = selectable_templates()
     except Exception:
         # Completion must never crash the shell, whatever state the config is in.
         templates = []
@@ -414,7 +414,8 @@ def templates(
     diff: bool = typer.Option(False, "--diff", help="Show what ow changed in the files it materialized, against the packaged baseline"),
 ) -> None:
     """List template files and their state."""
-    cmd_templates(workspace=_pick_workspace(workspace, workspace_opt), show_diff=diff)
+    config = _load_config()
+    cmd_templates(config, workspace=_pick_workspace(workspace, workspace_opt), show_diff=diff)
 
 
 @app.command()

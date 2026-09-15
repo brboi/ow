@@ -7,7 +7,6 @@ import pytest
 
 from ow.utils.config import BranchSpec, WorkspaceConfig
 from ow.utils.templates import (
-    TemplateSync,
     _get_packaged_templates,
     _packaged_bundle,
     bundle_source_files,
@@ -122,45 +121,42 @@ class TestApplyTemplatesExtended:
         packaged = _packaged_bundle("common")
         assert packaged is not None
 
-        out = ws_dir / "mise.toml"
-        assert out.stat().st_mode == (packaged / "mise.toml.j2").stat().st_mode
+        out = ws_dir / "mise" / "conf.d" / "00-ow.toml"
+        assert out.stat().st_mode == (packaged / "mise" / "conf.d" / "00-ow.toml.j2").stat().st_mode
         assert not out.stat().st_mode & 0o111
 
 class TestApplyTemplatesCollision:
     """n5: a bundle containing both `foo` and `foo.j2` would write to the same output path."""
 
     def test_collision_between_plain_and_j2_raises(self, tmp_path, config):
+        from ow.utils import paths
+
+        local = paths.templates_dir() / "collider"
+        local.mkdir(parents=True)
+        (local / "foo").write_text("plain\n")
+        (local / "foo.j2").write_text("j2\n")
+
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
         ws = WorkspaceConfig(repos={}, templates=["collider"])
 
-        # Two materialised files that resolve to the same output path.
-        plain = tmp_path / "foo"
-        plain.write_text("plain\n")
-        j2 = tmp_path / "foo.j2"
-        j2.write_text("j2\n")
-        files = {Path("foo"): plain, Path("foo.j2"): j2}
-
-        with patch("ow.utils.templates.materialize_templates", return_value=TemplateSync()):
-            with patch("ow.utils.templates.workspace_template_files", return_value=files):
-                with pytest.raises(ValueError, match="collision"):
-                    apply_templates(ws, config, ws_dir)
+        with pytest.raises(ValueError, match="collision"):
+            apply_templates(ws, config, ws_dir)
 
     def test_no_collision_when_outputs_differ(self, tmp_path, config):
         """Two distinct output paths must not raise, even if the inputs look similar."""
+        from ow.utils import paths
+
+        local = paths.templates_dir() / "safe"
+        local.mkdir(parents=True)
+        (local / "a").write_text("a\n")
+        (local / "b.j2").write_text("b\n")
+
         ws_dir = tmp_path / "ws"
         ws_dir.mkdir()
         ws = WorkspaceConfig(repos={}, templates=["safe"])
 
-        a = tmp_path / "a"
-        a.write_text("a\n")
-        b = tmp_path / "b.j2"
-        b.write_text("b\n")
-        files = {Path("a"): a, Path("b.j2"): b}
-
-        with patch("ow.utils.templates.materialize_templates", return_value=TemplateSync()):
-            with patch("ow.utils.templates.workspace_template_files", return_value=files):
-                with patch("ow.utils.templates.Environment") as mock_env:
-                    mock_env.return_value.get_template.return_value.render.return_value = "rendered"
-                    # Must not raise — outputs are distinct.
-                    apply_templates(ws, config, ws_dir)
+        # Must not raise — outputs are distinct.
+        apply_templates(ws, config, ws_dir)
+        assert (ws_dir / "a").read_text() == "a\n"
+        assert (ws_dir / "b").read_text() == "b\n"
