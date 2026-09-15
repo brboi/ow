@@ -17,7 +17,7 @@ src/
 │   │   ├── prune.py         # cmd_prune
 │   │   ├── rm.py            # cmd_rm — remove a workspace: worktrees, local branches, directory, index entry
 │   │   ├── switch.py        # cmd_switch — git switch across a workspace; all-or-nothing pre-flight, detached specs are pins left alone unless insisted on, config written after the fact
-│   │   └── templates.py     # cmd_templates — list/diff the files materialised in <ws>/.ow/templates
+│   │   └── templates.py     # cmd_templates — list/diff the files ow manages, and their state
 │   ├── utils/               # shared utilities used by commands
 │   │   ├── config.py        # Config dataclasses, TOML loading/writing, BranchSpec, select_aliases
 │   │   ├── display.py       # console, err_console, counts, print_git_result
@@ -33,9 +33,9 @@ src/
 │   │   ├── switch_plan.py   # SwitchFacts, SwitchPlan, plan_switch (pure)
 │   │   ├── askpass.py       # SSH_ASKPASS broker: git children ask ow, ow asks the terminal
 │   │   ├── resolver.py      # resolve_workspace
-│   │   └── templates.py     # file generators, materialisation into <ws>/.ow/templates, rendering
+│   │   └── templates.py     # bundle discovery, direct rendering, output lock, ensure_workspace_materialized
 │   └── _static/
-│       ├── templates/       # bundled template files (bwrap, common, vscode, zed)
+│       ├── templates/       # bundled template files (bwrap, common, odoo, vscode, zed)
 │       └── services/        # bundled service files (compose.yml, etc.)
 ├── tests/
 │   ├── __init__.py
@@ -55,7 +55,7 @@ pyproject.toml
 AGENTS.md
 ```
 
-`ow/__main__.py` is the CLI entry point. There is no project root to find: every command that needs configuration loads the same global one via `load_global_config()`, `init` included, bootstrapping a default `config.toml` on first use. Only `ls` and `templates` skip it, because neither reads it.
+`ow/__main__.py` is the CLI entry point. There is no project root to find: every command that needs configuration loads the same global one via `load_global_config()`, `init` included, bootstrapping a default `config.toml` on first use. Only `ls` skips it, because it doesn't read it.
 
 ## Key abstractions
 
@@ -81,7 +81,7 @@ AGENTS.md
   - `askpass.py` — `broker()`, `child_env()`. Every git child runs in its own session and so has no controlling terminal; ssh therefore falls back to `SSH_ASKPASS`. The broker points it at a generated shim that forwards the prompt over a Unix socket to ow, which still owns the terminal. Prompts are serialised and answers cached per run. Entered once, in `__main__.main()`.
   - `resolver.py` — `resolve_workspace(name=None)` resolves a workspace: an explicit path, an explicit name (looked up via the index), the `OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml`. One rule, four branches, no fallback between them. `repo_from_cwd(ws_dir, aliases)` continues that walk one level down — which repo of the workspace the cwd sits in, if any.
   - `switch_plan.py` — `SwitchFacts`, `SwitchPlan`, `plan_switch` — pure analysis functions for switch planning, including the DWIM ow performs in git's place.
-  - `templates.py` — `is_odoo_main_repo`, `find_addon_paths`, `build_template_context`, `materialize_templates`, `apply_templates`, `template_states`, `outdated_templates`, `workspace_template_files`, `bundle_source_files`, `ensure_workspace_materialized`, `available_templates`. Bundles are copied into `<ws>/.ow/templates/<bundle>/` and rendered from there; `<ws>/.ow/templates.lock.toml` records the sha256 of each copied source, which is what tells an untouched copy (ow overwrites it) from an edited one (ow never does).
+  - `templates.py` — `is_odoo_main_repo`, `find_addon_paths`, `build_template_context`, `is_odoo_workspace`, `effective_bundles`, `available_templates`, `selectable_templates`, `bundle_source_files`, `apply_templates`, `rendered_states`, `legacy_mise_toml`, `ensure_workspace_materialized`, `ensure_services_compose`. `effective_bundles` is the three axes: `IMPLICIT_BUNDLE` (`"common"`) always, `ODOO_BUNDLE` (`"odoo"`) when `is_odoo_workspace`, plus whatever `WorkspaceConfig.templates` names. `apply_templates` renders each bundle's files straight from its packaged (or user-overridden) source and compares the bytes against `<ws>/.ow/rendered.lock.toml` (`RENDERED_LOCK`), which is keyed by output path, not by source — a file matching the lock is ow's and gets rewritten when the render changes, a file that doesn't is the user's and is never touched again. A template rendering to nothing but whitespace writes (and deletes) no file.
 
 ## Commands
 
@@ -89,7 +89,7 @@ AGENTS.md
 |---------|-----------|---------|
 | `ow (bare)` | `run_dashboard(config)` | Launches the interactive dashboard (TTY only) |
 | `ow init` | `cmd_init(config, name=None, templates=None, repos=None, configuration=None)` | Create a workspace in the current directory, or in `./NAME` — interactive form, or flags-only when stdin isn't a terminal |
-| `ow apply` | `cmd_apply(config, workspace=None, *, check=False)` | Materialize worktrees, materialise templates into `.ow/templates`, re-render them; `--check` reports without writing |
+| `ow apply` | `cmd_apply(config, workspace=None, *, check=False)` | Materialize worktrees, render each effective bundle's templates and write/update files per the output lock; `--check` reports without writing |
 | `ow status` | `cmd_status(config, workspace=None)` | Show workspace branch status |
 | `ow rebase` | `cmd_rebase(config, workspace=None, *, only=None, autostash=False, dry_run=False, yes=False)` | Fetch + rebase workspace branches |
 | `ow pull` | `cmd_pull(config, workspace=None, *, only=None, dry_run=False)` | Fetch, then fast-forward each repo — or replay it on its own upstream, `git pull --rebase` style. Never moves a repo off its base ref; that stays `ow rebase` |
@@ -98,11 +98,11 @@ AGENTS.md
 | `ow fetch` | `cmd_fetch(config, workspace=None, *, only=None)` | Refresh the refs a workspace follows — `git fetch` into the bare repos, reporting what arrived (`+N`, `up to date`, `force-pushed`). No worktree moves; `--only` narrows the network work |
 | `ow prune` | `cmd_prune(config)` | Clean up stale worktree references, orphaned branches, dead index entries |
 | `ow rm` | `cmd_rm(name, *, yes=False)` | Remove a workspace: worktrees, local branches, directory, index entry |
-| `ow templates` | `cmd_templates(workspace=None, *, show_diff=False)` | List the files materialised in `<ws>/.ow/templates` with their state, or diff the outdated ones |
+| `ow templates` | `cmd_templates(config, workspace=None, *, show_diff=False)` | List the files ow manages in a workspace with their state (`up to date`, `outdated`, `yours`, `absent`, `not rendered`), or diff the ones that differ |
 
-Every command except `ls`, `templates`, and `rm` loads the same global config; those three read the
-index, the workspace configs and the template files, none of which need it — so on a machine
-with no `config.toml` yet, none creates one. Every command with an optional workspace resolves it
+Every command except `ls` and `rm` loads the same global config; those two read the index and
+the workspace configs, neither of which needs it — so on a machine with no `config.toml` yet,
+neither creates one. Every command with an optional workspace resolves it
 via `resolve_workspace(workspace)` — an explicit path or name, the `OW_WORKSPACE` env var, or a
 cwd walk-up for `.ow/config.toml` — and each accepts that workspace either positionally or as
 `-w/--workspace`; passing both with different values is an error. `init` resolves its target
@@ -128,14 +128,30 @@ into the TUI's log pane.
 
 ## Template system
 
-Workspace files are generated from bundled templates in `ow/_static/templates/`. Each subdirectory is a template bundle. Workspaces declare templates via the `templates` field (required array). Templates are applied in order — later templates can override files from earlier ones.
+Workspace files are generated from bundled templates in `ow/_static/templates/`. Each
+subdirectory is a template bundle. Three axes decide which bundles apply to a workspace, with no
+overlap: `common` (`IMPLICIT_BUNDLE`) renders for every workspace and is never declared; `odoo`
+(`ODOO_BUNDLE`) renders exactly when `is_odoo_workspace` finds a worktree matching
+`is_odoo_main_repo`, and is never declared either; everything else — `vscode`, `zed`, `bwrap`,
+custom bundles — comes from `WorkspaceConfig.templates`. `effective_bundles` computes the union
+in that order.
 
-Nothing is rendered from the packaged tree directly: `ow init` and `ow apply` first copy each declared bundle into `<ws>/.ow/templates/<bundle>/`, recording the sha256 of every source in `<ws>/.ow/templates.lock.toml`, and render from that copy. The lock is the baseline — a copy still matching it is ow's and gets overwritten when the source moves, a copy that differs was edited by the user and is never touched (only reported `outdated` when the source moved too). A workspace created before 2.4.0 simply has nothing materialised yet, which is the copy-everything case.
+Nothing is copied into the workspace: `ow` renders each effective bundle's files straight from
+`ow/_static/templates/<bundle>/`, overridden per file by `$XDG_CONFIG_HOME/ow/templates/<bundle>/`
+when present, and compares the render against `<ws>/.ow/rendered.lock.toml` (keyed by output
+path, sha256 of what `ow` wrote). Absent, it's written; matching the lock, it's `ow`'s and gets
+rewritten when the render changes; present but not matching the lock, it's the user's and is
+never written again. A template rendering to nothing but whitespace writes no file — and never
+deletes one written before, ow deletes nothing — which is how `launch.json`/`debug.json` stay
+absent outside an Odoo workspace. `<ws>/.ow/templates/` and `<ws>/.ow/templates.lock.toml` no
+longer exist; a workspace
+from before this model just has dead files there that nothing reads.
 
 Bundled templates (git-tracked):
-- `_static/templates/common/` — core files: mise.toml, odoorc, odools.toml, pyrightconfig.json, requirements-dev.txt
-- `_static/templates/vscode/.vscode/` — VSCode settings and debug config
-- `_static/templates/zed/.zed/` — Zed settings and debug config
+- `_static/templates/common/` — `mise/conf.d/00-ow.toml`
+- `_static/templates/odoo/` — `odoorc`, `odools.toml`, `pyrightconfig.json`, `requirements-dev.txt`
+- `_static/templates/vscode/.vscode/` — VSCode settings and debug config (debug config renders empty outside an Odoo workspace)
+- `_static/templates/zed/.zed/` — Zed settings and debug config (debug config renders empty outside an Odoo workspace)
 - `_static/templates/bwrap/` — sandbox scripts for AI coding assistants (bwrap-opencode, bwrap-claude)
 
 Templates are Jinja2 (`.j2` extension); static files are copied as-is.
@@ -146,7 +162,7 @@ Template context keys:
 - `addons_paths` — ordered list of absolute addon paths
 - `odools_path_items` — relative paths for odools.toml
 - `repos` — list of repo aliases
-- `main_repo_alias` — alias of the Odoo core repo (has `odoo-bin`), or `None`
+- `main_repo_alias` — alias of the Odoo core repo (has `odoo-bin`), or `None` outside an Odoo workspace
 
 ## Conventions
 
@@ -154,5 +170,5 @@ Template context keys:
 - A workspace is any directory holding a `.ow/config.toml`, created by `ow init` in the current directory or in `./NAME` (mirrors `git init`). There is no project root and no fixed `workspaces/` parent; subdirs inside a workspace match repo aliases.
 - `community` is always the Odoo core repo; its addons are at `community/addons` and `community/odoo/addons` (relative to the workspace directory). Note that `community` is the default proposed alias for the main `odoo/odoo` repository, but it can be changed. There is `is_odoo_main_repo` that is made to discover which repo is the main.
 - Configuration is global and machine-wide: `$XDG_CONFIG_HOME/ow/config.toml` (bootstrapped with a commented default on first use). Contains `[vars]` and `[remotes]`. No workspace declarations. Its `[vars]` are initial values: `ow init` copies them into the new workspace, and no existing workspace ever reads them again.
-- Each workspace has its own `.ow/config.toml` file that stores its config: templates, repos, vars. Its name is not stored — it is the workspace directory's own name. Next to it live `.ow/templates/` (the materialised bundles, which is what rendering reads) and `.ow/templates.lock.toml`.
-- `$XDG_CONFIG_HOME/ow/templates/` contains user-local template bundles that override the packaged ones per file at materialisation time; subdirectories like `common/`, `vscode/`, `zed/` follow the same layout as `ow/_static/templates/`.
+- Each workspace has its own `.ow/config.toml` file that stores its config: templates, repos, vars. Its name is not stored — it is the workspace directory's own name. Next to it lives `.ow/rendered.lock.toml`, the sha256 of every file `ow` has written there.
+- `$XDG_CONFIG_HOME/ow/templates/` contains user-local template bundles that override the packaged ones per file at render time; subdirectories like `common/`, `odoo/`, `vscode/`, `zed/` follow the same layout as `ow/_static/templates/`.
