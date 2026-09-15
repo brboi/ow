@@ -21,7 +21,7 @@
 | `ow cd` | `[workspace]`, `-w/--workspace` | Print a workspace path — with `ow shell-init`, changes directory |
 | `ow shell-init` | `<shell>` | Print the shell snippet that makes `ow cd` change directory |
 | `ow open` | `[workspace]`, `-w/--workspace` | Open a workspace in the configured editor |
-| `ow templates` | `[workspace]`, `-w/--workspace`, `--diff` | List a workspace's template files and their state, or diff the outdated ones |
+| `ow templates` | `[workspace]`, `-w/--workspace`, `--diff` | List the files `ow` manages in a workspace and their state, or diff the ones that differ |
 A command that takes a `[workspace]` resolves it in exactly one of four forms, never falling
 back from one to the next:
 
@@ -69,16 +69,18 @@ the command exits non-zero — the workspace exists, but it is not the one you a
 Re-renders templates and materializes worktrees for a workspace: creates any missing worktree,
 reconciles attached/detached state for existing ones, and renders the services compose file.
 Useful after changing templates or the global config without recreating the workspace. `--check`
-reports drift and outdated templates without modifying anything, and exits non-zero if either is
-found — for scripts and pre-commit hooks.
+reports what would change without writing anything, and exits non-zero if a repo has drifted or
+if any file `ow` writes or rewrites would change — never for a file that is yours, since `ow`
+wouldn't touch it anyway.
 
-Each template file is copied into `<ws>/.ow/templates/<bundle>/<relpath>` before it is rendered;
-`ow apply` prints `materialised <name>` the first time a file lands there, and `updated <name>`
-when it overwrites a copy you never touched whose source has since moved. A copy you edited
-yourself is never touched — silently, if `ow`'s source hasn't moved either, or flagged with a
-pointer to `ow templates --diff` if it has.
-Files left over from a template bundle you've since removed from your config are listed as
-orphans — remove them manually if stale.
+Each file `ow` manages is rendered straight from its packaged (or user-overridden) template and
+compared against `<ws>/.ow/rendered.lock.toml`: absent, it is written and printed `wrote <name>`;
+matching the lock but stale relative to the current render, it is rewritten and printed
+`updated <name>`; present but not matching the lock, it is yours, and `ow` leaves it alone,
+silently. A template that renders nothing but whitespace writes no file, and does not remove one
+left by an earlier render either — `ow` never deletes a workspace file — so a workspace with no
+Odoo checkout ends up with neither `.vscode/launch.json` nor `.zed/debug.json`. See
+[Template System](templates.md) for the three axes that decide which bundles apply.
 Like `ow init` and `ow rebase`, `ow apply` exits non-zero when any repo failed, even though
 everything else — templates, vars, the repos that worked — is applied.
 
@@ -472,19 +474,19 @@ to parse shows as an error in place of its repos rather than aborting the listin
 
 ## `ow templates`
 
-Lists every template file materialised into one workspace, with its state:
+Lists every file `ow` manages in one workspace, with its state:
 
-- `up to date` — your copy matches what `ow` copied it from
-- `modified` — you edited it, and `ow`'s source hasn't moved since
-- `outdated` — you edited it, and `ow`'s source has moved since; `ow apply` leaves it alone
-  either way, so this is the one state you have to reconcile by hand
-- `unlocked` — the file has no lock entry, because you (or something else) added it directly;
-  `ow` never touches it and never reports it as anything else
+- `up to date` — the file matches what `ow` would render right now
+- `outdated` — `ow` wrote this file before, but the render has since changed; the next
+  `ow apply` rewrites it
+- `yours` — the file doesn't match `ow`'s lock; you edited it (or wrote it yourself), and `ow`
+  will never touch it again
+- `absent` — `ow` would write this file, and it isn't there yet
+- `not rendered` — the template renders nothing but whitespace for this workspace (for example
+  `launch.json` outside an Odoo workspace), so there is no file to manage
 
-Owning a template now means editing its copy directly, under
-`<ws>/.ow/templates/<bundle>/<relpath>`. `--diff` prints a unified diff, from your copy
-(`(yours)`) to `ow`'s current source (`(ow)`), for every outdated file. See
-[Template System](templates.md).
+`--diff` prints a unified diff, from your file (`(yours)`) to what `ow` would write (`(ow)`), for
+every file that differs. See [Template System](templates.md).
 
 ## Tab Completion
 
