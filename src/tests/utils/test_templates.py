@@ -1432,6 +1432,63 @@ class TestRenderedLock:
         assert (ws_dir / "greeting.txt").read_text() == "hello\n"
         assert result.wrote == ["greeting.txt"]
 
+    def test_a_locked_output_no_bundle_renders_any_more_is_named_not_removed(
+        self, xdg, tmp_path, config
+    ):
+        """The bundle drops a file: the lock still remembers it, the file is
+        still on disk, and ow says so instead of going quiet about it."""
+        local = self._local_bundle()
+        (local / "kept.txt").write_text("kept\n")
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
+
+        (local / "greeting.txt").unlink()
+        result = apply_templates(ws, config, ws_dir)
+
+        assert (ws_dir / "greeting.txt").read_text() == "hello\n"
+        assert self._own(result.skipped) == ["greeting.txt"]
+        assert self._own(result.managed) == []
+        assert self._own(result.wrote) == []
+        assert self._own(result.updated) == []
+
+    def test_a_bundle_no_longer_declared_keeps_its_files_and_stops_rendering_them(
+        self, xdg, tmp_path, config
+    ):
+        """Undeclaring a bundle is not a delete: the lock still knows the
+        files, and ow names them instead of leaving them unexplained."""
+        local = self._local_bundle()
+        (local / "kept.txt").write_text("kept\n")
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
+
+        undeclared = WorkspaceConfig(repos={}, templates=[])
+        result = apply_templates(undeclared, config, ws_dir)
+
+        assert (ws_dir / "greeting.txt").read_text() == "hello\n"
+        assert self._own(result.skipped) == ["greeting.txt"]
+        assert self._own(result.managed) == []
+
+        states = {f.path: f for f in rendered_states(undeclared, config, ws_dir)}
+        assert states["greeting.txt"].state == NOT_RENDERED
+
+    def test_a_retired_output_that_comes_back_is_ows_again(self, xdg, tmp_path, config):
+        """The lock entry is kept, not pruned: the file is still the one ow
+        wrote, so a bundle that ships it again may move it — exactly like any
+        other output ow owns and you have not touched."""
+        local = self._local_bundle()
+        (local / "kept.txt").write_text("kept\n")
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
+
+        (local / "greeting.txt").unlink()
+        apply_templates(ws, config, ws_dir)
+
+        (local / "greeting.txt").write_text("goodbye\n")
+        result = apply_templates(ws, config, ws_dir)
+
+        assert (ws_dir / "greeting.txt").read_text() == "goodbye\n"
+        assert self._own(result.updated) == ["greeting.txt"]
+
     def test_whitespace_only_render_writes_nothing(self, xdg, tmp_path, config):
         from ow.utils import paths
 
@@ -1462,6 +1519,7 @@ class TestRenderedStates:
         (local / "outdated.txt").write_text("original\n")
         (local / "absent.txt").write_text("original\n")
         (local / "blank.txt.j2").write_text("   \n")
+        (local / "retired.txt").write_text("retired\n")
         return local
 
     def _ws(self, tmp_path: Path) -> tuple[WorkspaceConfig, Path]:
@@ -1505,6 +1563,39 @@ class TestRenderedStates:
         assert (ws_dir / "up_to_date.txt").stat().st_mtime_ns == file_mtime_before
         assert (ws_dir / RENDERED_LOCK).read_bytes() == lock_before
         assert (ws_dir / RENDERED_LOCK).stat().st_mtime_ns == lock_mtime_before
+
+    def test_a_retired_output_is_not_rendered_and_still_named(self, xdg, tmp_path, config):
+        """Nothing renders it any more, but it is on disk and it is ow's
+        output: the state says so rather than pretending the file is not
+        there."""
+        local = self._local_bundle()
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
+
+        (local / "retired.txt").unlink()
+        states = {f.path: f for f in rendered_states(ws, config, ws_dir)}
+
+        retired = states["retired.txt"]
+        assert retired.state == NOT_RENDERED
+        assert retired.ow_text is None
+        assert retired.your_text == "retired\n"
+        assert (ws_dir / "retired.txt").read_text() == "retired\n"
+
+    def test_a_retired_output_whose_file_is_gone_is_not_named(self, xdg, tmp_path, config):
+        """A lock entry with nothing behind it is a tombstone, and a file ow
+        never rendered is the user's: neither belongs in the list."""
+        local = self._local_bundle()
+        ws, ws_dir = self._ws(tmp_path)
+        apply_templates(ws, config, ws_dir)
+
+        (local / "retired.txt").unlink()
+        (ws_dir / "retired.txt").unlink()
+        (ws_dir / "notes.txt").write_text("mine\n")
+
+        names = {f.path for f in rendered_states(ws, config, ws_dir)}
+
+        assert "retired.txt" not in names
+        assert "notes.txt" not in names
 
 
 # ---------------------------------------------------------------------------

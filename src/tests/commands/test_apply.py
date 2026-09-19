@@ -450,10 +450,10 @@ class TestCmdApplyRenderReport:
         assert "yours, left alone: common/odoorc.j2" in out
         assert "run `ow templates --diff` to see what ow would write instead." in out
 
-    def test_reports_files_that_rendered_blank(self, tmp_path, capsys, config_with_remotes):
+    def test_reports_the_paths_it_did_not_render(self, tmp_path, capsys, config_with_remotes):
         ws_dir = self._workspace(tmp_path)
-        self._apply(ws_dir, config_with_remotes, RenderResult(skipped=["vscode/launch.json.j2"]))
-        assert "not rendered (empty): vscode/launch.json.j2" in capsys.readouterr().out
+        self._apply(ws_dir, config_with_remotes, RenderResult(skipped=["vscode/launch.json"]))
+        assert "not rendered: vscode/launch.json" in capsys.readouterr().out
 
     def test_stays_quiet_about_categories_that_are_empty(self, tmp_path, capsys, config_with_remotes):
         ws_dir = self._workspace(tmp_path)

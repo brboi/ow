@@ -67,7 +67,11 @@ def cmd_apply(config: Config, workspace: str | None = None, *, check: bool = Fal
         print("yours, left alone: " + ", ".join(result.yours))
         print("run `ow templates --diff` to see what ow would write instead.")
     if result.skipped:
-        print("not rendered (empty): " + ", ".join(result.skipped))
+        # Two kinds of path land here: a template that renders nothing for
+        # this workspace, and a path ow wrote before that no current bundle
+        # produces. Neither is written, neither is deleted, and calling the
+        # second one "empty" would describe a file sitting right there.
+        print("not rendered: " + ", ".join(result.skipped))
 
     legacy = legacy_mise_toml(ws_dir)
     if legacy is not None:
