@@ -409,7 +409,11 @@ def cmd_init(
     _check_duplicate_branches(ws.repos)
 
     print(f"\nWorkspace '{ws_dir.name}' will be created in {ws_dir} with:")
-    print(f"  Templates: {', '.join(ws.templates)}")
+    # Nothing declared is the normal case — common is always applied and odoo
+    # follows from the repos — but "Templates: " with nothing after it reads
+    # like a bug rather than a choice.
+    declared = ", ".join(ws.templates) if ws.templates else "(none declared — common is always applied)"
+    print(f"  Templates: {declared}")
     for alias, spec in ws.repos.items():
         print(f"  {alias}: {spec.to_spec_str()}")
     if ws.vars:
