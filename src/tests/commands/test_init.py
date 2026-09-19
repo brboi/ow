@@ -1,5 +1,6 @@
 import subprocess
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ from ow.utils.config import (
     parse_branch_spec,
     write_workspace_config,
 )
+from ow.utils.templates import RenderResult
 
 
 def _make_config(vars=None, remotes=None) -> Config:
@@ -78,10 +80,15 @@ def _prompt_answers(templates=("vscode",), aliases=("community",), spec="master"
 
 @contextmanager
 def _no_git(ws_dir, errors=None):
-    """Skip the real worktree work; keep the .ow/config.toml write real."""
+    """Skip the real worktree work; keep the .ow/config.toml write real.
+
+    The render is stubbed with an empty result — no file rendered, so nothing
+    to trust — rather than a bare MagicMock whose `managed` happens to be
+    empty by accident.
+    """
     with (
         patch("ow.commands.init.ensure_workspace_materialized", return_value=(ws_dir, set(), errors or {})),
-        patch("ow.commands.init.apply_templates"),
+        patch("ow.commands.init.apply_templates", return_value=RenderResult()),
         patch("ow.commands.init.run_cmd"),
     ):
         yield
@@ -761,17 +768,57 @@ def test_init_survives_an_indexed_workspace_with_a_corrupt_config(tmp_path, monk
 # mise trust is a convenience, not a condition of the workspace existing
 # ---------------------------------------------------------------------------
 
+MISE_FRAGMENT = Path("mise") / "conf.d" / "00-ow.toml"
+
+
 @contextmanager
-def _workspace_with_a_mise_toml(ws_dir, trust_raises):
-    """A workspace whose mise.toml exists and whose `mise trust` fails."""
-    ws_dir.mkdir(parents=True, exist_ok=True)
-    (ws_dir / "mise.toml").write_text("[tools]\n")
+def _fresh_init(ws_dir, trust_effect=None):
+    """Let the real render run; intercept only `mise trust`.
+
+    Git is out of the picture and apply_templates is not stubbed: a fresh
+    init has to render the fragment it then trusts, which is exactly what
+    `RenderResult.managed` exists to name.
+    """
     with (
         patch("ow.commands.init.ensure_workspace_materialized", return_value=(ws_dir, set(), {})),
-        patch("ow.commands.init.apply_templates"),
-        patch("ow.commands.init.run_cmd", side_effect=trust_raises),
+        patch("ow.commands.init.run_cmd", side_effect=trust_effect) as run_cmd_mock,
     ):
-        yield
+        yield run_cmd_mock
+
+
+def test_init_trusts_the_mise_fragment_it_just_rendered(tmp_path, monkeypatch, config_with_remotes):
+    """The fragment ow writes is the fragment mise must be told about: a
+    fresh init renders mise/conf.d/00-ow.toml and trusts it straight away."""
+    monkeypatch.chdir(tmp_path)
+
+    with _tty(False), _prompt_answers(), _fresh_init(tmp_path / "parrot") as run_cmd_mock:
+        cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
+
+    fragment = tmp_path / "parrot" / MISE_FRAGMENT
+    assert fragment.is_file()
+    assert ["mise", "trust", str(fragment)] in [call.args[0] for call in run_cmd_mock.call_args_list]
+
+
+def test_init_trusts_nothing_when_rendering_failed(tmp_path, monkeypatch, capsys, config_with_remotes):
+    """A render that raised leaves no result to vouch for the fragment, so
+    nothing is trusted; `ow apply` does it once the workspace is fixed."""
+    monkeypatch.chdir(tmp_path)
+
+    with (
+        _tty(False),
+        _prompt_answers(),
+        patch("ow.commands.init.ensure_workspace_materialized", return_value=(tmp_path, set(), {})),
+        patch("ow.commands.init.apply_templates", side_effect=RuntimeError("jinja boom")),
+        patch("ow.commands.init.run_cmd") as mock_run,
+        pytest.raises(SystemExit) as exc,
+    ):
+        cmd_init(config_with_remotes, repos=dict(ONE_REPO))
+
+    assert exc.value.code == 1
+    mock_run.assert_not_called()
+    captured = capsys.readouterr()
+    assert "jinja boom" in captured.err
+    assert "created with errors" in captured.out
 
 
 def test_init_keeps_the_workspace_when_mise_trust_fails(tmp_path, monkeypatch, capsys, config_with_remotes):
@@ -780,12 +827,12 @@ def test_init_keeps_the_workspace_when_mise_trust_fails(tmp_path, monkeypatch, c
     monkeypatch.chdir(tmp_path)
     failure = subprocess.CalledProcessError(1, ["mise", "trust"])
 
-    with _tty(False), _prompt_answers(), _workspace_with_a_mise_toml(ws_dir, failure):
+    with _tty(False), _prompt_answers(), _fresh_init(ws_dir, failure):
         cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [ws_dir.resolve()]
     err = capsys.readouterr().err
-    assert str(ws_dir / "mise.toml") in err
+    assert str(ws_dir / MISE_FRAGMENT) in err
     assert "mise trust" in err
 
 
@@ -793,11 +840,13 @@ def test_init_survives_mise_not_being_installed(tmp_path, monkeypatch, capsys, c
     ws_dir = tmp_path / "parrot"
     monkeypatch.chdir(tmp_path)
 
-    with _tty(False), _prompt_answers(), _workspace_with_a_mise_toml(ws_dir, FileNotFoundError("mise")):
+    with _tty(False), _prompt_answers(), _fresh_init(ws_dir, FileNotFoundError("mise")):
         cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
 
     assert index.known_workspaces() == [ws_dir.resolve()]
-    assert "mise trust" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert str(ws_dir / MISE_FRAGMENT) in err
+    assert "mise trust" in err
 
 
 def test_init_remembers_the_workspace_before_it_reaches_mise(tmp_path, monkeypatch, config_with_remotes):
@@ -808,7 +857,7 @@ def test_init_remembers_the_workspace_before_it_reaches_mise(tmp_path, monkeypat
     with (
         _tty(False),
         _prompt_answers(),
-        _workspace_with_a_mise_toml(ws_dir, KeyboardInterrupt),
+        _fresh_init(ws_dir, KeyboardInterrupt),
         pytest.raises(KeyboardInterrupt),
     ):
         cmd_init(config_with_remotes, name="parrot", repos=dict(ONE_REPO))
