@@ -14,7 +14,7 @@ import difflib
 from ow.utils.config import Config
 from ow.utils.legacy import check_legacy_layout
 from ow.utils.resolver import resolve_workspace
-from ow.utils.templates import OUTDATED, YOURS, RenderedFile, rendered_states
+from ow.utils.templates import ABSENT, OUTDATED, YOURS, RenderedFile, rendered_states
 
 
 def _list(states: list[RenderedFile]) -> None:
@@ -26,17 +26,44 @@ def _list(states: list[RenderedFile]) -> None:
         print(f"{s.path.ljust(width)}  {s.state}")
 
 
+def _binary_note(s: RenderedFile) -> str:
+    """One line for a file whose bytes are not text, so no line diff exists.
+
+    `None` text means binary here, never an absent or empty file: a missing
+    file is the state's business, and a line diff is only out of reach when
+    a side the reader can see has no lines.
+    """
+    if s.state == ABSENT:
+        return f"{s.path}: binary file, ow would write it (absent)"
+    if s.ow_text is None:
+        return f"{s.path}: binary file, differs from yours"
+    return f"{s.path}: yours is not text, ow would write text"
+
+
 def _diff(states: list[RenderedFile]) -> None:
-    diffable = [s for s in states if s.state in (YOURS, OUTDATED)]
+    """What ow would change, line by line wherever both sides are text.
+
+    An output that is not there yet is a change like any other: it is diffed
+    against `/dev/null`, which is the file the addition would be made to.
+    `not rendered` is not in this list on purpose — a template rendering
+    nothing but whitespace proposes no file, so it proposes no change.
+    """
+    diffable = [s for s in states if s.state in (YOURS, OUTDATED, ABSENT)]
     if not diffable:
         print("nothing differs from what ow would write.")
         return
     for s in diffable:
-        assert s.your_text is not None and s.ow_text is not None
+        if s.state == ABSENT:
+            yours, fromfile = "", "/dev/null"
+        else:
+            yours, fromfile = s.your_text, f"{s.path} (yours)"
+        if s.ow_text is None or yours is None:
+            print(_binary_note(s))
+            continue
         lines = difflib.unified_diff(
-            s.your_text.splitlines(keepends=True),
+            yours.splitlines(keepends=True),
             s.ow_text.splitlines(keepends=True),
-            fromfile=f"{s.path} (yours)",
+            fromfile=fromfile,
             tofile=f"{s.path} (ow)",
         )
         for line in lines:
