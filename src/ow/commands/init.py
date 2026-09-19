@@ -21,6 +21,7 @@ from ow.utils.display import console, err_console
 from ow.utils.templates import (
     IMPLICIT_BUNDLE,
     ODOO_BUNDLE,
+    RenderResult,
     apply_templates,
     ensure_services_compose,
     ensure_workspace_materialized,
@@ -444,22 +445,28 @@ def cmd_init(
 
     ensure_services_compose()
 
-    template_error = None
+    # `render is None` is the one signal that rendering failed: the result
+    # both vouches for what landed and says whether anything did.
+    render: RenderResult | None = None
     try:
-        apply_templates(ws, config, ws_dir)
+        render = apply_templates(ws, config, ws_dir)
     except Exception as exc:
-        template_error = exc
         print(f"\nWarning: template rendering failed: {exc}", file=sys.stderr)
 
-    mise_toml = ws_dir / "mise.toml"
-    if mise_toml.exists():
-        try:
-            run_cmd(["mise", "trust", str(mise_toml)], check=True)
-        except (OSError, subprocess.CalledProcessError) as e:
-            print(f"\nWarning: could not trust {mise_toml}: {e}", file=sys.stderr)
-            print(f"  Run it yourself when mise is happy: mise trust {mise_toml}", file=sys.stderr)
+    # The fragments ow renders under mise/ need trusting, and `managed` names
+    # them without reading the lock back — the same path policy as `ow apply`.
+    # A render that raised leaves no result to vouch for what landed: nothing
+    # is trusted here, and `ow apply` does it once the workspace is fixed.
+    if render is not None:
+        mise_fragments = [ws_dir / path for path in render.managed if path.startswith("mise/")]
+        for mise_toml in mise_fragments:
+            try:
+                run_cmd(["mise", "trust", str(mise_toml)], check=True)
+            except (OSError, subprocess.CalledProcessError) as e:
+                print(f"\nWarning: could not trust {mise_toml}: {e}", file=sys.stderr)
+                print(f"  Run it yourself when mise is happy: mise trust {mise_toml}", file=sys.stderr)
 
-    if errors or template_error:
+    if errors or render is None:
         print(f"\nWorkspace '{ws_dir.name}' created with errors. Fix issues and run: ow apply")
     else:
         print(f"\nWorkspace '{ws_dir.name}' created. To install dependencies:")
@@ -470,5 +477,5 @@ def cmd_init(
     # The workspace is complete and the user is told everything they would
     # have been told anyway; only the status code says a repo went wrong, so
     # a script that chains on `ow init` notices. Same rule as apply and rebase.
-    if errors or template_error:
+    if errors or render is None:
         sys.exit(1)
