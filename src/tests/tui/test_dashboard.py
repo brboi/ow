@@ -10,6 +10,8 @@ These tests verify:
 from __future__ import annotations
 
 import asyncio
+import importlib
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -270,5 +272,29 @@ def test_switch_submits_target_and_runs_cmd_switch(
                 assert kwargs["detach"] is False
                 assert kwargs["only"] is None
                 assert kwargs["dry_run"] is False
+
+    asyncio.run(_run())
+
+
+def test_dashboard_boots_without_the_generated_version_module(
+    dashboard_pilot, monkeypatch
+):
+    """A source checkout has no `ow/_version.py`: setuptools-scm writes it at
+    build time and .gitignore keeps it out of git. The dashboard used to
+    import it on mount, so `pytest` (or `python -m ow`) straight out of a
+    fresh clone crashed every TUI screen with an ImportError.
+
+    Two things have to go for a clone to be modelled: the entry in
+    sys.modules, and the attribute an earlier import left on the package —
+    `from ow import _version` finds the second one even when the first is
+    gone, which is why blocking sys.modules alone proves nothing here.
+    """
+    ow = importlib.import_module("ow")
+    monkeypatch.setitem(sys.modules, "ow._version", None)
+    monkeypatch.delattr(ow, "_version", raising=False)
+
+    async def _run():
+        async with dashboard_pilot() as (pilot, screen):
+            assert isinstance(pilot.app.screen, MainScreen)
 
     asyncio.run(_run())

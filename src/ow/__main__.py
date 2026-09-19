@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 import typer
 
+from ow import __version__
 from ow.commands import (
     cmd_apply,
     cmd_archive,
@@ -33,11 +34,6 @@ from ow.utils.legacy import check_legacy_layout
 from ow.utils.paths import config_file
 from ow.utils.resolver import resolve_workspace
 from ow.utils.templates import selectable_templates
-
-try:
-    from ow._version import version as __version__
-except ImportError:
-    __version__ = "dev"
 
 
 def _version_callback(value: bool) -> None:

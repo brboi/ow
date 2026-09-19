@@ -1,6 +1,8 @@
+import importlib
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 from unittest.mock import patch
 
@@ -42,6 +44,24 @@ def test_version_flag(flag):
     result = runner.invoke(app, [flag])
     assert result.exit_code == 0
     assert result.output.startswith("ow ")
+
+
+def test_version_falls_back_in_a_source_checkout(monkeypatch):
+    """`ow/_version.py` is written by setuptools-scm at build time and kept
+    out of git, so it exists in an installed ow and not in a clone. Importing
+    ow must survive that — `ow --version` then answers `ow dev` rather than
+    raising, and every caller reads the same `ow.__version__`.
+
+    `None` in sys.modules is what makes an import of that name fail, which is
+    the state a fresh clone is in.
+    """
+    ow = importlib.import_module("ow")
+    monkeypatch.setitem(sys.modules, "ow._version", None)
+    try:
+        assert importlib.reload(ow).__version__ == "dev"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(ow)
 
 
 def test_short_v_is_not_version():

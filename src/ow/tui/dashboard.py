@@ -26,6 +26,7 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
+from ow import __version__
 from ow.utils import index, paths
 from ow.utils.config import (
     Config,
@@ -307,11 +308,7 @@ class MainScreen(Screen):
     # ---- startup --------------------------------------------------------
 
     def on_mount(self) -> None:
-        log = self.query_one("#log", OperationLog)
-        from ow import _version as _v
-
-        version = getattr(_v, "version", "dev")
-        self.reload_workspaces(initial=True, version=version)
+        self.reload_workspaces(initial=True, version=__version__)
         self.run_operation(
             "legacy-layout check",
             lambda: check_legacy_layout(fatal=False),
