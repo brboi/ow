@@ -69,17 +69,19 @@ saas branch's series is the literal string `saas~18.4`, not its base major.
 **Decision.** Read `<main_repo>/odoo/release.py` with a regex, and map `version_info` to a
 *profile* by shape, never by number:
 
-| `version_info[:2]` | series | profile |
+| `version_info[:2]` | series | what it is |
 |---|---|---|
-| `(18, 0)` | `18.0` | `18.0` |
-| `(19, 0)` | `19.0` | `19.0` |
-| `(20, 0)` | `20.0` | `20.0` |
+| `(18, 0)` | `18.0` | a stable major, in the window |
+| `(19, 0)` | `19.0` | a stable major, in the window |
+| `(20, 0)` | `20.0` | a stable major, in the window |
 | `(20, 1)` … | `20.1` | **trunk** (master — whatever major it becomes) |
-| `('saas~19', 4)` | `saas~19.4` | `19.0` (the saas of a major runs the major's profile) |
+| `('saas~19', 4)` | `saas~19.4` | a saas of the 19 series — its code is its cut era's, §2 |
 
-So: minor `0` → the stable profile of that major; an integer minor ≥ 1 → the trunk profile;
-a `saas~X` major → the profile of major X. The trunk is keyed by *kind*, which is why the
-`19.5 → 20.1` jump on master changes nothing.
+So: minor `0` → a stable major, an integer minor ≥ 1 → the trunk, a `saas~X` major → the saas
+series of major X. What the series decides is **the window** — whether this checkout is one
+ow supports at all — and nothing about the content it writes: the trunk is keyed by *kind*
+(which is why the `19.5 → 20.1` jump on master changes nothing), and a saas branch carries
+the code of the era it was cut from, not of the major in its name (§2).
 
 The same parse picks up the Python and PostgreSQL bounds, because the checkout states them
 itself — and *where* it states them moved inside the window:
@@ -95,8 +97,8 @@ itself — and *where* it states them moved inside the window:
 at import (`assert sys.version_info > MIN_PY_VERSION, "Outdated python version detected…"`);
 from 19.0 on they live in `odoo/release.py`, with `MIN_PG_VERSION`. (Replay: `git show
 <ref>:odoo/__init__.py` and `:odoo/release.py` through `sed -n '/MIN_PY_VERSION/p;/MAX_PY_VERSION/p;/MIN_PG_VERSION/p'`.)
-A profile therefore carries four things: which args it writes (§2), and the Python range it
-is allowed to run on.
+The series (the window), the Python bounds, and the option table (§2) are the only three
+things ow reads out of a checkout; everything else it writes is fixed.
 
 Rejected alternatives:
 
@@ -139,28 +141,35 @@ expansion; the value is forwarded.
 (`die(args, "unrecognized parameters")`). phone-service survives today only because its
 config overrides `debug_args`.
 
-(Replay: `git -C $XDG_DATA_HOME/ow/repos/community.git show origin/{18.0,19.0}:odoo/tools/config.py`
-through `sed -n '/with-demo/p;/without-demo/p;/stop_after_init/p'`, and the demo flip through
-`odoo/modules/loading.py` on 18.0 against `odoo/orm/registry.py` on 19.0.)
+**Decision — one probe, on the checkout's own option table.** The only generated content that
+follows the version is the demo argument, and the option table says which one applies: a
+checkout whose `odoo/tools/config.py` declares `--with-demo` installs no demo data by default
+and needs no flag; a checkout without it installs demo by default and gets
+`--without-demo=all`. The series is deliberately *not* the discriminator — a saas branch runs
+the code of the era it was cut from, not of the major in its name: `saas-18.4` carries
+`--with-demo`, `new_db_demo` and the `--stop-after-init` forcing exactly like 19.0, while
+18.0 carries none of them.
 
-**Decision — one profile table in code, three columns:**
+| checkout | `--with-demo` in the option table | default `debug_args` |
+|---|---|---|
+| 18.0 | no — demo on by default | `["--dev=all", "--without-demo=all"]` |
+| saas-18.4, 19.0, 20.0, trunk | yes — demo off by default | `["--dev=all"]` |
 
-| | 18.0 | 19.0 | 20.0 / trunk |
-|---|---|---|---|
-| default `debug_args` | `["--dev=all", "--without-demo=all"]` | `["--dev=all"]` | `["--dev=all"]` |
-| demo | on by default → the default args turn it off | off by default | off by default |
-| default `debug_test_args` | `["--test-tags=<ws>"]` | same | same |
+`debug_test_args` stays `["--test-tags=<ws>"]` everywhere, and the odoorc keys ow writes
+(`http_port`, `addons_path`, `data_dir`, `admin_passwd`, `db_name`, `dbfilter`, `db_host`,
+`db_port`, `db_user`, `db_password`, `smtp_server`, `smtp_port`) are valid in every version in
+the window — **no odoorc key differs**, and the 18.0-only `xmlrpc_port → http_port` rename map
+is legacy import, not something ow emits. So the version decides the demo flag, not odoorc
+content — today.
 
-and the odoorc keys ow writes (`http_port`, `addons_path`, `data_dir`, `admin_passwd`,
-`db_name`, `dbfilter`, `db_host`, `db_port`, `db_user`, `db_password`, `smtp_server`,
-`smtp_port`) are verified valid in all four versions — **no odoorc key differs in the
-window**; the 18.0-only `xmlrpc_port → http_port` rename map is legacy import, not something
-ow emits. So the version decides *args*, not odoorc content — today.
+(Replay: `git show <ref>:odoo/tools/config.py | sed -n '/add_option("--with-demo"/p;/"--xmlrpc-port"/p'`;
+the demo default through `odoo/modules/loading.py` — `tools.config['without_demo']` — against
+`odoo/orm/registry.py` — `new_db_demo = config['with_demo']`; the odoorc keys with
+`sed -n 's/.*dest="\([a-z_]*\)".*/\1/p' | sort -u`.)
 
-Two facts the table must not lose: `--test-tags` forces `--stop-after-init` from 19.0 on
-(a test config that waits for a server that exits), and `--xmlrpc-port` is rejected from 19.0
-on. Both are the reason the profile is a table rather than a version string interpolated into
-a template.
+Two facts worth keeping in view, both era-discriminated the same way: `--test-tags` forces
+`--stop-after-init` from the 19-era on (a test config that waits for a server that exits), and
+`--xmlrpc-port` is rejected from the 19-era on. Neither changes what ow writes.
 
 **Python, from the same file.** The checkout states the Python range it supports (§1), and ow
 uses it instead of guessing: `[mise] python` (§8) is **clamped into
@@ -174,10 +183,11 @@ workspace whose checkout moves to 20.0 with the preference left at 3.10 gets a w
 needs nothing from ow: the compose stack ships `pgvector/pgvector:pg17` (§3, `compose.yml.j2`),
 above every floor in the window.
 
-**Where the profile is read.** Rendering already rescans the workspace before writing; the
-profile comes from the same pass. Because the main repo's branch can move under ow
-(`ow switch 19.0`), **`ow switch` re-renders** (§6) — a workspace on 18.0 that switches to
-master gets master's args without anyone remembering to ask.
+**Where all of it is read.** Rendering already rescans the workspace before writing; the
+version, the bounds and the option-table probe come from the same pass. Because the main
+repo's branch can move under ow (`ow switch 19.0`), **`ow switch` re-renders** (§6) — a
+workspace on 18.0 that switches to master gets master's args without anyone remembering to
+ask.
 
 ## 3. Generation moves into the code
 
