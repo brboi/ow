@@ -466,6 +466,32 @@ def _write_file(dest: Path, out: _Output) -> None:
     dest.chmod(out.mode)
 
 
+def _stale_outputs(
+    ws_dir: Path, lock: dict[str, str], outputs: dict[Path, _Output]
+) -> list[str]:
+    """Locked paths no bundle renders any more, still on disk.
+
+    A path in the lock that today's bundles do not produce is an output ow
+    wrote once and has since retired — a bundle dropped it, a bundle that
+    ships it was undeclared, the workspace no longer has the Odoo that wanted
+    it. The file stays exactly where it is (ow never deletes, and re-adopting
+    it would be claiming a file nothing renders), but it is ow's to name: it
+    is reported like a render that comes out empty, so "not rendered" says
+    the same thing about a file that is there and a file that never was.
+
+    The lock is the evidence, and the only evidence: a path ow never locked
+    is the user's, whatever it is called, so nothing walks the workspace
+    looking for candidates. A lock entry whose file is gone is a tombstone,
+    and naming a path that holds nothing would only puzzle whoever reads it.
+    """
+    produced = {rel.as_posix() for rel in outputs}
+    return sorted(
+        name
+        for name in lock
+        if name not in produced and (ws_dir / name).is_file()
+    )
+
+
 def _write_outputs(ws_dir: Path, outputs: dict[Path, _Output]) -> RenderResult:
     """Write what ow owns, leave what you touched, per the lock.
 
@@ -504,6 +530,10 @@ def _write_outputs(ws_dir: Path, outputs: dict[Path, _Output]) -> RenderResult:
             result.updated.append(name)
         else:
             result.yours.append(name)
+
+    # Retired outputs keep their lock entry — the lock records what ow wrote,
+    # and forgetting a file is not the same as giving it back.
+    result.skipped.extend(_stale_outputs(ws_dir, lock, outputs))
 
     _write_lock(ws_dir, lock)
     return result
@@ -588,7 +618,13 @@ def apply_templates(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> Render
 
 
 def rendered_states(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> list[RenderedFile]:
-    """Every output of this workspace's bundles, with its state. Writes nothing."""
+    """Every output of this workspace's bundles, with its state. Writes nothing.
+
+    Retired outputs — locked once, rendered by nothing today, still on disk —
+    are listed too, as NOT_RENDERED with no `ow_text`: there is nothing ow
+    would write there, and the file you can see is the one ow stopped
+    writing. A locked path whose file is gone is not listed at all.
+    """
     context = build_template_context(ws, config, ws_dir)
     outputs = _render_outputs(ws, ws_dir, context)
     lock = _read_lock(ws_dir)
@@ -611,7 +647,13 @@ def rendered_states(ws: WorkspaceConfig, config: Config, ws_dir: Path) -> list[R
             state = YOURS
 
         states.append(RenderedFile(name, state, _as_text(out.data), _as_text(current)))
-    return states
+
+    for name in _stale_outputs(ws_dir, lock, outputs):
+        on_disk = _as_text((ws_dir / name).read_bytes())
+        states.append(RenderedFile(name, NOT_RENDERED, None, on_disk))
+
+    # Retired outputs were appended; the listing stays one sorted list.
+    return sorted(states, key=lambda f: Path(f.path))
 
 
 def ensure_services_compose() -> Path:
