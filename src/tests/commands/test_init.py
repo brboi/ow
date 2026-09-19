@@ -313,6 +313,31 @@ def test_init_with_configuration_vars_override_global_vars(tmp_path, monkeypatch
     assert ws.vars == {"http_port": 9999, "db_host": "localhost"}
 
 
+def test_init_configuration_drops_the_bundles_ow_now_decides(tmp_path, monkeypatch, config_with_remotes):
+    """A config ow wrote before #45 names common and odoo. Duplicating that
+    workspace must not be refused over names ow no longer asks for: they are
+    dropped, and everything else the source holds is carried over."""
+    config_with_remotes.vars = {"http_port": 8069, "db_host": "localhost"}
+    source = tmp_path / "source"
+    (source / ".ow").mkdir(parents=True)
+    (source / ".ow" / "config.toml").write_text(
+        'templates = ["common", "odoo", "vscode"]\n\n'
+        '[repos]\ncommunity = "master..from-source"\n\n'
+        '[vars]\nhttp_port = 9999\n'
+    )
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.chdir(target)
+
+    with _tty(False), _prompt_answers(), _no_git(target):
+        cmd_init(config_with_remotes, configuration=str(source))
+
+    ws = load_workspace_config(target / ".ow" / "config.toml")
+    assert ws.templates == ["vscode"]
+    assert ws.repos["community"].local_branch == "from-source"
+    assert ws.vars == {"http_port": 9999, "db_host": "localhost"}
+
+
 def test_init_with_a_tty_asks(tmp_path, monkeypatch, config_with_remotes):
     monkeypatch.chdir(tmp_path)
 
