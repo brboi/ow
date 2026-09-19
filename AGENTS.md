@@ -96,19 +96,19 @@ AGENTS.md
 | `ow reset` | `cmd_reset(config, workspace=None, *, only=None, hard=False, fetch=False, dry_run=False, yes=False)` | Put each repo back on the ref it follows — its branch's upstream, or the base ref when there is none. Plain form moves HEAD and leaves the working tree, so nothing on disk is lost; `--hard` discards it too. No fetch unless `-f`; skips a repo that is not on the branch the config names |
 | `ow switch` | `cmd_switch(config, target=None, workspace=None, *, create=None, detach=False, only=None, all_repos=False, dry_run=False, include_detached=False)` | `git switch` across the workspace: a branch, never a spec. DWIM included, done by ow because a `--single-branch` bare repo defeats git's own — it also qualifies the ref for `--detach` and for a `-c` start point, which git refuses outright. Run from inside a repo with no workspace and no `--only`, it narrows to that repo (`-a/--all` opts out). Pre-flight is all-or-nothing; detached specs are pins, left alone unless `--include-detached-specs` or a `--only` names them; `.ow/config.toml` is rewritten afterwards from what git left on disk; templates are not re-rendered |
 | `ow fetch` | `cmd_fetch(config, workspace=None, *, only=None)` | Refresh the refs a workspace follows — `git fetch` into the bare repos, reporting what arrived (`+N`, `up to date`, `force-pushed`). No worktree moves; `--only` narrows the network work |
-| `ow prune` | `cmd_prune(config)` | Clean up stale worktree references, orphaned branches, dead index entries |
+| `ow prune` | `cmd_prune(*, dry_run=False, yes=False, also_backups=False)` | Clean up stale worktree references, orphaned branches, dead index entries (reads no global config) |
 | `ow rm` | `cmd_rm(name, *, yes=False)` | Remove a workspace: worktrees, local branches, directory, index entry |
 | `ow templates` | `cmd_templates(config, workspace=None, *, show_diff=False)` | List the files ow manages in a workspace with their state (`up to date`, `outdated`, `yours`, `absent`, `not rendered`), or diff the ones that differ |
 
-Every command except `ls` and `rm` loads the same global config; those two read the index and
-the workspace configs, neither of which needs it — so on a machine with no `config.toml` yet,
-neither creates one. Every command with an optional workspace resolves it
-via `resolve_workspace(workspace)` — an explicit path or name, the `OW_WORKSPACE` env var, or a
-cwd walk-up for `.ow/config.toml` — and each accepts that workspace either positionally or as
-`-w/--workspace`; passing both with different values is an error. `init` resolves its target
-directory itself (current directory, or `./NAME`), since the workspace doesn't exist yet. `rm`
-resolves its target by name only (via the index) and accepts `-w` as a plain alias: being the
-destructive one, it never resolves implicitly.
+Every command that reads the global config loads the same one; `ls`, `rm`, `prune`, `cd` and
+`shell-init` don't — they work off the index, the workspace configs, or nothing at all — so on a
+machine with no `config.toml` yet, none of them creates one. Every command with an optional
+workspace resolves it via `resolve_workspace(workspace)` — an explicit path or name, the
+`OW_WORKSPACE` env var, or a cwd walk-up for `.ow/config.toml` — and each accepts that workspace
+either positionally or as `-w/--workspace`; passing both with different values is an error. `init`
+resolves its target directory itself (current directory, or `./NAME`), since the workspace doesn't
+exist yet. `rm` resolves its target by name only (via the index) and accepts `-w` as a plain
+alias: being the destructive one, it never resolves implicitly.
 
 ## TUI Dashboard
 
