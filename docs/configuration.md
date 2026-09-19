@@ -9,7 +9,7 @@
 | What | Path | Notes |
 |------|------|-------|
 | Global config | `$XDG_CONFIG_HOME/ow/config.toml` | `[vars]` + `[remotes]`; bootstrapped with a commented default the first time any command needs it |
-| Template overrides | `$XDG_CONFIG_HOME/ow/templates/` | a bundle tree you create yourself; overrides the packaged bundles per file when a workspace materialises its templates |
+| Template overrides | `$XDG_CONFIG_HOME/ow/templates/` | a bundle tree you create yourself; overrides the packaged bundles per file at render time |
 | Services | `$XDG_CONFIG_HOME/ow/services/` | rendered by `ow init` and `ow apply` from the packaged `compose.yml.j2` |
 | Bare repos | `$XDG_DATA_HOME/ow/repos/` | one `<alias>.git` per remote, shared by every workspace on the machine |
 | Container volumes | `$XDG_DATA_HOME/ow/volumes/` | used by the rendered `compose.yml` for postgres and mailpit data |
@@ -20,10 +20,13 @@ A workspace's own config lives inside it, at `.ow/config.toml` — it stores tha
 Both config files start with `version = 1`; a file with a newer version is refused with an
 upgrade message.
 
-A workspace's templates are materialised inside it too: `.ow/templates/<bundle>/<relpath>` holds
-the working copy that rendering reads from, and `.ow/templates.lock.toml` records the sha256 of
-the source file each copy came from — see [Template System](templates.md) for the upgrade rules
-that lock drives.
+A workspace's rendered files are compared against a lock inside it too:
+`.ow/rendered.lock.toml` records the sha256 of every output `ow` wrote (or adopted as already
+identical), keyed by its workspace-relative path — see [Template System](templates.md) for the
+states that lock drives. A workspace created by an older `ow` still has the `.ow/templates/` tree
+and `.ow/templates.lock.toml` it used to materialise; nothing reads them any more, so edits you
+made in that tree are ignored — `ow` renders from the packaged bundles (and
+`$XDG_CONFIG_HOME/ow/templates/` overrides) instead.
 
 ## Remotes
 

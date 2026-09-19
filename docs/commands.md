@@ -51,36 +51,50 @@ given); when stdin isn't a terminal, flags (or `-c/--configuration`, to duplicat
 workspace's config) must supply everything, or the command refuses to guess.
 
 ```sh
-ow init my_work -r community:master..my-feature -r enterprise:master..my-feature -t common -t vscode
+ow init my_work -r community:master..my-feature -r enterprise:master..my-feature -t vscode
 ```
 
 `-r` takes a single `ALIAS:SPEC` argument and `-t` a single template name; repeat either flag
 to pass more than one. A `-r` value without a `:` is rejected rather than ignored. `NAME`, when
 given, must be alphanumeric plus `-`/`_`.
 
+`-t` names a bundle the workspace declares. `common` and `odoo` are not names you can pass:
+`common` is applied to every workspace, and `odoo` follows from the repos, so `-t common` is
+refused with a line saying exactly that. `-c/--configuration` copies an existing workspace's
+config; a `common`/`odoo` entry that config still carries from an older `ow` is dropped silently,
+and the rest of the source — other bundles, repos, vars — carries over.
+
 After confirmation, `ow` sets up each repo's bare clone and required refs, creates (or
-reconciles) its worktree, applies templates, writes `.ow/config.toml`, trusts `mise.toml` if the
-templates produced one, and remembers the workspace in the discovery index. A repo that fails to
-set up is reported; the workspace is still created as long as at least one repo succeeded, and
-the command exits non-zero — the workspace exists, but it is not the one you asked for.
+reconciles) its worktree, applies templates, writes `.ow/config.toml`, trusts the mise fragments
+it generated (`mise/conf.d/00-ow.toml`) so `mise` will load them, and remembers the workspace in
+the discovery index. A repo that fails to set up is reported; the workspace is still created as
+long as at least one repo succeeded, and the command exits non-zero — the workspace exists, but
+it is not the one you asked for.
 
 ## `ow apply`
 
 Re-renders templates and materializes worktrees for a workspace: creates any missing worktree,
 reconciles attached/detached state for existing ones, and renders the services compose file.
 Useful after changing templates or the global config without recreating the workspace. `--check`
-reports what would change without writing anything, and exits non-zero if a repo has drifted or
-if any file `ow` writes or rewrites would change — never for a file that is yours, since `ow`
-wouldn't touch it anyway.
+reports what would change without writing anything, and exits non-zero if a repo has drifted or is
+missing its worktree, or if any file `ow` writes or rewrites would change — never for a file that
+is yours, since `ow` wouldn't touch it anyway.
 
 Each file `ow` manages is rendered straight from its packaged (or user-overridden) template and
 compared against `<ws>/.ow/rendered.lock.toml`: absent, it is written and printed `wrote <name>`;
-matching the lock but stale relative to the current render, it is rewritten and printed
-`updated <name>`; present but not matching the lock, it is yours, and `ow` leaves it alone,
-silently. A template that renders nothing but whitespace writes no file, and does not remove one
-left by an earlier render either — `ow` never deletes a workspace file — so a workspace with no
-Odoo checkout ends up with neither `.vscode/launch.json` nor `.zed/debug.json`. See
-[Template System](templates.md) for the three axes that decide which bundles apply.
+present and byte-identical to what `ow` would render, it is adopted into the lock without a write
+(that is how a workspace from before the lock comes under management); matching the lock but
+stale relative to the current render, it is rewritten and printed `updated <name>`; present but
+not matching the lock, it is yours — printed under `yours, left alone`, never written — and a
+later render that happens to be byte-identical to it adopts it back, but nothing else will touch
+it. A template that renders nothing but whitespace writes no file, and does not remove one left
+by an earlier render either — `ow` never deletes a workspace file — so a workspace with no Odoo
+checkout ends up with neither `.vscode/launch.json` nor `.zed/debug.json`. A file `ow` wrote in
+the past that no current bundle produces any more is reported `not rendered` while it is still on
+disk, and left exactly as it is — `ow` neither rewrites nor deletes it. `ow apply` also warns,
+every time, about a `mise.toml` left at the workspace root by an older `ow`: it shadows the
+generated `mise/conf.d/00-ow.toml` as far as `mise` is concerned, and `ow` will not delete it.
+See [Template System](templates.md) for the three axes that decide which bundles apply.
 Like `ow init` and `ow rebase`, `ow apply` exits non-zero when any repo failed, even though
 everything else — templates, vars, the repos that worked — is applied.
 
@@ -480,13 +494,19 @@ Lists every file `ow` manages in one workspace, with its state:
 - `outdated` — `ow` wrote this file before, but the render has since changed; the next
   `ow apply` rewrites it
 - `yours` — the file doesn't match `ow`'s lock; you edited it (or wrote it yourself), and `ow`
-  will never touch it again
+  leaves it alone — a later render that is byte-identical to it adopts it back; nothing else
+  will touch it
 - `absent` — `ow` would write this file, and it isn't there yet
 - `not rendered` — the template renders nothing but whitespace for this workspace (for example
-  `launch.json` outside an Odoo workspace), so there is no file to manage
+  `launch.json` outside an Odoo workspace), so there is no file to manage — or `ow` wrote this
+  path in the past and no current bundle produces it any more; the file stays on disk, untouched
 
 `--diff` prints a unified diff, from your file (`(yours)`) to what `ow` would write (`(ow)`), for
-every file that differs. See [Template System](templates.md).
+every file that differs; a file that isn't there yet is an addition, from `/dev/null`, and a file
+whose bytes aren't UTF-8 text is named with a one-line reason instead of a diff. Like the
+listing, `--diff` writes nothing, and differences do not change the exit status: a successful
+inspection exits 0 whether or not anything differs (a resolution or render failure still fails).
+See [Template System](templates.md).
 
 ## Tab Completion
 
@@ -500,7 +520,7 @@ Then restart your shell. To inspect the generated script instead of installing i
 ow --show-completion
 ```
 
-Completion covers template names (`ow init -t <TAB>`), repo aliases (`ow init -r <TAB>`,
-which only offers aliases you haven't already passed) and workspace names
-(`ow status <TAB>`, `ow rm <TAB>`, from the same discovery index `ow ls` reads — so a workspace `ow` has
-never resolved is not offered).
+Completion covers template names (`ow init -t <TAB>`, only the bundles you can declare — `common`
+and `odoo` are never offered), repo aliases (`ow init -r <TAB>`, which only offers aliases you
+haven't already passed) and workspace names (`ow status <TAB>`, `ow rm <TAB>`, from the same
+discovery index `ow ls` reads — so a workspace `ow` has never resolved is not offered).
