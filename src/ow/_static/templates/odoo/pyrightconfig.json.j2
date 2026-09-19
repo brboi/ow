@@ -1,7 +1,7 @@
 {
   "venvPath": ".",
   "venv": ".venv",
-  "pythonVersion": "3.12",
+  "pythonVersion": {{ vars.python | default('3.12') | tojson }},
   "extraPaths": ["./{{ main_repo_alias }}"],
   "reportArgumentType": "none",
   "reportAttributeAccessIssue": "none",
