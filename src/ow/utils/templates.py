@@ -515,6 +515,15 @@ def _first_verdict(first: RenderResult, second: RenderResult) -> RenderResult:
     A file the first pass created and the second rewrote was still created by
     this run; reporting it twice, under two names, would only puzzle whoever
     reads the output.
+
+    A skip is the one first verdict the second pass may overturn. "ow wants
+    nothing here" is provisional when it comes from a pass whose context could
+    not yet see what that same pass was about to write — an addon-dependent
+    output renders empty on the first pass and real on the second. Whatever
+    the second pass renders at such a path decides instead: what it did there
+    (wrote, updated, yours), or nothing at all when the file on disk is
+    already what the render wants — an adoption is not a skip either.
+    Skipped in both passes stays skipped.
     """
     merged = RenderResult(
         list(first.wrote),
@@ -523,16 +532,27 @@ def _first_verdict(first: RenderResult, second: RenderResult) -> RenderResult:
         list(first.skipped),
         list(first.managed),
     )
-    seen = set(first.wrote) | set(first.updated) | set(first.yours) | set(first.skipped)
+    first_skipped = set(first.skipped)
+    second_rendered = set(second.managed)
+
+    # `managed` holds every path the second pass rendered, whichever verdict
+    # it reached — the silent adoption of an already-correct file included.
+    merged.skipped = [name for name in merged.skipped if name not in second_rendered]
+
+    decided = set(first.wrote) | set(first.updated) | set(first.yours)
     for names, target in (
         (second.wrote, merged.wrote),
         (second.updated, merged.updated),
         (second.yours, merged.yours),
-        (second.skipped, merged.skipped),
     ):
         for name in names:
-            if name not in seen:
-                target.append(name)
+            if name in decided:
+                continue
+            target.append(name)
+            decided.add(name)
+    for name in second.skipped:
+        if name not in decided and name not in first_skipped:
+            merged.skipped.append(name)
     for name in second.managed:
         if name not in merged.managed:
             merged.managed.append(name)
