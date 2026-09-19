@@ -1215,11 +1215,11 @@ class MainScreen(Screen):
         # Mutate the shared Config object in place — never replace the
         # reference. `self._config` here is the *same object* as
         # `self.app._config` (passed by reference at construction); the
-        # theme picker ('t') mutates that shared object directly, on the
-        # App. Reassigning `self._config` to a freshly loaded object would
-        # make MainScreen's config diverge from the App's, so a later save
-        # from this screen would carry the App's *stale* pre-divergence
-        # theme value back over whatever the picker set afterwards.
+        # command palette's theme picker (Ctrl+P) mutates that shared object
+        # directly, on the App. Reassigning `self._config` to a freshly loaded
+        # object would make MainScreen's config diverge from the App's, so a
+        # later save from this screen would carry the App's *stale*
+        # pre-divergence theme value back over whatever the picker set after.
         reloaded = load_global_config()
         self._config.vars = reloaded.vars
         self._config.remotes = reloaded.remotes

@@ -68,9 +68,9 @@ theme = "textual-dark"
 ```
 
 `editor` is the command `ow open` runs (may include flags, e.g. `"code -n"`). `theme` is
-the dashboard's Textual theme — press `t` in the dashboard to pick one interactively, or
-set it by hand. Any theme name Textual ships is accepted; an unknown name is silently
-ignored and the default is used.
+the dashboard's Textual theme — press `Ctrl+P` in the dashboard, type "theme", and pick one
+from the palette (the choice is persisted here), or set it by hand. Any theme name Textual
+ships is accepted; an unknown name is reported and the default is used.
 
 ## Branch Spec Syntax
 
