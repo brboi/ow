@@ -1,3 +1,5 @@
+import json
+import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -145,6 +147,38 @@ class TestApplyTemplates:
         assert (ws_dir / "odoorc").exists()
         assert (ws_dir / "pyrightconfig.json").exists()
         assert (ws_dir / "requirements-dev.txt").exists()
+
+    def test_pyright_and_mise_agree_on_the_workspace_python(self, tmp_path, config):
+        """One preference, two files: pyright must type-check the interpreter
+        mise installs, and the JSON must stay JSON."""
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        self._make_main_repo(ws_dir)
+        ws = WorkspaceConfig(
+            repos={"community": BranchSpec("origin/master")},
+            templates=[],
+            vars={"python": "3.13"},
+        )
+        apply_templates(ws, config, ws_dir)
+
+        pyright = json.loads((ws_dir / "pyrightconfig.json").read_text())
+        mise = tomllib.loads((ws_dir / "mise" / "conf.d" / "00-ow.toml").read_text())
+
+        assert pyright["pythonVersion"] == "3.13"
+        assert mise["tools"]["python"] == "3.13"
+
+    def test_pyright_and_mise_default_to_the_same_python(self, tmp_path, config):
+        ws_dir = tmp_path / "workspaces" / "test"
+        ws_dir.mkdir(parents=True)
+        self._make_main_repo(ws_dir)
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[])
+        apply_templates(ws, config, ws_dir)
+
+        pyright = json.loads((ws_dir / "pyrightconfig.json").read_text())
+        mise = tomllib.loads((ws_dir / "mise" / "conf.d" / "00-ow.toml").read_text())
+
+        assert pyright["pythonVersion"] == "3.12"
+        assert mise["tools"]["python"] == "3.12"
 
     def test_template_uses_context(self, tmp_path, config):
         ws_dir = tmp_path / "workspaces" / "my-test-ws"
