@@ -411,9 +411,9 @@ def prune(
 def templates(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
-    diff: bool = typer.Option(False, "--diff", help="Show what ow changed in the files it materialized, against the packaged baseline"),
+    diff: bool = typer.Option(False, "--diff", help="Show a unified diff of every file that differs, from yours to what ow would render"),
 ) -> None:
-    """List template files and their state."""
+    """List the files ow manages and their state, or diff the ones that differ."""
     config = _load_config()
     cmd_templates(config, workspace=_pick_workspace(workspace, workspace_opt), show_diff=diff)
 
