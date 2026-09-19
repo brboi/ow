@@ -112,6 +112,16 @@ def _validate_init_inputs(
             print(f"Error: could not load {src_config_file}: {exc}", file=sys.stderr)
             sys.exit(1)
 
+        # A config ow wrote before #45 declares `common` and `odoo`. Both are
+        # ow's decision now, and refusing to duplicate a workspace over names
+        # ow no longer asks for would strand every existing config, so they
+        # are dropped; the rest of the source (other template names, repos,
+        # vars, order) is carried over untouched. `-t` stays strict above: a
+        # name typed at the CLI is a typo worth naming.
+        source_ws.templates = [
+            t for t in source_ws.templates if t not in (IMPLICIT_BUNDLE, ODOO_BUNDLE)
+        ]
+
         invalid = [t for t in source_ws.templates if t not in available]
         if invalid:
             avail = ", ".join(available) if available else "(none found)"

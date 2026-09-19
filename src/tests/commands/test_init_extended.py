@@ -67,6 +67,22 @@ class TestValidateInitInputs:
         assert exc.value.code == 1
         assert "unknown template" in capsys.readouterr().err.lower()
 
+    def test_still_rejects_a_real_unknown_name_next_to_legacy_ones(
+        self, tmp_path, monkeypatch, capsys, config_with_remotes
+    ):
+        """Dropping common and odoo must not muffle a genuine unknown name in
+        the same source, nor quietly widen the drop to other names."""
+        monkeypatch.chdir(tmp_path)
+        src_config = tmp_path / "src" / ".ow" / "config.toml"
+        src_config.parent.mkdir(parents=True)
+        src_config.write_text('templates = ["common", "nonexistent"]\n\n[repos]\ncommunity = "master"\n')
+        with pytest.raises(SystemExit) as exc:
+            _validate_init_inputs(config_with_remotes, "test", None, None, configuration=str(tmp_path / "src"))
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "unknown template(s): nonexistent" in err
+        assert "common" not in err
+
     def test_rejects_a_blank_name(self, tmp_path, monkeypatch, capsys, config):
         monkeypatch.chdir(tmp_path)
         with pytest.raises(SystemExit) as exc:
