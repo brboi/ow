@@ -1202,6 +1202,88 @@ def test_apply_templates_renders_once_when_nothing_appears(xdg, tmp_path, config
     assert render.call_count == 1
 
 
+def make_addon_bundle() -> Path:
+    """A local bundle whose output only the second pass can render.
+
+    It ships an addon of its own — which the first pass writes, so the first
+    pass's addon scan cannot see it — and a template that names what the scan
+    found. The template renders empty on the first pass and real on the
+    second.
+    """
+    from ow.utils import paths
+
+    local = paths.templates_dir() / "local"
+    (local / "custom" / "my_addon").mkdir(parents=True, exist_ok=True)
+    (local / "custom" / "my_addon" / "__manifest__.py").write_text("{}\n")
+    (local / "addons.txt.j2").write_text(
+        "{% if addons_paths %}addons = {{ addons_paths | join(',') }}\n{% endif %}"
+    )
+    return local
+
+
+def test_apply_templates_reports_an_addon_dependent_output_it_wrote(xdg, tmp_path, config):
+    """The first pass renders nothing at a path whose content depends on the
+    addon the same pass is about to write; the second pass writes it. The
+    output is reported as written — "not rendered" would name a file that is
+    sitting right there."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    ws_dir.mkdir(parents=True)
+    make_addon_bundle()
+
+    ws = WorkspaceConfig(repos={}, templates=["local"])
+    result = apply_templates(ws, config, ws_dir)
+
+    assert str(ws_dir / "custom") in (ws_dir / "addons.txt").read_text()
+    assert "addons.txt" in result.wrote
+    assert "addons.txt" not in result.skipped
+
+
+def test_preexisting_divergent_output_survives_the_first_apply(xdg, tmp_path, config):
+    """A file that was already there, differing from the render, with no lock
+    to speak for it: it is the user's from the first apply on, and the second
+    pass must not quietly adopt it by writing what the first pass could not
+    render."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    ws_dir.mkdir(parents=True)
+    local_dir = make_addon_bundle()
+    (ws_dir / "addons.txt").write_text("my own words\n")
+
+    ws = WorkspaceConfig(repos={}, templates=["local"])
+    result = apply_templates(ws, config, ws_dir)
+
+    assert (ws_dir / "addons.txt").read_text() == "my own words\n"
+    assert "addons.txt" in result.yours
+    assert "addons.txt" not in result.wrote
+    assert "addons.txt" not in result.skipped
+
+    # Not adopted into the lock: a render that moves still leaves it alone.
+    (local_dir / "addons.txt.j2").write_text("addons = gone\n")
+    again = apply_templates(ws, config, ws_dir)
+
+    assert (ws_dir / "addons.txt").read_text() == "my own words\n"
+    assert "addons.txt" in again.yours
+
+
+def test_an_output_the_second_pass_only_adopts_is_not_reported_as_skipped(
+    xdg, tmp_path, config
+):
+    """The second pass finds the file already equal to what it renders: it
+    adopts it and writes nothing, which is not a skip either — the file the
+    first pass wanted nothing at is on disk and correct."""
+    ws_dir = tmp_path / "workspaces" / "test"
+    ws_dir.mkdir(parents=True)
+    make_addon_bundle()
+    (ws_dir / "addons.txt").write_text(f"addons = {ws_dir / 'custom'}\n")
+
+    ws = WorkspaceConfig(repos={}, templates=["local"])
+    result = apply_templates(ws, config, ws_dir)
+
+    assert "addons.txt" not in result.skipped
+    assert "addons.txt" in result.managed
+    assert "addons.txt" not in result.wrote
+    assert "addons.txt" not in result.yours
+
+
 # ---------------------------------------------------------------------------
 # bundle_source_files — hybrid source resolution (local overrides packaged
 # per file, never per bundle)
