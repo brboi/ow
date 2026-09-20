@@ -43,7 +43,7 @@ class OdooInfo:
     """Everything derived from one checkout's files, never its imports."""
 
     alias: str
-    series: int
+    series: str
     major: int
     minor: int
     python_min: tuple[int, int]
@@ -157,6 +157,8 @@ def workspace_addon_paths(
     """
     if core_alias is None:
         return ()
+    if core_alias not in aliases:
+        raise ValueError(f"core_alias: {core_alias!r} not in aliases {list(aliases)!r}")
 
     repo_dirs = {alias: root / alias for alias in aliases}
     main_paths: list[Path] = []
@@ -226,14 +228,14 @@ def _probe_core(alias: str, core_path: Path) -> OdooInfo:
     release_path = core_path / "odoo" / "release.py"
     release_tree = _parse_module(release_path)
 
-    major, minor = _read_identity(release_tree, release_path)
+    major, minor, series = _read_identity(release_tree, release_path)
     python_min, python_max = _read_python_bounds(release_tree, core_path, release_path)
     with_demo = _read_demo_capability(core_path)
     sandbox_paths = _probe_sandbox_paths(core_path)
 
     return OdooInfo(
         alias=alias,
-        series=major,
+        series=series,
         major=major,
         minor=minor,
         python_min=python_min,
@@ -293,7 +295,8 @@ def _parse_major(value: object, release_path: Path) -> int:
     raise ValueError(f"version_info: unrecognized major {value!r} in {release_path}")
 
 
-def _read_identity(tree: ast.Module, release_path: Path) -> tuple[int, int]:
+def _read_identity(tree: ast.Module, release_path: Path) -> tuple[int, int, str]:
+    """major, minor, and upstream's own series string ('.'.join(version_info[:2]))."""
     assignments = _module_assignments(tree, "version_info")
     if not assignments:
         raise ValueError(f"version_info: not declared in {release_path}")
@@ -303,7 +306,9 @@ def _read_identity(tree: ast.Module, release_path: Path) -> tuple[int, int]:
     major_value, minor_value = _literal_pair(assignments[0], "version_info")
     if type(minor_value) is not int:
         raise ValueError(f"version_info: non-integer minor in {release_path}")
-    return _parse_major(major_value, release_path), minor_value
+    major = _parse_major(major_value, release_path)
+    series = f"{major_value}.{minor_value}"
+    return major, minor_value, series
 
 
 def _literal_int_pair(node: ast.expr, name: str, path: Path) -> tuple[int, int]:
