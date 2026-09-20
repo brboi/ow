@@ -259,7 +259,9 @@ def _stale_backups() -> list[Path]:
 
     `--also-backups` lists every backup — no age heuristic to explain, and
     the confirmation prompt already makes the list visible before anything
-    is deleted.
+    is deleted. The glob is non-recursive on purpose: `backups/migrations/`
+    holds migration backups keyed by content hash, not rm backups keyed by
+    workspace name, and they are never this operation's to delete.
     """
     try:
         return sorted(paths.backups_dir().glob("*.toml"))

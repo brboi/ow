@@ -846,6 +846,26 @@ def test_also_backups_with_no_backups_does_nothing(tmp_path, capsys, xdg, monkey
 
     assert "Aborted." not in capsys.readouterr().out
 
+
+def test_also_backups_never_deletes_migration_backups(tmp_path, capsys, xdg, monkeypatch):
+    """Migration backups live in their own subdirectory, keyed by content
+    hash, not by workspace name — they are not removable rm backups, and
+    `--also-backups` must never sweep them up."""
+    from ow.utils.migration import write_backup
+
+    rm_backup = paths.backups_dir() / "canary-20260101T000000.toml"
+    rm_backup.parent.mkdir(parents=True, exist_ok=True)
+    rm_backup.write_text("version = 2\n")
+
+    migration_backup = write_backup(tmp_path / "workspace" / ".ow" / "config.toml", b"version = 1\n")
+
+    _answer(monkeypatch, "y")
+    cmd_prune(also_backups=True)
+
+    assert not rm_backup.exists()
+    assert migration_backup.exists()
+    assert migration_backup.read_bytes() == b"version = 1\n"
+
 # ---------------------------------------------------------------------------
 # What a live workspace owns (issue #50)
 #

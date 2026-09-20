@@ -419,13 +419,24 @@ uncommitted changes in the working tree. Confirmation defaults to no — `-y/--y
 
 A workspace whose bare repo is missing still has its directory and index entry cleaned up.
 
+Before the workspace directory goes, its `.ow/config.toml` is copied — byte for byte, at mode
+`0600` — to `$XDG_STATE_HOME/ow/backups/<name>-<timestamp>.toml`, and the command prints the
+path with a restore hint: `ow init <name> -c <backup>`. `ow prune --also-backups` deletes those
+backups; it never touches `backups/migrations/`, which holds the schema-migration backups.
+
 ## `ow mv`
 
 Moves a workspace to a new path, repairing what `mv` alone would break: the bare repos still
-point at the old worktree paths, the discovery index still names the old directory, and the
-rendered templates hold absolute paths that only `ow apply` can regenerate. All three are
+point at the old worktree paths, the discovery index still names the old directory, and
+`odoorc` holds an absolute `data_dir` that only a refresh can regenerate. All three are
 fixed, in that order — the worktrees have to work again before the addon scan that re-renders
 `odoorc` can see anything.
+
+The refresh is skipped for a workspace still on schema 1 (its own manifest or the global
+config): the move leaves the manifest and the rendered lock exactly as they were and tells you
+to run `ow render -w <new path>` afterwards. Relocation and the index update are already done
+by the time the refresh runs, so a prerequisite or render failure exits non-zero with the
+workspace left at its new path — never rolled back.
 
 ```sh
 ow mv parrot ~/odoo/parrot          # rename
@@ -451,9 +462,11 @@ ow unarchive parrot                  # restore it to ./parrot
 ow unarchive parrot ~/odoo/parrot   # ... or somewhere else
 ```
 
-Unarchiving is the same move in reverse, plus a re-render so the absolute paths in `odoorc`
-name wherever it landed. `ow ls --archived` lists the archive — it is not in the index by
-design, so it is read straight off the filesystem.
+Unarchiving is the same move in reverse, plus a refresh for a schema-2 workspace so the
+absolute `data_dir` in `odoorc` names wherever it landed. A schema-1 archive comes back exactly
+as it left — restoring it never migrates it; only `ow render` does, and the command tells you
+so. `ow ls --archived` lists the archive — it is not in the index by design, so it is read
+straight off the filesystem.
 
 ## `ow cd` / `ow shell-init`
 

@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Iterable
 
 from ow.utils import paths
+from ow.utils.config import Config, WorkspaceConfig
 from ow.utils.git import run_cmd
+from ow.utils.render import RenderResult
+from ow.utils.workspace import refresh_workspace, require_mise
 
 
 def validate_target(ws_dir: Path, target: Path) -> str | None:
@@ -35,7 +38,7 @@ def relocate_workspace(ws_dir: Path, target: Path, aliases: Iterable[str]) -> li
 
     Returns the aliases whose registration could not be repaired — a missing
     bare repo, or a `git worktree repair` that failed. Not fatal on its own:
-    every file is already at the new path, and `ow apply` re-creates a
+    every file is already at the new path, and `ow init` re-creates a
     worktree the bare repo has lost track of.
     """
     shutil.move(str(ws_dir), str(target))
@@ -54,3 +57,23 @@ def relocate_workspace(ws_dir: Path, target: Path, aliases: Iterable[str]) -> li
         if result.returncode != 0:
             unrepaired.append(alias)
     return unrepaired
+
+
+def refresh_after_relocation(config: Config, ws: WorkspaceConfig, target: Path) -> RenderResult | None:
+    """Bring `target`'s generated files in line with `ws`/`config`, once the move is done.
+
+    A workspace still on schema 1 — its own file or the global config — is
+    left exactly as it is: converting it is `ow render`'s job alone, never
+    a side effect of `mv`/`unarchive`. `None` says so plainly; the caller
+    points at `ow render -w target` and touches neither the manifest nor
+    the lock. A schema-2 workspace gets mise's one prerequisite check, then
+    a full refresh. Either failure comes back as `RenderResult.errors` —
+    the move has already happened, and there is nothing here to roll back.
+    """
+    if config.version == 1 or ws.version == 1:
+        return None
+    try:
+        require_mise()
+    except ValueError as exc:
+        return RenderResult(errors=(str(exc),))
+    return refresh_workspace(config, ws, target, trust=False)

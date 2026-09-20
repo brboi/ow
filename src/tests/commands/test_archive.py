@@ -2,7 +2,7 @@
 
 The property that matters is that a workspace survives the round trip with
 working worktrees and its branches intact. Only real bare repos can show
-that, so nothing here is mocked but the confirmation prompt.
+that, so nothing here is mocked but the confirmation prompt and mise.
 """
 
 import subprocess
@@ -17,7 +17,13 @@ from ow.commands.archive import (
 )
 from ow.commands.ls import cmd_ls
 from ow.utils import index, paths
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
+from ow.utils.config import (
+    BranchSpec,
+    Config,
+    WorkspaceConfig,
+    load_workspace_config,
+    write_workspace_config,
+)
 
 MARKER = Path(".ow") / "config.toml"
 
@@ -48,6 +54,15 @@ def _bare_repo(tmp_path: Path, alias: str = "community") -> Path:
     (src / "addons" / "sale" / "__manifest__.py").write_text("{}\n")
     (src / "odoo" / "addons" / "base").mkdir(parents=True)
     (src / "odoo" / "addons" / "base" / "__manifest__.py").write_text("{}\n")
+    (src / "odoo" / "release.py").write_text(
+        "version_info = (19, 0, 0, 'final', 0, '')\n"
+        "MIN_PY_VERSION = (3, 10)\nMAX_PY_VERSION = (3, 14)\n"
+    )
+    (src / "odoo" / "tools").mkdir(parents=True)
+    (src / "odoo" / "tools" / "config.py").write_text(
+        "PARSER.add_argument('--with-demo', action='store_true')\n"
+        "PARSER.add_argument('--without-demo', action='store_true')\n"
+    )
     _git(src, "add", "-A")
     _git(src, "commit", "-qm", "A")
 
@@ -83,10 +98,7 @@ def _make_workspace(tmp_path: Path, name: str, bare: Path) -> Path:
     ws.mkdir(parents=True)
     write_workspace_config(
         ws / MARKER,
-        WorkspaceConfig(
-            repos={"community": BranchSpec("origin/master", f"master-{name}")},
-            templates=["common"],
-        ),
+        WorkspaceConfig(repos={"community": BranchSpec("origin/master", f"master-{name}")}),
     )
     _git(bare, "worktree", "add", "-b", f"master-{name}", str(ws / "community"), "origin/master")
     index.remember(ws)
@@ -97,9 +109,13 @@ def _answer(monkeypatch, reply: str):
     monkeypatch.setattr("builtins.input", lambda prompt="": reply)
 
 
+def _mise_ok(monkeypatch):
+    monkeypatch.setattr("ow.utils.relocate.require_mise", lambda: (2026, 9, 9))
+
+
 @pytest.fixture
 def config(xdg) -> Config:
-    return Config(vars={"http_port": 8069}, remotes={})
+    return Config(remotes={})
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +181,7 @@ def test_the_round_trip_restores_a_working_workspace(tmp_path, monkeypatch, conf
     bare = _bare_repo(tmp_path)
     _make_workspace(tmp_path, "parrot", bare)
     _answer(monkeypatch, "y")
+    _mise_ok(monkeypatch)
 
     cmd_archive("parrot")
     back = tmp_path / "restored"
@@ -187,6 +204,7 @@ def test_unarchive_defaults_to_the_current_directory(tmp_path, monkeypatch, conf
     bare = _bare_repo(tmp_path)
     _make_workspace(tmp_path, "parrot", bare)
     _answer(monkeypatch, "y")
+    _mise_ok(monkeypatch)
     cmd_archive("parrot")
 
     here = tmp_path / "here"
@@ -219,6 +237,76 @@ def test_unarchive_refuses_an_occupied_destination(tmp_path, monkeypatch, capsys
 
     assert exc.value.code == 1
     assert "already exists" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Legacy (schema-1) archives — a round trip must never be the thing that
+# migrates a manifest; only `ow render` does that.
+# ---------------------------------------------------------------------------
+
+LEGACY_WS_WITH_UNKNOWN_KEY = (
+    'mystery = "unrecognized-value"\n'
+    "\n"
+    "[repos]\n"
+    'community = "master..master-parrot"\n'
+)
+
+
+def test_archive_and_unarchive_preserve_a_legacy_workspace_byte_for_byte(
+    tmp_path, monkeypatch, config,
+):
+    """Unknown keys, and the manifest's own schema, survive archive and
+    unarchive untouched — restoring a legacy archive must not migrate it."""
+    bare = _bare_repo(tmp_path)
+    ws = tmp_path / "workspaces" / "parrot"
+    (ws / ".ow").mkdir(parents=True)
+    (ws / MARKER).write_text(LEGACY_WS_WITH_UNKNOWN_KEY)
+    lock_bytes = b'# Managed by ow.\nodoorc = "deadbeef"\n'
+    (ws / ".ow" / "rendered.lock.toml").write_bytes(lock_bytes)
+    _git(bare, "worktree", "add", "-b", "master-parrot", str(ws / "community"), "origin/master")
+    index.remember(ws)
+
+    _answer(monkeypatch, "y")
+    cmd_archive("parrot")
+
+    archived = paths.archives_dir() / "parrot"
+    assert (archived / MARKER).read_text() == LEGACY_WS_WITH_UNKNOWN_KEY
+    assert (archived / ".ow" / "rendered.lock.toml").read_bytes() == lock_bytes
+
+    back = tmp_path / "restored"
+    back.mkdir()
+    cmd_unarchive(config, "parrot", str(back))
+
+    target = back / "parrot"
+    assert (target / MARKER).read_text() == LEGACY_WS_WITH_UNKNOWN_KEY
+    assert (target / ".ow" / "rendered.lock.toml").read_bytes() == lock_bytes
+    assert not (target / "odoorc").exists()
+
+    reloaded = load_workspace_config(target / MARKER)
+    assert reloaded.version == 1
+    assert reloaded.legacy is not None
+    assert reloaded.legacy.issues  # the unknown key is recorded, never fatal
+
+
+def test_unarchive_of_a_legacy_workspace_points_at_ow_render(tmp_path, monkeypatch, capsys, config):
+    bare = _bare_repo(tmp_path)
+    ws = tmp_path / "workspaces" / "parrot"
+    (ws / ".ow").mkdir(parents=True)
+    (ws / MARKER).write_text(LEGACY_WS_WITH_UNKNOWN_KEY)
+    _git(bare, "worktree", "add", "-b", "master-parrot", str(ws / "community"), "origin/master")
+    index.remember(ws)
+
+    _answer(monkeypatch, "y")
+    cmd_archive("parrot")
+
+    back = tmp_path / "restored"
+    back.mkdir()
+    capsys.readouterr()
+    cmd_unarchive(config, "parrot", str(back))
+
+    target = back / "parrot"
+    out = capsys.readouterr().out
+    assert f"ow render -w {target}" in out
 
 
 # ---------------------------------------------------------------------------
