@@ -32,7 +32,7 @@ def test_a_worktree_on_another_branch_is_never_reset():
 
     assert plan.is_skipped
     assert "hotfix" in plan.skip_reason
-    assert "ow apply" in plan.skip_reason
+    assert "ow switch" in plan.skip_reason
     assert plan.steps == ()
 
 

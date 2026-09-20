@@ -6,8 +6,10 @@ git state, not from the flags the command was given — both are only
 provable against real worktrees.
 """
 
+import configparser
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -601,3 +603,103 @@ def test_standing_in_a_pinned_repo_is_not_insisting_on_it(tmp_path, capsys, xdg,
     out = capsys.readouterr().out
     assert "left alone" in out
     assert "--include-detached-specs" in out
+
+
+def _make_core_repo(tmp_path: Path, alias: str = "community") -> tuple[Path, Path]:
+    """Like `_make_repo`, but the source also carries Odoo core markers."""
+    src = tmp_path / "origin" / alias
+    src.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(src), "init", "-q", "-b", "master"], check=True)
+    _git(src, "config", "user.email", "t@t")
+    _git(src, "config", "user.name", "T")
+    (src / "odoo-bin").write_text("#!/usr/bin/env python3\n")
+    (src / "addons").mkdir()
+    (src / "addons" / ".keep").write_text("")
+    (src / "odoo" / "addons").mkdir(parents=True)
+    (src / "odoo" / "addons" / ".keep").write_text("")
+    (src / "odoo" / "release.py").write_text(
+        "version_info = (19, 0, 0, 'final', 0, '')\n"
+        "MIN_PY_VERSION = (3, 10)\nMAX_PY_VERSION = (3, 14)\n"
+    )
+    (src / "odoo" / "tools").mkdir(parents=True)
+    (src / "odoo" / "tools" / "config.py").write_text(
+        "PARSER.add_argument('--with-demo', action='store_true')\n"
+        "PARSER.add_argument('--without-demo', action='store_true')\n"
+    )
+    _git(src, "add", "-A")
+    _git(src, "commit", "-qm", "core")
+
+    repos = paths.repos_dir()
+    repos.mkdir(parents=True, exist_ok=True)
+    bare = repos / f"{alias}.git"
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(src), str(bare)],
+        capture_output=True, text=True, check=True,
+    )
+    _git(bare, "config", "user.email", "t@t")
+    _git(bare, "config", "user.name", "T")
+    _git(bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+    _git(bare, "update-ref", "refs/remotes/origin/master", "refs/heads/master")
+    return bare, src
+
+
+def test_a_successful_switch_still_fails_the_run_when_files_cannot_be_refreshed(tmp_path, capsys, xdg):
+    """Git and the config write both succeed; a missing mise prerequisite
+    must not pretend the switch itself failed, and must not throw away
+    what git and the config already did — but the run still has to fail,
+    honestly, for the reason that is actually true."""
+    bare, src = _make_repo(tmp_path, "community")
+    _branch_only_on_source(src, "feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt = _add_worktree(bare, ws_dir, "community")
+    _workspace_config(ws_dir, {"community": "master..featA"})
+
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+
+    with patch(
+        "ow.utils.workspace.require_mise",
+        side_effect=ValueError("mise 2026.8.13 or newer is required; could not run it"),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            cmd_switch(config, "feature-x", workspace=str(ws_dir))
+
+    assert exc.value.code == 1
+    assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    new_ws = load_workspace_config(ws_dir / ".ow" / "config.toml")
+    assert new_ws.repos["community"] == parse_branch_spec("feature-x..feature-x")
+
+    captured = capsys.readouterr()
+    assert "Done." in captured.out
+    assert "files were not refreshed" in captured.err
+
+
+def test_only_narrowing_the_core_still_renders_every_repos_addons(tmp_path, capsys, xdg):
+    """`--only` narrows which repo's Git moves; the refresh that follows
+    still inspects the whole workspace, so `enterprise`'s addon path is
+    not dropped just because only `community` was switched."""
+    bare_c, src_c = _make_core_repo(tmp_path, "community")
+    bare_e, src_e = _make_repo(tmp_path, "enterprise")
+    _branch_only_on_source(src_c, "feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    wt_c = _add_worktree(bare_c, ws_dir, "community")
+    wt_e = _add_worktree(bare_e, ws_dir, "enterprise")
+    (wt_e / "my_addon").mkdir()
+    (wt_e / "my_addon" / "__manifest__.py").write_text("{}")
+    _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master..featA"})
+
+    config = Config(remotes={
+        "community": {"origin": RemoteConfig(url=str(src_c))},
+        "enterprise": {"origin": RemoteConfig(url=str(src_e))},
+    })
+
+    cmd_switch(config, "feature-x", workspace=str(ws_dir), only="community")
+
+    assert _git(wt_c, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
+    assert _git(wt_e, "rev-parse", "--abbrev-ref", "HEAD") == "featA"  # untouched by --only
+
+    odoorc = configparser.ConfigParser(interpolation=None)
+    odoorc.read(ws_dir / "odoorc")
+    addon_paths = odoorc["options"]["addons_path"].split(",")
+    assert "enterprise" in addon_paths

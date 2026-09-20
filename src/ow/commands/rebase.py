@@ -31,6 +31,7 @@ from ow.utils.git import (
 from ow.utils.rebase_plan import RebasePlan, RepoFacts, plan_for
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
+from ow.utils.workspace import refresh_after_git
 
 
 def _bound(worktree, base: str, up_before: str | None, up: str | None = None) -> str | None:
@@ -320,6 +321,7 @@ def cmd_rebase(
         console.print("Aborted.")
         sys.exit(2)
 
+    changed: set[str] = set()
     for plan in plans:
         if plan.is_skipped:
             _report_skip(plan)
@@ -327,8 +329,11 @@ def cmd_rebase(
             continue
         if plan.is_noop:
             continue
-        if not _execute(plan, ws_dir / plan.alias):
+        if _execute(plan, ws_dir / plan.alias):
+            changed.add(plan.alias)
+        else:
             failed = True
 
-    if failed:
+    render_failed = refresh_after_git(config, ws, ws_dir, changed=changed, failed=failed)
+    if failed or render_failed:
         sys.exit(1)

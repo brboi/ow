@@ -30,6 +30,7 @@ from ow.utils.git import (
 )
 from ow.utils.resolver import repo_from_cwd, resolve_workspace
 from ow.utils.switch_plan import SwitchFacts, SwitchPlan, plan_switch
+from ow.utils.workspace import refresh_after_git
 
 
 def _tracking_matches(worktree: Path, ref: str) -> list[str]:
@@ -302,8 +303,8 @@ def _new_spec(worktree: Path, *, target: str | None, create: str | None, old: Br
     branch = get_worktree_branch(worktree)
     if branch is None:
         # Detached: the bare spec is the ref the user asked for, not the
-        # sha it happens to resolve to — that is what a future `ow apply`
-        # or `ow switch` would need to re-detach onto the same place.
+        # sha it happens to resolve to — that is what a future `ow switch`
+        # would need to re-detach onto the same place.
         assert target is not None
         return BranchSpec(base_ref=target)
 
@@ -364,8 +365,10 @@ def cmd_switch(
     Once a repo has actually moved, `.ow/config.toml` is rewritten from
     what git now reports for it — an upstream when the branch tracks
     one, the start point (or the repo's own prior base ref) when it does
-    not, a bare ref when it ends up detached. Files are not re-rendered
-    here; that is `ow render`'s job.
+    not, a bare ref when it ends up detached. A run that moved at least
+    one repo then refreshes generated files for the whole workspace, the
+    same way `ow render` would; `ow render` is only needed after a dry
+    run, a refusal, or a run where nothing moved.
     """
     if detach and create is not None:
         err_console.print("Error: --detach cannot be combined with -c/--create", markup=False)
@@ -482,18 +485,17 @@ def cmd_switch(
         # actually given: schema version, typed overrides and legacy evidence
         # all travel with it, and the schema-preserving writer decides how
         # they reach disk.
-        write_workspace_config(ws_dir / ".ow" / "config.toml", replace(ws, repos=new_repos))
-        console.print(
-            "\n[dim]Files are not re-rendered by a switch — run `ow render` if you need them refreshed.[/]"
+        ws = write_workspace_config(ws_dir / ".ow" / "config.toml", replace(ws, repos=new_repos))
+
+    if exec_failed and touched:
+        # A failure here is the one case the pre-flight cannot prevent,
+        # and it leaves exactly what the pre-flight exists to avoid.
+        stranded = ", ".join(p.alias for p in runnable if p.alias not in touched)
+        err_console.print(
+            f"  [yellow]The workspace is split[/]: {escape(', '.join(touched))} moved, "
+            f"{escape(stranded)} did not."
         )
 
-    if exec_failed:
-        if touched:
-            # A failure here is the one case the pre-flight cannot prevent,
-            # and it leaves exactly what the pre-flight exists to avoid.
-            stranded = ", ".join(p.alias for p in runnable if p.alias not in touched)
-            err_console.print(
-                f"  [yellow]The workspace is split[/]: {escape(', '.join(touched))} moved, "
-                f"{escape(stranded)} did not."
-            )
+    render_failed = refresh_after_git(config, ws, ws_dir, changed=set(touched), failed=exec_failed)
+    if exec_failed or render_failed:
         sys.exit(1)

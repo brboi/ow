@@ -20,9 +20,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import pathspec
+from rich.markup import escape
 
 from ow.utils import paths
-from ow.utils.config import Config, WorkspaceConfig
+from ow.utils.config import Config, WorkspaceConfig, report_pending_migration
+from ow.utils.display import console, err_console
 from ow.utils.generate import GenerationContext, generate_files
 from ow.utils.git import get_worktree_common_dir, in_progress_operation, run_cmd
 from ow.utils.migration import plan_migration
@@ -309,3 +311,62 @@ def refresh_workspace(config: Config, ws: WorkspaceConfig, root: Path, *, trust:
                 errors = (f"could not trust {root / _MISE_FRAGMENT}: {exc}",)
 
     return replace(result, warnings=warnings, errors=errors)
+
+
+# ---------------------------------------------------------------------------
+# refresh_after_git
+# ---------------------------------------------------------------------------
+
+
+def refresh_after_git(
+    config: Config, ws: WorkspaceConfig, root: Path, *, changed: set[str], failed: bool
+) -> bool:
+    """Refresh generated files once, after a batch of Git mutations.
+
+    Every mutating command (`switch`, `pull`, `rebase`, `reset`) shares
+    this boundary instead of re-rendering per repo: one inspection and one
+    write for the whole workspace, run only when at least one repo's plan
+    actually executed. Returns True exactly when Git itself succeeded but
+    the refresh could not run or could not finish — the caller's cue to
+    still exit nonzero, without turning a real Git failure into a second,
+    misleading one.
+
+    `changed` empty means nothing moved: no prerequisite is checked, no
+    file is touched, nothing is printed. A `failed` batch is left exactly
+    as Git left it — refreshing on top of a half-finished batch would mix
+    generated output from before and after the failure, so the skip is
+    explained but nothing is added to the failure. A schema-1 `config` or
+    `ws` is not converted here — that is `ow init`'s or `ow render`'s job
+    — so the pending-migration notice is shown and refresh is skipped
+    without counting as a failure of this run.
+    """
+    if not changed:
+        return False
+    if failed:
+        console.print(
+            "[dim]Files were not refreshed: at least one repo's Git operation failed.[/]"
+        )
+        return False
+    if config.version == 1 or ws.version == 1:
+        report_pending_migration(config, ws, root)
+        return False
+
+    try:
+        require_mise()
+    except ValueError as exc:
+        err_console.print(
+            f"[yellow]Git succeeded, but files were not refreshed[/]: {escape(str(exc))}"
+        )
+        return True
+
+    result = refresh_workspace(config, ws, root, trust=False)
+    if result.errors:
+        for error in result.errors:
+            err_console.print(
+                f"[yellow]Git succeeded, but files were not refreshed[/]: {escape(error)}"
+            )
+        return True
+
+    for warning in result.warnings:
+        console.print(f"[dim]{escape(warning)}[/]")
+    return False

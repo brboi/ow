@@ -6,6 +6,8 @@ real working tree. Nothing here is mocked: with no fetch, resolution is
 entirely local.
 """
 
+import configparser
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -28,13 +30,33 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _bare_repo(tmp_path: Path, alias: str = "community") -> Path:
+def _bare_repo(
+    tmp_path: Path, alias: str = "community", *, odoo_core: bool = False, addon: str | None = None,
+) -> Path:
     src = tmp_path / "origin" / alias
     src.mkdir(parents=True)
     subprocess.run(["git", "-C", str(src), "init", "-q", "-b", "master"], check=True)
     _git(src, "config", "user.email", "t@t")
     _git(src, "config", "user.name", "T")
     (src / "a.txt").write_text("a")
+    if odoo_core:
+        (src / "odoo-bin").write_text("#!/usr/bin/env python3\n")
+        (src / "addons").mkdir()
+        (src / "addons" / ".keep").write_text("")
+        (src / "odoo" / "addons").mkdir(parents=True)
+        (src / "odoo" / "addons" / ".keep").write_text("")
+        (src / "odoo" / "release.py").write_text(
+            "version_info = (19, 0, 0, 'final', 0, '')\n"
+            "MIN_PY_VERSION = (3, 10)\nMAX_PY_VERSION = (3, 14)\n"
+        )
+        (src / "odoo" / "tools").mkdir(parents=True)
+        (src / "odoo" / "tools" / "config.py").write_text(
+            "PARSER.add_argument('--with-demo', action='store_true')\n"
+            "PARSER.add_argument('--without-demo', action='store_true')\n"
+        )
+    if addon is not None:
+        (src / addon).mkdir()
+        (src / addon / "__manifest__.py").write_text("{}")
     _git(src, "add", "-A")
     _git(src, "commit", "-qm", "A")
 
@@ -216,7 +238,7 @@ def test_a_worktree_on_another_branch_is_never_reset(tmp_path, capsys, xdg):
     assert _git(worktree, "rev-parse", "HEAD") == mine
     err = capsys.readouterr().err
     assert "hotfix" in err
-    assert "ow apply" in err
+    assert "ow switch" in err
 
 
 def test_a_repo_already_on_its_target_is_left_alone_without_asking(tmp_path, capsys, xdg, monkeypatch):
@@ -298,3 +320,47 @@ def test_only_narrows_the_work_to_one_repo(tmp_path, capsys, xdg):
 
     assert _git(other, "rev-parse", "HEAD") == kept
     assert "enterprise" not in capsys.readouterr().out
+
+
+def _two_repo_workspace_with_addon(tmp_path: Path, addon: str = "my_addon") -> tuple[Config, Path, Path, Path]:
+    """A core repo plus a non-core repo carrying one tracked addon, both
+    worktrees sitting on featA at their unmoved base — moving nothing is
+    the whole point of this fixture."""
+    bare_c = _bare_repo(tmp_path, "community", odoo_core=True)
+    bare_e = _bare_repo(tmp_path, "enterprise", addon=addon)
+    ws_dir = tmp_path / "workspaces" / "test"
+    ws_dir.mkdir(parents=True)
+    wt_c = ws_dir / "community"
+    wt_e = ws_dir / "enterprise"
+    _git(bare_c, "worktree", "add", "-q", str(wt_c), "-b", "featA", "master")
+    _git(bare_e, "worktree", "add", "-q", str(wt_e), "-b", "featA", "master")
+    write_workspace_config(
+        ws_dir / ".ow" / "config.toml",
+        WorkspaceConfig(repos={
+            "community": parse_branch_spec("master..featA"),
+            "enterprise": parse_branch_spec("master..featA"),
+        }),
+    )
+    return Config(remotes={}), ws_dir, wt_c, wt_e
+
+
+def test_hard_reset_restores_a_deleted_tracked_addon_even_though_head_does_not_move(tmp_path, capsys, xdg):
+    """The addon directory is deleted, uncommitted, from a non-core repo.
+    Resetting to the ref the repo is already on moves nothing — HEAD stays
+    exactly where it was — but the working tree comes back, and the
+    refresh that follows must go by the plan that actually ran, not by
+    comparing HEAD before and after."""
+    config, ws_dir, wt_c, wt_e = _two_repo_workspace_with_addon(tmp_path)
+    shutil.rmtree(wt_e / "my_addon")
+    assert not (wt_e / "my_addon").exists()
+    before_head = _git(wt_e, "rev-parse", "HEAD")
+
+    cmd_reset(config, workspace=str(ws_dir), hard=True, yes=True)
+
+    assert _git(wt_e, "rev-parse", "HEAD") == before_head
+    assert (wt_e / "my_addon" / "__manifest__.py").exists()
+
+    odoorc = configparser.ConfigParser(interpolation=None)
+    odoorc.read(ws_dir / "odoorc")
+    addon_paths = odoorc["options"]["addons_path"].split(",")
+    assert "enterprise" in addon_paths

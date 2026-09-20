@@ -66,7 +66,7 @@ def plan_pull(f: PullFacts) -> PullPlan:
 
     if f.detached_drift:
         return PullPlan(
-            skip_reason="worktree state does not match the config — run ow apply", **carried
+            skip_reason="worktree state does not match the config — run ow switch", **carried
         )
 
     if f.head is None or f.target_sha is None:
