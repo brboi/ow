@@ -13,7 +13,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Literal, Mapping
+from typing import Iterable, Literal, Mapping, Sequence
 
 ProbeKind = Literal["none", "supported", "unsupported", "invalid", "ambiguous", "incomplete"]
 
@@ -58,7 +58,7 @@ class OdooProbe:
 
     kind: ProbeKind
     info: OdooInfo | None
-    reason: str | None = None
+    messages: tuple[str, ...] = ()
 
 
 def is_odoo_main_repo(repo_dir: Path) -> bool:
@@ -141,32 +141,44 @@ def find_addon_paths(path: Path, exclude: Iterable[Path] = ()) -> list[Path]:
     return sorted(result)
 
 
-def workspace_addon_paths(ws_dir: Path, repo_dirs: Mapping[str, Path]) -> list[Path]:
+def workspace_addon_paths(
+    root: Path, aliases: Sequence[str], core_alias: str | None
+) -> tuple[Path, ...]:
     """Every addons_path this workspace exposes, in Odoo's resolution order.
 
-    `.local` addons first, then other loose workspace addons, then each
-    non-core repo's own addons_paths in `repo_dirs` order, then the core
-    repo's two fixed addons_path directories last: Odoo resolves a module
-    from the first addons_path holding it, and loose addons exist to shadow
-    the module they replace. Raises if more than one repo looks like the
-    Odoo core: an ambiguous core has no correct place in this order.
+    A generic workspace (`core_alias=None`) never walks the tree: no
+    consumer of this order needs one without a supported Odoo core, so
+    scanning is skipped entirely. With a core, order is `.local` addons,
+    other loose workspace addons, each non-core repo's own addons_paths in
+    `aliases` order, then the core repo's two fixed addons_path directories
+    last: Odoo resolves a module from the first addons_path holding it, and
+    loose addons exist to shadow the module they replace. Deduplicated
+    without reordering. Each alias's repo lives at `root / alias`.
     """
-    cores = [alias for alias, repo_dir in repo_dirs.items() if is_odoo_main_repo(repo_dir)]
-    if len(cores) > 1:
-        raise ValueError(f"repo_dirs: multiple Odoo cores {sorted(cores)!r}")
+    if core_alias is None:
+        return ()
 
+    repo_dirs = {alias: root / alias for alias in aliases}
     main_paths: list[Path] = []
     repo_paths: list[Path] = []
-    for alias, repo_dir in repo_dirs.items():
-        if alias in cores:
+    for alias in aliases:
+        repo_dir = repo_dirs[alias]
+        if alias == core_alias:
             main_paths = [repo_dir / "addons", repo_dir / "odoo" / "addons"]
         else:
             repo_paths.extend(find_addon_paths(repo_dir))
 
-    loose = find_addon_paths(ws_dir / ".local") + find_addon_paths(
-        ws_dir, exclude=list(repo_dirs.values())
+    loose = find_addon_paths(root / ".local") + find_addon_paths(
+        root, exclude=list(repo_dirs.values())
     )
-    return loose + repo_paths + main_paths
+
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for candidate in loose + repo_paths + main_paths:
+        if candidate not in seen:
+            seen.add(candidate)
+            deduped.append(candidate)
+    return tuple(deduped)
 
 
 def probe_odoo(repo_dirs: Mapping[str, Path]) -> OdooProbe:
@@ -182,25 +194,32 @@ def probe_odoo(repo_dirs: Mapping[str, Path]) -> OdooProbe:
     missing = sorted(alias for alias, repo_dir in repo_dirs.items() if not repo_dir.is_dir())
     if missing:
         return OdooProbe(
-            kind="incomplete", info=None, reason=f"missing worktree(s): {', '.join(missing)}"
+            kind="incomplete",
+            info=None,
+            messages=tuple(f"{alias}: worktree missing" for alias in missing),
         )
 
     cores = sorted(alias for alias, repo_dir in repo_dirs.items() if is_odoo_main_repo(repo_dir))
     if len(cores) > 1:
         return OdooProbe(
-            kind="ambiguous", info=None, reason=f"multiple Odoo cores: {', '.join(cores)}"
+            kind="ambiguous",
+            info=None,
+            messages=tuple(
+                f"{alias}: matches Odoo core markers (odoo-bin, addons/, odoo/addons/)"
+                for alias in cores
+            ),
         )
     if not cores:
-        return OdooProbe(kind="none", info=None, reason=None)
+        return OdooProbe(kind="none", info=None)
 
     alias = cores[0]
     try:
         info = _probe_core(alias, repo_dirs[alias])
     except ValueError as exc:
-        return OdooProbe(kind="invalid", info=None, reason=str(exc))
+        return OdooProbe(kind="invalid", info=None, messages=(str(exc),))
 
     kind: ProbeKind = "supported" if info.major in SUPPORTED_MAJORS else "unsupported"
-    return OdooProbe(kind=kind, info=info, reason=None)
+    return OdooProbe(kind=kind, info=info)
 
 
 def _probe_core(alias: str, core_path: Path) -> OdooInfo:
