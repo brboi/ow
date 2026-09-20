@@ -62,9 +62,9 @@ src/
 ```
 
 There is no project root to find: every command that needs configuration loads the same global one
-via `load_global_config()`. `ls`, `rm`, `prune`, `cd`, `shell-init` and the completion callbacks
-are the ones that don't — they read the index, the workspace configs, or nothing at all, so none
-of them creates a config.
+via `load_global_config()`. `ls`, `rm`, `archive`, `prune`, `cd`, `shell-init` and the completion
+callbacks are the ones that don't — they read the index, the workspace configs, or nothing at all,
+so none of them creates a config.
 
 ## Key abstractions
 

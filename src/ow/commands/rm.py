@@ -178,7 +178,7 @@ def execute_removal(name: str, ws_dir: Path, repos: list[RepoRemoval]) -> None:
                     markup=False,
                 )
 
-    # 2. Remove the workspace directory (worktrees, templates, .ow, .data, etc.).
+    # 2. Remove the workspace directory (worktrees, generated files, .ow, .odoo, etc.).
     shutil.rmtree(ws_dir, ignore_errors=True)
     index.forget(ws_dir)
 
