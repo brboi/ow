@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from ow import __main__ as cli
+from ow.commands.files import cmd_files
 from ow.commands.ls import cmd_ls
 from ow.commands.prune import cmd_prune
 from ow.commands.pull import cmd_pull
@@ -303,6 +304,72 @@ def test_a_declared_but_absent_worktree_is_a_read_not_a_repair(
     before = tree_snapshot.capture(xdg, ws_dir)
 
     cmd_status(Config(remotes={}), workspace=str(ws_dir))
+
+    assert tree_snapshot.differences(before, tree_snapshot.capture(xdg, ws_dir)) == {}
+    capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------
+# `ow files` is read-only: neither listing nor diffing may write a byte,
+# including the bootstrap-on-first-read and index-pruning cases above.
+# ---------------------------------------------------------------------------
+
+
+def test_files_with_no_global_config_and_no_index_writes_nothing(
+    xdg: Path, tmp_path: Path, tree_snapshot, capsys
+) -> None:
+    config, ws_dir, _ = _workspace(tmp_path)
+    assert not paths.config_file().exists()
+    assert not paths.index_file().exists()
+    before = tree_snapshot.capture(xdg, ws_dir)
+
+    cmd_files(config, workspace=str(ws_dir))
+
+    assert tree_snapshot.differences(before, tree_snapshot.capture(xdg, ws_dir)) == {}
+    capsys.readouterr()
+
+
+def test_files_diff_with_no_global_config_and_no_index_writes_nothing(
+    xdg: Path, tmp_path: Path, tree_snapshot, capsys
+) -> None:
+    config, ws_dir, _ = _workspace(tmp_path)
+    before = tree_snapshot.capture(xdg, ws_dir)
+
+    with pytest.raises(SystemExit):
+        cmd_files(config, workspace=str(ws_dir), show_diff=True)
+
+    assert tree_snapshot.differences(before, tree_snapshot.capture(xdg, ws_dir)) == {}
+    capsys.readouterr()
+
+
+def test_files_on_a_workspace_missing_a_worktree_writes_nothing(
+    xdg: Path, tmp_path: Path, tree_snapshot, capsys
+) -> None:
+    """A blocked plan (repair guidance, no generation) is still read-only."""
+    ws_dir = tmp_path / "workspaces" / "hollow"
+    write_workspace_config(
+        ws_dir / ".ow" / "config.toml",
+        WorkspaceConfig(repos={"community": parse_branch_spec("master")}),
+    )
+    before = tree_snapshot.capture(xdg, ws_dir)
+
+    with pytest.raises(SystemExit):
+        cmd_files(Config(remotes={}), workspace=str(ws_dir))
+
+    assert tree_snapshot.differences(before, tree_snapshot.capture(xdg, ws_dir)) == {}
+    capsys.readouterr()
+
+
+def test_files_leaves_the_git_index_alone(
+    xdg: Path, tmp_path: Path, tree_snapshot, capsys
+) -> None:
+    """Addon-path scanning and the Git worktree it walks must not be touched."""
+    config, ws_dir, worktree = _workspace(tmp_path)
+    git_index = Path(_git(worktree, "rev-parse", "--git-path", "index"))
+    assert git_index.exists(), git_index
+    before = tree_snapshot.capture(xdg, ws_dir)
+
+    cmd_files(config, workspace=str(ws_dir))
 
     assert tree_snapshot.differences(before, tree_snapshot.capture(xdg, ws_dir)) == {}
     capsys.readouterr()

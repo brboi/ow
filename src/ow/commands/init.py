@@ -1,41 +1,37 @@
-"""Creating a workspace, here or in ./NAME.
+"""Creating or repairing a workspace, here or in ./NAME.
 
-Mirrors `git init`: a workspace is a directory holding a .ow/config.toml, and
-its name is that directory's name — which is already what
-`build_template_context` reads. Nothing here knows about a project root,
-because there is none.
+`ow init` is re-runnable: pointed at a directory that is already a
+workspace, it repairs it — recreates whatever worktree went missing,
+seeds whatever `.local` file is still absent, and renders whatever
+generated file is stale — without ever touching a repo or a branch spec
+that is already there and correct. Pointed at a new directory, it creates
+one, interactively when a human is asking, from flags and `-c` otherwise.
 """
 
 import re
-import shutil
-import subprocess
 import sys
 import tomllib
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 from rich.prompt import Prompt
 
-from ow.utils import index
-from ow.utils.display import console, err_console
-from ow.utils.templates import (
-    IMPLICIT_BUNDLE,
-    ODOO_BUNDLE,
-    RenderResult,
-    apply_templates,
-    ensure_services_compose,
-    ensure_workspace_materialized,
-    selectable_templates,
-)
+from ow.utils import index, paths
 from ow.utils.config import (
     BranchSpec,
     Config,
     WorkspaceConfig,
+    load_global_config,
     load_workspace_config,
     parse_branch_spec,
     write_workspace_config,
 )
-from ow.utils.git import run_cmd
+from ow.utils.display import confirm, console, err_console
+from ow.utils.drift import print_drift_warning
+from ow.utils.materialize import materialize_missing, seed_local_files
+from ow.utils.migration import commit_migration, plan_migration
+from ow.utils.options import MiseOverrides, OdooOverrides
+from ow.utils.workspace import refresh_workspace, require_mise
 
 MARKER = Path(".ow") / "config.toml"
 
@@ -44,53 +40,24 @@ MARKER = Path(".ow") / "config.toml"
 # ---------------------------------------------------------------------------
 
 
-def _cleanup_failed_workspace(ws_dir: Path) -> None:
-    """Remove workspace directory if it's empty or contains only .ow/.
-
-    Only ever called on a directory ow created itself. `ow init` with no
-    argument runs in a directory the user was already standing in, and
-    deleting that because a fetch failed would be unforgivable.
-    """
-    if not ws_dir.exists():
-        return
-    contents = list(ws_dir.iterdir())
-    if not contents or contents == [ws_dir / ".ow"]:
-        shutil.rmtree(ws_dir)
-
-
-def _validate_init_inputs(
+def _resolve_target(
     config: Config,
     name: str | None,
-    templates: list[str] | None,
     repos: dict[str, BranchSpec] | None,
     configuration: str | None,
     *,
     parent: Path | None = None,
-) -> tuple[WorkspaceConfig | None, Path]:
-    """Validate CLI inputs and resolve the target directory.
+) -> tuple[WorkspaceConfig | None, Path, bool]:
+    """Validate CLI inputs, resolve the target directory, and say whether it exists.
 
-    Returns (source_ws, ws_dir). Exits on validation errors.
+    Returns `(source_ws, ws_dir, existing)`. `source_ws` is `-c`'s source,
+    read-only and never mutated. Existence-dependent refusals (a
+    conflicting `-r`, or `-c` pointed at a workspace that is already one)
+    are the caller's business once `existing` is known.
     """
-    # Packaged templates are always available even when the user hasn't taken
-    # (and thus doesn't have a local copy of) any — nothing is copied at
-    # bootstrap, so listing paths.templates_dir() alone would wrongly treat a
-    # fresh install as having no templates. common and odoo are excluded:
-    # neither is ever declared here — common always applies, odoo is
-    # detected from the repos.
-    available = selectable_templates()
-
-    if templates is not None:
-        invalid = [t for t in templates if t not in available]
-        if invalid:
-            avail = ", ".join(available)
-            print(f"Error: unknown template(s): {', '.join(invalid)}. Available: {avail}", file=sys.stderr)
-            if any(t in (IMPLICIT_BUNDLE, ODOO_BUNDLE) for t in invalid):
-                print("       common is always applied, and odoo is detected from the repos", file=sys.stderr)
-            sys.exit(1)
-
     known_aliases = list(config.remotes.keys())
     if repos is not None:
-        unknown = [a for a in repos if a not in known_aliases]
+        unknown = [alias for alias in repos if alias not in known_aliases]
         if unknown:
             avail = ", ".join(known_aliases) if known_aliases else "(none configured)"
             print(f"Error: unknown repo alias(es): {', '.join(unknown)}. Available: {avail}", file=sys.stderr)
@@ -106,28 +73,8 @@ def _validate_init_inputs(
         try:
             source_ws = load_workspace_config(src_config_file)
         except (OSError, ValueError) as exc:
-            # TOMLDecodeError is a ValueError; a fumbled quote or missing
-            # bracket deserves the same one-liner the global config gets,
-            # not eight frames of tomllib.
             print(f"Error: could not load {src_config_file}: {exc}", file=sys.stderr)
             sys.exit(1)
-
-        # A config ow wrote before #45 declares `common` and `odoo`. Both are
-        # ow's decision now, and refusing to duplicate a workspace over names
-        # ow no longer asks for would strand every existing config, so they
-        # are dropped; the rest of the source (other template names, repos,
-        # vars, order) is carried over untouched. `-t` stays strict above: a
-        # name typed at the CLI is a typo worth naming.
-        source_ws.templates = [
-            t for t in source_ws.templates if t not in (IMPLICIT_BUNDLE, ODOO_BUNDLE)
-        ]
-
-        invalid = [t for t in source_ws.templates if t not in available]
-        if invalid:
-            avail = ", ".join(available) if available else "(none found)"
-            print(f"Error: configuration references unknown template(s): {', '.join(invalid)}. Available: {avail}", file=sys.stderr)
-            sys.exit(1)
-
         for alias in source_ws.repos:
             if alias not in known_aliases:
                 avail = ", ".join(known_aliases) if known_aliases else "(none configured)"
@@ -142,73 +89,38 @@ def _validate_init_inputs(
         # one the user already named.
         ws_dir = base_dir
     else:
-        name = name.strip()
-        if not name or not re.match(r'^[a-zA-Z0-9_-]+$', name):
+        stripped = name.strip()
+        if not stripped or not re.match(r'^[a-zA-Z0-9_-]+$', stripped):
             print("Error: name must be alphanumeric with hyphens and underscores only.", file=sys.stderr)
             sys.exit(1)
-        ws_dir = base_dir / name
+        ws_dir = base_dir / stripped
 
-    # A plain directory, empty or not, is just a place to work. The one thing
-    # ow refuses to walk over is an existing workspace definition.
-    if (ws_dir / MARKER).exists():
-        print(f"Error: {ws_dir} is already a workspace.", file=sys.stderr)
-        print(f"       {ws_dir / MARKER} exists; edit it and run `ow apply`.", file=sys.stderr)
-        sys.exit(1)
-
-    return source_ws, ws_dir
+    existing = (ws_dir / MARKER).exists()
+    return source_ws, ws_dir, existing
 
 
 def _preselection(
-    source_ws: WorkspaceConfig | None,
-    templates: list[str] | None,
-    repos: dict[str, BranchSpec] | None,
-) -> tuple[list[str], dict[str, BranchSpec]]:
+    source_ws: WorkspaceConfig | None, repos: dict[str, BranchSpec] | None
+) -> dict[str, BranchSpec]:
     """Everything the caller already decided, before any question is asked."""
-    if source_ws is not None:
-        chosen_templates = list(templates) if templates else list(source_ws.templates)
-        chosen_repos: dict[str, BranchSpec] = dict(source_ws.repos)
-    else:
-        chosen_templates = list(templates) if templates else []
-        chosen_repos = {}
+    chosen_repos: dict[str, BranchSpec] = dict(source_ws.repos) if source_ws is not None else {}
     if repos:
         chosen_repos.update(repos)
-    return chosen_templates, chosen_repos
+    return chosen_repos
 
 
 def _workspace_config_from_flags(
-    config: Config,
-    source_ws: WorkspaceConfig | None,
-    templates: list[str] | None,
-    repos: dict[str, BranchSpec] | None,
+    source_ws: WorkspaceConfig | None, repos: dict[str, BranchSpec] | None
 ) -> WorkspaceConfig:
-    """Build the workspace config without asking anything.
+    """Build a new workspace's config without asking anything.
 
-    Used when stdin is not a terminal. The flags have to carry everything;
-    what they don't carry is named, not prompted for.
+    Used when stdin is not a terminal. A repo-less workspace is legitimate
+    here: nothing given at all is not an error, it is a generic workspace.
     """
-    # Refuse only when nothing at all was given. A repo-less workspace is
-    # legitimate here too — the interactive path already allows ticking no
-    # repo, so `ow init tools -t vscode` in a script has to be allowed as
-    # well. This guard exists solely to catch the accidental bare `ow init`
-    # in a non-interactive context.
-    if templates is None and repos is None and source_ws is None:
-        avail_t = ", ".join(selectable_templates())
-        avail_r = ", ".join(config.remotes) or "(none configured)"
-        print("Error: stdin is not a terminal, so ow init cannot ask. Nothing was given:", file=sys.stderr)
-        print(f"         -t/--template NAME     available: {avail_t}", file=sys.stderr)
-        print(f"         -r/--repo ALIAS:SPEC   aliases: {avail_r}", file=sys.stderr)
-        print("       or pass -c/--configuration to copy an existing workspace.", file=sys.stderr)
-        sys.exit(1)
-
-    chosen_templates, chosen_repos = _preselection(source_ws, templates, repos)
-
-    # New workspaces always start with a full, self-contained copy of the
-    # global vars — after 2.4.0 the render context reads only ws.vars, so
-    # anything not copied here is simply absent from this workspace forever.
-    # A -c source's own vars take precedence over the global ones they were
-    # copied from at that source's own creation time.
-    ws_vars = {**config.vars, **(source_ws.vars if source_ws is not None else {})}
-    return WorkspaceConfig(repos=chosen_repos, templates=chosen_templates, vars=ws_vars)
+    chosen_repos = _preselection(source_ws, repos)
+    odoo = source_ws.odoo if source_ws is not None else OdooOverrides()
+    mise = source_ws.mise if source_ws is not None else MiseOverrides()
+    return WorkspaceConfig(repos=chosen_repos, odoo=odoo, mise=mise)
 
 
 def _ask_multi(title: str, items: list[str], preselected: set[str]) -> list[str]:
@@ -219,7 +131,6 @@ def _ask_multi(title: str, items: list[str], preselected: set[str]) -> list[str]
     keeps the default; the literal string ``none`` (case-insensitive) or
     ``-`` selects nothing. Re-asks on an unknown token.
     """
-    # Build the default answer: indices (1-based) of preselected items.
     default_indices = [str(i + 1) for i, item in enumerate(items) if item in preselected]
     default_str = ",".join(default_indices)
 
@@ -239,17 +150,14 @@ def _ask_multi(title: str, items: list[str], preselected: set[str]) -> list[str]
         if not answer or answer.lower() in ("none", "-"):
             return []
 
-        # Parse the answer: split by comma, match each token as name or index.
         tokens = [t.strip() for t in answer.split(",") if t.strip()]
         selected: list[str] = []
         unknown: list[str] = []
         for token in tokens:
-            # Try name first (case-sensitive).
             if token in items:
                 if token not in selected:
                     selected.append(token)
                 continue
-            # Try 1-based index.
             try:
                 idx = int(token)
                 if 1 <= idx <= len(items):
@@ -287,68 +195,50 @@ def _ask_spec(alias: str, default: str) -> BranchSpec:
 def _gather_workspace_config_interactive(
     config: Config,
     source_ws: WorkspaceConfig | None,
-    templates: list[str] | None,
     repos: dict[str, BranchSpec] | None,
-    ws_name: str,
 ) -> WorkspaceConfig | None:
-    """Run the interactive questionnaire to build WorkspaceConfig.
+    """Run the interactive questionnaire to build a new workspace's config.
 
-    Returns None if the user cancelled.
+    Returns None if the user cancelled. Nothing is preselected beyond what
+    `-c`/`-r` already named: a bare `ow init` at a terminal offers every
+    known alias unchecked, never guessing `community` for the user.
     """
-    pre_selected_templates, final_repos = _preselection(source_ws, templates, repos)
-
-    # Fail on what the flags already say before making anyone answer questions.
+    final_repos = _preselection(source_ws, repos)
     _check_duplicate_branches(final_repos)
 
+    known_aliases = list(config.remotes.keys())
     try:
-        selected_templates = _ask_multi(
-            "Templates",
-            selectable_templates(),
-            set(pre_selected_templates),
-        )
-
-        known_aliases = list(config.remotes.keys())
         if known_aliases:
-            pre_selected_aliases = set(final_repos.keys())
-            if "community" in known_aliases:
-                pre_selected_aliases.add("community")
-            selected_aliases = _ask_multi(
-                "Repos",
-                known_aliases,
-                pre_selected_aliases,
-            )
-
+            selected_aliases = _ask_multi("Repos", known_aliases, set(final_repos.keys()))
             for alias in selected_aliases:
                 if alias not in final_repos:
                     final_repos[alias] = _ask_spec(alias, "master")
     except KeyboardInterrupt:
         err_console.print("Aborted.")
-        sys.exit(1)
+        return None
 
-    # Same copy-not-link rule as the non-interactive path: the global vars
-    # are the defaults, a -c source's vars override them.
-    ws_vars: dict[str, Any] = {**config.vars, **(source_ws.vars if source_ws is not None else {})}
-
-    return WorkspaceConfig(repos=final_repos, templates=selected_templates, vars=ws_vars)
+    odoo = source_ws.odoo if source_ws is not None else OdooOverrides()
+    mise = source_ws.mise if source_ws is not None else MiseOverrides()
+    return WorkspaceConfig(repos=final_repos, odoo=odoo, mise=mise)
 
 
-def _check_duplicate_branches(new_repos: dict[str, BranchSpec]) -> None:
+def _check_duplicate_branches(
+    new_repos: dict[str, BranchSpec], *, ignore: Path | None = None
+) -> None:
     """Abort if a repo alias would reuse the local branch of a known workspace.
 
     Only local branches (the part after `..`) can collide — source branches
     are shared freely, git only objects to two worktrees on one local branch.
 
     Best-effort by design: it reads index.known_workspaces(), so a workspace
-    ow has never resolved is invisible here and slips through. That is
-    acceptable, because git itself still refuses the second worktree. This
-    check exists only to say so earlier, and in a sentence naming the
-    workspace that already holds the branch.
-
-    A workspace whose own config no longer reads is skipped for the same
-    reason: nothing about the workspace being created is wrong, and git
-    still refuses the second worktree if it turns out to collide.
+    ow has never resolved is invisible here and slips through. `ignore` is
+    the workspace being repaired, if any: comparing its own declared repos
+    against itself is not a collision.
     """
+    ignore_resolved = ignore.resolve() if ignore is not None else None
     for existing_ws_dir in index.known_workspaces():
+        if ignore_resolved is not None and existing_ws_dir.resolve() == ignore_resolved:
+            continue
         try:
             existing = load_workspace_config(existing_ws_dir / MARKER)
         except (OSError, tomllib.TOMLDecodeError, ValueError):
@@ -374,122 +264,147 @@ def _check_duplicate_branches(new_repos: dict[str, BranchSpec]) -> None:
 def cmd_init(
     config: Config,
     name: str | None = None,
-    templates: list[str] | None = None,
     repos: dict[str, BranchSpec] | None = None,
     configuration: str | None = None,
     *,
     parent: Path | None = None,
     yes: bool = False,
 ) -> None:
-    """Create a workspace in the current directory, or in ./NAME.
+    """Create a workspace in the current directory, or in ./NAME — or repair one already there.
 
-    Optional pre-populated values from CLI args:
-      name: directory to create under the current one; without it, "here"
-      templates: list of template names to apply
-      repos: dict of alias -> BranchSpec
-      configuration: path to an existing workspace config to duplicate
-      parent: directory to create the workspace in (default: cwd)
-      yes: skip the confirmation prompt
+    name: directory to create/repair under the current one; without it, "here"
+    repos: dict of alias -> BranchSpec, explicit overrides or additions
+    configuration: path to an existing workspace config to duplicate (new targets only)
+    parent: directory to create the workspace in (default: cwd)
+    yes: skip the confirmation prompt
     """
-    source_ws, ws_dir = _validate_init_inputs(
-        config, name, templates, repos, configuration, parent=parent
-    )
-
-    # Read once, so the questionnaire and the confirmation cannot disagree.
-    interactive = sys.stdin.isatty()
-
-    if interactive:
-        ws = _gather_workspace_config_interactive(config, source_ws, templates, repos, ws_dir.name)
-        if ws is None:
-            print("Aborted.", file=sys.stderr)
-            sys.exit(1)
-    else:
-        ws = _workspace_config_from_flags(config, source_ws, templates, repos)
-
-    _check_duplicate_branches(ws.repos)
-
-    print(f"\nWorkspace '{ws_dir.name}' will be created in {ws_dir} with:")
-    # Nothing declared is the normal case — common is always applied and odoo
-    # follows from the repos — but "Templates: " with nothing after it reads
-    # like a bug rather than a choice.
-    declared = ", ".join(ws.templates) if ws.templates else "(none declared — common is always applied)"
-    print(f"  Templates: {declared}")
-    for alias, spec in ws.repos.items():
-        print(f"  {alias}: {spec.to_spec_str()}")
-    if ws.vars:
-        # Labelled, and indented one step further than the repo lines above:
-        # without that, a var named like a repo alias is indistinguishable
-        # from one on the screen someone reads before typing `y`.
-        print("  Vars: (copied from the global config; this workspace now owns its own copy)")
-        for var_name, value in ws.vars.items():
-            print(f"    {var_name}: {value}")
-
-    if interactive and not yes:
-        from ow.utils.display import confirm
-        if not confirm():
-            print("Aborted.")
-            return
-
-
+    source_ws, ws_dir, existing = _resolve_target(config, name, repos, configuration, parent=parent)
     ow_config_path = ws_dir / MARKER
-    ow_created_the_dir = not ws_dir.exists()
+
+    if existing and configuration is not None:
+        err_console.print(f"Error: {ws_dir} is already a workspace; -c only creates a new one.", markup=False)
+        err_console.print(f"       edit {ow_config_path} directly, or run `ow init` there to repair it.", markup=False)
+        sys.exit(1)
+
+    if existing:
+        try:
+            existing_ws = load_workspace_config(ow_config_path)
+        except (OSError, ValueError) as exc:
+            err_console.print(f"Error: could not load {ow_config_path}: {exc}", markup=False)
+            sys.exit(1)
+
+        conflicts = [
+            alias for alias, spec in (repos or {}).items()
+            if alias in existing_ws.repos and existing_ws.repos[alias] != spec
+        ]
+        if conflicts:
+            err_console.print(
+                "Error: -r conflicts with the existing workspace: " + ", ".join(sorted(conflicts)),
+                markup=False,
+            )
+            err_console.print("       run `ow switch` to change a repo's branch instead.", markup=False)
+            sys.exit(1)
+
+        merged_repos = dict(existing_ws.repos)
+        for alias, spec in (repos or {}).items():
+            merged_repos.setdefault(alias, spec)
+        ws = replace(existing_ws, repos=merged_repos)
+        _check_duplicate_branches(ws.repos, ignore=ws_dir)
+    else:
+        interactive = sys.stdin.isatty() and not yes
+        if interactive:
+            ws = _gather_workspace_config_interactive(config, source_ws, repos)
+            if ws is None:
+                sys.exit(2)
+        else:
+            ws = _workspace_config_from_flags(source_ws, repos)
+            _check_duplicate_branches(ws.repos)
+
+    try:
+        require_mise()
+    except ValueError as exc:
+        err_console.print(f"Error: {exc}", markup=False)
+        sys.exit(1)
+
+    verb = "repaired" if existing else "created"
+    console.print(f"\nWorkspace '{ws_dir.name}' will be {verb} in {ws_dir} with:")
+    if ws.repos:
+        for alias, spec in ws.repos.items():
+            console.print(f"  {alias}: {spec.to_spec_str()}")
+    else:
+        console.print("  (no repos declared)")
+
+    if not existing and sys.stdin.isatty() and not yes:
+        if not confirm():
+            console.print("Aborted.")
+            sys.exit(2)
+
     ws_dir.mkdir(parents=True, exist_ok=True)
 
-    _, successful, errors = ensure_workspace_materialized(ws, config, ws_dir)
-
-    if errors:
-        if len(errors) == len(ws.repos):
-            if ow_created_the_dir:
-                _cleanup_failed_workspace(ws_dir)
-            print("\nError: all repos failed to set up:", file=sys.stderr)
-            for alias, err in errors.items():
-                print(f"  {alias}: {err}", file=sys.stderr)
+    if config.version == 1 or ws.version == 1:
+        migration_plan = plan_migration(config, ws, ws_dir)
+        if migration_plan.errors:
+            for line in migration_plan.errors:
+                err_console.print(f"Error: {line}", markup=False)
             sys.exit(1)
-
-        print("\nWarning: some repos failed to set up:", file=sys.stderr)
-        for alias, err in errors.items():
-            print(f"  {alias}: {err}", file=sys.stderr)
-
-    write_workspace_config(ow_config_path, ws)
-
-    # The config file is the truth; the index only remembers where to find it,
-    # so it is written the moment the truth exists — nothing after this point
-    # may cost the user a workspace that is already on disk.
-    index.remember(ws_dir)
-
-    ensure_services_compose()
-
-    # `render is None` is the one signal that rendering failed: the result
-    # both vouches for what landed and says whether anything did.
-    render: RenderResult | None = None
-    try:
-        render = apply_templates(ws, config, ws_dir)
-    except Exception as exc:
-        print(f"\nWarning: template rendering failed: {exc}", file=sys.stderr)
-
-    # The fragments ow renders under mise/ need trusting, and `managed` names
-    # them without reading the lock back — the same path policy as `ow apply`.
-    # A render that raised leaves no result to vouch for what landed: nothing
-    # is trusted here, and `ow apply` does it once the workspace is fixed.
-    if render is not None:
-        mise_fragments = [ws_dir / path for path in render.managed if path.startswith("mise/")]
-        for mise_toml in mise_fragments:
-            try:
-                run_cmd(["mise", "trust", str(mise_toml)], check=True)
-            except (OSError, subprocess.CalledProcessError) as e:
-                print(f"\nWarning: could not trust {mise_toml}: {e}", file=sys.stderr)
-                print(f"  Run it yourself when mise is happy: mise trust {mise_toml}", file=sys.stderr)
-
-    if errors or render is None:
-        print(f"\nWorkspace '{ws_dir.name}' created with errors. Fix issues and run: ow apply")
+        commit_migration(migration_plan)
+        for line in migration_plan.warnings:
+            err_console.print(line, markup=False)
+        if config.version == 1:
+            config = load_global_config()
+        if ws.version == 1:
+            ws = load_workspace_config(ow_config_path)
     else:
-        print(f"\nWorkspace '{ws_dir.name}' created. To install dependencies:")
-        print(f"    cd {ws_dir} && mise install")
-    print(f"\nWorkspace config: {ow_config_path}")
-    print("Edit it to customize vars, then run: ow apply")
+        write_workspace_config(ow_config_path, ws)
 
-    # The workspace is complete and the user is told everything they would
-    # have been told anyway; only the status code says a repo went wrong, so
-    # a script that chains on `ow init` notices. Same rule as apply and rebase.
-    if errors or render is None:
+    # The config is the truth from this point on; a repo or a render
+    # failing below must still leave it exactly as intended, so a retry
+    # (another `ow init` here) has something meaningful to repair.
+    materialize_result = materialize_missing(ws, config, ws_dir)
+    print_drift_warning(list(materialize_result.drifted))
+    for alias, error in sorted(materialize_result.errors.items()):
+        err_console.print(f"Error: {alias}: {error}", markup=False)
+
+    seed_conflict = None
+    seed_errors: tuple[str, ...] = ()
+    if ".local" in ws.repos:
+        seed_conflict = "'.local' is a declared worktree; ow will not seed local files into it"
+        err_console.print(f"Error: {seed_conflict}", markup=False)
+    else:
+        seed_result = seed_local_files(paths.local_dir(), ws_dir)
+        seed_errors = seed_result.errors
+        for error in seed_errors:
+            err_console.print(f"Error: seeding .local: {error}", markup=False)
+
+    render_result = None
+    if not materialize_result.errors and not seed_errors and seed_conflict is None:
+        render_result = refresh_workspace(config, ws, ws_dir, trust=True)
+        for path in render_result.wrote:
+            console.print(f"wrote {path}")
+        for path in render_result.updated:
+            console.print(f"updated {path}")
+        for path in render_result.adopted:
+            console.print(f"adopted {path}")
+        if render_result.yours:
+            console.print("yours, left alone: " + ", ".join(render_result.yours))
+        for warning in render_result.warnings:
+            err_console.print(warning, markup=False)
+        if render_result.failed:
+            for line in render_result.errors:
+                err_console.print(f"Error: {line}", markup=False)
+
+    failed = (
+        bool(materialize_result.errors)
+        or bool(seed_errors)
+        or seed_conflict is not None
+        or render_result is None
+        or render_result.failed
+    )
+
+    console.print(f"\nWorkspace config: {ow_config_path}")
+    if failed:
+        console.print(f"\nWorkspace '{ws_dir.name}' {verb} with errors. Fix issues and run: ow init")
         sys.exit(1)
+
+    index.remember(ws_dir)
+    console.print(f"\nWorkspace '{ws_dir.name}' {verb}.")

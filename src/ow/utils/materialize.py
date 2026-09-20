@@ -1,10 +1,13 @@
-"""Copy-once local seeds: the workspace files ow did not generate.
+"""Copy-once local seeds, and create-only worktree repair.
 
 `$XDG_CONFIG_HOME/ow/local/` is an optional source of files the user wants
-in every workspace. Init copies the ones a workspace does not have yet into
-`<workspace>/.local/` — before addon scanning looks there — and never
-replaces one that already exists. There is no interpolation and no second
-render pass: a seed file is copied byte for byte, once.
+in every workspace; `seed_local_files` copies the ones a workspace does not
+have yet into `<workspace>/.local/`, once, byte for byte, before addon
+scanning looks there. `materialize_missing` never deletes, never
+commandeers, and never touches a worktree that already exists and checks
+out correctly: an existing path is either exactly this repository's
+worktree or a naming conflict it reports and leaves alone. Only an absent
+alias is ever created.
 """
 
 from __future__ import annotations
@@ -13,8 +16,25 @@ import contextlib
 import os
 import stat
 import tempfile
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
+
+from ow.utils import paths
+from ow.utils.drift import DriftResult, check_all_drift
+from ow.utils.git import (
+    create_worktree,
+    ensure_bare_repo,
+    get_worktree_common_dir,
+    parallel_per_repo,
+    resolve_spec,
+    run_cmd,
+    worktree_exists,
+)
+
+if TYPE_CHECKING:
+    from ow.utils.config import BranchSpec, Config, WorkspaceConfig
 
 _LOCAL = ".local"
 
@@ -214,3 +234,92 @@ def seed_local_files(source: Path, root: Path) -> SeedResult:
         copied.append(label)
 
     return SeedResult(tuple(copied), tuple(kept), tuple(errors))
+
+
+@dataclass(frozen=True)
+class MaterializeResult:
+    """What one repair pass did, by repo alias.
+
+    `created` and `existing` are disjoint: every declared alias lands in
+    exactly one of them, or in `errors`. `drifted` is computed once, after
+    the whole pass, against the config `materialize_missing` was given —
+    it names every repo whose worktree is not on the branch its own spec
+    declares, existing and freshly created alike, so a caller can surface
+    what a repair deliberately chose not to touch.
+    """
+
+    created: tuple[str, ...] = ()
+    existing: tuple[str, ...] = ()
+    drifted: tuple[DriftResult, ...] = ()
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+def _is_this_repos_worktree(bare_repo: Path, destination: Path) -> bool:
+    """Whether `destination` already checks out `bare_repo`, safely.
+
+    Every condition must hold: a symlink is never trusted regardless of
+    where it points, `.git` must be the file form a linked worktree writes
+    (never a directory, which would make `destination` a repository of its
+    own), the bare repo's own worktree list must agree, and the worktree's
+    resolved common dir must be this exact bare repo — both sides resolved,
+    so a symlinked $HOME cannot make a healthy worktree look foreign.
+    """
+    return (
+        not destination.is_symlink()
+        and (destination / ".git").is_file()
+        and worktree_exists(bare_repo, destination)
+        and get_worktree_common_dir(destination) == bare_repo.resolve()
+    )
+
+
+def materialize_missing(ws: WorkspaceConfig, config: Config, root: Path) -> MaterializeResult:
+    """Create every declared worktree that is not already there. Never repairs one that is.
+
+    An existing path is checked, never rebuilt: valid, it counts as
+    `existing`; anything else — a stray file, someone else's checkout, a
+    symlink — is a naming conflict reported in `errors` and left exactly as
+    found. Absent aliases are fetched and created in parallel, since each is
+    an independent network operation; the safety check above is local and
+    fast, so it stays sequential.
+    """
+    bare_repos_dir = paths.repos_dir()
+    created: set[str] = set()
+    existing: set[str] = set()
+    errors: dict[str, str] = {}
+    tasks: dict[str, Callable[[], None]] = {}
+
+    def _make_task(alias: str, spec: BranchSpec, bare_repo: Path) -> Callable[[], None]:
+        def _task() -> None:
+            alias_remotes = config.remotes.get(alias, {})
+            ensure_bare_repo(alias, alias_remotes, bare_repos_dir)
+            resolved = resolve_spec(bare_repo, spec, alias_remotes)
+            run_cmd(["git", "-C", str(bare_repo), "worktree", "prune"], check=True, label=alias)
+            create_worktree(bare_repo, root / alias, resolved)
+        return _task
+
+    for alias, spec in ws.repos.items():
+        destination = root / alias
+        bare_repo = bare_repos_dir / f"{alias}.git"
+        if destination.exists() or destination.is_symlink():
+            if _is_this_repos_worktree(bare_repo, destination):
+                existing.add(alias)
+            else:
+                errors[alias] = "path exists but is not this repository's worktree"
+            continue
+        tasks[alias] = _make_task(alias, spec, bare_repo)
+
+    if tasks:
+        results = parallel_per_repo(tasks)
+        for alias, result in results.items():
+            if isinstance(result, Exception):
+                errors[alias] = str(result)
+            else:
+                created.add(alias)
+
+    drifted = tuple(check_all_drift(ws, root))
+    return MaterializeResult(
+        created=tuple(sorted(created)),
+        existing=tuple(sorted(existing)),
+        drifted=drifted,
+        errors=errors,
+    )

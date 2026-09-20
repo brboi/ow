@@ -564,25 +564,54 @@ def create_worktree(bare_repo: Path, worktree_path: Path, spec: BranchSpec) -> N
             label=alias,
             check=True,
         )
+        return
+    branch_exists = _run(
+        ["git", "-C", str(bare_repo), "rev-parse", "--verify", f"refs/heads/{spec.local_branch}"],
+        capture_output=True,
+    ).returncode == 0
+    if branch_exists:
+        # An existing local branch already carries whatever upstream it
+        # wants — including none at all. Restoring a worktree onto it must
+        # never reset that choice, so upstream is set only in the arm below,
+        # where the branch is new and has no upstream of its own yet.
+        run_cmd(
+            ["git", "-C", str(bare_repo), "worktree", "add", str(worktree_path), spec.local_branch],
+            label=alias,
+            check=True,
+        )
     else:
-        branch_exists = _run(
-            ["git", "-C", str(bare_repo), "rev-parse", "--verify", f"refs/heads/{spec.local_branch}"],
-            capture_output=True,
-        ).returncode == 0
-        if branch_exists:
-            run_cmd(
-                ["git", "-C", str(bare_repo), "worktree", "add", str(worktree_path), spec.local_branch],
-                label=alias,
-                check=True,
-            )
-        else:
-            run_cmd(
-                ["git", "-C", str(bare_repo), "worktree", "add", "-b", spec.local_branch, str(worktree_path), spec.base_ref],
-                label=alias,
-                check=True,
-            )
+        run_cmd(
+            ["git", "-C", str(bare_repo), "worktree", "add", "-b", spec.local_branch, str(worktree_path), spec.base_ref],
+            label=alias,
+            check=True,
+        )
         set_branch_upstream(bare_repo, spec.local_branch, spec.remote, spec.branch)
 
+
+def get_worktree_common_dir(worktree: Path) -> Path | None:
+    """The repository `worktree` belongs to, or None if it is not one.
+
+    A quiet `_run` probe: `git -C <worktree> rev-parse --git-common-dir`.
+    Git prints a path relative to the worktree itself when the common dir
+    is not already absolute, so a relative result is resolved against
+    `worktree` before either side is `Path.resolve()`d — a bare repo
+    reached through a symlinked $HOME would otherwise compare unequal to
+    itself, marking a perfectly healthy worktree invalid.
+    """
+    result = _run(
+        ["git", "-C", str(worktree), "rev-parse", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    common = Path(raw)
+    if not common.is_absolute():
+        common = worktree / common
+    return common.resolve()
 
 def get_rev_list_count(repo_path: Path, ref_a: str, ref_b: str) -> tuple[int, int]:
     """Return (ahead, behind): ref_a ahead of ref_b, ref_a behind ref_b."""
