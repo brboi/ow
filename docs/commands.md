@@ -189,6 +189,11 @@ Shows local branch status with behind/ahead counts — no network by default, li
 Pass `-f`/`--fetch` to fetch latest refs before showing status. Behind/ahead counts are then
 relative to fresh remote-tracking refs; without it, they reflect the last fetch.
 
+A `files` block appears under the branches when the workspace's generated files have pending
+differences or the inspection has diagnostics: the inspection's diagnostics and a
+`N pending difference(s)` count, never a per-file state or a diff — `ow files` is the listing and
+`ow files --diff` the diff.
+
 ## `ow fetch`
 
 Refreshes the refs a workspace follows — `git fetch`, into the bare repos, one repo at a time —

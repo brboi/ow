@@ -126,7 +126,8 @@ with a one-line reason instead of a diff. It writes nothing, and it exits:
 - `1` when any path is `yours`, `outdated` or `absent`, or when the inspection is blocked.
 
 The Git half of the same question is `ow status`: file alignment is not Git-drift alignment.
-`ow files` says nothing about branches, commits or remotes, and
-`ow status` says nothing about generated files. A repo whose branch drifted from its spec is
-realigned by `ow switch`; a missing worktree or bare repo is repaired by `ow init`; the files are
-`ow render`'s business.
+`ow files` says nothing about branches, commits or remotes, and `ow status` never lists a path or
+prints a diff — it shows the same inspection's *diagnostics* (errors, blockers and warnings) plus a
+`N pending difference(s)` count that points back at `ow files` for the listing and the diff. A repo
+whose branch drifted from its spec is realigned by `ow switch`; a missing worktree or bare repo is
+repaired by `ow init`; the files are `ow render`'s business.
