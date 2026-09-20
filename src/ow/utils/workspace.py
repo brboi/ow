@@ -224,7 +224,10 @@ def inspect_workspace(config: Config, ws: WorkspaceConfig, root: Path) -> Render
             seen.add(common)
             common_dirs.append(common)
 
-    ignore_spec = pathspec.GitIgnoreSpec.from_lines(config.owignore)
+    try:
+        ignore_spec = pathspec.GitIgnoreSpec.from_lines(config.owignore)
+    except ValueError as exc:
+        return _fallback_plan(root, (), (f"owignore: {exc}",))
     dev_requirements_ignored = ignore_spec.match_file(_REQUIREMENTS_DEV)
     use_dev_requirements = (root / _REQUIREMENTS_DEV).exists() or not dev_requirements_ignored
 
@@ -238,7 +241,10 @@ def inspect_workspace(config: Config, ws: WorkspaceConfig, root: Path) -> Render
         git_common_dirs=tuple(common_dirs),
         use_dev_requirements=use_dev_requirements,
     )
-    outputs = generate_files(context)
+    try:
+        outputs = generate_files(context)
+    except ValueError as exc:
+        return _fallback_plan(root, config.owignore, (str(exc),))
 
     conflicts = tuple(
         f"{gf.path}: would be written inside the declared worktree '{gf.path.parts[0]}'"
@@ -297,11 +303,14 @@ def refresh_workspace(config: Config, ws: WorkspaceConfig, root: Path, *, trust:
 
     repo_dirs = {alias: root / alias for alias in ws.repos}
     probe = probe_odoo(repo_dirs)
-    if probe.kind == "supported":
-        ensure_services_compose()
-
     errors: tuple[str, ...] = ()
-    if trust:
+    if probe.kind == "supported":
+        try:
+            ensure_services_compose()
+        except (OSError, ValueError) as exc:
+            errors = (f"{paths.services_dir() / COMPOSE_NAME}: {exc}",)
+
+    if trust and not errors:
         touched = (
             _MISE_FRAGMENT in result.wrote
             or _MISE_FRAGMENT in result.updated

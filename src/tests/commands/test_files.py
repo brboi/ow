@@ -139,3 +139,25 @@ def test_files_plain_exits_zero_on_ordinary_yours_difference(xdg, tmp_path, caps
 
     out = capsys.readouterr().out
     assert "yours" in out
+
+
+def test_files_reports_an_unreadable_schema_1_lock_and_exits_one(xdg, tmp_path, capsys):
+    """A schema-1 workspace whose lock cannot be read is a printed blocker,
+    never an unhandled OSError."""
+    config, ws_dir = _workspace(tmp_path)
+    (ws_dir / ".ow" / "config.toml").write_text(
+        'version = 1\n\n[repos]\ncommunity = "master..featA"\n'
+    )
+    lock = ws_dir / ".ow" / "rendered.lock.toml"
+    lock.write_bytes(b"")
+    lock.chmod(0o000)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cmd_files(config, workspace=str(ws_dir))
+    finally:
+        lock.chmod(0o600)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert str(lock) in err
+    assert "Traceback" not in err

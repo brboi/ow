@@ -260,7 +260,7 @@ def plan_migration(
         try:
             decision = plan_retirement(inventory, render.read_lock(workspace_path))
             lock_write = plan_lock_retirement(workspace_path, decision)
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             return MigrationPlan(
                 errors=(f"{workspace_path / render.RENDERED_LOCK}: {exc}",)
             )
@@ -428,8 +428,12 @@ def plan_lock_retirement(
     remaining = {
         name: digest for name, digest in locked.items() if name not in set(decision.retired)
     }
+    try:
+        original = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"cannot read {path}: {exc}") from exc
     return MigrationWrite(
-        path=path, original=path.read_bytes(), replacement=render.dumps_lock(remaining)
+        path=path, original=original, replacement=render.dumps_lock(remaining)
     )
 
 

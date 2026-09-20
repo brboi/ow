@@ -411,6 +411,17 @@ def test_unreadable_lock_is_a_planned_error_not_a_raise(tmp_path):
     assert not (tmp_path / "settings.json").exists()
 
 
+def test_invalid_owignore_pattern_is_a_planned_error_not_a_raise(tmp_path):
+    plan = plan_files(tmp_path, (gf("settings.json", b"x\n"),), ("!",))
+
+    assert plan.outputs == () and plan.states == ()
+    assert any("owignore" in message and "!" in message for message in plan.errors)
+
+    result = write_files(plan)
+    assert result.failed
+    assert not (tmp_path / "settings.json").exists()
+
+
 def test_unreadable_destination_is_a_planned_error(tmp_path):
     dest = tmp_path / "settings.json"
     dest.write_bytes(b"old\n")

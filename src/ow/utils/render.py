@@ -278,7 +278,10 @@ def plan_files(
         return RenderPlan(root=root, outputs=(), states=(), lock={}, errors=(str(exc),))
 
     errors: list[str] = []
-    spec = pathspec.GitIgnoreSpec.from_lines(ignore)
+    try:
+        spec = pathspec.GitIgnoreSpec.from_lines(ignore)
+    except ValueError as exc:
+        return RenderPlan(root=root, outputs=(), states=(), lock={}, errors=(f"owignore: {exc}",))
 
     proposed: dict[str, "GeneratedFile"] = {gf.path.as_posix(): gf for gf in outputs}
     names = sorted(set(proposed) | set(lock))
