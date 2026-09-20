@@ -3,15 +3,20 @@
 Deliberately not a database. The only truth about a workspace is the
 .ow/config.toml on disk; this file just remembers where to look. If it is
 wrong, stale or deleted, everything still works — `ow ls` under-reports and
-name lookup fails with a message, and the next successful resolution puts
-the path back.
+name lookup fails with a message.
+
+Reading is genuinely read-only: a stale entry is filtered out in memory, and
+only lifecycle operations that own the index (`ow init`/`ow render` remember,
+`ow mv`/archive/rm forget, `ow prune` drops what died) ever write it. That is
+what lets `ow status`, `ow ls` and shell completion run without touching a
+byte of the user's state directory.
 """
 
 import contextlib
 import os
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from ow.utils import paths
@@ -108,34 +113,36 @@ def _write(entries: list[Path]) -> None:
             )
 
 
-def _read() -> tuple[list[Path], bool]:
-    """The entries worth keeping, and whether the file still says otherwise."""
+def _read() -> list[Path]:
+    """Every entry still worth acting on, filtered in memory. Reads only.
+
+    Blank lines, duplicates and entries whose workspace is gone are dropped
+    from the result — never from the file: a read that rewrote it would make
+    `ow status`, a completion callback or a dry-run mutate the user's state.
+    """
     target = paths.index_file()
     if not target.exists():
-        return [], False
+        return []
 
     seen: list[Path] = []
-    pruned = False
     for line in target.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
-            pruned = True
             continue
         candidate = Path(line)
         if candidate in seen:
-            pruned = True
             continue
         if not _still_there(candidate):
-            pruned = True
             continue
         seen.append(candidate)
-    return seen, pruned
+    return seen
 
 
 def list_workspaces() -> list[Path]:
-    """A read-only snapshot of the index file.
+    """A read-only snapshot of the index file, dead entries included.
 
-    For callers that must not mutate state, such as shell completion.
+    For callers that must not mutate state and cannot afford to lose what
+    the file says, such as shell completion and `ow prune`'s own survey.
     """
     target = paths.index_file()
     if not target.exists():
@@ -153,31 +160,25 @@ def list_workspaces() -> list[Path]:
 
 
 def known_workspaces() -> list[Path]:
-    """Every remembered workspace that still exists, pruning as it reads."""
-    seen, pruned = _read()
-    if not pruned:
-        # The overwhelmingly common case, and the one that must stay cheap:
-        # no write, so no lock, so `ow ls` never waits on anyone.
-        return seen
+    """Every remembered workspace that still exists. Never writes.
 
-    with _locked():
-        seen, pruned = _read()
-        if pruned:
-            _write(seen)
-    return seen
+    `ow prune` is what turns the difference between this and
+    `list_workspaces()` into a smaller file; a read only reports it.
+    """
+    return _read()
 
 
 def remember(ws_dir: Path) -> None:
+    """Record a workspace the user just created, moved or rendered."""
     resolved = ws_dir.resolve()
-    entries, pruned = _read()
-    if resolved in entries and not pruned:
+    if resolved in list_workspaces():
         return
 
     # Everything below writes, so re-read inside the lock: the entries read
     # above may already be stale, and writing them back is exactly how a
     # concurrent `ow init` loses its workspace.
     with _locked():
-        entries, _ = _read()
+        entries = list_workspaces()
         if resolved not in entries:
             entries = [*entries, resolved]
         _write(entries)
@@ -185,6 +186,7 @@ def remember(ws_dir: Path) -> None:
 
 def find_by_name(name: str) -> list[Path]:
     return [p for p in known_workspaces() if p.name == name]
+
 
 def forget(ws_dir: Path) -> None:
     """Remove a workspace from the discovery index.
@@ -194,11 +196,24 @@ def forget(ws_dir: Path) -> None:
     in the index is a no-op, not an error.
     """
     resolved = ws_dir.resolve()
-    entries, pruned = _read()
-    if resolved not in entries and not pruned:
+    if resolved not in list_workspaces():
         return
 
     with _locked():
-        entries, _ = _read()
-        entries = [e for e in entries if e != resolved]
-        _write(entries)
+        _write([entry for entry in list_workspaces() if entry != resolved])
+
+
+def prune(dead: Iterable[Path]) -> None:
+    """Drop exactly `dead` from the index file, under the lock.
+
+    `ow prune` owns this: reads filter dead entries in memory, so dropping
+    them for good is an explicit lifecycle action. Re-reads inside the lock
+    and removes only the named entries, so a concurrent `remember` cannot
+    lose its workspace to the cleanup.
+    """
+    doomed = set(dead)
+    if not doomed:
+        return
+
+    with _locked():
+        _write([entry for entry in list_workspaces() if entry not in doomed])

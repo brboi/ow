@@ -33,21 +33,22 @@ from ow.utils.config import (
     WorkspaceConfig,
     write_workspace_config,
 )
+from ow.utils.options import MiseOverrides, OdooOverrides
 from ow.tui.dashboard import DashboardApp, MainScreen
 
 
 def _default_config() -> Config:
     return Config(
-        vars={"http_port": 8069, "db_host": "localhost", "db_port": 5432},
         remotes={
             "community": {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")},
         },
+        odoo=OdooOverrides(http_port=8069, db_host="localhost", db_port=5432),
     )
 
 
 @pytest.fixture
 def seed_workspace() -> Callable[..., Path]:
-    """Factory: `seed_workspace(base, name, repos=..., templates=..., vars=...)`
+    """Factory: `seed_workspace(base, name, repos=..., odoo=..., mise=...)`
     writes a real `.ow/config.toml` under `base/name` and registers it with
     the workspace index — exactly what `ow init` does — so `MainScreen`'s
     startup `reload_workspaces()` (and any command run against the index)
@@ -60,8 +61,8 @@ def seed_workspace() -> Callable[..., Path]:
         name: str,
         *,
         repos: dict[str, str] | None = None,
-        templates: list[str] | None = None,
-        vars: dict[str, Any] | None = None,
+        odoo: OdooOverrides | None = None,
+        mise: MiseOverrides | None = None,
     ) -> Path:
         ws_dir = base / name
         ws_dir.mkdir(parents=True, exist_ok=True)
@@ -71,8 +72,8 @@ def seed_workspace() -> Callable[..., Path]:
         }
         ws = WorkspaceConfig(
             repos=parsed_repos,
-            templates=templates if templates is not None else [],
-            vars=vars or {},
+            odoo=odoo if odoo is not None else OdooOverrides(),
+            mise=mise if mise is not None else MiseOverrides(),
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         index.remember(ws_dir)

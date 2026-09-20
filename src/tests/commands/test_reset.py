@@ -74,9 +74,9 @@ def _workspace(tmp_path: Path, spec: str = "master..featA") -> tuple[Config, Pat
 
     write_workspace_config(
         ws_dir / ".ow" / "config.toml",
-        WorkspaceConfig(repos={"community": parse_branch_spec(spec)}, templates=[]),
+        WorkspaceConfig(repos={"community": parse_branch_spec(spec)}),
     )
-    return Config(vars={}, remotes={}), ws_dir, worktree
+    return Config(remotes={}), ws_dir, worktree
 
 
 def _refuse_input(monkeypatch, reason: str = "reset must not prompt here"):
@@ -289,7 +289,6 @@ def test_only_narrows_the_work_to_one_repo(tmp_path, capsys, xdg):
                 "community": parse_branch_spec("master..featA"),
                 "enterprise": parse_branch_spec("master..featA"),
             },
-            templates=[],
         ),
     )
     _commit(worktree, "C")

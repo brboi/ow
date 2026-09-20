@@ -887,9 +887,19 @@ def in_progress_operation(worktree: Path) -> tuple[str, str, str] | None:
 
 
 def dirty_files(worktree: Path) -> list[str]:
-    """Modified tracked files. Untracked files do not block a rebase."""
+    """Modified tracked files. Untracked files do not block a rebase.
+
+    `--no-optional-locks` is not cosmetic: a plain `git status` may refresh
+    and rewrite the worktree's index as a side effect of *reading*, which
+    would make `ow status`, a dry-run and every pre-flight mutate the repo
+    they were only asked about. Inspection must not take Git's optional
+    lock, and mutation commands keep theirs.
+    """
     result = _run(
-        ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=no"],
+        [
+            "git", "-C", str(worktree), "--no-optional-locks",
+            "status", "--porcelain", "--untracked-files=no",
+        ],
         capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:

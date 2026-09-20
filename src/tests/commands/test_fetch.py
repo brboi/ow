@@ -63,13 +63,13 @@ def _workspace(bare: Path, tmp_path: Path, alias: str, spec: str = "master") -> 
         _git(bare, "worktree", "add", "-q", "--detach", str(ws_dir / alias), "master")
     write_workspace_config(
         ws_dir / ".ow" / "config.toml",
-        WorkspaceConfig(repos={alias: parse_branch_spec(spec)}, templates=[]),
+        WorkspaceConfig(repos={alias: parse_branch_spec(spec)}),
     )
     return ws_dir
 
 
 def _config(alias: str, src: Path) -> Config:
-    return Config(vars={}, remotes={alias: {"origin": RemoteConfig(url=str(src))}})
+    return Config(remotes={alias: {"origin": RemoteConfig(url=str(src))}})
 
 
 def test_commits_that_arrived_are_counted_and_no_worktree_moves(tmp_path, capsys, xdg):

@@ -75,7 +75,7 @@ def _branch_only_on_source(src: Path, name: str, start: str = "master") -> None:
 def _workspace_config(ws_dir: Path, repos: dict[str, str]) -> None:
     write_workspace_config(
         ws_dir / ".ow" / "config.toml",
-        WorkspaceConfig(repos={a: parse_branch_spec(s) for a, s in repos.items()}, templates=[]),
+        WorkspaceConfig(repos={a: parse_branch_spec(s) for a, s in repos.items()}),
     )
 
 
@@ -90,7 +90,7 @@ def test_a_plain_switch_moves_every_repo_and_rewrites_the_specs(tmp_path, capsys
     wt_e = _add_worktree(bare_e, ws_dir, "enterprise")
     _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master..featA"})
 
-    config = Config(vars={}, remotes={
+    config = Config(remotes={
         "community": {"origin": RemoteConfig(url=str(src_c))},
         "enterprise": {"origin": RemoteConfig(url=str(src_e))},
     })
@@ -105,6 +105,39 @@ def test_a_plain_switch_moves_every_repo_and_rewrites_the_specs(tmp_path, capsys
     assert new_ws.repos["enterprise"] == parse_branch_spec("feature-x..feature-x")
 
 
+def test_a_switch_on_a_schema_1_workspace_keeps_it_schema_1(tmp_path, capsys, xdg):
+    """Switch rewrites the specs git was given; it does not migrate the file.
+
+    A schema-1 manifest can hold sections ow has no model for — the bundles
+    it declared, the vars it was rendered with. Converting it is `ow render`'s
+    explicit decision, and dropping what it says on the way past would be
+    exactly the silent data loss the migration exists to avoid."""
+    bare, src = _make_repo(tmp_path, "community")
+    _branch_only_on_source(src, "feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    _add_worktree(bare, ws_dir, "community")
+    marker = ws_dir / ".ow" / "config.toml"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        'templates = ["common"]\n\n[repos]\ncommunity = "master..featA"\n\n'
+        '[vars]\nmystery = "kept"\n'
+    )
+
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+
+    cmd_switch(config, "feature-x", workspace=str(ws_dir))
+
+    content = marker.read_text()
+    assert "version" not in content
+    assert 'templates = ["common"]' in content
+    assert 'mystery = "kept"' in content
+    reloaded = load_workspace_config(marker)
+    assert reloaded.version == 1
+    assert reloaded.repos["community"] == parse_branch_spec("feature-x..feature-x")
+    assert "Pending migration" in capsys.readouterr().err
+
+
 def test_a_repo_with_no_configured_remote_still_fetches_its_own(tmp_path, capsys, xdg):
     """The global `[remotes.<alias>]` table describes what new workspaces
     get, not what a repo has: an alias missing from it must still reach the
@@ -117,7 +150,7 @@ def test_a_repo_with_no_configured_remote_still_fetches_its_own(tmp_path, capsys
     wt = _add_worktree(bare, ws_dir, "enterprise")
     _workspace_config(ws_dir, {"enterprise": "master..featA"})
 
-    cmd_switch(Config(vars={}, remotes={}), "feature-x", workspace=str(ws_dir))
+    cmd_switch(Config(remotes={}), "feature-x", workspace=str(ws_dir))
 
     assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
     new_ws = load_workspace_config(ws_dir / ".ow" / "config.toml")
@@ -135,7 +168,7 @@ def test_a_target_missing_in_one_repo_aborts_the_whole_switch(tmp_path, capsys, 
     wt_e = _add_worktree(bare_e, ws_dir, "enterprise")
     _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master..featA"})
 
-    config = Config(vars={}, remotes={
+    config = Config(remotes={
         "community": {"origin": RemoteConfig(url=str(src_c))},
         "enterprise": {"origin": RemoteConfig(url=str(src_e))},
     })
@@ -173,7 +206,7 @@ def test_create_makes_the_branch_from_the_given_start_point(tmp_path, capsys, xd
     wt = _add_worktree(bare, ws_dir, "community")
     _workspace_config(ws_dir, {"community": "master..featA"})
 
-    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
 
     cmd_switch(config, "origin/release", workspace=str(ws_dir), create="new-feature")
 
@@ -193,7 +226,7 @@ def test_detach_writes_a_bare_spec_at_the_ref_the_user_asked_for(tmp_path, capsy
     wt = _add_worktree(bare, ws_dir, "community")
     _workspace_config(ws_dir, {"community": "master..featA"})
 
-    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
 
     cmd_switch(config, "origin/master", workspace=str(ws_dir), detach=True)
 
@@ -215,7 +248,7 @@ def test_only_narrows_which_repos_are_touched(tmp_path, capsys, xdg):
     wt_e = _add_worktree(bare_e, ws_dir, "enterprise")
     _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master..featA"})
 
-    config = Config(vars={}, remotes={
+    config = Config(remotes={
         "community": {"origin": RemoteConfig(url=str(src_c))},
         "enterprise": {"origin": RemoteConfig(url=str(src_e))},
     })
@@ -236,7 +269,7 @@ def test_dry_run_prints_the_command_and_writes_nothing(tmp_path, capsys, xdg):
     wt = _add_worktree(bare, ws_dir, "community")
     _workspace_config(ws_dir, {"community": "master..featA"})
 
-    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
 
     cmd_switch(config, "feature-x", workspace=str(ws_dir), dry_run=True)
 
@@ -258,7 +291,7 @@ def test_a_dirty_worktree_still_switches_when_git_allows_it(tmp_path, capsys, xd
     _workspace_config(ws_dir, {"community": "master..featA"})
     (wt / "a.txt").write_text("edited, uncommitted")
 
-    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
 
     cmd_switch(config, "feature-x", workspace=str(ws_dir))
 
@@ -278,7 +311,7 @@ def test_a_repo_already_on_the_target_is_left_alone(tmp_path, capsys, xdg):
     before = (ws_dir / ".ow" / "config.toml").read_text()
     head_before = _git(wt, "rev-parse", "HEAD")
 
-    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
 
     cmd_switch(config, "featA", workspace=str(ws_dir))
 
@@ -301,7 +334,7 @@ def test_creating_a_branch_one_repo_already_has_moves_nothing(tmp_path, capsys, 
     _git(bare_e, "branch", "feature-x", "master")  # enterprise already has it
     _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master..featA"})
 
-    config = Config(vars={}, remotes={
+    config = Config(remotes={
         "community": {"origin": RemoteConfig(url=str(src_c))},
         "enterprise": {"origin": RemoteConfig(url=str(src_e))},
     })
@@ -330,7 +363,7 @@ def _pin_workspace(tmp_path, capsys, xdg):  # noqa: ANN001
     _git(bare_e, "worktree", "add", "-q", "--detach", str(wt_e), "master")
     _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master"})
 
-    config = Config(vars={}, remotes={
+    config = Config(remotes={
         "community": {"origin": RemoteConfig(url=str(src_c))},
         "enterprise": {"origin": RemoteConfig(url=str(src_e))},
     })
@@ -392,7 +425,7 @@ def test_a_workspace_of_only_pins_switches_nothing(tmp_path, capsys, xdg):
     head = _git(wt, "rev-parse", "HEAD")
     before = (ws_dir / ".ow" / "config.toml").read_text()
 
-    cmd_switch(Config(vars={}, remotes={}), "feature-x", workspace=str(ws_dir))
+    cmd_switch(Config(remotes={}), "feature-x", workspace=str(ws_dir))
 
     assert (ws_dir / ".ow" / "config.toml").read_text() == before
     assert "left alone" in capsys.readouterr().out
@@ -409,7 +442,7 @@ def test_detaching_at_a_remote_only_branch_detaches_at_the_remote_ref(tmp_path, 
     ws_dir = tmp_path / "workspaces" / "test"
     wt = _add_worktree(bare, ws_dir, "community")
     _workspace_config(ws_dir, {"community": "master..featA"})
-    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
 
     cmd_switch(config, "feature-x", workspace=str(ws_dir), detach=True)
 
@@ -429,7 +462,7 @@ def test_creating_from_a_remote_only_start_point(tmp_path, capsys, xdg):
     ws_dir = tmp_path / "workspaces" / "test"
     wt = _add_worktree(bare, ws_dir, "community")
     _workspace_config(ws_dir, {"community": "master..featA"})
-    config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
 
     cmd_switch(config, "feature-x", workspace=str(ws_dir), create="fix")
 
@@ -466,7 +499,7 @@ def test_detaching_through_a_non_origin_remote_pins_that_remotes_ref(tmp_path, c
     wt = _add_worktree(bare, ws_dir, "community")
     _workspace_config(ws_dir, {"community": "master..featA"})
 
-    cmd_switch(Config(vars={}, remotes={}), "feature-x", workspace=str(ws_dir), detach=True)
+    cmd_switch(Config(remotes={}), "feature-x", workspace=str(ws_dir), detach=True)
 
     assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
     assert _git(wt, "rev-parse", "HEAD") == _git(wt, "rev-parse", "refs/remotes/upstream/feature-x")
@@ -485,7 +518,7 @@ def _two_repo_workspace(tmp_path):  # noqa: ANN001
     wt_c = _add_worktree(bare_c, ws_dir, "community")
     wt_e = _add_worktree(bare_e, ws_dir, "enterprise")
     _workspace_config(ws_dir, {"community": "master..featA", "enterprise": "master..featA"})
-    config = Config(vars={}, remotes={
+    config = Config(remotes={
         "community": {"origin": RemoteConfig(url=str(src_c))},
         "enterprise": {"origin": RemoteConfig(url=str(src_e))},
     })

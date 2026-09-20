@@ -35,6 +35,7 @@ from ow.utils.migration import (
     legacy_source_output,
     load_template_digests,
     plan_lock_retirement,
+    plan_migration,
     plan_retirement,
     write_backup,
 )
@@ -742,3 +743,254 @@ def test_migration_imports_no_templating_engine():
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+# ---------------------------------------------------------------------------
+# plan_migration: both configs preflight together, then translate and retire.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_workspace(root: Path, body: str) -> Path:
+    """A real schema-1 workspace: `.ow/config.toml` plus whatever `body` says."""
+    config_path = root / ".ow" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(body)
+    return config_path
+
+
+def _legacy_global(xdg, body: str) -> Path:
+    path = paths.config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+V1_GLOBAL = """\
+version = 1
+editor = "nvim"
+
+[vars]
+http_port = 8071
+
+[remotes.community]
+origin.url = "git@github.com:odoo/odoo.git"
+"""
+
+V1_WORKSPACE = """\
+templates = ["vscode"]
+
+[repos]
+community = "master..feat"
+
+[vars]
+python = "3.11"
+debug_args = ["--dev=all"]
+debug_test_args = ["--test-tags=ws"]
+"""
+
+
+def test_plan_migration_round_trips_both_configs(xdg, tmp_path):
+    from ow.utils import config as config_module
+
+    ws = tmp_path / "ws"
+    ws_config = _legacy_workspace(ws, V1_WORKSPACE)
+    global_config = _legacy_global(xdg, V1_GLOBAL)
+
+    plan = plan_migration(
+        config_module.load_global_config(),
+        config_module.load_workspace_config(ws_config),
+        ws,
+    )
+
+    assert plan.errors == ()
+    assert {write.path for write in plan.writes} == {ws_config, global_config}
+    commit_migration(plan)
+
+    reloaded_ws = config_module.load_workspace_config(ws_config)
+    reloaded_global = config_module.load_global_config()
+    assert reloaded_ws.version == 2
+    assert reloaded_ws.legacy is None
+    assert reloaded_ws.mise.python == "3.11"
+    assert reloaded_ws.odoo.debug_args == ("--dev=all",)
+    assert reloaded_ws.odoo.debug_test_args == ("--test-tags=ws",)
+    assert reloaded_ws.repos["community"] == config_module.parse_branch_spec("master..feat")
+    assert reloaded_global.version == 2
+    assert reloaded_global.editor == "nvim"
+    assert reloaded_global.odoo.http_port == 8071
+    assert "templates" not in ws_config.read_text()
+    assert "vars" not in ws_config.read_text()
+    # Every original was preserved before it was replaced.
+    assert backup_path(ws_config, V1_WORKSPACE.encode()).read_bytes() == V1_WORKSPACE.encode()
+    assert backup_path(global_config, V1_GLOBAL.encode()).read_bytes() == V1_GLOBAL.encode()
+
+
+def test_plan_migration_retires_an_overridden_output_and_keeps_the_rest(xdg, tmp_path):
+    from ow.utils import config as config_module
+
+    ws = tmp_path / "ws"
+    ws_config = _legacy_workspace(ws, 'templates = ["vscode"]\n[repos]\ncommunity = "master"\n')
+    settings = place(ws, ".vscode/settings.json", b'{"mine": true}\n')
+    wrapper = place(ws, "bwrap-claude", b"#!/bin/sh\n")
+    write_lock(
+        ws,
+        {
+            ".vscode/settings.json": sha(settings.read_bytes()),
+            "bwrap-claude": sha(wrapper.read_bytes()),
+        },
+    )
+    # A source ow cannot prove stock: the retirement must take its entry.
+    place(paths.config_home() / "templates", "vscode/.vscode/settings.json.j2", b'{"mine": true}\n')
+
+    plan = plan_migration(config_module.Config(remotes={}), config_module.load_workspace_config(ws_config), ws)
+
+    assert plan.errors == ()
+    assert any("not a stock" in line for line in plan.warnings)
+    commit_migration(plan)
+
+    assert render.read_lock(ws) == {"bwrap-claude": sha(wrapper.read_bytes())}
+    assert settings.read_bytes() == b'{"mine": true}\n'
+    assert wrapper.read_bytes() == b"#!/bin/sh\n"
+
+
+def test_plan_migration_inventories_the_odoo_bundle_for_a_core_repo(xdg, tmp_path):
+    """`odoo` was implicit: a core repo dir must bring it into the inventory."""
+    from ow.utils import config as config_module
+
+    ws = tmp_path / "ws"
+    ws_config = _legacy_workspace(ws, '[repos]\ncommunity = "master"\n')
+    core = ws / "community"
+    (core / "addons").mkdir(parents=True)
+    (core / "odoo" / "addons").mkdir(parents=True)
+    (core / "odoo-bin").write_text("#!/usr/bin/env python\n")
+    write_lock(ws, {"odoorc": sha(b"rendered")})
+
+    plan = plan_migration(config_module.Config(remotes={}), config_module.load_workspace_config(ws_config), ws)
+
+    assert any(line.startswith("legacy bundle 'odoo'") for line in plan.warnings)
+    assert render.read_lock(ws) == {"odoorc": sha(b"rendered")}
+
+
+def test_plan_migration_leaves_a_generic_workspace_without_the_odoo_bundle(xdg, tmp_path):
+    from ow.utils import config as config_module
+
+    ws = tmp_path / "ws"
+    ws_config = _legacy_workspace(ws, '[repos]\nnotes = "master"\n')
+    (ws / "notes").mkdir()
+
+    plan = plan_migration(config_module.Config(remotes={}), config_module.load_workspace_config(ws_config), ws)
+
+    assert not any("'odoo'" in line for line in plan.warnings)
+
+
+def test_plan_migration_blocks_every_write_when_one_side_cannot_be_represented(xdg, tmp_path):
+    """Either side's blockers abort both configs and the lock.
+
+    A workspace whose unknown var cannot be translated must not have its
+    lock retired or its global config migrated: the migration is one
+    decision, and half of it is not a state ow can describe."""
+    from ow.utils import config as config_module
+
+    ws = tmp_path / "ws"
+    ws_config = _legacy_workspace(
+        ws, '[repos]\ncommunity = "master"\n\n[vars]\nmystery = "kept"\n'
+    )
+    global_config = _legacy_global(xdg, V1_GLOBAL)
+    write_lock(ws, {"bwrap-claude": sha(b"wrapper")})
+
+    plan = plan_migration(
+        config_module.load_global_config(),
+        config_module.load_workspace_config(ws_config),
+        ws,
+    )
+
+    assert plan.writes == ()
+    assert any("mystery" in error and str(ws_config) in error for error in plan.errors)
+    with pytest.raises(ValueError, match="blocking diagnostics"):
+        commit_migration(plan)
+    assert ws_config.read_text() == '[repos]\ncommunity = "master"\n\n[vars]\nmystery = "kept"\n'
+    assert global_config.read_text() == V1_GLOBAL
+    assert render.read_lock(ws) == {"bwrap-claude": sha(b"wrapper")}
+
+
+def test_plan_migration_is_empty_for_two_schema_2_configs(xdg, tmp_path):
+    from ow.utils import config as config_module
+
+    ws = tmp_path / "ws"
+    ws_config = _legacy_workspace(ws, 'version = 2\n[repos]\ncommunity = "master"\n')
+    global_config = _legacy_global(xdg, "version = 2\n[remotes]\n")
+
+    plan = plan_migration(
+        config_module.load_global_config(),
+        config_module.load_workspace_config(ws_config),
+        ws,
+    )
+
+    assert plan == MigrationPlan()
+    assert global_config.read_text() == "version = 2\n[remotes]\n"
+
+
+def test_plan_migration_migrates_only_the_legacy_side(xdg, tmp_path):
+    from ow.utils import config as config_module
+
+    ws = tmp_path / "ws"
+    ws_config = _legacy_workspace(ws, 'version = 2\n[repos]\ncommunity = "master"\n')
+    global_config = _legacy_global(xdg, V1_GLOBAL)
+
+    plan = plan_migration(
+        config_module.load_global_config(),
+        config_module.load_workspace_config(ws_config),
+        ws,
+    )
+
+    assert [write.path for write in plan.writes] == [global_config]
+    commit_migration(plan)
+    assert config_module.load_global_config().version == 2
+    assert ws_config.read_text() == 'version = 2\n[repos]\ncommunity = "master"\n'
+
+
+def test_a_partial_commit_must_be_replanned_before_retrying(xdg, tmp_path, monkeypatch):
+    """Documented on commit_migration: a retry re-plans, it never re-commits.
+
+    The plan holds the bytes of the files as they were *before* the
+    interruption, so replaying it would either refuse (its own recheck) or
+    clobber whatever happened in between. This test pins the refusal, which
+    is what makes "rerun the migration" the honest instruction."""
+    from ow.utils import config as config_module
+
+    ws = tmp_path / "ws"
+    ws_config = _legacy_workspace(ws, V1_WORKSPACE)
+    global_config = _legacy_global(xdg, V1_GLOBAL)
+
+    plan = plan_migration(
+        config_module.load_global_config(),
+        config_module.load_workspace_config(ws_config),
+        ws,
+    )
+    assert plan.writes
+
+    real_replace = os.replace
+
+    def fail_on_workspace(source, dest, *args, **kwargs):
+        if Path(dest) == ws_config:
+            raise OSError("disk went away")
+        return real_replace(source, dest, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_on_workspace)
+    with pytest.raises(OSError, match="disk went away"):
+        commit_migration(plan)
+
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert config_module.load_global_config().version == 2
+    assert ws_config.read_text() == V1_WORKSPACE
+
+    with pytest.raises(ValueError, match="changed since migration planning"):
+        commit_migration(plan)
+
+    fresh = plan_migration(
+        config_module.load_global_config(),
+        config_module.load_workspace_config(ws_config),
+        ws,
+    )
+    assert fresh.errors == ()
+    assert [write.path for write in fresh.writes] == [ws_config]
+    commit_migration(fresh)
+    assert config_module.load_workspace_config(ws_config).version == 2

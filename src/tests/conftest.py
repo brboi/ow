@@ -1,6 +1,7 @@
+import os
+import stat
 import subprocess
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,15 +14,21 @@ from ow.utils.config import (
     WorkspaceConfig,
     write_workspace_config,
 )
+from ow.utils.options import MiseOverrides, OdooOverrides
+
+
+def _default_odoo() -> OdooOverrides:
+    """The typed defaults a fixture config carries, where vars used to sit."""
+    return OdooOverrides(http_port=8069, db_host="localhost", db_port=5432)
 
 
 def _make_config(
-    vars: dict[str, Any] | None = None,
     remotes: dict[str, dict[str, RemoteConfig]] | None = None,
+    odoo: OdooOverrides | None = None,
 ) -> Config:
     return Config(
-        vars=vars if vars is not None else {"http_port": 8069, "db_host": "localhost", "db_port": 5432},
         remotes=remotes or {},
+        odoo=odoo if odoo is not None else _default_odoo(),
     )
 
 
@@ -47,19 +54,16 @@ def config_full(xdg: Path) -> Config:
             "origin": MagicMock(url="git@github.com:odoo/odoo.git"),
         },
     }
-    return _make_config(
-        vars={"http_port": 8069, "db_host": "localhost", "db_port": 5432},
-        remotes=remotes,
-    )
+    return _make_config(remotes=remotes, odoo=_default_odoo())
 
 
 @pytest.fixture
 def ws_config() -> WorkspaceConfig:
-    """Helper factory — call ws_config(repos=..., templates=..., vars=...)."""
+    """Helper factory — call ws_config(repos=..., odoo=..., mise=...)."""
     def _make(
         repos: dict[str, str] | dict[str, BranchSpec] | None = None,
-        templates: list[str] | None = None,
-        vars: dict[str, Any] | None = None,
+        odoo: OdooOverrides | None = None,
+        mise: MiseOverrides | None = None,
     ) -> WorkspaceConfig:
         if repos is None:
             repos = {"community": BranchSpec("origin/master")}
@@ -68,8 +72,8 @@ def ws_config() -> WorkspaceConfig:
             parsed[alias] = spec if isinstance(spec, BranchSpec) else parse_branch_spec(spec)
         return WorkspaceConfig(
             repos=parsed,
-            templates=templates or ["common"],
-            vars=vars or {},
+            odoo=odoo if odoo is not None else OdooOverrides(),
+            mise=mise if mise is not None else MiseOverrides(),
         )
     return _make
 
@@ -78,9 +82,9 @@ def ws_config() -> WorkspaceConfig:
 def workspace_dir(tmp_path: Path) -> Path:
     """Create a temporary workspace with a .ow/config.toml file."""
     def _make(
-        templates: list[str] | None = None,
         repos: dict[str, str] | None = None,
-        vars: dict[str, Any] | None = None,
+        odoo: OdooOverrides | None = None,
+        mise: MiseOverrides | None = None,
         name: str = "test",
     ) -> Path:
         ws_dir = tmp_path / "workspaces" / name
@@ -93,12 +97,70 @@ def workspace_dir(tmp_path: Path) -> Path:
             parsed_repos = {"community": BranchSpec("origin/master")}
         ws = WorkspaceConfig(
             repos=parsed_repos,
-            templates=templates or ["common"],
-            vars=vars or {},
+            odoo=odoo if odoo is not None else OdooOverrides(),
+            mise=mise if mise is not None else MiseOverrides(),
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         return ws_dir
     return _make
+
+
+_MISSING = object()
+
+
+class TreeSnapshotter:
+    """Snapshot filesystem trees by path, mode, mtime and bytes.
+
+    Merely comparing a config file's content misses exactly the writes a
+    read-only proof is about: a bootstrapped default, an index rewrite, a
+    Git index refresh. Directories are recorded too, so a created directory
+    is a difference; a symlink is recorded as its target, never followed.
+    """
+
+    def capture(self, *roots: Path) -> dict[str, tuple[int, int, object]]:
+        found: dict[str, tuple[int, int, object]] = {}
+        for root in roots:
+            if not root.exists():
+                found[str(root)] = (-1, -1, None)
+                continue
+            for path in (root, *sorted(root.rglob("*"))):
+                try:
+                    st = path.lstat()
+                except OSError:
+                    continue
+                found[str(path)] = self._describe(path, st)
+        return found
+
+    @staticmethod
+    def _describe(path: Path, st: os.stat_result) -> tuple[int, int, object]:
+        mode = stat.S_IMODE(st.st_mode)
+        if stat.S_ISLNK(st.st_mode):
+            return (mode, st.st_mtime_ns, os.readlink(path))
+        if stat.S_ISDIR(st.st_mode):
+            return (mode, st.st_mtime_ns, None)
+        return (mode, st.st_mtime_ns, path.read_bytes())
+
+    @staticmethod
+    def differences(
+        before: dict[str, tuple[int, int, object]],
+        after: dict[str, tuple[int, int, object]],
+    ) -> dict[str, tuple[object, object]]:
+        return {
+            path: (before.get(path, _MISSING), after.get(path, _MISSING))
+            for path in set(before) | set(after)
+            if before.get(path, _MISSING) != after.get(path, _MISSING)
+        }
+
+
+@pytest.fixture
+def tree_snapshot() -> TreeSnapshotter:
+    """`tree_snapshot.capture(*roots)` / `.differences(before, after)`.
+
+    Used to prove a command touched nothing: snapshot the isolated XDG tree
+    and the workspace before, run it, and compare. Content alone would not
+    do — the writes that matter are files that did not exist before.
+    """
+    return TreeSnapshotter()
 
 
 class GitLab:

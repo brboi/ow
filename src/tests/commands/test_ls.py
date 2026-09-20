@@ -34,7 +34,6 @@ def _make_ws(base: Path, name: str, repos: dict[str, str] | None = None) -> Path
         ws_dir / ".ow" / "config.toml",
         WorkspaceConfig(
             repos={alias: parse_branch_spec(s) for alias, s in (repos or {}).items()},
-            templates=["common"],
         ),
     )
     index.remember(ws_dir)

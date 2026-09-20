@@ -115,11 +115,11 @@ def _declared_branches() -> tuple[dict[str, set[str]], list[tuple[Path, str]]]:
     declared: dict[str, set[str]] = {}
     unreadable: list[tuple[Path, str]] = []
 
-    # list_workspaces, not known_workspaces: the latter rewrites the index
-    # as it reads, and --dry-run and a declined confirmation must leave it
-    # exactly as they found it. Dead entries are dropped later, by the index
-    # pass that already owns that job.
-    for ws_dir in index.list_workspaces():
+    # known_workspaces, not list_workspaces: a dead entry has no branches to
+    # protect, and the read filters those out without writing anything. The
+    # config check below still covers a marker that vanished between the two
+    # reads — this loop may report a workspace it cannot read, never guess.
+    for ws_dir in index.known_workspaces():
         try:
             config_file = ws_dir / ".ow" / "config.toml"
             if not config_file.is_file():
@@ -218,24 +218,21 @@ def _apply(plan: _PrunePlan) -> _PruneOutcome:
     return _PruneOutcome(alias=plan.alias, deleted=deleted, failed=failed)
 
 
-def _dead_index_entries() -> int:
-    """How many index lines name a workspace that is gone. Reads only.
+def _dead_index_entries() -> list[Path]:
+    """Every index line naming a workspace that is gone. Reads only.
 
-    known_workspaces() prunes on read for two unrelated reasons: a line
-    whose workspace no longer exists, and a duplicate of a line already
-    seen. Only the former is a fact worth reporting — a duplicate is
-    internal hygiene from a read-modify-write race in remember() (two
-    concurrent writers), not something the user caused or can act on. So
-    "dropped" here counts unique raw paths whose .ow/config.toml is gone,
-    not the drop in line count, which would also count collapsed
-    duplicates as deaths.
+    known_workspaces() filters those out of what it returns and nothing
+    rewrites the file as a side effect any more, so dropping them for good
+    is this command's explicit job — and the reason the list of paths is
+    returned, not just its length.
 
-    This scan is done on the raw file, read before known_workspaces()
-    rewrites it — reading it again afterwards would just see the
-    already-pruned result.
+    Only a path whose .ow/config.toml is gone counts. A duplicate raw line
+    is internal hygiene from a read-modify-write race in remember() (two
+    concurrent writers), not something the user caused or can act on, so it
+    is neither reported nor counted as a death.
     """
     index_file = paths.index_file()
-    dropped = 0
+    dead: list[Path] = []
     if index_file.exists():
         seen: set[Path] = set()
         for line in index_file.read_text().splitlines():
@@ -247,9 +244,9 @@ def _dead_index_entries() -> int:
                 continue
             seen.add(candidate)
             if not index._still_there(candidate):
-                dropped += 1
+                dead.append(candidate)
 
-    return dropped
+    return dead
 
 
 def _index_line(dropped: int, verb: str) -> str:
@@ -326,7 +323,6 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False, also_backups: bool = 
     """
     dropped = _dead_index_entries()
     declared, unreadable = _declared_branches()
-
     bare_repos_dir = paths.repos_dir()
     # Not every *.git under there is an alias: a stray `.git` directory
     # matches the pattern too, and surveying it fails as "not a repository".
@@ -382,7 +378,7 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False, also_backups: bool = 
             for p in backups:
                 print(f"  rm {p}")
         if dropped:
-            print(_index_line(dropped, "Would drop"))
+            print(_index_line(len(dropped), "Would drop"))
         return
 
     if (
@@ -435,8 +431,8 @@ def cmd_prune(*, dry_run: bool = False, yes: bool = False, also_backups: bool = 
             print(f"Deleted {deleted} backup {noun}.")
 
     if dropped:
-        index.known_workspaces()
-        print(_index_line(dropped, "Dropped"))
+        index.prune(dropped)
+        print(_index_line(len(dropped), "Dropped"))
 
     if acted:
         # The plan above is written in the imperative. Without this, silence

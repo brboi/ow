@@ -11,9 +11,10 @@ represented is a blocking diagnostic that stops every write.
 
 `plan_migration`/`commit_migration` are the entry points of the whole
 conversion. Their config half belongs to the runtime model in
-`ow.utils.config` (`dumps_workspace_config`/`dumps_global_config` build the
-`MigrationWrite.replacement` bytes), so this module deliberately imports no
-config record: the dependency is one-way, config → migration, never back.
+`ow.utils.config`: `dumps_workspace_config`/`dumps_global_config` are the
+only writers of either on-disk format, so this module imports them rather
+than serializing anything itself. The dependency is one-way — migration
+imports config, config never imports migration.
 """
 
 from __future__ import annotations
@@ -25,10 +26,21 @@ import os
 import re
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ow.utils import generate, paths, render
+from ow.utils.config import (
+    SCHEMA_VERSION,
+    Config,
+    LegacyConfig,
+    WorkspaceConfig,
+    _legacy_document,
+    _legacy_templates,
+    dumps_global_config,
+    dumps_workspace_config,
+)
+from ow.utils.odoo import is_odoo_main_repo
 
 _DIGEST_ASSET = (
     Path(__file__).resolve().parent.parent / "_static" / "legacy-template-hashes.json"
@@ -173,6 +185,113 @@ def load_template_digests(
 def legacy_source_output(relative: str) -> str:
     """The workspace-relative output a legacy source derives: `.j2` stripped once."""
     return relative[:-3] if relative.endswith(".j2") else relative
+
+
+def _legacy_overrides_root() -> Path:
+    """The user's own bundle tree, `$XDG_CONFIG_HOME/ow/templates`.
+
+    Named here rather than in `paths` because it is a migration-era location:
+    `paths.templates_dir()` and the packaged tree both disappear with the
+    rendering engine, and a path only migration still needs belongs with
+    migration. Resolved per call, so an isolated XDG in a test is honoured.
+    """
+    return paths.config_home() / "templates"
+
+
+def _effective_bundles(
+    legacy: "LegacyConfig", workspace_path: Path, repos: Mapping[str, object]
+) -> tuple[str, ...]:
+    """The bundle names a schema-1 workspace effectively declared.
+
+    `common` always applied and `odoo` applied whenever a declared repo is an
+    Odoo core — neither was ever named in the manifest, so both are derived
+    here the way the old renderer derived them. The declaration is what the
+    file itself says; a name it cannot carry (a path separator, an empty
+    string) raises, and the caller turns that into a blocker.
+    """
+    bundles = ["common", *_legacy_templates(_legacy_document(legacy))]
+    if any(is_odoo_main_repo(workspace_path / alias) for alias in repos):
+        bundles.append("odoo")
+    return tuple(bundles)
+
+
+def plan_migration(
+    config: Config, ws: WorkspaceConfig, workspace_path: Path
+) -> MigrationPlan:
+    """Everything an explicit conversion would write, after a joint preflight.
+
+    Both sides are planned together and either side's blockers abort every
+    write: a workspace whose `vars` cannot be represented must not have its
+    lock retired either. Nothing here touches the filesystem — the
+    replacements come from the config serializers and the lock's own
+    serializer, and the originals are the bytes the records were loaded
+    from, so `commit_migration` can refuse a source edited since.
+
+    The retirement half only applies to a schema-1 workspace: it is the
+    workspace manifest that declared bundles, and a schema-2 one cannot.
+    """
+    global_legacy = config.legacy if config.version == 1 else None
+    workspace_legacy = ws.legacy if ws.version == 1 else None
+
+    errors: list[str] = []
+    for legacy in (global_legacy, workspace_legacy):
+        if legacy is not None:
+            errors += [f"{legacy.source}: {issue}" for issue in legacy.issues]
+    if errors:
+        # Blocked plans carry no writes at all, so a caller that ignores the
+        # diagnostics still cannot commit a half-migration.
+        return MigrationPlan(errors=tuple(errors))
+
+    writes: list[MigrationWrite] = []
+    warnings: tuple[str, ...] = ()
+
+    if workspace_legacy is not None:
+        digests = load_template_digests()
+        try:
+            bundles = _effective_bundles(workspace_legacy, workspace_path, ws.repos)
+            inventory = inventory_bundles(
+                bundles,
+                digests,
+                overrides_root=_legacy_overrides_root(),
+                workspace_templates_root=workspace_path / ".ow" / "templates",
+            )
+        except ValueError as exc:
+            return MigrationPlan(errors=(f"{workspace_legacy.source}: {exc}",))
+        try:
+            decision = plan_retirement(inventory, render.read_lock(workspace_path))
+            lock_write = plan_lock_retirement(workspace_path, decision)
+        except ValueError as exc:
+            return MigrationPlan(
+                errors=(f"{workspace_path / render.RENDERED_LOCK}: {exc}",)
+            )
+        warnings = decision.report
+        if lock_write is not None:
+            # Retirement first, both here and in `commit_migration`: it only
+            # ever makes ow own less, so an interruption there leaves a
+            # schema-1 workspace whose next attempt re-plans the same set.
+            writes.append(lock_write)
+
+    if global_legacy is not None:
+        migrated = replace(config, version=SCHEMA_VERSION, legacy=None)
+        writes.append(
+            MigrationWrite(
+                path=global_legacy.source,
+                original=global_legacy.original,
+                replacement=dumps_global_config(migrated),
+            )
+        )
+
+    if workspace_legacy is not None:
+        migrated = replace(ws, version=SCHEMA_VERSION, legacy=None)
+        writes.append(
+            MigrationWrite(
+                path=workspace_legacy.source,
+                original=workspace_legacy.original,
+                replacement=dumps_workspace_config(migrated),
+            )
+        )
+
+    return MigrationPlan(writes=tuple(writes), warnings=warnings)
 
 
 def inventory_bundles(
@@ -370,6 +489,11 @@ def commit_migration(plan: MigrationPlan) -> None:
     retryable, never a replaced config without its backup. Replacements are
     atomic per file, not across files: a global config followed by a failed
     workspace config is explicitly retryable, not falsely rolled back.
+
+    A retry must *re-plan* first: the same plan holds the bytes of the file
+    as it was before the interruption, and the byte recheck above will
+    refuse it — by design, since only a fresh read can tell what is left to
+    do. Callers report that as "rerun the migration", never as a clobber.
     """
     if plan.errors:
         raise ValueError("migration has blocking diagnostics: " + "; ".join(plan.errors))

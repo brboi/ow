@@ -65,7 +65,7 @@ class TestCmdApplyExtended:
     def test_cmd_apply_shows_error_when_repo_fails(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[])
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")})
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         config = config_with_remotes
 
@@ -83,7 +83,7 @@ class TestCmdApplyExtended:
     def test_cmd_apply_no_errors_no_warning(self, tmp_path, capsys, config_with_remotes):
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(repos={}, templates=["common"])
+        ws = WorkspaceConfig(repos={})
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         config = config_with_remotes
 

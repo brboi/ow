@@ -75,9 +75,9 @@ def _workspace(tmp_path: Path, spec: str = "master..featA") -> tuple[Config, Pat
 
     write_workspace_config(
         ws_dir / ".ow" / "config.toml",
-        WorkspaceConfig(repos={"community": parse_branch_spec(spec)}, templates=[]),
+        WorkspaceConfig(repos={"community": parse_branch_spec(spec)}),
     )
-    return Config(vars={}, remotes={}), ws_dir, worktree
+    return Config(remotes={}), ws_dir, worktree
 
 
 def _fetched(tracks: dict[str, str], upstreams: dict[str, str] | None = None, failed=frozenset()):
@@ -214,10 +214,10 @@ def test_a_detached_repo_follows_its_base_ref(tmp_path, capsys, xdg):
 
     write_workspace_config(
         ws_dir / ".ow" / "config.toml",
-        WorkspaceConfig(repos={"community": parse_branch_spec("master")}, templates=[]),
+        WorkspaceConfig(repos={"community": parse_branch_spec("master")}),
     )
 
-    _run_pull(Config(vars={}, remotes={}), ws_dir, _fetched({"community": "origin/master"}))
+    _run_pull(Config(remotes={}), ws_dir, _fetched({"community": "origin/master"}))
 
     assert _git(worktree, "rev-parse", "HEAD") == ahead
     assert _git(worktree, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
@@ -279,7 +279,6 @@ def test_only_narrows_the_work_to_one_repo(tmp_path, capsys, xdg):
                 "community": parse_branch_spec("master..featA"),
                 "enterprise": parse_branch_spec("master..featA"),
             },
-            templates=[],
         ),
     )
 

@@ -101,7 +101,6 @@ class TestNonOkStates:
         # No community/ subdir → not applied
         ws = WorkspaceConfig(
             repos={"community": BranchSpec("origin/master")},
-            templates=["common"],
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         with (
@@ -121,7 +120,6 @@ class TestNonOkStates:
         (ws_dir / "community").mkdir()
         ws = WorkspaceConfig(
             repos={"community": BranchSpec("origin/master")},
-            templates=["common"],
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         with (
@@ -143,7 +141,6 @@ class TestNonOkStates:
         (paths.repos_dir() / "community.git").mkdir(parents=True)
         ws = WorkspaceConfig(
             repos={"community": BranchSpec("origin/master")},
-            templates=["common"],
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         resolved = BranchSpec("origin/master")
@@ -220,7 +217,6 @@ class TestByteIdenticalOutput:
         (paths.repos_dir() / "community.git").mkdir(parents=True)
         ws = WorkspaceConfig(
             repos={"community": BranchSpec("origin/master")},
-            templates=["common"],
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         resolved = BranchSpec("origin/master")
@@ -258,7 +254,6 @@ class TestByteIdenticalOutput:
         (paths.repos_dir() / "community.git").mkdir(parents=True)
         ws = WorkspaceConfig(
             repos={"community": BranchSpec("origin/master", "feat")},
-            templates=["common"],
         )
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         resolved = BranchSpec("origin/master", "feat")

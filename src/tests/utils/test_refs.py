@@ -9,9 +9,9 @@ def _workspace(tmp_path, alias="community"):
     """A workspace whose worktree exists but whose bare repo does not."""
     ws_dir = tmp_path / "workspaces" / "ws"
     (ws_dir / alias).mkdir(parents=True)
-    config = Config(vars={}, remotes={})
+    config = Config(remotes={})
     ws = WorkspaceConfig(
-        templates=[], vars={}, repos={alias: BranchSpec("origin/master", "feature")}
+        repos={alias: BranchSpec("origin/master", "feature")}
     )
     return config, ws, ws_dir
 
@@ -67,10 +67,9 @@ class TestUpstreamBefore:
         bare = paths.repos_dir() / "community.git"
         bare.mkdir(parents=True)
 
-        config = Config(vars={}, remotes={"community": {}})
+        config = Config(remotes={"community": {}})
         ws = WorkspaceConfig(
             repos={"community": BranchSpec("origin/master", "work")},
-            templates=[],
         )
 
         def fake_resolve(bare_repo, spec, alias_remotes):
@@ -122,10 +121,9 @@ def test_fetch_jobs_stay_routed_through_tracked_run(tmp_path, monkeypatch, xdg):
     bare = paths.repos_dir() / f"{alias}.git"
     bare.mkdir(parents=True)
 
-    config = Config(vars={}, remotes={alias: {}})
+    config = Config(remotes={alias: {}})
     ws = WorkspaceConfig(
-        repos={alias: BranchSpec("origin/master")}, templates=[],
-    )
+        repos={alias: BranchSpec("origin/master")},     )
 
     def fake_resolve(bare_repo, spec, alias_remotes):
         return BranchSpec("origin/master")
@@ -163,10 +161,9 @@ class TestFetchFailureIsReported:
         (ws_dir / "community").mkdir(parents=True)
         (paths.repos_dir() / "community.git").mkdir(parents=True)
 
-        config = Config(vars={}, remotes={"community": {}})
+        config = Config(remotes={"community": {}})
         ws = WorkspaceConfig(
-            repos={"community": BranchSpec("origin/master")}, templates=[],
-        )
+            repos={"community": BranchSpec("origin/master")},         )
 
         def fake_run(*a, **k):
             if isinstance(run_result, Exception):
@@ -288,8 +285,8 @@ class TestFetchJobShape:
             return BranchSpec("dev/work", "work") if spec.local_branch else BranchSpec("origin/master")
 
         refs_mod.fetch_workspace_refs(
-            WorkspaceConfig(repos={"community": BranchSpec("origin/master", "work")}, templates=[]),
-            ws_dir, Config(vars={}, remotes={"community": {}}),
+            WorkspaceConfig(repos={"community": BranchSpec("origin/master", "work")}),
+            ws_dir, Config(remotes={"community": {}}),
             fetch_upstreams=True, resolve_fn=fake_resolve,
         )
 
@@ -308,8 +305,8 @@ class TestFetchJobShape:
         monkeypatch.setattr(refs_mod, "get_upstream", lambda p: "origin/master")
 
         refs_mod.fetch_workspace_refs(
-            WorkspaceConfig(repos={"community": BranchSpec("origin/master", "master")}, templates=[]),
-            ws_dir, Config(vars={}, remotes={"community": {}}),
+            WorkspaceConfig(repos={"community": BranchSpec("origin/master", "master")}),
+            ws_dir, Config(remotes={"community": {}}),
             fetch_upstreams=True,
             resolve_fn=lambda bare, spec, remotes: BranchSpec("origin/master"),
         )
@@ -326,8 +323,8 @@ class TestFetchJobShape:
         monkeypatch.setattr(refs_mod, "get_upstream", lambda p: "dev/leftover")
 
         refs_mod.fetch_workspace_refs(
-            WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[]),
-            ws_dir, Config(vars={}, remotes={"community": {}}),
+            WorkspaceConfig(repos={"community": BranchSpec("origin/master")}),
+            ws_dir, Config(remotes={"community": {}}),
             fetch_upstreams=True,
             resolve_fn=lambda bare, spec, remotes: BranchSpec("origin/master"),
         )
@@ -342,8 +339,8 @@ class TestFetchJobShape:
         calls = _record_fetches(monkeypatch)
 
         outcome = refs_mod.fetch_workspace_refs(
-            WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=[]),
-            ws_dir, Config(vars={}, remotes={"community": {}}),
+            WorkspaceConfig(repos={"community": BranchSpec("origin/master")}),
+            ws_dir, Config(remotes={"community": {}}),
             resolve_fn=lambda bare, spec, remotes: BranchSpec("origin/master"),
         )
 
@@ -401,10 +398,9 @@ class TestFetchJobsSameRepoAreSequential:
         refs_mod.fetch_workspace_refs(
             WorkspaceConfig(
                 repos={"community": BranchSpec("origin/master", "work")},
-                templates=[],
             ),
             ws_dir,
-            Config(vars={}, remotes={"community": {}}),
+            Config(remotes={"community": {}}),
             fetch_upstreams=True,
             resolve_fn=fake_resolve,
         )
@@ -539,8 +535,8 @@ class TestForcePushFetch:
         ws_dir.mkdir()
         (ws_dir / "community").mkdir()
 
-        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/feature")}, templates=[])
-        config = Config(vars={}, remotes={"community": {"origin": RemoteConfig(url=str(source))}})
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/feature")})
+        config = Config(remotes={"community": {"origin": RemoteConfig(url=str(source))}})
 
         # Call fetch_workspace_refs — it should succeed even after the force-push
         outcome = refs_mod.fetch_workspace_refs(ws, ws_dir, config, fetch=True)

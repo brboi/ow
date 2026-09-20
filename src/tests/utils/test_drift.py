@@ -118,7 +118,6 @@ def test_warn_if_drifted_passes_when_aligned(tmp_path, capsys):
     (ws_dir / "community").mkdir(parents=True)
     ws = WorkspaceConfig(
         repos={"community": BranchSpec("origin/master", "my-feature")},
-        templates=["common"],
     )
 
     with patch("ow.utils.drift.get_worktree_branch", return_value="my-feature"):
@@ -133,7 +132,6 @@ def test_warn_if_drifted_warns_on_drift(tmp_path, capsys):
     (ws_dir / "community").mkdir(parents=True)
     ws = WorkspaceConfig(
         repos={"community": BranchSpec("origin/master", "my-feature")},
-        templates=["common"],
     )
 
     with patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"):
@@ -148,7 +146,6 @@ def test_warn_if_drifted_skips_unapplied_repos(tmp_path, capsys):
     ws_dir.mkdir(parents=True)
     ws = WorkspaceConfig(
         repos={"community": BranchSpec("origin/master", "my-feature")},
-        templates=["common"],
     )
 
     warn_if_drifted(ws, ws_dir)
@@ -163,7 +160,6 @@ def test_warn_if_drifted_names_the_command_that_fixes_it(tmp_path, capsys):
     (ws_dir / "community").mkdir(parents=True)
     ws = WorkspaceConfig(
         repos={"community": BranchSpec("origin/master", "my-feature")},
-        templates=["common"],
     )
 
     with patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"):
@@ -204,7 +200,6 @@ def test_warn_if_drifted_survives_a_check_that_raised(tmp_path, capsys):
     (ws_dir / "community").mkdir(parents=True)
     ws = WorkspaceConfig(
         repos={"community": BranchSpec("origin/master", "my-feature")},
-        templates=["common"],
     )
 
     with patch("ow.utils.drift.get_worktree_branch", side_effect=RuntimeError("boom")):
