@@ -48,6 +48,12 @@ def services_dir() -> Path:
     return config_home() / "services"
 
 
+def local_dir() -> Path:
+    # Seeds, not a bundle: files the user wants copied into every new
+    # workspace, once, before addon scanning looks at `.local` there.
+    return config_home() / "local"
+
+
 def repos_dir() -> Path:
     return data_home() / "repos"
 
