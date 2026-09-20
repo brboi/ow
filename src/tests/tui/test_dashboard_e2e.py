@@ -6,12 +6,12 @@ Verifies the new-workspace form can be filled and the request is generated.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from ow.utils.config import Config, RemoteConfig, load_global_config, write_global_config
-from ow.tui.workspace_forms import NewWorkspaceRequest
-from textual.widgets import OptionList
+from ow.utils.options import OdooOverrides
 
 
 def test_new_workspace_form_fills_and_dismisses(dashboard_pilot, tmp_path: Path):
@@ -44,17 +44,7 @@ def test_new_workspace_form_fills_and_dismisses(dashboard_pilot, tmp_path: Path)
 
             # Patch cmd_init to capture the request instead of running it
             with patch("ow.commands.init.cmd_init") as mock_init:
-                def capture_init(*args, **kwargs):
-                    # Extract the request from kwargs
-                    req = NewWorkspaceRequest(
-                        parent=Path(kwargs.get("parent", tmp_path)),
-                        name=kwargs.get("name", "test"),
-                        templates=kwargs.get("templates", []),
-                        repos=kwargs.get("repos", {}),
-                        configuration=kwargs.get("configuration"),
-                    )
-                    captured_request.append(req)
-                mock_init.side_effect = capture_init
+                mock_init.side_effect = lambda *a, **kw: captured_request.append(kw)
 
                 # Press Create
                 create_btn = new_screen.query_one("#btn_create")
@@ -75,9 +65,13 @@ def test_new_workspace_form_fills_and_dismisses(dashboard_pilot, tmp_path: Path)
     # Verify the request was captured
     assert len(captured_request) == 1, "cmd_init was not called"
     req = captured_request[0]
-    assert req.name == "e2e-test-ws"
-    assert req.parent == tmp_path
-    assert "community" in req.repos
+    assert req["name"] == "e2e-test-ws"
+    assert req["parent"] == tmp_path
+    assert "community" in req["repos"]
+    assert req["yes"] is True, (
+        "the TUI path must skip the prompt: display.confirm cannot ask "
+        "while output is redirected into the log pane"
+    )
 
 
 def test_operation_with_task_progress_completes_through_pushed_main_screen(dashboard_pilot):
@@ -114,10 +108,10 @@ def test_operation_with_task_progress_completes_through_pushed_main_screen(dashb
 
 def _theme_test_config() -> Config:
     return Config(
-        vars={"http_port": 8069},
         remotes={
             "community": {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")},
         },
+        odoo=OdooOverrides(http_port=8069),
     )
 
 
@@ -155,8 +149,7 @@ def test_startup_with_theme_in_config_does_not_rewrite_file(dashboard_pilot):
     is already on disk is churn.
     """
     # Write a config with theme = "dracula"
-    cfg = _theme_test_config()
-    cfg.theme = "dracula"
+    cfg = replace(_theme_test_config(), theme="dracula")
     write_global_config(cfg)
 
     # Record the file's mtime before launch
@@ -360,3 +353,43 @@ def test_command_palette_reflects_previewed_theme(dashboard_pilot):
                 )
 
     asyncio.run(_run())
+
+
+def test_shared_config_keeps_the_theme_after_a_defaults_save(dashboard_pilot):
+    """Saving global defaults must not resurrect a stale theme.
+
+    The App's theme watcher and the global-config screen both write through
+    the one shared `ConfigHolder`; the saved record is what the holder now
+    carries. So a theme set after a defaults save still persists — proving
+    the screen did not swap in a config object the App's watcher no longer
+    sees (the config is a frozen record now, so "in place" means the holder,
+    not the record).
+    """
+    write_global_config(replace(_theme_test_config(), theme="dracula"))
+    config = load_global_config()
+
+    async def _run():
+        async with dashboard_pilot(config) as (pilot, screen):
+            assert pilot.app.theme == "dracula"
+
+            # Edit the global defaults: E → change the editor command → Save.
+            await pilot.press("E")
+            await pilot.pause()
+            gc_screen = pilot.app.screen
+            gc_screen.query_one("#gc_editor").query_one("#li_input").value = "vim"
+            await pilot.click("#btn_save")
+            await pilot.pause()
+
+            # The save swapped in a fresh record; the App still sees the
+            # theme that was on disk, and its watcher still persists changes.
+            pilot.app.theme = "nord"
+            await pilot.pause()
+
+    asyncio.run(_run())
+
+    reloaded = load_global_config()
+    assert reloaded.editor == "vim"
+    assert reloaded.theme == "nord", (
+        "the global save dropped the shared theme: the App's watcher and the "
+        "config screen no longer share one holder"
+    )

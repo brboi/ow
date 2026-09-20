@@ -135,29 +135,19 @@ def test_confirm_dialog_no_returns_false():
     assert result is False
 
 
-def test_vars_editor_get_vars_reads_existing_rows():
-    """`get_vars()` must read back the rows `compose()` seeded, with their
-    original scalar types intact — an int var must stay an int, not
-    round-trip to a string. `DataTable.get_cell_at()` takes a single
-    `Coordinate`, not two positional ints; calling it the wrong way either
-    raises outright or (worse) silently reads back the wrong cell,
-    rewriting the user's config types on every save.
-    """
+def test_labeled_input_password_masks_the_value():
+    """A password field renders bullets, never the secret itself."""
     from textual.app import App
-    from ow.tui.workspace_forms import VarsEditor
+    from textual.widgets import Input
 
     class TestApp(App):
         def compose(self):
-            yield VarsEditor({"http_port": 8069, "db_host": "localhost"})
+            yield LabeledInput("db_password", value="s3cret", password=True)
 
     async def run_test():
         async with TestApp().run_test() as pilot:
-            await pilot.pause()  # let compose() seed the table's rows
-            editor = pilot.app.query_one(VarsEditor)
-            return editor.get_vars()
+            li = pilot.app.query_one(LabeledInput)
+            return str(li.query_one(Input).render())
 
-    result = asyncio.run(run_test())
-    assert result == {"http_port": 8069, "db_host": "localhost"}
-    assert isinstance(result["http_port"], int), (
-        f"http_port round-tripped as {type(result['http_port']).__name__}, not int"
-    )
+    rendered = asyncio.run(run_test())
+    assert "s3cret" not in rendered, f"password leaked into its own render: {rendered!r}"

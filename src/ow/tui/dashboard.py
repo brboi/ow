@@ -5,6 +5,7 @@ import tomllib
 
 import shlex
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 import functools
 from typing import Any, Callable, Optional
@@ -31,7 +32,6 @@ from ow.utils import index, paths
 from ow.utils.config import (
     Config,
     WorkspaceConfig,
-    load_global_config,
     load_workspace_config,
     write_global_config,
     write_workspace_config,
@@ -44,6 +44,30 @@ from ow.tui.runner import TuiSink
 from ow.tui.widgets import ConfirmDialog, OperationLog, WorkspaceDetail
 
 MARKER = Path(".ow") / "config.toml"
+
+
+# ---------------------------------------------------------------------------
+# ConfigHolder — the one mutable reference every screen swaps in place
+# ---------------------------------------------------------------------------
+
+
+class ConfigHolder:
+    """A mutable box around the current, immutable `Config`.
+
+    `Config` is a frozen dataclass: nothing can write through a reference
+    to it, so nothing here mutates one in place. Every place that would
+    once have done `self._config.theme = ...` instead builds a fresh
+    record (`dataclasses.replace`, or a config writer's own return value)
+    and assigns it to `holder.value`. `MainScreen` and `DashboardApp` are
+    handed the *same* `ConfigHolder`, so a swap made in one is visible to
+    the other — including the App's theme watcher — without either side
+    re-wiring a callback or diverging from what the other last saved.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Config) -> None:
+        self.value = value
 
 
 # ---------------------------------------------------------------------------
@@ -125,11 +149,13 @@ class HelpScreen(ModalScreen[None]):
             "[bold]Operations[/]\n"
             "  s            Status (local)\n"
             "  f            Fetch + status\n"
-            "  a            Apply\n"
+            "  a            Render\n"
+            "  F            Files (diff)\n"
             "  R            Rebase\n"
             "  P            Pull\n"
             "  S            Switch\n"
             "  r            Reset\n"
+            "  I            Repair\n"
             "  p            Prune\n"
             "\n"
             "[bold]Workspace management[/]\n"
@@ -183,11 +209,13 @@ class MainScreen(Screen):
         Binding("q", "request_quit", "Quit", show=False),
         Binding("s", "status_local", "Status", show=True),
         Binding("f", "fetch_status", "Fetch+status", show=True),
-        Binding("a", "apply", "Apply", show=True),
+        Binding("a", "render", "Render", show=True),
+        Binding("F", "files", "Files", show=True),
         Binding("R", "rebase", "Rebase", show=True),
         Binding("P", "pull", "Pull", show=True),
         Binding("S", "switch", "Switch", show=True),
         Binding("r", "reset", "Reset", show=True),
+        Binding("I", "repair", "Repair", show=True),
         Binding("n", "new_workspace", "New", show=True),
         Binding("e", "edit_config", "Edit", show=True),
         Binding("E", "edit_global_config", "Global", show=True),
@@ -199,9 +227,9 @@ class MainScreen(Screen):
         Binding("question_mark", "help", "Help", show=True),
     ]
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config_holder: ConfigHolder) -> None:
         super().__init__()
-        self._config = config
+        self._config_holder = config_holder
         self._entries: list[WorkspaceEntry] = []
         self._status_cache: dict[Path, WorkspaceStatus] = {}
         self._busy = False
@@ -468,9 +496,16 @@ class MainScreen(Screen):
         then: Callable[[Any], None] | None = None,
         quiet: bool = False,
         reload: bool = False,
+        reload_config: bool = False,
         invalidate: Path | None = None,
+        pending_exit_codes: frozenset[int] = frozenset(),
     ) -> None:
-        """Gate on _busy, then launch the worker."""
+        """Gate on _busy, then launch the worker.
+
+        `reload` re-reads the workspace list; `reload_config` re-reads the
+        global config into the shared holder — an operation that may have
+        migrated it (`ow init`, `ow render`) is the caller that needs it.
+        """
         if self._busy:
             if not quiet:
                 self.notify("An operation is already running", severity="warning")
@@ -484,7 +519,8 @@ class MainScreen(Screen):
         self.run_operation_worker = self._run_worker(
             label, fn, then=then, quiet=quiet,
             reload=reload, invalidate=invalidate,
-            log=log,
+            log=log, pending_exit_codes=pending_exit_codes,
+            reload_config=reload_config,
         )
 
     @work(thread=True, group="op", exit_on_error=False)
@@ -498,6 +534,8 @@ class MainScreen(Screen):
         reload: bool = False,
         invalidate: Path | None = None,
         log: OperationLog | None = None,
+        pending_exit_codes: frozenset[int] = frozenset(),
+        reload_config: bool = False,
     ) -> None:
         from ow.utils.display import redirect_output
         import typer
@@ -526,7 +564,7 @@ class MainScreen(Screen):
         finally:
             self.app.call_from_thread(
                 self._finish, label, exit_code, quiet, result, then,
-                reload, invalidate,
+                reload, invalidate, pending_exit_codes, reload_config,
             )
 
     def _finish(
@@ -538,14 +576,23 @@ class MainScreen(Screen):
         then: Callable[[Any], None] | None,
         reload: bool,
         invalidate: Path | None,
+        pending_exit_codes: frozenset[int] = frozenset(),
+        reload_config: bool = False,
     ) -> None:
         try:
             log = self.query_one("#log", OperationLog)
             if not quiet:
                 # exit_code is None on a plain return; an explicit 0 means
                 # SystemExit(0), also a success — only nonzero is a failure.
+                # A caller-declared "pending" nonzero code (e.g. `ow files
+                # --diff` exiting 1 to report pending changes) is neither:
+                # it is a real, expected outcome the log must not call a
+                # failure just because it isn't a clean exit.
                 if exit_code is not None and exit_code != 0:
-                    log.write(f"{label}: failed (exit {exit_code})")
+                    if exit_code in pending_exit_codes:
+                        log.write(f"{label}: pending changes")
+                    else:
+                        log.write(f"{label}: failed (exit {exit_code})")
                 else:
                     log.write(f"{label}: done")
         except Exception as e:
@@ -558,12 +605,29 @@ class MainScreen(Screen):
             # callback for either, not only when nothing was raised at all.
             if exit_code in (None, 0) and then is not None:
                 then(result)
+            if reload_config:
+                self._reload_global_config()
             if reload:
                 self.reload_workspaces()
         finally:
             self._busy = False
             self._hide_progress_row()
             self.run_operation_worker = None
+
+    def _reload_global_config(self) -> None:
+        """Re-read the global config into the shared holder.
+
+        `ow init`/`ow render` migrate a schema-1 global config as part of
+        their own work; the holder kept the record loaded before that, so
+        a later read of `odoo`/`mise`/`owignore`/`version`/`legacy` would
+        describe a file that no longer exists in that shape.
+        """
+        from ow.utils.config import load_global_config
+
+        try:
+            self._config_holder.value = load_global_config()
+        except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+            self.notify(f"Could not reload global config: {exc}", severity="error")
 
     def _log_header(self, label: str) -> None:
         try:
@@ -636,7 +700,7 @@ class MainScreen(Screen):
         self.run_operation(
             f"status {entry.name}",
             lambda: gather_workspace_status(
-                entry.ws, entry.path, self._config, fetch=fetch
+                entry.ws, entry.path, self._config_holder.value, fetch=fetch
             ),
             then=self._show_status,
             quiet=not fetch,
@@ -679,21 +743,72 @@ class MainScreen(Screen):
             return
         self.refresh_status(entry, fetch=True)
 
-    # ---- apply (§4.2) --------------------------------------------------
+    # ---- render (§4.2) --------------------------------------------------
 
-    def action_apply(self) -> None:
+    def action_render(self) -> None:
         entry = self._selected_entry()
         if entry is None:
             self.notify("No workspace selected", severity="warning")
             return
         if entry.archived:
-            self.notify("Cannot apply archived workspace", severity="warning")
+            self.notify("Cannot render archived workspace", severity="warning")
             return
-        from ow.commands.apply import cmd_apply
+        self._do_render(entry)
+
+    def _do_render(self, entry: WorkspaceEntry) -> None:
+        from ow.commands.render import cmd_render
         self.run_operation(
-            f"apply {entry.name}",
-            lambda: cmd_apply(self._config, workspace=str(entry.path)),
+            f"render {entry.name}",
+            lambda: cmd_render(self._config_holder.value, workspace=str(entry.path)),
             invalidate=entry.path,
+            reload=True,
+            reload_config=True,
+        )
+
+    # ---- files (§4.2b) --------------------------------------------------
+
+    def action_files(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self.notify("No workspace selected", severity="warning")
+            return
+        if entry.archived:
+            self.notify("Cannot show files for archived workspace", severity="warning")
+            return
+        from ow.commands.files import cmd_files
+        self.run_operation(
+            f"files {entry.name}",
+            lambda: cmd_files(
+                self._config_holder.value, workspace=str(entry.path), show_diff=True,
+            ),
+            pending_exit_codes=frozenset({1}),
+        )
+
+    # ---- repair (§4.2c) --------------------------------------------------
+
+    def action_repair(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self.notify("No workspace selected", severity="warning")
+            return
+        if entry.archived:
+            self.notify("Cannot repair archived workspace", severity="warning")
+            return
+        self._do_repair(entry)
+
+    def _do_repair(self, entry: WorkspaceEntry) -> None:
+        from ow.commands.init import cmd_init
+
+        def _then(_result: Any) -> None:
+            self.notify(f"Repaired {entry.name}", severity="information")
+
+        self.run_operation(
+            f"repair {entry.name}",
+            lambda: cmd_init(self._config_holder.value, parent=entry.path, name=None, yes=True),
+            then=_then,
+            invalidate=entry.path,
+            reload=True,
+            reload_config=True,
         )
 
     # ---- rebase (§4.3) -------------------------------------------------
@@ -710,7 +825,7 @@ class MainScreen(Screen):
         self.run_operation(
             f"rebase {entry.name} (plan)",
             lambda: cmd_rebase(
-                self._config, workspace=str(entry.path), dry_run=True
+                self._config_holder.value, workspace=str(entry.path), dry_run=True
             ),
             then=lambda _r: self._push_rebase_confirm(entry),
         )
@@ -725,7 +840,7 @@ class MainScreen(Screen):
             callback=lambda ok: ok and self.run_operation(
                 f"rebase {entry.name}",
                 lambda: cmd_rebase(
-                    self._config, workspace=str(entry.path),
+                    self._config_holder.value, workspace=str(entry.path),
                     yes=True, no_fetch=True,
                 ),
                 invalidate=entry.path,
@@ -748,7 +863,7 @@ class MainScreen(Screen):
         from ow.commands.pull import cmd_pull
         self.run_operation(
             f"pull {entry.name}",
-            lambda: cmd_pull(self._config, workspace=str(entry.path)),
+            lambda: cmd_pull(self._config_holder.value, workspace=str(entry.path)),
             invalidate=entry.path,
         )
 
@@ -780,7 +895,7 @@ class MainScreen(Screen):
         self.run_operation(
             f"switch {entry.name}",
             lambda: cmd_switch(
-                self._config,
+                self._config_holder.value,
                 target=req.target,
                 workspace=str(entry.path),
                 create=req.create,
@@ -809,7 +924,7 @@ class MainScreen(Screen):
         self.run_operation(
             f"reset {entry.name} (plan)",
             lambda: cmd_reset(
-                self._config, workspace=str(entry.path), dry_run=True,
+                self._config_holder.value, workspace=str(entry.path), dry_run=True,
             ),
             then=lambda _r: self._push_reset_confirm(entry),
         )
@@ -824,7 +939,7 @@ class MainScreen(Screen):
             callback=lambda ok: ok and self.run_operation(
                 f"reset {entry.name}",
                 lambda: cmd_reset(
-                    self._config, workspace=str(entry.path), yes=True,
+                    self._config_holder.value, workspace=str(entry.path), yes=True,
                 ),
                 invalidate=entry.path,
             ),
@@ -933,7 +1048,7 @@ class MainScreen(Screen):
             f"[bold]Restore workspace[/]\n"
             f"  from  {display_path(entry.path)}\n"
             f"  to    {display_path(target)}\n\n"
-            f"Will re-render templates."
+            f"Will refresh its generated files."
         )
         self.app.push_screen(
             ConfirmDialog("Restore?", details=details),
@@ -943,20 +1058,48 @@ class MainScreen(Screen):
     def _do_unarchive(self, entry: WorkspaceEntry, target: Path) -> None:
         from ow.commands.archive import execute_unarchive
 
-        def _then(unrepaired: list[str]) -> None:
-            if unrepaired:
-                log = self.query_one("#log", OperationLog)
-                log.write(
-                    Text.from_markup(f"[yellow]unrepaired aliases: {', '.join(unrepaired)}[/]")
-                )
+        def _then(outcome: tuple[list[str], Any]) -> None:
+            self._report_relocation(target, *outcome)
             self.notify(f"Restored {entry.name}", severity="information")
 
         self.run_operation(
             f"unarchive {entry.name}",
-            lambda: execute_unarchive(self._config, entry.path, entry.ws, target),
+            lambda: execute_unarchive(
+                self._config_holder.value, entry.path, entry.ws, target,
+            ),
             then=_then,
             reload=True,
         )
+
+    def _report_relocation(
+        self, new_path: Path, unrepaired: list[str], render: Any,
+    ) -> None:
+        """Log what a move/unarchive's relocation refresh could not do.
+
+        `render` is the refresh outcome, or None for a workspace still on
+        schema 1: relocation never migrates, so the workspace keeps its
+        legacy files until an explicit `ow render`.
+        """
+        log = self.query_one("#log", OperationLog)
+        if unrepaired:
+            log.write(
+                Text.from_markup(f"[yellow]unrepaired aliases: {', '.join(unrepaired)}[/]")
+            )
+        if render is None:
+            log.write(
+                Text.from_markup(
+                    f"[yellow]still schema 1 — run `ow render -w {new_path}` "
+                    f"to generate its files[/]"
+                )
+            )
+            return
+        for line in render.errors:
+            log.write(Text(line, style="red"))
+        if render.yours:
+            log.write(
+                f"yours, left alone: {', '.join(render.yours)} "
+                f"(run `ow files --diff`)"
+            )
 
     # ---- move (§4.6) ---------------------------------------------------
 
@@ -1015,17 +1158,15 @@ class MainScreen(Screen):
     def _do_move(self, entry: WorkspaceEntry, target: Path) -> None:
         from ow.commands.mv import execute_move
 
-        def _then(unrepaired: list[str]) -> None:
-            if unrepaired:
-                log = self.query_one("#log", OperationLog)
-                log.write(
-                    Text.from_markup(f"[yellow]unrepaired aliases: {', '.join(unrepaired)}[/]")
-                )
+        def _then(outcome: tuple[list[str], Any]) -> None:
+            self._report_relocation(target, *outcome)
             self.notify(f"Moved {entry.name}", severity="information")
 
         self.run_operation(
             f"move {entry.name}",
-            lambda: execute_move(self._config, entry.path, entry.ws, target),
+            lambda: execute_move(
+                self._config_holder.value, entry.path, entry.ws, target,
+            ),
             then=_then,
             reload=True,
         )
@@ -1104,7 +1245,7 @@ class MainScreen(Screen):
         if entry.archived:
             self.notify("Cannot open archived workspace", severity="warning")
             return
-        editor = self._config.editor
+        editor = self._config_holder.value.editor
         if not editor:
             self.notify("No editor configured", severity="warning")
             return
@@ -1129,7 +1270,7 @@ class MainScreen(Screen):
     def action_new_workspace(self) -> None:
         from ow.tui.workspace_forms import NewWorkspaceScreen
         self.app.push_screen(
-            NewWorkspaceScreen(self._config),
+            NewWorkspaceScreen(self._config_holder.value),
             callback=lambda req: req and self._do_new_workspace(req),
         )
 
@@ -1142,9 +1283,8 @@ class MainScreen(Screen):
         self.run_operation(
             f"init {req.name}",
             lambda: cmd_init(
-                self._config,
+                self._config_holder.value,
                 name=req.name,
-                templates=req.templates,
                 repos=req.repos,
                 configuration=req.configuration,
                 parent=req.parent,
@@ -1152,6 +1292,7 @@ class MainScreen(Screen):
             ),
             then=_then,
             reload=True,
+            reload_config=True,
         )
 
     # ---- edit workspace config (§4.10) ---------------------------------
@@ -1169,7 +1310,7 @@ class MainScreen(Screen):
             return
         from ow.tui.workspace_forms import WorkspaceConfigScreen
         self.app.push_screen(
-            WorkspaceConfigScreen(self._config, entry.path, entry.ws),
+            WorkspaceConfigScreen(self._config_holder.value, entry.path, entry.ws),
             callback=lambda new_ws: new_ws and self._do_save_ws_config(entry, new_ws),
         )
 
@@ -1177,55 +1318,71 @@ class MainScreen(Screen):
         self, entry: WorkspaceEntry, new_ws: WorkspaceConfig
     ) -> None:
         config_path = entry.path / MARKER
-        write_workspace_config(config_path, new_ws)
-        entry.ws = new_ws
+        old_ws = entry.ws
+        try:
+            written = write_workspace_config(config_path, new_ws)
+        except (OSError, ValueError) as exc:
+            self.notify(f"Config not saved: {exc}", severity="error")
+            return
+        entry.ws = written
         self._status_cache.pop(entry.path, None)
         self._render_detail_for(entry)
         log = self.query_one("#log", OperationLog)
         log.write("workspace config saved")
         self.notify("Config saved", severity="information")
-        self.app.push_screen(
-            ConfirmDialog("Apply now?"),
-            callback=lambda ok: ok and self._do_apply_after_edit(entry),
-        )
 
-    def _do_apply_after_edit(self, entry: WorkspaceEntry) -> None:
-        from ow.commands.apply import cmd_apply
-        self.run_operation(
-            f"apply {entry.name}",
-            lambda: cmd_apply(self._config, workspace=str(entry.path)),
-            invalidate=entry.path,
-        )
+        if old_ws is None:
+            return
+        if written.repos != old_ws.repos:
+            details = Text(
+                "Repair creates missing worktrees, seeds local files and "
+                "renders stale files. It never switches the branch of a "
+                "worktree that already exists."
+            )
+            moved = [
+                f"{alias}: {old_ws.repos[alias].to_spec_str()} → {spec.to_spec_str()}"
+                for alias, spec in written.repos.items()
+                if alias in old_ws.repos
+                and old_ws.repos[alias].local_branch != spec.local_branch
+            ]
+            if moved:
+                details.append("\n\nBranch intent changed — " + "; ".join(moved))
+                details.append(
+                    "\nRepair will leave each worktree where it is; the detail "
+                    "pane shows the drift until you press S (Switch)."
+                )
+            self.app.push_screen(
+                ConfirmDialog("Repos changed — repair now?", details=details),
+                callback=lambda ok: ok and self._do_repair(entry),
+            )
+        elif written.odoo != old_ws.odoo or written.mise != old_ws.mise:
+            self.app.push_screen(
+                ConfirmDialog("Options changed — render now?"),
+                callback=lambda ok: ok and self._do_render(entry),
+            )
 
     # ---- edit global config (§4.11) ------------------------------------
 
     def action_edit_global_config(self) -> None:
         from ow.tui.global_config import GlobalConfigScreen
         self.app.push_screen(
-            GlobalConfigScreen(self._config),
+            GlobalConfigScreen(self._config_holder.value),
             callback=lambda new_cfg: new_cfg and self._do_save_global_config(new_cfg),
         )
 
     def _do_save_global_config(self, new_cfg: Config) -> None:
-        from ow.utils.config import write_global_config
-        write_global_config(new_cfg)
-        # Mutate the shared Config object in place — never replace the
-        # reference. `self._config` here is the *same object* as
-        # `self.app._config` (passed by reference at construction); the
-        # command palette's theme picker (Ctrl+P) mutates that shared object
-        # directly, on the App. Reassigning `self._config` to a freshly loaded
-        # object would make MainScreen's config diverge from the App's, so a
-        # later save from this screen would carry the App's *stale*
-        # pre-divergence theme value back over whatever the picker set after.
-        reloaded = load_global_config()
-        self._config.vars = reloaded.vars
-        self._config.remotes = reloaded.remotes
-        self._config.version = reloaded.version
-        self._config.editor = reloaded.editor
-        self._config.theme = reloaded.theme
+        try:
+            written = write_global_config(new_cfg)
+        except (OSError, ValueError) as exc:
+            self.notify(f"Global config not saved: {exc}", severity="error")
+            return
+        self._config_holder.value = written
         log = self.query_one("#log", OperationLog)
         log.write("global config saved")
-        self.notify("Global config saved", severity="information")
+        self.notify(
+            "Global config saved — workspaces pick this up at their next render",
+            severity="information",
+        )
 
     # ---- help ----------------------------------------------------------
 
@@ -1249,7 +1406,7 @@ class DashboardApp(App[None]):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self._config = config
+        self._config_holder = ConfigHolder(config)
         self.main_screen: MainScreen | None = None
         self._theme_previewing = False
         """True while the command palette is open and a theme is highlighted."""
@@ -1257,13 +1414,13 @@ class DashboardApp(App[None]):
     def on_mount(self) -> None:
         # Apply saved theme
         try:
-            self.theme = self._config.theme
+            self.theme = self._config_holder.value.theme
         except Exception:
             self.notify(
-                f"Theme '{self._config.theme}' is not available, using default.",
+                f"Theme '{self._config_holder.value.theme}' is not available, using default.",
                 severity="warning",
             )
-        self.main_screen = MainScreen(self._config)
+        self.main_screen = MainScreen(self._config_holder)
         self.push_screen(self.main_screen)
 
     async def action_cancel(self) -> None:
@@ -1316,16 +1473,16 @@ class DashboardApp(App[None]):
         (Escape) are handled in ``on_command_palette_closed``.
 
         Guard: do not write during the initial ``on_mount`` application
-        of the already-loaded theme. If ``new_theme == self._config.theme``,
+        of the already-loaded theme. If ``new_theme == holder.value.theme``,
         the theme is already on disk and writing would be churn.
         """
         if self._theme_previewing:
             return
-        if new_theme == self._config.theme:
+        current = self._config_holder.value
+        if new_theme == current.theme:
             return
-        self._config.theme = new_theme
         try:
-            write_global_config(self._config)
+            self._config_holder.value = write_global_config(replace(current, theme=new_theme))
         except Exception as exc:
             self.notify(f"Failed to save theme: {exc}", severity="error")
 
@@ -1388,18 +1545,20 @@ class DashboardApp(App[None]):
         to the theme that was active when the palette opened.
         """
         self._theme_previewing = False
+        current = self._config_holder.value
         if event.option_selected:
             # Commit: persist the current theme (already set by preview).
-            if self.theme != self._config.theme:
-                self._config.theme = self.theme
+            if self.theme != current.theme:
                 try:
-                    write_global_config(self._config)
+                    self._config_holder.value = write_global_config(
+                        replace(current, theme=self.theme)
+                    )
                 except Exception as exc:
                     self.notify(f"Failed to save theme: {exc}", severity="error")
         else:
             # Cancel: revert to the original theme.
-            if self.theme != self._config.theme:
-                self.theme = self._config.theme
+            if self.theme != current.theme:
+                self.theme = current.theme
 
 
 def run_dashboard(config: Config) -> None:

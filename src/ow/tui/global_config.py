@@ -1,45 +1,48 @@
 """Global config editor screen for the dashboard.
 
-Edits `editor`, `vars` and `remotes`; dismisses with a fresh `Config`
-that the dashboard writes via `write_global_config`.
+Edits `editor`, typed odoo/mise overrides, the ignore pattern list and
+remotes; dismisses with a fresh `Config` that the dashboard writes via
+`write_global_config`.
 
 Layout: full-screen modal with a sidebar for section navigation
-(Editor / Vars / Remotes) and a right panel showing the selected
-section's content.
+(Editor / Odoo / Mise / Ignore / Remotes) and a right panel showing the
+selected section's content.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, OptionList, Static
+from textual.widgets import Button, DataTable, Label, OptionList, Static
 
-from ow.utils import index
-from ow.utils.config import Config, RemoteConfig, load_workspace_config
+from ow.utils.config import Config, RemoteConfig, WorkspaceConfig, load_workspace_config
 from ow.tui.widgets import ConfirmDialog, LabeledInput
-from ow.tui.workspace_forms import VarsEditor
+from ow.tui.workspace_forms import OptionsEditor, PromptScreen
 
 # The per-workspace config marker, relative to a workspace directory.
 _WS_MARKER = Path(".ow") / "config.toml"
 
 
-def _known_workspace_configs() -> list[tuple[str, "WorkspaceConfig"]]:
+def _known_workspace_configs() -> list[tuple[str, WorkspaceConfig]]:
     """Every known workspace's name + config, skipping ones that fail to load.
 
-    Used to answer "is this remote alias / var key actually in use anywhere"
-    before letting the user delete it — a workspace with a bad or missing
-    config must not crash that check, it just doesn't count as a user.
+    Pure index/config reads: no git, no probing, nothing that touches a
+    worktree. Used to describe what a remote or a typed option override is
+    actually used for, before letting the user remove or change it.
     """
-    out: list[tuple[str, "WorkspaceConfig"]] = []
+    from ow.utils import index
+
+    out: list[tuple[str, WorkspaceConfig]] = []
     for ws_dir in index.known_workspaces():
         try:
             ws = load_workspace_config(ws_dir / _WS_MARKER)
-        except Exception:
+        except (OSError, ValueError):
             continue
         out.append((ws_dir.name, ws))
     return out
@@ -57,10 +60,18 @@ def _describe_remote_usage(alias: str) -> str:
     return _describe_usage(names)
 
 
-def _describe_var_usage(key: str) -> str:
-    """Which known workspaces override this var key in their own vars."""
-    names = [name for name, ws in _known_workspace_configs() if key in ws.vars]
-    return _describe_usage(names)
+def _describe_option_override_usage(table: str) -> str:
+    """How many known workspaces set at least one local override in `table`
+    ('odoo' or 'mise'), replacing the old free-form-vars usage describer
+    with a typed count over the fixed option model."""
+    def _has_override(ws: WorkspaceConfig) -> bool:
+        record = ws.odoo if table == "odoo" else ws.mise
+        return any(getattr(record, f.name) is not None for f in fields(record))
+
+    names = [name for name, ws in _known_workspace_configs() if _has_override(ws)]
+    if not names:
+        return f"No known workspace overrides {table} options locally."
+    return f"{len(names)} known workspace(s) override {table} options locally: {', '.join(sorted(names))}"
 
 
 # ---------------------------------------------------------------------------
@@ -211,13 +222,125 @@ class AddRemoteScreen(ModalScreen[AddRemoteRequest | None]):
 
 
 # ---------------------------------------------------------------------------
+# _IgnoreEditor — ordered global ignore-pattern list
+# ---------------------------------------------------------------------------
+
+
+class _IgnoreEditor(Vertical):
+    """An ordered `DataTable` of ignore patterns, with add/remove/edit.
+
+    `owignore` is a global, ordered pattern list applied to every
+    workspace's generated files — not a per-workspace setting — so this
+    editor has no per-row "used by" describer the way remotes/options do.
+    """
+
+    DEFAULT_CSS = """
+    _IgnoreEditor {
+        height: auto;
+        max-height: 12;
+    }
+    _IgnoreEditor DataTable {
+        height: auto;
+        max-height: 8;
+    }
+    _IgnoreEditor Horizontal {
+        height: auto;
+    }
+    _IgnoreEditor Button {
+        margin: 0 1;
+        min-width: 4;
+    }
+    """
+
+    BINDINGS = [
+        Binding("enter", "edit_cell", "Edit", show=True),
+    ]
+
+    def __init__(self, initial: tuple[str, ...], *, disabled: bool = False, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._initial = initial
+        self._locked = disabled
+
+    def compose(self) -> ComposeResult:
+        table = DataTable(id="ignore_table")
+        table.add_column("pattern")
+        for pattern in self._initial:
+            table.add_row(pattern)
+        yield table
+        yield Horizontal(
+            Button("+", id="ignore_add", disabled=self._locked),
+            Button("-", id="ignore_remove", disabled=self._locked),
+        )
+
+    def get_patterns(self) -> tuple[str, ...]:
+        table = self.query_one("#ignore_table", DataTable)
+        return tuple(
+            str(table.get_cell_at(Coordinate(i, 0))) for i in range(table.row_count)
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ignore_add":
+            self._add_row()
+        elif event.button.id == "ignore_remove":
+            self._remove_row()
+
+    def _add_row(self) -> None:
+        def _on_result(result: str | None) -> None:
+            if result is None:
+                return
+            pattern = result.strip()
+            if not pattern:
+                return
+            self.query_one("#ignore_table", DataTable).add_row(pattern)
+        self.app.push_screen(PromptScreen("pattern"), callback=_on_result)
+
+    def _remove_row(self) -> None:
+        table = self.query_one("#ignore_table", DataTable)
+        cursor = table.cursor_coordinate
+        if cursor is None:
+            self.app.notify("No row selected", severity="warning")
+            return
+        try:
+            row_key = table.coordinate_to_cell_key(cursor)[0]
+        except Exception:
+            self.app.notify("Could not remove row", severity="warning")
+            return
+        table.remove_row(row_key)
+
+    def action_edit_cell(self) -> None:
+        if self._locked:
+            return
+        table = self.query_one("#ignore_table", DataTable)
+        cursor = table.cursor_coordinate
+        if cursor is None:
+            self.app.notify("No row selected", severity="warning")
+            return
+        try:
+            current = str(table.get_cell_at(cursor))
+            row_key = table.coordinate_to_cell_key(cursor)[0]
+        except Exception:
+            self.app.notify("Could not read cell", severity="warning")
+            return
+
+        def _on_result(result: str | None) -> None:
+            if result is None:
+                return
+            table = self.query_one("#ignore_table", DataTable)
+            try:
+                table.update_cell(row_key, table.columns[0].key, result)
+            except Exception:
+                pass
+        self.app.push_screen(PromptScreen("pattern", default=current), callback=_on_result)
+
+
+# ---------------------------------------------------------------------------
 # GlobalConfigScreen — sidebar layout
 # ---------------------------------------------------------------------------
 
 
-
 class GlobalConfigScreen(ModalScreen[Config | None]):
-    """Edit the global config: editor, vars, remotes.
+    """Edit the global config: editor, typed odoo/mise defaults, the
+    ignore pattern list, and remotes.
 
     Full-screen modal with a sidebar for section navigation and a right
     panel showing the selected section's content.
@@ -320,9 +443,19 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
         Binding("ctrl+s", "save", "Save", show=True),
     ]
 
+    _SECTIONS = ("Editor", "Odoo", "Mise", "Ignore", "Remotes")
+    _PANEL_IDS = (
+        "gc_panel_editor",
+        "gc_panel_odoo",
+        "gc_panel_mise",
+        "gc_panel_ignore",
+        "gc_panel_remotes",
+    )
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self._config = config
+        self._schema1 = config.version == 1
         # Working copy of remotes that we mutate as the user edits
         self._remotes: dict[str, dict[str, RemoteConfig]] = {}
         for alias, names in config.remotes.items():
@@ -335,6 +468,14 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
     # ------------------------------------------------------------------
     # Compose
     # ------------------------------------------------------------------
+
+    def _migration_hint(self, what: str) -> Static:
+        return Static(
+            f"This config is still schema 1 — typed {what} can't be saved here "
+            "until it is migrated. Run `ow render` in any workspace, or press "
+            "I (Repair) in the dashboard.",
+            classes="section-hint",
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="gc_frame"):
@@ -349,12 +490,7 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
             with Horizontal(id="gc_body"):
                 with Vertical(id="gc_sidebar"):
                     yield Label("Settings")
-                    yield OptionList(
-                        "Editor",
-                        "Vars",
-                        "Remotes",
-                        id="gc_sections",
-                    )
+                    yield OptionList(*self._SECTIONS, id="gc_sections")
                 with VerticalScroll(id="gc_content"):
                     # Editor section
                     yield Vertical(
@@ -367,23 +503,56 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
                         id="gc_panel_editor",
                         classes="section-container",
                     )
-                    # Vars section
-                    yield Vertical(
-                        Static("Variables", classes="section-heading"),
-                        Static(
-                            "These are only initial values: they are copied into every new "
-                            "workspace at creation. Changing them here does not affect any "
-                            "workspace that already exists.",
-                            classes="section-hint",
-                        ),
-                        VarsEditor(
-                            self._config.vars,
-                            id="gc_vars",
-                            usage_describer=_describe_var_usage,
-                        ),
-                        id="gc_panel_vars",
-                        classes="section-container",
+                    # Odoo section
+                    odoo_children: list = [Static("Odoo", classes="section-heading")]
+                    if self._schema1:
+                        odoo_children.append(self._migration_hint("odoo options"))
+                    odoo_children.append(
+                        Static(_describe_option_override_usage("odoo"), classes="section-hint")
                     )
+                    odoo_children.append(
+                        OptionsEditor(
+                            odoo=self._config.odoo,
+                            include_mise=False,
+                            disabled=self._schema1,
+                            id="gc_odoo",
+                        )
+                    )
+                    yield Vertical(*odoo_children, id="gc_panel_odoo", classes="section-container")
+
+                    # Mise section
+                    mise_children: list = [Static("Mise", classes="section-heading")]
+                    if self._schema1:
+                        mise_children.append(self._migration_hint("mise options"))
+                    mise_children.append(
+                        Static(_describe_option_override_usage("mise"), classes="section-hint")
+                    )
+                    mise_children.append(
+                        OptionsEditor(
+                            mise=self._config.mise,
+                            include_odoo=False,
+                            disabled=self._schema1,
+                            id="gc_mise",
+                        )
+                    )
+                    yield Vertical(*mise_children, id="gc_panel_mise", classes="section-container")
+
+                    # Ignore section
+                    ignore_children: list = [Static("Ignore", classes="section-heading")]
+                    if self._schema1:
+                        ignore_children.append(self._migration_hint("the ignore list"))
+                    ignore_children.append(
+                        Static(
+                            "An ordered list of patterns applied to every workspace's "
+                            "generated files.",
+                            classes="section-hint",
+                        )
+                    )
+                    ignore_children.append(
+                        _IgnoreEditor(self._config.owignore, disabled=self._schema1, id="gc_ignore")
+                    )
+                    yield Vertical(*ignore_children, id="gc_panel_ignore", classes="section-container")
+
                     # Remotes section
                     yield Vertical(
                         Static("Remotes", classes="section-heading"),
@@ -430,8 +599,7 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
 
     def _show_section(self, index: int) -> None:
         """Show the section at `index` and hide the others."""
-        panel_ids = ("gc_panel_editor", "gc_panel_vars", "gc_panel_remotes")
-        for i, pid in enumerate(panel_ids):
+        for i, pid in enumerate(self._PANEL_IDS):
             panel = self.query_one(f"#{pid}", Vertical)
             panel.display = (i == index)
 
@@ -618,16 +786,28 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
         # Editor
         editor = self.query_one("#gc_editor", LabeledInput).value.strip() or "code"
 
-        # Vars
-        vars_editor = self.query_one("#gc_vars", VarsEditor)
-        vars_dict = vars_editor.get_vars()
+        # Typed odoo/mise/ignore — a schema-1 config keeps its current
+        # sparse overrides unchanged; its controls are disabled.
+        if self._schema1:
+            odoo, mise, owignore = self._config.odoo, self._config.mise, self._config.owignore
+        else:
+            odoo = self.query_one("#gc_odoo", OptionsEditor).build_odoo()
+            if odoo is None:
+                self._show_section(1)
+                return
+            mise = self.query_one("#gc_mise", OptionsEditor).build_mise()
+            if mise is None:
+                self._show_section(2)
+                return
+            owignore = self.query_one("#gc_ignore", _IgnoreEditor).get_patterns()
 
-        self.dismiss(Config(
-            vars=vars_dict,
+        self.dismiss(replace(
+            self._config,
             remotes=dict(self._remotes),
-            version=self._config.version,
             editor=editor,
-            theme=self._config.theme,
+            odoo=odoo,
+            mise=mise,
+            owignore=owignore,
         ))
 
     def action_save(self) -> None:

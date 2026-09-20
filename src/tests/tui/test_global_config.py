@@ -1,15 +1,15 @@
-"""Tests for the global config screen: modal-opening buttons, confirm-before-
-removal for vars and remotes, and header geometry.
+"""Tests for the global config screen: its five sections, modal-opening
+buttons, confirm-before-removal for remotes, the typed override summary,
+the ignore pattern list, and header geometry.
 
 `push_screen_wait` requires an active Textual worker context. Called
 directly from a plain button-press handler — which is never a worker —
 it used to raise `NoActiveWorker` and crash. Every one of these buttons
 now opens its modal with `push_screen(screen, callback=...)` instead.
 
-Removing a var or a remote used to happen immediately, with no
-confirmation and no indication whether anything still depended on it.
-Both now go through `ConfirmDialog`, annotated with which known
-workspaces actually use the item.
+Removing a remote used to happen immediately, with no confirmation and
+no indication whether anything still depended on it; it now goes through
+`ConfirmDialog`, annotated with which known workspaces use it.
 """
 
 from __future__ import annotations
@@ -17,45 +17,45 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from textual.widgets import Button, DataTable, Static
+from textual.widgets import Button, Checkbox, Static
 
-from ow.utils.config import Config, RemoteConfig
+from ow.utils.config import Config, RemoteConfig, load_global_config
+from ow.utils.options import OdooOverrides
 from ow.tui.global_config import AddRemoteScreen, GlobalConfigScreen
-from ow.tui.widgets import ConfirmDialog
+from ow.tui.widgets import ConfirmDialog, LabeledInput
 from ow.tui.workspace_forms import PromptScreen
 
 
-def _single_var_config() -> Config:
+# Section indexes of GlobalConfigScreen's sidebar.
+_EDITOR, _ODOO, _MISE, _IGNORE, _REMOTES = range(5)
+
+# The option panels are tall: a taller pilot keeps the widgets the test
+# clicks on inside the visible region.
+_SIZE = (120, 60)
+
+
+def _global_config() -> Config:
     return Config(
-        vars={"http_port": 8069},
         remotes={"community": {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}},
     )
 
 
-def test_vars_add_and_remote_add_open_prompt_without_crash(dashboard_pilot):
-    """'+' in Vars and 'Add' in Remotes open their prompt screens instead
-    of raising NoActiveWorker."""
+async def _open_section(pilot, index: int):
+    await pilot.press("E")
+    await pilot.pause()
+    gc_screen = pilot.app.screen
+    gc_screen._show_section(index)
+    await pilot.pause()
+    return gc_screen
+
+
+def test_remote_add_opens_form_without_crash(dashboard_pilot):
+    """'+ Add' in Remotes opens AddRemoteScreen instead of raising
+    NoActiveWorker."""
 
     async def _run():
-        async with dashboard_pilot(size=(120, 40)) as (pilot, screen):
-            await pilot.press("E")
-            await pilot.pause()
-            gc_screen = pilot.app.screen
-
-            # --- Vars: "+" must open PromptScreen, not crash ---
-            gc_screen._show_section(1)
-            await pilot.pause()
-            await pilot.click("#vars_add")
-            await pilot.pause()
-            assert isinstance(pilot.app.screen, PromptScreen), (
-                f"expected PromptScreen after '+', got {pilot.app.screen!r}"
-            )
-            await pilot.press("escape")
-            await pilot.pause()
-
-            # --- Remotes: "Add" must open AddRemoteScreen, not crash ---
-            gc_screen._show_section(2)
-            await pilot.pause()
+        async with dashboard_pilot(size=_SIZE) as (pilot, screen):
+            gc_screen = await _open_section(pilot, _REMOTES)
             await pilot.click("#gc_remote_add")
             await pilot.pause()
             assert isinstance(pilot.app.screen, AddRemoteScreen), (
@@ -67,72 +67,16 @@ def test_vars_add_and_remote_add_open_prompt_without_crash(dashboard_pilot):
     asyncio.run(_run())
 
 
-async def _open_vars_and_select_row(pilot) -> DataTable:
-    await pilot.press("E")
-    await pilot.pause()
-    gc_screen = pilot.app.screen
-    gc_screen._show_section(1)
-    await pilot.pause()
-    table = gc_screen.query_one("#gc_vars").query_one("#vars_table", DataTable)
-    table.cursor_coordinate = table.cursor_coordinate.__class__(0, 0)
-    await pilot.pause()
-    return table
-
-
-def test_removing_var_asks_for_confirmation_and_names_the_workspace(
-    dashboard_pilot, seed_workspace, tmp_path: Path
-):
-    """Clicking '-' on a var used by a known workspace must show a
-    ConfirmDialog naming that workspace, and cancelling must not remove
-    the row."""
-    seed_workspace(tmp_path, "voip", repos={"community": "origin/master"}, vars={"http_port": 8069})
-
-    async def _run():
-        async with dashboard_pilot(_single_var_config(), size=(120, 40)) as (pilot, screen):
-            table = await _open_vars_and_select_row(pilot)
-            await pilot.click("#vars_remove")
-            await pilot.pause()
-            assert isinstance(pilot.app.screen, ConfirmDialog)
-            details = str(pilot.app.screen.query_one("#confirm_details").render())
-            assert "voip" in details, f"workspace not named: {details!r}"
-            # Cancel — the row must survive.
-            await pilot.click("#btn_no")
-            await pilot.pause()
-            assert table.row_count == 1
-
-    asyncio.run(_run())
-
-
-def test_confirming_var_removal_removes_the_row(dashboard_pilot):
-    """Confirming the dialog with Yes actually removes the row."""
-
-    async def _run():
-        async with dashboard_pilot(_single_var_config(), size=(120, 40)) as (pilot, screen):
-            table = await _open_vars_and_select_row(pilot)
-            await pilot.click("#vars_remove")
-            await pilot.pause()
-            assert isinstance(pilot.app.screen, ConfirmDialog)
-            await pilot.click("#btn_yes")
-            await pilot.pause()
-            assert table.row_count == 0
-
-    asyncio.run(_run())
-
-
 def test_removing_remote_asks_for_confirmation_and_names_the_workspace(
     dashboard_pilot, seed_workspace, tmp_path: Path
 ):
     """Clicking '- Remove' on a remote alias used by a known workspace
     must show a ConfirmDialog naming that workspace."""
-    seed_workspace(tmp_path, "voip", repos={"community": "origin/master"}, vars={"http_port": 8069})
+    seed_workspace(tmp_path, "voip", repos={"community": "origin/master"})
 
     async def _run():
-        async with dashboard_pilot(size=(120, 40)) as (pilot, screen):
-            await pilot.press("E")
-            await pilot.pause()
-            gc_screen = pilot.app.screen
-            gc_screen._show_section(2)
-            await pilot.pause()
+        async with dashboard_pilot(size=_SIZE) as (pilot, screen):
+            gc_screen = await _open_section(pilot, _REMOTES)
             await pilot.click("#gc_remote_remove")
             await pilot.pause()
             assert isinstance(pilot.app.screen, ConfirmDialog)
@@ -144,21 +88,60 @@ def test_removing_remote_asks_for_confirmation_and_names_the_workspace(
     asyncio.run(_run())
 
 
-def test_removing_unused_var_states_it_is_not_used(dashboard_pilot):
-    """A var no workspace overrides must say so, not name anyone."""
+def test_odoo_section_reports_typed_override_usage(
+    dashboard_pilot, seed_workspace, tmp_path: Path
+):
+    """The Odoo panel replaces the old per-var usage describer with a typed
+    count: it names the workspaces that override an odoo option locally,
+    and says so plainly when none do."""
+    seed_workspace(
+        tmp_path, "voip",
+        repos={"community": "origin/master"},
+        odoo=OdooOverrides(http_port=8169),
+    )
 
     async def _run():
-        async with dashboard_pilot(size=(120, 40)) as (pilot, screen):
-            await _open_vars_and_select_row(pilot)
-            await pilot.click("#vars_remove")
+        async with dashboard_pilot(size=_SIZE) as (pilot, screen):
+            gc_screen = await _open_section(pilot, _ODOO)
+            panel = gc_screen.query_one("#gc_panel_odoo")
+            rendered = "\n".join(str(s.render()) for s in panel.query(Static))
+            assert "voip" in rendered, rendered
+            assert "override odoo options locally" in rendered, rendered
+
+            gc_screen._show_section(_MISE)
             await pilot.pause()
-            assert isinstance(pilot.app.screen, ConfirmDialog)
-            details = str(pilot.app.screen.query_one("#confirm_details").render())
-            assert "Not used by any workspace" in details
-            await pilot.click("#btn_no")
+            mise_rendered = "\n".join(
+                str(s.render()) for s in gc_screen.query_one("#gc_panel_mise").query(Static)
+            )
+            assert "No known workspace overrides mise options locally." in mise_rendered
+
+    asyncio.run(_run())
+
+
+def test_ignore_pattern_list_is_ordered_and_saved(dashboard_pilot):
+    """Ignore is an ordered pattern list: a pattern added through the prompt
+    lands at the end, and Ctrl+S persists the whole list in that order."""
+    seeded = Config(
+        remotes={"community": {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}},
+        owignore=("*.log",),
+    )
+
+    async def _run():
+        async with dashboard_pilot(seeded, size=_SIZE) as (pilot, screen):
+            gc_screen = await _open_section(pilot, _IGNORE)
+            await pilot.click("#ignore_add")
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, PromptScreen)
+            pilot.app.screen.query_one("#prompt_input").query_one("#li_input").value = "*.tmp"
+            await pilot.click("#btn_ok")
+            await pilot.pause()
+
+            await pilot.click("#btn_save")
             await pilot.pause()
 
     asyncio.run(_run())
+
+    assert load_global_config().owignore == ("*.log", "*.tmp")
 
 
 def test_gc_header_save_button_not_clipped(dashboard_pilot):
@@ -187,22 +170,87 @@ def test_gc_header_save_button_not_clipped(dashboard_pilot):
     asyncio.run(_run())
 
 
-def test_global_config_vars_section_explains_they_are_copied_not_linked(dashboard_pilot):
-    """The vars panel must say these are initial values copied into new
-    workspaces, and that editing them here does not touch existing ones —
-    not that the workspace stays linked to the global config."""
+def test_editing_the_global_port_leaves_a_local_override_alone(
+    dashboard_pilot, seed_workspace, tmp_path: Path
+):
+    """Changing the global http_port saves the global file only: a
+    workspace whose own config overrides that key keeps its value, and
+    keeps it on disk untouched — inheritance is resolved at render time,
+    never copied into anyone's file by a global save."""
+    ws_dir = seed_workspace(
+        tmp_path, "voip",
+        repos={"community": "origin/master"},
+        odoo=OdooOverrides(http_port=8169),
+    )
+    ws_config_path = ws_dir / ".ow" / "config.toml"
+    before = ws_config_path.read_bytes()
 
     async def _run():
-        async with dashboard_pilot(size=(120, 40)) as (pilot, screen):
-            await pilot.press("E")
+        async with dashboard_pilot(size=_SIZE) as (pilot, screen):
+            gc_screen = await _open_section(pilot, _ODOO)
+            checkbox = gc_screen.query_one("#oe_odoo_http_port_override", Checkbox)
+            assert checkbox.value is True, "the global config's own port override"
+            port_input = gc_screen.query_one("#oe_odoo_http_port_input", LabeledInput)
+            assert port_input.value == "8069"
+
+            port_input.query_one("#li_input").value = "8180"
+            await pilot.click("#btn_save")
             await pilot.pause()
-            gc_screen = pilot.app.screen
-            gc_screen._show_section(1)
-            await pilot.pause()
-            panel = gc_screen.query_one("#gc_panel_vars")
-            rendered = "\n".join(str(s.render()) for s in panel.query(Static)).lower()
-            assert "copied" in rendered
-            assert "new workspace" in rendered
-            assert "does not affect" in rendered
+            assert pilot.app.screen is screen, "save should dismiss the global screen"
 
     asyncio.run(_run())
+
+    assert load_global_config().odoo.http_port == 8180
+    assert ws_config_path.read_bytes() == before, (
+        "a global save rewrote a workspace's config file"
+    )
+
+def test_schema1_global_disables_typed_options_and_keeps_its_file(
+    xdg, dashboard_pilot
+):
+    """A schema-1 global config keeps its editor/remotes editable, disables
+    the typed odoo/mise/ignore controls with migration guidance, and its
+    unmodelled keys survive a save."""
+    from ow.utils import paths
+    from ow.utils.config import load_config
+
+    path = paths.config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# my notes\nversion = 1\n\n[vars]\nhttp_port = 8071\nmystery = \"kept\"\n\n"
+        "[remotes.community]\norigin.url = \"git@github.com:odoo/odoo.git\"\n"
+    )
+    config = load_config(path)
+    assert config.version == 1
+
+    async def _run():
+        async with dashboard_pilot(config, size=_SIZE) as (pilot, screen):
+            gc_screen = await _open_section(pilot, _ODOO)
+            assert gc_screen.query_one(
+                "#oe_odoo_http_port_override", Checkbox
+            ).disabled is True
+            panels = [
+                "\n".join(
+                    str(s.render())
+                    for s in gc_screen.query_one(pid).query(Static)
+                )
+                for pid in ("#gc_panel_odoo", "#gc_panel_mise", "#gc_panel_ignore")
+            ]
+            for rendered in panels:
+                assert "ow render" in rendered, rendered
+
+            # Editor is still editable — only the typed tables are frozen.
+            gc_screen._show_section(_EDITOR)
+            await pilot.pause()
+            gc_screen.query_one("#gc_editor").query_one("#li_input").value = "nvim"
+            await pilot.click("#btn_save")
+            await pilot.pause()
+            assert pilot.app.screen is screen, "save should dismiss the global screen"
+
+    asyncio.run(_run())
+
+    text = path.read_text()
+    assert 'editor = "nvim"' in text
+    assert "# my notes" in text
+    assert "version = 1" in text, "the TUI save migrated the file: only init/render may"
+    assert 'mystery = "kept"' in text, "a save dropped legacy data it has no model for"

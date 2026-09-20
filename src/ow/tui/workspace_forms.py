@@ -8,17 +8,17 @@ operations.
 from __future__ import annotations
 
 import re
-import tomllib
-from dataclasses import dataclass, field
+import shlex
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.coordinate import Coordinate
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, DataTable, Label, SelectionList, Static
+from textual.widget import Widget
+from textual.widgets import Button, Checkbox, Static
 
 from ow.utils.config import (
     BranchSpec,
@@ -26,8 +26,13 @@ from ow.utils.config import (
     WorkspaceConfig,
     parse_branch_spec,
 )
-from ow.utils.templates import selectable_templates
-from ow.tui.widgets import ConfirmDialog, LabeledInput
+from ow.utils.options import (
+    MiseOverrides,
+    OdooOverrides,
+    parse_mise_options,
+    parse_odoo_options,
+)
+from ow.tui.widgets import LabeledInput
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +125,7 @@ class PromptScreen(ModalScreen[str | None]):
         else:
             self.dismiss(None)
 
-    def on_input_submitted(self, event) -> None:
+    def on_input_submitted(self, event: Input.Submitted) -> None:
         inp = self.query_one("#prompt_input", LabeledInput)
         self.dismiss(inp.value)
 
@@ -136,7 +141,6 @@ class NewWorkspaceRequest:
 
     parent: Path
     name: str
-    templates: list[str]
     repos: dict[str, BranchSpec]
     configuration: str | None
 
@@ -164,7 +168,6 @@ class NewWorkspaceScreen(ModalScreen[NewWorkspaceRequest | None]):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self._config = config
-        self._templates = selectable_templates()
         self._aliases = list(config.remotes.keys())
 
     def compose(self) -> ComposeResult:
@@ -174,18 +177,9 @@ class NewWorkspaceScreen(ModalScreen[NewWorkspaceRequest | None]):
             )
             yield LabeledInput("name", id="nw_name")
 
-            yield Static("Templates", classes="section-heading")
-            sel = SelectionList[str](id="nw_templates")
-            for t in self._templates:
-                sel.add_option((t, t, False))
-            yield sel
-
             yield Static("Repos", classes="section-heading")
             for alias in self._aliases:
-                # Pre-fill "master" for the community alias (matches the old
-                # preselection); leave others empty so they are not included.
-                value = "master" if alias == "community" else ""
-                yield LabeledInput(alias, value=value, id=f"nw_spec_{alias}")
+                yield LabeledInput(alias, id=f"nw_spec_{alias}")
 
             yield LabeledInput("copy config from", id="nw_copy_config")
 
@@ -225,10 +219,6 @@ class NewWorkspaceScreen(ModalScreen[NewWorkspaceRequest | None]):
             name_input.set_error("workspace already exists")
             return
 
-        # Templates
-        tpl_sel = self.query_one("#nw_templates", SelectionList)
-        templates = list(tpl_sel.selected)
-
         # Repos — iterate aliases; empty spec means not included.
         repos: dict[str, BranchSpec] = {}
         for alias in self._aliases:
@@ -249,10 +239,228 @@ class NewWorkspaceScreen(ModalScreen[NewWorkspaceRequest | None]):
         self.dismiss(NewWorkspaceRequest(
             parent=parent,
             name=name,
-            templates=templates,
             repos=repos,
             configuration=copy_config,
         ))
+
+
+# ---------------------------------------------------------------------------
+# OptionsEditor — typed, sparse odoo/mise override editor
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _OptionField:
+    """UI metadata for one of the ten fixed odoo keys, or mise.python.
+
+    This is display/parsing metadata for a *closed* set of keys — never a
+    user-extensible schema. `kind` picks the parser: `port` and `python`
+    convert the typed text before delegating to `options.py`; `str` and
+    `password` pass the text through unchanged; `args` splits it on shell
+    rules first. `default_display` is the built-in default shown as a hint
+    when neither this record nor the layer above it overrides the key; a
+    blank one marks a key whose default depends on the detected Odoo core
+    rather than being a fixed constant.
+    """
+
+    key: str
+    kind: str  # "port" | "str" | "password" | "args" | "python"
+    default_display: str = ""
+
+
+_ODOO_FIELDS: tuple[_OptionField, ...] = (
+    _OptionField("http_port", "port", "8069"),
+    _OptionField("db_host", "str", "localhost"),
+    _OptionField("db_port", "port", "5432"),
+    _OptionField("db_user", "str", "odoo"),
+    _OptionField("db_password", "password"),
+    _OptionField("admin_passwd", "password"),
+    _OptionField("smtp_server", "str", "localhost"),
+    _OptionField("smtp_port", "port", "25"),
+    _OptionField("debug_args", "args"),
+    _OptionField("debug_test_args", "args"),
+)
+
+_MISE_FIELDS: tuple[_OptionField, ...] = (
+    _OptionField("python", "python", "3.12"),
+)
+
+
+def _format_field(field: _OptionField, value: Any) -> str:
+    if field.kind == "args":
+        return shlex.join(value)
+    return str(value)
+
+
+def _validate_odoo_field(field: _OptionField, text: str) -> object:
+    if field.kind == "port":
+        try:
+            raw: object = int(text)
+        except ValueError:
+            raise ValueError(f"{field.key} must be a whole number") from None
+    elif field.kind == "args":
+        raw = shlex.split(text)
+    else:
+        raw = text
+    validated = parse_odoo_options({field.key: raw})
+    return getattr(validated, field.key)
+
+
+def _validate_mise_field(field: _OptionField, text: str) -> object:
+    validated = parse_mise_options({field.key: text})
+    return getattr(validated, field.key)
+
+
+class OptionsEditor(Vertical):
+    """One checkbox + `LabeledInput` row per fixed odoo/mise key.
+
+    Unchecked means "inherit" — the row's own override stays `None`
+    regardless of what text sits in its (disabled) input. Checked reads
+    whatever text is there, including blank: an enabled password commits
+    as `''`, and enabled `debug_args`/`debug_test_args` commit as `()` —
+    both explicit, neither `None`. `base_odoo`/`base_mise` is the layer
+    immediately above this record (the global config, for a workspace's
+    editor); its values show as the row's inherited hint. Left at their
+    `None` default, every row hints the built-in default (or, for the two
+    core-dependent debug-arg keys, that the default is automatic).
+
+    `disabled=True` (a schema-1 record) freezes every row so nothing here
+    can be changed until the record is migrated to schema 2.
+    """
+
+    DEFAULT_CSS = """
+    OptionsEditor {
+        height: auto;
+    }
+    OptionsEditor .option-row {
+        height: auto;
+    }
+    OptionsEditor .option-row Checkbox {
+        width: auto;
+        padding: 0 1 0 0;
+    }
+    OptionsEditor .option-row LabeledInput {
+        width: 1fr;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        odoo: OdooOverrides = OdooOverrides(),
+        mise: MiseOverrides = MiseOverrides(),
+        base_odoo: OdooOverrides | None = None,
+        base_mise: MiseOverrides | None = None,
+        include_odoo: bool = True,
+        include_mise: bool = True,
+        disabled: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._odoo = odoo
+        self._mise = mise
+        self._base_odoo = base_odoo
+        self._base_mise = base_mise
+        self._include_odoo = include_odoo
+        self._include_mise = include_mise
+        self._disabled = disabled
+
+    def _hint(self, table: str, field: _OptionField) -> tuple[str, str]:
+        base_val = (
+            self._base_mise.python
+            if table == "mise" and self._base_mise is not None
+            else getattr(self._base_odoo, field.key)
+            if table == "odoo" and self._base_odoo is not None
+            else None
+        )
+        if base_val is not None:
+            if field.kind == "password":
+                return "(set)", "global"
+            return _format_field(field, base_val), "global"
+        if field.kind == "password":
+            return "(unset)", "built-in"
+        return field.default_display or "auto", "built-in"
+
+    def _row(self, table: str, field: _OptionField, local_value: Any) -> Widget:
+        hint, source = self._hint(table, field)
+        overridden = local_value is not None
+        text_value = "" if local_value is None else _format_field(field, local_value)
+        checkbox_id = f"oe_{table}_{field.key}_override"
+        input_id = f"oe_{table}_{field.key}_input"
+        return Horizontal(
+            Checkbox(
+                "override",
+                value=overridden,
+                disabled=self._disabled,
+                id=checkbox_id,
+            ),
+            LabeledInput(
+                field.key,
+                value=text_value,
+                placeholder=f"{hint} ({source})",
+                enabled=overridden and not self._disabled,
+                password=(field.kind == "password"),
+                id=input_id,
+            ),
+            classes="option-row",
+        )
+
+    def compose(self) -> ComposeResult:
+        if self._include_odoo:
+            for field in _ODOO_FIELDS:
+                yield self._row("odoo", field, getattr(self._odoo, field.key))
+        if self._include_mise:
+            for field in _MISE_FIELDS:
+                yield self._row("mise", field, self._mise.python)
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        cid = event.checkbox.id or ""
+        if not (cid.startswith("oe_") and cid.endswith("_override")):
+            return
+        input_id = cid[: -len("_override")] + "_input"
+        try:
+            li = self.query_one(f"#{input_id}", LabeledInput)
+        except Exception:
+            return
+        li.set_enabled(event.value)
+        if not event.value:
+            li.set_error(None)
+
+    def build_odoo(self) -> OdooOverrides | None:
+        """The sparse `OdooOverrides` the checked rows describe, or `None`
+        if a checked row's text failed validation (its own error is set)."""
+        assert self._include_odoo, "build_odoo() called on a mise-only editor"
+        kwargs: dict[str, object] = {}
+        for field in _ODOO_FIELDS:
+            checkbox = self.query_one(f"#oe_odoo_{field.key}_override", Checkbox)
+            li = self.query_one(f"#oe_odoo_{field.key}_input", LabeledInput)
+            li.set_error(None)
+            if not checkbox.value:
+                continue
+            try:
+                kwargs[field.key] = _validate_odoo_field(field, li.value)
+            except ValueError as exc:
+                li.set_error(str(exc))
+                return None
+        return OdooOverrides(**kwargs)
+
+    def build_mise(self) -> MiseOverrides | None:
+        """The sparse `MiseOverrides` the checked rows describe, or `None`
+        if a checked row's text failed validation (its own error is set)."""
+        assert self._include_mise, "build_mise() called on an odoo-only editor"
+        kwargs: dict[str, object] = {}
+        for field in _MISE_FIELDS:
+            checkbox = self.query_one(f"#oe_mise_{field.key}_override", Checkbox)
+            li = self.query_one(f"#oe_mise_{field.key}_input", LabeledInput)
+            li.set_error(None)
+            if not checkbox.value:
+                continue
+            try:
+                kwargs[field.key] = _validate_mise_field(field, li.value)
+            except ValueError as exc:
+                li.set_error(str(exc))
+                return None
+        return MiseOverrides(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +469,7 @@ class NewWorkspaceScreen(ModalScreen[NewWorkspaceRequest | None]):
 
 
 class WorkspaceConfigScreen(ModalScreen[WorkspaceConfig | None]):
-    """Edit a workspace's templates, repos and vars.
+    """Edit a workspace's repos and typed odoo/mise overrides.
 
     Dismisses with a new `WorkspaceConfig` on Save, None on Cancel.
     """
@@ -278,29 +486,32 @@ class WorkspaceConfigScreen(ModalScreen[WorkspaceConfig | None]):
         self._ws_dir = ws_dir
         self._ws = ws
         self._aliases = list(config.remotes.keys())
+        self._schema1 = ws.version == 1
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
-            yield Static("Templates", classes="section-heading")
-            sel = SelectionList[str](id="wc_templates")
-            for t in selectable_templates():
-                sel.add_option((t, t, t in self._ws.templates))
-            yield sel
-
             yield Static("Repos", classes="section-heading")
             for alias in self._aliases:
                 current = self._ws.repos.get(alias)
                 value = current.to_spec_str() if current else ""
                 yield LabeledInput(alias, value=value, id=f"wc_spec_{alias}")
 
-            yield Static("Vars", classes="section-heading")
-            yield Static(
-                "Copied from the global config when this workspace was created; "
-                "these values are now this workspace's own — editing global vars "
-                "later won't change them.",
-                classes="section-hint",
+            yield Static("Options", classes="section-heading")
+            if self._schema1:
+                yield Static(
+                    "This workspace is still schema 1 — typed odoo/mise options "
+                    "can't be saved here until it is migrated. Run `ow render`, "
+                    "or press I (Repair) in the dashboard.",
+                    classes="section-hint",
+                )
+            yield OptionsEditor(
+                odoo=self._ws.odoo,
+                mise=self._ws.mise,
+                base_odoo=self._config.odoo,
+                base_mise=self._config.mise,
+                disabled=self._schema1,
+                id="wc_options",
             )
-            yield VarsEditor(self._ws.vars, id="wc_vars")
 
             yield Horizontal(
                 Button("Save", id="btn_save", variant="success"),
@@ -318,10 +529,6 @@ class WorkspaceConfigScreen(ModalScreen[WorkspaceConfig | None]):
         self._try_save()
 
     def _try_save(self) -> None:
-        # Templates
-        tpl_sel = self.query_one("#wc_templates", SelectionList)
-        templates = list(tpl_sel.selected)
-
         # Repos
         repos: dict[str, BranchSpec] = {}
         for alias in self._aliases:
@@ -336,16 +543,20 @@ class WorkspaceConfigScreen(ModalScreen[WorkspaceConfig | None]):
                 return
             inp.set_error(None)
 
-        # Vars
-        vars_editor = self.query_one("#wc_vars", VarsEditor)
-        vars_dict = vars_editor.get_vars()
+        # Options — a schema-1 workspace keeps its current sparse overrides
+        # unchanged; its controls are disabled and have nothing new to read.
+        if self._schema1:
+            odoo, mise = self._ws.odoo, self._ws.mise
+        else:
+            options = self.query_one("#wc_options", OptionsEditor)
+            odoo = options.build_odoo()
+            if odoo is None:
+                return
+            mise = options.build_mise()
+            if mise is None:
+                return
 
-        self.dismiss(WorkspaceConfig(
-            repos=repos,
-            templates=templates,
-            vars=vars_dict,
-            version=self._ws.version,
-        ))
+        self.dismiss(replace(self._ws, repos=repos, odoo=odoo, mise=mise))
 
 
 # ---------------------------------------------------------------------------
@@ -437,169 +648,3 @@ class SwitchScreen(ModalScreen[SwitchRequest | None]):
         target_input.set_error(None)
 
         self.dismiss(SwitchRequest(target=target, create=create, detach=detach))
-
-
-# ---------------------------------------------------------------------------
-# VarsEditor — shared key/value editor used by both config screens
-# ---------------------------------------------------------------------------
-
-
-class VarsEditor(Vertical):
-    """A DataTable of key/value pairs with add/remove/edit.
-
-    Value typing: parse the text as a TOML scalar; if that raises, store
-    as a string. This keeps `http_port = 8069` an int and
-    `db_host = "localhost"` a string without asking the user to quote.
-    """
-
-    DEFAULT_CSS = """
-    VarsEditor {
-        height: auto;
-        max-height: 12;
-    }
-    VarsEditor DataTable {
-        height: auto;
-        max-height: 8;
-    }
-    VarsEditor Horizontal {
-        height: auto;
-    }
-    VarsEditor Button {
-        margin: 0 1;
-        min-width: 4;
-    }
-    """
-
-    BINDINGS = [
-        Binding("enter", "edit_cell", "Edit", show=True),
-    ]
-
-    def __init__(
-        self,
-        initial: dict[str, Any],
-        *,
-        usage_describer: Callable[[str], str] | None = None,
-        **kwargs,
-    ) -> None:
-        super().__init__(**kwargs)
-        self._initial = initial
-        self._usage_describer = usage_describer
-
-    def compose(self) -> ComposeResult:
-        table = DataTable(id="vars_table")
-        table.add_columns("key", "value")
-        for k, v in self._initial.items():
-            table.add_row(str(k), _format_value(v))
-        yield table
-        yield Horizontal(
-            Button("+", id="vars_add"),
-            Button("-", id="vars_remove"),
-        )
-
-    def get_vars(self) -> dict[str, Any]:
-        """Collect the current table contents as a typed dict."""
-        table = self.query_one("#vars_table", DataTable)
-        result: dict[str, Any] = {}
-        for row_idx in range(table.row_count):
-            key = table.get_cell_at(Coordinate(row_idx, 0))
-            val_text = table.get_cell_at(Coordinate(row_idx, 1))
-            if key is None:
-                continue
-            key = str(key)
-            result[key] = _parse_value(str(val_text))
-        return result
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "vars_add":
-            self._add_row()
-        elif event.button.id == "vars_remove":
-            self._remove_row()
-
-    def _add_row(self) -> None:
-        def _on_result(result: str | None) -> None:
-            if result is None:
-                return
-            key = result.strip()
-            if not key:
-                return
-            table = self.query_one("#vars_table", DataTable)
-            table.add_row(key, "")
-        self.app.push_screen(PromptScreen("key"), callback=_on_result)
-
-    def _remove_row(self) -> None:
-        table = self.query_one("#vars_table", DataTable)
-        cursor = table.cursor_coordinate
-        if cursor is None or cursor.row is None:
-            self.app.notify("No row selected", severity="warning")
-            return
-        try:
-            row_key = table.coordinate_to_cell_key(cursor)[0]
-            key = str(table.get_cell_at(Coordinate(cursor.row, 0)))
-        except Exception:
-            self.app.notify("Could not remove row", severity="warning")
-            return
-
-        def _on_confirmed(ok: bool) -> None:
-            if not ok:
-                return
-            try:
-                table.remove_row(row_key)
-            except Exception:
-                self.app.notify("Could not remove row", severity="warning")
-
-        details = self._usage_describer(key) if self._usage_describer else None
-        self.app.push_screen(
-            ConfirmDialog(f"Remove var {key!r}?", details=details),
-            callback=_on_confirmed,
-        )
-
-    def action_edit_cell(self) -> None:
-        table = self.query_one("#vars_table", DataTable)
-        cursor = table.cursor_coordinate
-        if cursor is None:
-            self.app.notify("No row selected", severity="warning")
-            return
-        row_idx = cursor.row
-        col_idx = cursor.column
-        try:
-            current = str(table.get_cell_at(cursor))
-            row_key = table.coordinate_to_cell_key(cursor)[0]
-        except Exception:
-            self.app.notify("Could not read cell", severity="warning")
-            return
-
-        def _on_result(result: str | None) -> None:
-            if result is None:
-                return
-            table = self.query_one("#vars_table", DataTable)
-            try:
-                # Update cell in-place — preserves row position and cursor
-                table.update_cell(row_key, table.columns[col_idx].key, result)
-            except Exception:
-                pass
-        label = "value" if col_idx == 1 else "key"
-        self.app.push_screen(PromptScreen(label, default=current), callback=_on_result)
-
-
-def _format_value(v: Any) -> str:
-    """Render a Python value as a user-editable string."""
-    if isinstance(v, str):
-        return v
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return str(v)
-
-
-def _parse_value(text: str) -> Any:
-    """Parse a user-edited string as a TOML scalar; fall back to string."""
-    text = text.strip()
-    if not text:
-        return ""
-    try:
-        value = tomllib.loads(f"_ = {text}")["_"]
-        # Restrict to scalar types only — dates, arrays, tables corrupt config
-        if isinstance(value, (str, int, float, bool)):
-            return value
-    except Exception:
-        pass
-    return text
