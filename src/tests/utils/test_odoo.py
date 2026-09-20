@@ -198,13 +198,14 @@ def test_find_addon_paths_categorized_repo(tmp_path):
 
 
 def test_find_addon_paths_handles_symlink_cycle(tmp_path):
+    """A symlink cycle must not raise RecursionError."""
     root = tmp_path / "repo"
     root.mkdir()
     loop = root / "loop"
     loop.mkdir()
     (loop / "back").symlink_to(root, target_is_directory=True)
     result = find_addon_paths(root)
-    assert isinstance(result, list)
+    assert result == []
 
 
 def test_find_addon_paths_prunes_noise_dirs(tmp_path):
@@ -303,6 +304,12 @@ def test_workspace_addon_paths_deduplicates_without_reordering(tmp_path):
     )
 
 
+def test_workspace_addon_paths_rejects_core_alias_outside_aliases(tmp_path):
+    ws_dir = tmp_path / "ws"
+    with pytest.raises(ValueError, match="community"):
+        workspace_addon_paths(ws_dir, ["other"], "community")
+
+
 # ---------------------------------------------------------------------------
 # probe_odoo -- the six spec outcomes.
 # ---------------------------------------------------------------------------
@@ -341,7 +348,7 @@ def test_probe_odoo_supported_19_stable(tmp_path):
     assert probe.kind == "supported"
     assert probe.info == OdooInfo(
         alias="community",
-        series=19,
+        series="19.0",
         major=19,
         minor=0,
         python_min=(3, 10),
@@ -356,6 +363,7 @@ def test_probe_odoo_supported_20_master(tmp_path):
     probe = probe_odoo({"community": core})
     assert probe.kind == "supported"
     assert probe.info.major == 20
+    assert probe.info.series == "20.1"
     assert probe.info.minor == 1
     assert probe.info.python_min == (3, 12)
     assert probe.info.python_max == (3, 14)
@@ -380,7 +388,7 @@ def test_probe_odoo_supported_saas_identity(tmp_path):
     probe = probe_odoo({"community": core})
     assert probe.kind == "supported"
     assert probe.info.major == 19
-    assert probe.info.series == 19
+    assert probe.info.series == "saas~19.4"
     assert probe.info.minor == 4
 
 
