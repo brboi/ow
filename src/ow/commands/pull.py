@@ -26,7 +26,7 @@ from ow.utils.git import (
 from ow.utils.pull_plan import PullFacts, PullPlan, plan_pull
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
-from ow.utils.workspace import refresh_after_git
+from ow.utils.workspace import print_render_pointer, refresh_after_git
 
 
 def gather_pull_facts(
@@ -197,6 +197,7 @@ def cmd_pull(
     if not tasks:
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     results = parallel_per_repo(tasks)
@@ -214,6 +215,7 @@ def cmd_pull(
     if not plans:
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     _display_summary(ws_dir.name, plans)
@@ -222,6 +224,7 @@ def cmd_pull(
         _display_dry_run(plans, ws_dir)
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     changed: set[str] = set()
@@ -238,5 +241,10 @@ def cmd_pull(
             failed = True
 
     render_failed = refresh_after_git(config, ws, ws_dir, changed=changed, failed=failed)
+    if not changed and not failed:
+        # Every plan was a no-op: the run reached this boundary having moved
+        # nothing, and `refresh_after_git` stays silent on an empty change
+        # set — the pointer belongs to the command that decided to skip.
+        print_render_pointer()
     if failed or render_failed:
         sys.exit(1)

@@ -23,6 +23,14 @@ from ow.utils.config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _mise_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refresh boundary's one prerequisite check, stubbed the way every
+    sibling suite stubs it: the host's mise version is not the behavior
+    under test. Everything past the gate stays real."""
+    monkeypatch.setattr("ow.utils.workspace.require_mise", lambda: (2026, 9, 9))
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True,

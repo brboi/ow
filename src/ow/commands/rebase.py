@@ -31,7 +31,7 @@ from ow.utils.git import (
 from ow.utils.rebase_plan import RebasePlan, RepoFacts, plan_for
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.resolver import resolve_workspace
-from ow.utils.workspace import refresh_after_git
+from ow.utils.workspace import print_render_pointer, refresh_after_git
 
 
 def _bound(worktree, base: str, up_before: str | None, up: str | None = None) -> str | None:
@@ -284,6 +284,7 @@ def cmd_rebase(
     if not tasks:
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     results = parallel_per_repo(tasks)
@@ -301,6 +302,7 @@ def cmd_rebase(
     if not plans:
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     _display_summary(ws_dir.name, plans, cached=no_fetch)
@@ -309,16 +311,19 @@ def cmd_rebase(
         _display_dry_run(plans, ws_dir)
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     actionable = [p for p in plans if not p.is_skipped and not p.is_noop]
     if not actionable and not any(p.is_skipped for p in plans):
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     if actionable and not yes and not confirm():
         console.print("Aborted.")
+        print_render_pointer()
         sys.exit(2)
 
     changed: set[str] = set()

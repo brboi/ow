@@ -28,7 +28,7 @@ from ow.utils.git import (
 from ow.utils.refs import fetch_workspace_refs
 from ow.utils.reset_plan import ResetFacts, ResetPlan, plan_reset
 from ow.utils.resolver import resolve_workspace
-from ow.utils.workspace import refresh_after_git
+from ow.utils.workspace import print_render_pointer, refresh_after_git
 
 
 def _drift_reason(result: DriftResult) -> str | None:
@@ -228,6 +228,7 @@ def cmd_reset(
     if not tasks:
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     results = parallel_per_repo(tasks)
@@ -245,6 +246,7 @@ def cmd_reset(
     if not plans:
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     _display_summary(ws_dir.name, plans, hard=hard)
@@ -253,6 +255,7 @@ def cmd_reset(
         _display_dry_run(plans, ws_dir)
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     actionable = [p for p in plans if not p.is_skipped and not p.is_noop]
@@ -263,10 +266,12 @@ def cmd_reset(
                 failed = True
         if failed:
             sys.exit(1)
+        print_render_pointer()
         return
 
     if not yes and not confirm():
         console.print("Aborted.")
+        print_render_pointer()
         sys.exit(2)
 
     changed: set[str] = set()

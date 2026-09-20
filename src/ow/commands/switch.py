@@ -30,7 +30,7 @@ from ow.utils.git import (
 )
 from ow.utils.resolver import repo_from_cwd, resolve_workspace
 from ow.utils.switch_plan import SwitchFacts, SwitchPlan, plan_switch
-from ow.utils.workspace import refresh_after_git
+from ow.utils.workspace import print_render_pointer, refresh_after_git
 
 
 def _tracking_matches(worktree: Path, ref: str) -> list[str]:
@@ -440,6 +440,7 @@ def cmd_switch(
     refused = [p for p in plans if p.is_skipped]
     if refused:
         _report_refusals(refused, narrowed=narrowed)
+        print_render_pointer()
         sys.exit(2)
 
     excluded = [a for a in aliases if a not in {p.alias for p in plans}]
@@ -454,10 +455,12 @@ def cmd_switch(
 
     if dry_run:
         _display_dry_run(plans, ws_dir)
+        print_render_pointer()
         return
 
     runnable = [p for p in plans if not p.is_noop]
     if not runnable:
+        print_render_pointer()
         return
 
     console.print()

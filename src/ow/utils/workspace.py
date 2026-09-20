@@ -318,6 +318,28 @@ def refresh_workspace(config: Config, ws: WorkspaceConfig, root: Path, *, trust:
 # ---------------------------------------------------------------------------
 
 
+def print_files_refreshed() -> None:
+    """Say the one refresh a mutating command ran actually happened.
+
+    `ow switch`'s old note claimed a switch never re-rendered anything;
+    what replaced it is this line — printed only after the write
+    succeeded, so it is never a promise the run did not keep.
+    """
+    console.print("[dim]Generated files refreshed.[/]")
+
+
+def print_render_pointer() -> None:
+    """Say the generated files were left alone, and what refreshes them.
+
+    Every path that returns before `refresh_after_git` — a dry run, a
+    refusal, a decline, a run where nothing moved — owes the user this
+    line rather than silence: the same run without `--dry-run` would have
+    refreshed the files itself, and `ow render` is the command that does
+    it on its own.
+    """
+    console.print("[dim]Files were not refreshed — run `ow render` if you need them up to date.[/]")
+
+
 def refresh_after_git(
     config: Config, ws: WorkspaceConfig, root: Path, *, changed: set[str], failed: bool
 ) -> bool:
@@ -332,13 +354,15 @@ def refresh_after_git(
     misleading one.
 
     `changed` empty means nothing moved: no prerequisite is checked, no
-    file is touched, nothing is printed. A `failed` batch is left exactly
-    as Git left it — refreshing on top of a half-finished batch would mix
-    generated output from before and after the failure, so the skip is
-    explained but nothing is added to the failure. A schema-1 `config` or
-    `ws` is not converted here — that is `ow init`'s or `ow render`'s job
-    — so the pending-migration notice is shown and refresh is skipped
-    without counting as a failure of this run.
+    file is touched, nothing is printed — a caller that got here with
+    nothing changed says so itself with `print_render_pointer`. A `failed`
+    batch is left exactly as Git left it — refreshing on top of a
+    half-finished batch would mix generated output from before and after
+    the failure, so the skip is explained but nothing is added to the
+    failure. A schema-1 `config` or `ws` is not converted here — that is
+    `ow init`'s or `ow render`'s job — so the pending-migration notice is
+    shown and refresh is skipped without counting as a failure of this
+    run.
     """
     if not changed:
         return False
@@ -369,4 +393,5 @@ def refresh_after_git(
 
     for warning in result.warnings:
         console.print(f"[dim]{escape(warning)}[/]")
+    print_files_refreshed()
     return False
