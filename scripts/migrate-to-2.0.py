@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Migration script for ow 2.0.
+Migration script for the ow 2.0 layout move.
 
-Migrates from the 1.x project-scoped layout (ow.toml at a project root,
-.bare-git-repos/ and workspaces/ beside it) to the 2.0 user-level layout
-(XDG-based global config, shared bare repos, workspaces anywhere).
+This is the first step of moving a 1.x project to ow 3.0: it converts the
+1.x project-scoped layout (ow.toml at a project root, .bare-git-repos/ and
+workspaces/ beside it) into the user-level layout (XDG-based global config,
+shared bare repos, workspaces anywhere). It does not convert the config
+schema — the workspaces it produces are still schema 1, and `ow render`
+performs the 3.0 schema migration afterwards.
 
 Automated:
   1. Copy ow.toml → ~/.config/ow/config.toml
@@ -12,17 +15,19 @@ Automated:
   3. Repair worktrees (git worktree repair per bare repo)
   4. Rename .ow/config → .ow/config.toml per workspace
 
-Optional (--apply):
-  5. Run ow apply per workspace (register in index + re-render templates)
+Optional (--render):
+  5. Run ow render per workspace (migrate schema 1 → 2, register in the
+     index, and write every generated file)
 
 Manual (guidance printed):
-  - Templates: diff old customizations against packaged versions
-  - See docs/migrating-to-2.0.md for full context
+  - The old templates/ tree: what the schema migration inventories
+  - See docs/migrating-to-2.0.md (this layout step) and
+    docs/migrating-to-3.0.md (the schema migration) for full context
 
 Usage:
-    python scripts/migrate-to-2.0.py OLD              # dry-run: show plan
-    python scripts/migrate-to-2.0.py OLD --yes        # execute
-    python scripts/migrate-to-2.0.py OLD --yes --apply  # also run ow apply
+    python scripts/migrate-to-2.0.py OLD               # dry-run: show plan
+    python scripts/migrate-to-2.0.py OLD --yes         # execute
+    python scripts/migrate-to-2.0.py OLD --yes --render  # also run ow render
 """
 from __future__ import annotations
 
@@ -158,42 +163,49 @@ def step_workspaces(old: Path, *, execute: bool) -> list[Path]:
     return [ws for ws, _, _ in to_rename]
 
 
-def step_apply(workspaces: list[Path], *, execute: bool) -> None:
-    """Run ow apply per workspace."""
-    print("5. Apply")
+def step_render(workspaces: list[Path], *, execute: bool) -> None:
+    """Run ow render per workspace: migrate schema 1 → 2 and write the files."""
+    print("5. Render")
     if not workspaces:
         print("   skip: no workspaces")
         return
     ow_bin = shutil.which("ow")
     if not ow_bin:
-        print("   skip: ow not on PATH (run 'ow apply <workspace>' manually)")
+        print("   skip: ow not on PATH (run 'ow render <workspace>' manually)")
         return
     for ws in workspaces:
         if execute:
-            print(f"   applying: {ws.name}...")
-            result = subprocess.run([ow_bin, "apply", str(ws)])
+            print(f"   rendering: {ws.name}...")
+            result = subprocess.run([ow_bin, "render", str(ws)])
             if result.returncode == 0:
                 print(f"   done: {ws.name}")
             else:
                 print(f"   failed: {ws.name} (exit {result.returncode})")
         else:
-            print(f"   would run: ow apply {ws}")
+            print(f"   would run: ow render {ws}")
 
 
 def step_templates(old: Path) -> None:
-    """Print template guidance (always manual)."""
+    """Describe what the old templates/ tree means for the 3.0 migration."""
     tmpl_dir = old / "templates"
     if not tmpl_dir.is_dir():
         return
     files = sorted(f for f in tmpl_dir.rglob("*") if f.is_file())
     if not files:
         return
-    print(f"\nTemplates (manual — {len(files)} file(s) in $OLD/templates/):")
+    print(
+        f"\nOld templates/ ({len(files)} file(s) in $OLD/templates/) — "
+        "ow 3.0 has no template overrides."
+    )
+    print(
+        "  The schema migration (ow render) inventories this tree and your "
+        "$XDG_CONFIG_HOME/ow/templates/ copy,\n"
+        "  retires the generated files you customized, and leaves them as "
+        "`yours`. See docs/migrating-to-3.0.md."
+    )
     for f in files:
         rel = f.relative_to(tmpl_dir)
         print(f"  {rel}")
-        print(f"    ow templates --take {rel}")
-        print(f"    diff {f} ~/.config/ow/templates/{rel}")
 
 
 # --- Main ---------------------------------------------------------------------
@@ -207,7 +219,7 @@ def main() -> None:
         "--yes", action="store_true", help="execute the migration (default: dry-run)"
     )
     parser.add_argument(
-        "--apply", action="store_true", help="also run ow apply per workspace"
+        "--render", action="store_true", help="also run ow render per workspace"
     )
     args = parser.parse_args()
 
@@ -239,10 +251,10 @@ def main() -> None:
     print()
     workspaces = step_workspaces(old, execute=args.yes)
     print()
-    if args.apply:
-        step_apply(workspaces, execute=args.yes)
+    if args.render:
+        step_render(workspaces, execute=args.yes)
     elif workspaces:
-        print("5. Apply (skipped — pass --apply to run ow apply per workspace)")
+        print("5. Render (skipped — pass --render to run ow render per workspace)")
     print()
 
     step_templates(old)
@@ -252,10 +264,11 @@ def main() -> None:
     else:
         print("\nMigration complete. Next steps:")
         print("  - Reopen your shell (mise drops stale OW_WORKSPACE)")
-        if not args.apply:
-            print("  - Run 'ow apply <workspace>' per workspace")
-        print("  - Review templates guidance above")
-        print("  - See docs/migrating-to-2.0.md for context")
+        if not args.render:
+            print("  - Run 'ow render <workspace>' per workspace to migrate the")
+            print("    config to schema 2 and write the generated files")
+        print("  - Review the old templates/ guidance above")
+        print("  - See docs/migrating-to-2.0.md (layout) and docs/migrating-to-3.0.md (schema)")
 
 
 if __name__ == "__main__":

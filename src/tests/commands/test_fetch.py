@@ -30,7 +30,7 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _make_repo(tmp_path: Path, alias: str) -> tuple[Path, Path]:
-    """A bare repo plus its 'origin' source, wired the way `ow apply` leaves one."""
+    """A bare repo plus its 'origin' source, wired the way `ow init` leaves one."""
     src = tmp_path / "origin" / alias
     src.mkdir(parents=True)
     subprocess.run(["git", "-C", str(src), "init", "-q", "-b", "master"], check=True)

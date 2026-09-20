@@ -1,12 +1,7 @@
-import os
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from ow.utils.status import _gather_one_repo
-from ow.commands.apply import cmd_apply
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig, write_workspace_config
+from ow.utils.config import BranchSpec
 
 
 # ---------------------------------------------------------------------------
@@ -54,44 +49,3 @@ class TestStatusExtended:
 
         assert result.github_url is not None
         assert "tree/feature" in result.github_url
-
-
-# ---------------------------------------------------------------------------
-# update — error display
-# ---------------------------------------------------------------------------
-
-class TestCmdApplyExtended:
-
-    def test_cmd_apply_shows_error_when_repo_fails(self, tmp_path, capsys, config_with_remotes):
-        ws_dir = tmp_path / "workspaces" / "test"
-        ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")})
-        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-        config = config_with_remotes
-
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {"community": "clone failed"})):
-                with patch("ow.commands.apply.apply_templates"):
-                    with pytest.raises(SystemExit) as exc:
-                        cmd_apply(config)
-
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "Warning" in captured.err or "Warning" in captured.out
-        assert "community" in (captured.err + captured.out)
-
-    def test_cmd_apply_no_errors_no_warning(self, tmp_path, capsys, config_with_remotes):
-        ws_dir = tmp_path / "workspaces" / "test"
-        ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(repos={})
-        write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-        config = config_with_remotes
-
-        with patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}):
-            with patch("ow.commands.apply.ensure_workspace_materialized", return_value=(ws_dir, set(), {})):
-                with patch("ow.commands.apply.apply_templates"):
-                    cmd_apply(config)
-
-        captured = capsys.readouterr()
-        assert "Warning" not in captured.err
-        assert "Warning" not in captured.out

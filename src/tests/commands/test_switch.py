@@ -42,7 +42,7 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _make_repo(tmp_path: Path, alias: str) -> tuple[Path, Path]:
-    """A bare repo plus its 'origin' source, wired the way `ow apply` leaves
+    """A bare repo plus its 'origin' source, wired the way `ow init` leaves
     one: a master branch, and a fetch refspec so refs/remotes/origin/*
     means something."""
     src = tmp_path / "origin" / alias
@@ -508,7 +508,7 @@ def _second_remote(tmp_path, bare: Path, src: Path, *, name: str, branch: str) -
 def test_detaching_through_a_non_origin_remote_pins_that_remotes_ref(tmp_path, capsys, xdg):
     """The config records where the repo actually sits. `feature-x` found on
     `upstream` must be written `upstream/feature-x`: the bare short name
-    re-reads as origin's branch, and a later `ow apply` or `ow reset` would
+    re-reads as origin's branch, and a later `ow render` or `ow reset` would
     move the repo somewhere it has never been."""
     bare, src = _make_repo(tmp_path, "community")
     _second_remote(tmp_path, bare, src, name="upstream", branch="feature-x")

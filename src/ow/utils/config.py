@@ -894,7 +894,7 @@ def select_aliases(available: list[str], only: str | None) -> list[str]:
     """Filter repo aliases by --only, preserving the order of the config.
 
     Shared by every command whose --only narrows a workspace-wide operation
-    down to specific repos (`ow rebase`, `ow apply`). typer.BadParameter is
+    down to specific repos (`ow rebase`, `ow switch`). typer.BadParameter is
     deliberate: Typer renders it as a usage error and exit code 2, where a
     bare SystemExit would look like the operation itself had failed.
     """

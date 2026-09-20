@@ -1,4 +1,9 @@
-"""Tests for migrate-to-2.0.py."""
+"""Tests for migrate-to-2.0.py.
+
+The layout step is only half the move: what these tests care about is that
+the workspaces it produces are usable — ow can load them, and the 3.0
+schema migration converts them without touching anything it cannot prove.
+"""
 import importlib.util
 import shutil
 import subprocess
@@ -6,6 +11,9 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from ow.utils.config import load_global_config, load_workspace_config
+from ow.utils.migration import commit_migration, plan_migration
 
 SCRIPTS_DIR = Path(__file__).parent.parent
 _spec = importlib.util.spec_from_file_location("migrate_2", SCRIPTS_DIR / "migrate-to-2.0.py")
@@ -202,37 +210,56 @@ class TestStepWorkspaces:
         assert workspaces == []
 
 
-# --- step_apply ---------------------------------------------------------------
+# --- step_render --------------------------------------------------------------
 
-class TestStepApply:
+class TestStepRender:
     def test_skips_when_ow_not_on_path(
         self, old_project: Path, xdg_dirs: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(shutil, "which", lambda _: None)
         ws = old_project / "workspaces" / "canary"
-        migrate.step_apply([ws], execute=True)
+        migrate.step_render([ws], execute=True)
         # No crash
 
     def test_skips_when_no_workspaces(self, xdg_dirs: Path) -> None:
-        migrate.step_apply([], execute=True)
+        migrate.step_render([], execute=True)
         # No crash
+
+    def test_dry_run_names_ow_render_and_runs_nothing(
+        self, old_project: Path, xdg_dirs: Path, capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _boom(*args, **kwargs):
+            raise AssertionError("dry run must not run subprocesses")
+
+        monkeypatch.setattr(migrate.shutil, "which", lambda _: "/usr/bin/ow")
+        monkeypatch.setattr(migrate.subprocess, "run", _boom)
+        ws = old_project / "workspaces" / "canary"
+        migrate.step_render([ws], execute=False)
+        out = capsys.readouterr().out
+        assert f"ow render {ws}" in out
 
 
 # --- step_templates -----------------------------------------------------------
 
 class TestStepTemplates:
-    def test_prints_guidance(self, old_project: Path, xdg_dirs: Path, capsys: pytest.CaptureFixture) -> None:
+    def test_lists_the_old_tree_without_importing_it(
+        self, old_project: Path, xdg_dirs: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """The script must not copy the old tree into the override directory:
+        what happens to those files is the schema migration's decision."""
         migrate.step_templates(old_project)
         out = capsys.readouterr().out
-        assert "Templates (manual" in out
         assert "common/odoorc.j2" in out
-        assert "ow templates --take common/odoorc.j2" in out
+        assert not (migrate._xdg("XDG_CONFIG_HOME", ".config") / "ow" / "templates").exists()
 
-    def test_no_templates_dir(self, old_project: Path, xdg_dirs: Path, capsys: pytest.CaptureFixture) -> None:
+    def test_no_old_templates_tree(
+        self, old_project: Path, xdg_dirs: Path, capsys: pytest.CaptureFixture
+    ) -> None:
         shutil.rmtree(old_project / "templates")
         migrate.step_templates(old_project)
         out = capsys.readouterr().out
-        assert "Templates" not in out
+        assert "old templates/" not in out.lower()
 
 
 # --- Integration (main) -------------------------------------------------------
@@ -273,6 +300,28 @@ class TestMainIntegration:
         assert (_repos_target() / "community.git").is_dir()
         ws_cfg = old_project / "workspaces" / "canary" / ".ow" / "config.toml"
         assert ws_cfg.exists()
+
+    def test_the_migrated_workspace_loads_and_the_schema_migration_converts_it(
+        self, old_project: Path, xdg_dirs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The layout step leaves a workspace ow can read; `ow render`'s own
+        plan/commit then turns it into a schema-2 workspace. That two-step
+        is the whole point — the script never converts the schema itself."""
+        monkeypatch.setattr(sys, "argv", ["migrate", str(old_project), "--yes"])
+        migrate.main()
+        marker = old_project / "workspaces" / "canary" / ".ow" / "config.toml"
+
+        ws = load_workspace_config(marker)
+        assert ws.version == 1
+
+        plan = plan_migration(load_global_config(), ws, marker.parent.parent)
+        assert plan.errors == ()
+        commit_migration(plan)
+
+        migrated = load_workspace_config(marker)
+        assert migrated.version == 2
+        assert migrated.repos == {}
+        assert "templates" not in marker.read_text()
 
     def test_missing_ow_toml_errors(
         self, tmp_path: Path, xdg_dirs: Path, monkeypatch: pytest.MonkeyPatch

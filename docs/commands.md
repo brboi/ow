@@ -4,8 +4,9 @@
 
 | Command | Flags | Description |
 |---------|-------|-------------|
-| `ow init` | `[NAME]`, `-c/--configuration`, `-t/--template`, `-r/--repo` | Create a workspace here, or in `./NAME` |
-| `ow apply` | `[workspace]`, `-w/--workspace`, `--check` | Re-render templates and materialize worktrees |
+| `ow init` | `[NAME]`, `-c/--configuration`, `-r/--repo`, `-y/--yes` | Create a workspace here, or in `./NAME` — or repair one already there |
+| `ow render` | `[workspace]`, `-w/--workspace` | Migrate the config if needed, then write every generated file |
+| `ow files` | `[workspace]`, `-w/--workspace`, `--diff` | List the files ow manages and their state, or diff the ones that differ |
 | `ow status` | `[workspace]`, `-w/--workspace`, `-f/--fetch` | Show branch status with behind/ahead counts |
 | `ow fetch` | `[workspace]`, `-w/--workspace`, `--only` | Refresh the refs a workspace follows, without touching any worktree |
 | `ow rebase` | `[workspace]`, `-w/--workspace`, `--only`, `--autostash`, `--dry-run`, `-y/--yes`, `--no-fetch` | Fetch and rebase repos in a workspace |
@@ -21,7 +22,6 @@
 | `ow cd` | `[workspace]`, `-w/--workspace` | Print a workspace path — with `ow shell-init`, changes directory |
 | `ow shell-init` | `<shell>` | Print the shell snippet that makes `ow cd` change directory |
 | `ow open` | `[workspace]`, `-w/--workspace` | Open a workspace in the configured editor |
-| `ow templates` | `[workspace]`, `-w/--workspace`, `--diff` | List the files `ow` manages in a workspace and their state, or diff the ones that differ |
 A command that takes a `[workspace]` resolves it in exactly one of four forms, never falling
 back from one to the next:
 
@@ -45,58 +45,81 @@ directory, or `./NAME`), since the workspace doesn't exist yet.
 
 ## `ow init`
 
-Creates a workspace: in the current directory by default, or in `./NAME` if given — mirrors
-`git init`. Interactive by default (templates → repos → branch specs, pre-filled from any flags
-given); when stdin isn't a terminal, flags (or `-c/--configuration`, to duplicate an existing
-workspace's config) must supply everything, or the command refuses to guess.
+Creates a workspace — in the current directory by default, or in `./NAME` if given — or repairs
+one already there. Mirrors `git init`, and is re-runnable: run it again inside an existing
+workspace and it creates only what is missing, leaves every existing worktree's HEAD, branch,
+upstream and index untouched, and reports what drifted instead of realigning it.
+
+Interactive by default (repos → branch specs, pre-filled from any flags given); when stdin isn't
+a terminal it takes everything from flags or from `-c/--configuration`, and refuses to guess.
+Repair never asks.
 
 ```sh
-ow init my_work -r community:master..my-feature -r enterprise:master..my-feature -t vscode
+ow init my_work -r community:master..my-feature -r enterprise:master..my-feature
+ow init -r community:master..my-feature        # here (the current directory)
+ow init my_work -c ./other-workspace           # duplicate another workspace's config
 ```
 
-`-r` takes a single `ALIAS:SPEC` argument and `-t` a single template name; repeat either flag
-to pass more than one. A `-r` value without a `:` is rejected rather than ignored. `NAME`, when
-given, must be alphanumeric plus `-`/`_`.
+`-r` takes a single `ALIAS:SPEC` argument; repeat it for more than one. A `-r` value without a
+`:` is rejected rather than ignored. `NAME`, when given, must be alphanumeric plus `-`/`_`.
+`-c/--configuration` duplicates an existing workspace's config into a **new** workspace only —
+against an existing one it is refused, and the message says to edit `.ow/config.toml` or run
+`ow init` there to repair. A `-r` that disagrees with a spec the existing workspace already
+declares is refused before anything is written; run `ow switch` to change a repo's branch.
+`-y/--yes` skips the confirmation prompt (the prompt only exists on a TTY and only for a new
+workspace).
 
-`-t` names a bundle the workspace declares. `common` and `odoo` are not names you can pass:
-`common` is applied to every workspace, and `odoo` follows from the repos, so `-t common` is
-refused with a line saying exactly that. `-c/--configuration` copies an existing workspace's
-config; a `common`/`odoo` entry that config still carries from an older `ow` is dropped silently,
-and the rest of the source — other bundles, repos, vars — carries over.
+After confirmation, `ow` sets up each repo's bare clone and required refs, creates the worktrees
+that are missing, writes `.ow/config.toml`, seeds `.local` from `$XDG_CONFIG_HOME/ow/local/`,
+writes and trusts the generated files (`mise/conf.d/00-ow.toml` included) so `mise` will load
+them, and remembers the workspace in the discovery index. A repo that fails to set up is
+reported; the manifest is still written and the workspace is still usable as long as at least one
+repo succeeded, and the command exits non-zero — the workspace exists, but it is not the one you
+asked for. `ow init` never cleans up a directory that was already there, and never migrates the
+global config unless the workspace itself needs it.
 
-After confirmation, `ow` sets up each repo's bare clone and required refs, creates (or
-reconciles) its worktree, applies templates, writes `.ow/config.toml`, trusts the mise fragments
-it generated (`mise/conf.d/00-ow.toml`) so `mise` will load them, and remembers the workspace in
-the discovery index. A repo that fails to set up is reported; the workspace is still created as
-long as at least one repo succeeded, and the command exits non-zero — the workspace exists, but
-it is not the one you asked for.
+## `ow render`
 
-## `ow apply`
+Migrates a workspace's config if it is still schema 1, then writes every generated file it owns.
+It is the explicit form of what `ow init` does on creation and what `ow switch`, `ow pull`,
+`ow rebase` and `ow reset` do after a successful Git batch: one inspection, one write.
 
-Re-renders templates and materializes worktrees for a workspace: creates any missing worktree,
-reconciles attached/detached state for existing ones, and renders the services compose file.
-Useful after changing templates or the global config without recreating the workspace. `--check`
-reports what would change without writing anything, and exits non-zero if a repo has drifted or is
-missing its worktree, or if any file `ow` writes or rewrites would change — never for a file that
-is yours, since `ow` wouldn't touch it anyway.
+```sh
+ow render                    # the current workspace (OW_WORKSPACE or walk-up)
+ow render parrot             # by name
+ow render -w ./parrot        # by path
+```
 
-Each file `ow` manages is rendered straight from its packaged (or user-overridden) template and
-compared against `<ws>/.ow/rendered.lock.toml`: absent, it is written and printed `wrote <name>`;
-present and byte-identical to what `ow` would render, it is adopted into the lock without a write
-(that is how a workspace from before the lock comes under management); matching the lock but
-stale relative to the current render, it is rewritten and printed `updated <name>`; present but
-not matching the lock, it is yours — printed under `yours, left alone`, never written — and a
-later render that happens to be byte-identical to it adopts it back, but nothing else will touch
-it. A template that renders nothing but whitespace writes no file, and does not remove one left
-by an earlier render either — `ow` never deletes a workspace file — so a workspace with no Odoo
-checkout ends up with neither `.vscode/launch.json` nor `.zed/debug.json`. A file `ow` wrote in
-the past that no current bundle produces any more is reported `not rendered` while it is still on
-disk, and left exactly as it is — `ow` neither rewrites nor deletes it. `ow apply` also warns,
-every time, about a `mise.toml` left at the workspace root by an older `ow`: it shadows the
-generated `mise/conf.d/00-ow.toml` as far as `mise` is concerned, and `ow` will not delete it.
-See [Template System](templates.md) for the three axes that decide which bundles apply.
-Like `ow init` and `ow rebase`, `ow apply` exits non-zero when any repo failed, even though
-everything else — templates, vars, the repos that worked — is applied.
+`ow render` never creates a missing repo or seeds `.local` — that is `ow init`'s job — and it
+stops before writing anything if the workspace is blocked: a declared worktree missing or
+mid-rebase, an unrecognised or ambiguous Odoo core, an output that would land inside a declared
+worktree, or migration diagnostics it cannot represent. A prerequisite it can check itself (a
+mise older than the floor) stops it too.
+
+It prints each path as `wrote`, `updated` or `adopted`, lists the files that are `yours, left
+alone` (with `ow files --diff` as the way to see what it would write), names the paths it no
+longer renders, warns about a legacy `mise.toml` left at the workspace root by an older ow, and
+trusts the mise fragment it wrote. It exits non-zero if any file failed to write or the trust
+failed. See [Generated files](files.md) for the states, the ownership lock, and the fixed output
+table.
+
+## `ow files`
+
+Lists every file `ow` manages in one workspace, with its state — `absent`, `up to date`,
+`outdated`, `yours`, `not rendered`, or `ignored` — and writes nothing.
+
+```sh
+ow files                 # the listing
+ow files --diff          # a unified diff of everything that differs
+ow files --diff -w ./ws  # ... for a workspace named by path
+```
+
+`--diff` prints, from your file to what `ow` would write, for every file that differs; a file
+that isn't there yet is an addition from `/dev/null`, and a file whose bytes aren't UTF-8 text is
+named with a one-line reason instead of a diff. `ow files` exits `1` only when the inspection is
+blocked; `ow files --diff` exits `1` when anything differs *or* the inspection is blocked, and
+`0` otherwise. Neither writes, fetches, or migrates. See [Generated files](files.md) for the
+states, the ignore rules, and why file alignment is not Git-drift alignment.
 
 ## Interactive Dashboard
 
@@ -119,10 +142,12 @@ bottom captures every operation's output.
 | `enter` | Focus the detail pane |
 | `s` | Status (local — no fetch) |
 | `f` | Fetch + status |
-| `a` | Apply |
+| `a` | Render (migrate and write the generated files) |
+| `F` | Files — the generated-file diff |
+| `I` | Repair (`ow init` in the highlighted workspace) |
+| `S` | Switch |
 | `R` | Rebase |
 | `P` | Pull |
-| `S` | Switch |
 | `r` | Reset |
 | `p` | Prune |
 | `n` | New workspace |
@@ -293,7 +318,8 @@ A repo is skipped, and the run exits non-zero, when a git operation is already
 in progress, when the worktree is missing, when its refs will not resolve
 locally, or when it is not on the branch the config names. That last one
 matters: resetting whatever else happens to be checked out would throw away
-work ow was never told about, and realigning is `ow apply`'s job.
+work ow was never told about, and realigning a repo onto the branch its config
+names is `ow switch`'s job.
 
 ## `ow switch`
 
@@ -378,8 +404,10 @@ Once a repo has actually moved, `.ow/config.toml` is rewritten from what git lef
 from what was asked for: an attached branch with an upstream gets `<upstream>..<branch>`, an
 attached branch without one keeps its start point (`-c`) or the repo's previous base ref, and a
 detached repo gets the bare ref you asked for. Each repo's `Done.` line carries the spec that
-was written for it. Templates are deliberately not re-rendered — the run ends by telling you to
-run `ow apply` if you need them refreshed.
+was written for it. A switch that moved at least one repo refreshes the generated files once at
+the end — an Odoo core that appeared or disappeared changes what `odoorc` and the debug configs
+should say — and says so. When nothing moved, a dry run, a refusal or a declined prompt, it says
+the files were left alone and points at `ow render` instead.
 
 `--dry-run` prints the same summary, then the exact `git switch` invocation per repo, and writes
 nothing.
@@ -499,28 +527,6 @@ with their branch specs — read from the discovery index and each workspace's o
 instead, which is not in the index by design — see `ow archive`. A workspace config that fails
 to parse shows as an error in place of its repos rather than aborting the listing.
 
-## `ow templates`
-
-Lists every file `ow` manages in one workspace, with its state:
-
-- `up to date` — the file matches what `ow` would render right now
-- `outdated` — `ow` wrote this file before, but the render has since changed; the next
-  `ow apply` rewrites it
-- `yours` — the file doesn't match `ow`'s lock; you edited it (or wrote it yourself), and `ow`
-  leaves it alone — a later render that is byte-identical to it adopts it back; nothing else
-  will touch it
-- `absent` — `ow` would write this file, and it isn't there yet
-- `not rendered` — the template renders nothing but whitespace for this workspace (for example
-  `launch.json` outside an Odoo workspace), so there is no file to manage — or `ow` wrote this
-  path in the past and no current bundle produces it any more; the file stays on disk, untouched
-
-`--diff` prints a unified diff, from your file (`(yours)`) to what `ow` would write (`(ow)`), for
-every file that differs; a file that isn't there yet is an addition, from `/dev/null`, and a file
-whose bytes aren't UTF-8 text is named with a one-line reason instead of a diff. Like the
-listing, `--diff` writes nothing, and differences do not change the exit status: a successful
-inspection exits 0 whether or not anything differs (a resolution or render failure still fails).
-See [Template System](templates.md).
-
 ## Tab Completion
 
 One-time setup for your current shell:
@@ -533,7 +539,8 @@ Then restart your shell. To inspect the generated script instead of installing i
 ow --show-completion
 ```
 
-Completion covers template names (`ow init -t <TAB>`, only the bundles you can declare — `common`
-and `odoo` are never offered), repo aliases (`ow init -r <TAB>`, which only offers aliases you
-haven't already passed) and workspace names (`ow status <TAB>`, `ow rm <TAB>`, from the same
-discovery index `ow ls` reads — so a workspace `ow` has never resolved is not offered).
+Completion covers repo aliases (`ow init -r <TAB>`, which only offers aliases you haven't already
+passed), workspace names (`ow status <TAB>`, `ow rm <TAB>`, from the same discovery index `ow ls`
+reads — so a workspace `ow` has never resolved is not offered), archived names (`ow unarchive
+<TAB>`) and branch names (`ow switch <TAB>`, local and remote-tracking). There is no template
+completion: 3.0 removed the template system.

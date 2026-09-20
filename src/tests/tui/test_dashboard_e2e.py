@@ -76,7 +76,7 @@ def test_new_workspace_form_fills_and_dismisses(dashboard_pilot, tmp_path: Path)
 
 def test_operation_with_task_progress_completes_through_pushed_main_screen(dashboard_pilot):
     """A real DashboardApp always runs with `MainScreen` pushed on top of
-    the App's default screen. `apply`/`status`/`reset` all report progress
+    the App's default screen. `render`/`status`/`reset` all report progress
     through `sink.task(...)` (via `ow.utils.display.task_progress`) while
     running — this drives that exact path through the real, pushed
     `MainScreen`, not a hand-rolled stand-in, and asserts the operation

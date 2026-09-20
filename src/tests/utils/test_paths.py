@@ -1,7 +1,7 @@
 """Tests for ow.utils.paths.
 
 The functions fall into three families, one per XDG base directory: config
-(config_file, templates_dir, services_dir, local_dir), data (repos_dir,
+(config_file, services_dir, local_dir), data (repos_dir,
 volumes_dir, archives_dir) and state (index_file, backups_dir). Each family
 is exercised once rather than writing the same test ten times.
 """
@@ -12,7 +12,7 @@ import pytest
 
 from ow.utils import paths
 
-CONFIG_FUNCS = [paths.config_file, paths.templates_dir, paths.services_dir, paths.local_dir]
+CONFIG_FUNCS = [paths.config_file, paths.services_dir, paths.local_dir]
 DATA_FUNCS = [paths.repos_dir, paths.volumes_dir, paths.archives_dir]
 STATE_FUNCS = [paths.index_file, paths.backups_dir]
 
