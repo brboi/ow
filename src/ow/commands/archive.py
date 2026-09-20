@@ -3,8 +3,11 @@
 Archiving is relocation to a canonical place plus dropping the index entry.
 The worktrees stay registered — repaired at the archive path — and the local
 branches stay, which is the whole point: an archived workspace comes back
-exactly as it left. Unarchiving is the same move in reverse, plus a re-render
-so the absolute paths in `odoorc` name wherever it landed.
+exactly as it left. Unarchiving is the same move in reverse, plus a refresh
+for a schema-2 workspace so the absolute `data_dir` in `odoorc` names
+wherever it landed. A schema-1 archive comes back exactly as it left,
+unmigrated too — restoring it is never the thing that converts it; only
+`ow render` does that.
 
 One subject, two directions, one module.
 """
@@ -16,8 +19,8 @@ from pathlib import Path
 from ow.utils import index, paths
 from ow.utils.config import Config, WorkspaceConfig, load_workspace_config
 from ow.utils.display import confirm, display_path, err_console
-from ow.utils.relocate import relocate_workspace, validate_target
-from ow.utils.templates import apply_templates
+from ow.utils.relocate import refresh_after_relocation, relocate_workspace, validate_target
+from ow.utils.render import RenderResult
 
 MARKER = Path(".ow") / "config.toml"
 
@@ -47,10 +50,10 @@ def _resolve_by_name(name: str) -> tuple[Path, WorkspaceConfig]:
         sys.exit(1)
 
 
-def _report_unrepaired(unrepaired: list[str]) -> None:
+def _report_unrepaired(unrepaired: list[str], target: Path) -> None:
     for alias in unrepaired:
         err_console.print(
-            f"  [{alias}] worktree not repaired — run `ow apply`",
+            f"  [{alias}] worktree not repaired — run `ow init` in {target}",
             markup=False,
         )
 
@@ -94,9 +97,9 @@ def cmd_archive(name: str, *, yes: bool = False) -> None:
 
     unrepaired = execute_archive(ws_dir, ws, target)
 
-    # No apply_templates: an archive is not meant to be used in place.
+    # No refresh: an archive is not meant to be used in place.
     if unrepaired:
-        _report_unrepaired(unrepaired)
+        _report_unrepaired(unrepaired, target)
         sys.exit(1)
 
     print("Done.")
@@ -114,12 +117,17 @@ def _resolve_unarchive_dest(name: str, dest: str | None) -> Path:
 
 def execute_unarchive(
     config: Config, source: Path, ws: WorkspaceConfig, target: Path,
-) -> list[str]:
-    """Relocate from archive + reindex + re-render. Returns aliases left unrepaired."""
+) -> tuple[list[str], RenderResult | None]:
+    """Relocate from archive + reindex + refresh. Returns (aliases left unrepaired, the refresh outcome).
+
+    `None` means the archived workspace is still schema 1: restoring it
+    must never be the thing that migrates it, so unarchiving a legacy
+    archive stays legacy — only `ow render` converts it.
+    """
     unrepaired = relocate_workspace(source, target, ws.repos)
     index.remember(target)
-    apply_templates(ws, config, target)
-    return unrepaired
+    render_result = refresh_after_relocation(config, ws, target)
+    return unrepaired, render_result
 
 
 def cmd_unarchive(
@@ -151,8 +159,12 @@ def cmd_unarchive(
     print(f"  from {display_path(source)}")
     print(f"  to   {display_path(target)}")
     print()
-    print("Will re-render: odoorc (absolute addons_path and data_dir), and every")
-    print("                other template file of this workspace")
+    if config.version == 1 or ws.version == 1:
+        print("Will not re-render: the workspace config is still schema 1 — run")
+        print(f"                    `ow render -w {target}` afterwards")
+    else:
+        print("Will re-render: odoorc (absolute data_dir), and every other generated")
+        print("                file of this workspace")
 
     if not yes and not confirm():
         print("Aborted.")
@@ -160,10 +172,31 @@ def cmd_unarchive(
 
     sys.stdout.flush()
 
-    unrepaired = execute_unarchive(config, source, ws, target)
+    unrepaired, render_result = execute_unarchive(config, source, ws, target)
 
+    failed = bool(unrepaired)
     if unrepaired:
-        _report_unrepaired(unrepaired)
+        _report_unrepaired(unrepaired, target)
+
+    if render_result is None:
+        print(f"Schema 1 workspace: run `ow render -w {target}` to re-render odoorc and the rest.")
+    else:
+        for path in render_result.wrote:
+            print(f"wrote {path}")
+        for path in render_result.updated:
+            print(f"updated {path}")
+        for path in render_result.adopted:
+            print(f"adopted {path}")
+        if render_result.yours:
+            print("yours, left alone: " + ", ".join(render_result.yours))
+        for warning in render_result.warnings:
+            err_console.print(warning, markup=False)
+        if render_result.failed:
+            for line in render_result.errors:
+                err_console.print(f"Error: {line}", markup=False)
+            failed = True
+
+    if failed:
         sys.exit(1)
 
     print("Done.")

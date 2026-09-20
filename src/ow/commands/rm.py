@@ -133,18 +133,23 @@ def _delete_branch(bare_repo: Path, branch: str, alias: str) -> bool:
 def _save_backup(name: str, ws_dir: Path) -> Path | None:
     """Copy the workspace config aside so `ow init -c` can restore it.
 
-    A failed backup must not block the removal the user asked for: warn and
-    carry on.
+    A raw byte copy, never a reconstructed alias list: the manifest may
+    carry typed passwords (db_password, admin_passwd), so the backup is
+    chmod'd 0600 explicitly rather than trusting whatever the source
+    file's mode happened to be. A failed backup must not block the
+    removal the user asked for: warn and carry on.
     """
     stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     target = paths.backups_dir() / f"{name}-{stamp}.toml"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ws_dir / MARKER, target)
+        target.chmod(0o600)
     except OSError as exc:
         err_console.print(f"  Warning: could not save config backup ({exc})", markup=False)
         return None
     return target
+
 
 def survey_removal(ws_dir: Path, ws: WorkspaceConfig) -> list[RepoRemoval]:
     """What removing this workspace would touch. No output, no mutation."""

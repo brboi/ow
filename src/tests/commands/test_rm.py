@@ -508,6 +508,62 @@ def test_rm_saves_a_config_backup(tmp_path, capsys, xdg, monkeypatch):
     assert "ow init canary -c" in out
 
 
+def test_rm_backup_is_a_raw_byte_copy_at_mode_0600(tmp_path, capsys, xdg, monkeypatch):
+    """Typed passwords now live in the manifest — the backup ow's own
+    restore hint points at must be a raw copy, never a reconstructed alias
+    list, and never group/world readable."""
+    import stat
+
+    bare = _bare_repo(tmp_path, "community")
+    ws = _make_workspace(
+        tmp_path, "canary",
+        {"community": BranchSpec("origin/master", "master-canary")},
+        bare_repos={"community": bare},
+    )
+    original_bytes = (ws / MARKER).read_bytes()
+    _answer(monkeypatch, "y")
+
+    cmd_rm("canary")
+
+    backups = sorted(paths.backups_dir().glob("canary-*.toml"))
+    assert len(backups) == 1
+    backup = backups[0]
+    assert backup.read_bytes() == original_bytes
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+def test_rm_backup_used_as_init_source_is_never_mutated(tmp_path, capsys, xdg, monkeypatch):
+    """`ow init NAME -c BACKUP` only ever reads the backup rm left behind."""
+    from unittest.mock import patch
+
+    from ow.commands.init import cmd_init
+    from ow.utils.config import Config, RemoteConfig
+
+    bare = _bare_repo(tmp_path, "community")
+    ws = _make_workspace(
+        tmp_path, "canary",
+        {"community": BranchSpec("origin/master", "master-canary")},
+        bare_repos={"community": bare},
+    )
+    _answer(monkeypatch, "y")
+    cmd_rm("canary")
+
+    backup = sorted(paths.backups_dir().glob("canary-*.toml"))[0]
+    before = backup.read_bytes()
+
+    monkeypatch.chdir(tmp_path)
+    init_config = Config(remotes={"community": {"origin": RemoteConfig(url=str(bare))}})
+    with patch("sys.stdin.isatty", return_value=False), \
+         patch("ow.commands.init.require_mise", return_value=(2026, 9, 9)):
+        try:
+            cmd_init(init_config, name="reborn", configuration=str(backup))
+        except SystemExit:
+            pass
+
+    assert backup.read_bytes() == before
+
+
+
 def test_rm_without_a_backup_dir_does_not_crash(tmp_path, capsys, xdg, monkeypatch):
     bare = _bare_repo(tmp_path, "community")
     ws = _make_workspace(
