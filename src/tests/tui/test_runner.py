@@ -262,7 +262,7 @@ def test_busy_refuses_second_operation():
 
 
 def test_task_progress_completes_through_pushed_screen():
-    """A fn that opens a sink task (like apply/status/reset via
+    """A fn that opens a sink task (like render/status/reset via
     `task_progress`) must complete without `NoMatches`, driven through a
     *pushed* screen — never through the App's own default screen.
 

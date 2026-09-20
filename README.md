@@ -18,8 +18,8 @@ gigabytes of history.
 ## What it solves
 
 - **Clone fatigue** — Odoo repos are large. Shared bare repos mean one clone, many worktrees.
-- **Setup boilerplate** — `mise.toml`, `odoorc`, `odools.toml`, `pyrightconfig.json`, and IDE
-  configs are generated from [templates](docs/templates.md) every time.
+- **Setup boilerplate** — the mise fragment, `odoorc`, `odools.toml`, `pyrightconfig.json`, and
+  the IDE configs are [generated](docs/files.md) every time, from a fixed set of outputs.
 - **Branch juggling** — concise `base..feature` branch specs control detached vs attached
   worktrees; `ow rebase` keeps them up to date idempotently, and `ow switch` moves every repo in
   a workspace to a branch at once.
@@ -31,7 +31,7 @@ gigabytes of history.
 - **[mise](https://mise.jdx.dev/)** — manages Python, virtualenvs, and dependencies in generated workspaces
 - **Odoo system dependencies** — see [Odoo source install docs](https://www.odoo.com/documentation/master/administration/on_premise/source.html#dependencies) (includes wkhtmltopdf, PostgreSQL client libs, etc.)
 - **SSH** — configured for access to Odoo repositories
-- **Docker or Podman** (optional) — `ow` ships a compose file for postgres, pgweb and mailpit; see [Services](docs/services.md)
+- **Docker or Podman** (optional) — `ow` writes a compose file for postgres, pgweb and mailpit; see [Services](docs/services.md)
 
 ## Installation
 
@@ -44,25 +44,28 @@ pip install odoo-workspaces    # or in an active venv
 
 ```sh
 mkdir my_work && cd my_work
-ow init                            # interactive form: templates, repos, branch specs
+ow init                            # interactive form: repos and branch specs
 mise install
 code .                             # open in your IDE and enjoy
 ow                                 # launch the interactive dashboard
 ```
 
-On first use, `ow` writes a commented default config to `~/.config/ow/config.toml` — edit it to
-point at your Odoo remotes. See [Configuration](docs/configuration.md) for the full layout.
+There is no global config until you save one: `ow` runs on built-in defaults, the community remote
+included, and the dashboard's global-config editor writes a commented
+`~/.config/ow/config.toml` for you to edit. See [Configuration](docs/configuration.md) for the
+full layout.
 
 ## Documentation
 
 - [Commands](docs/commands.md) — full command reference with flags and workspace resolution
 - [Interactive Dashboard](docs/commands.md#interactive-dashboard) — TUI for managing workspaces without memorising flags
-- [Configuration](docs/configuration.md) — XDG paths, remotes, variables, branch spec syntax
-- [Template System](docs/templates.md) — bundles, overrides, context keys, custom bundles
+- [Configuration](docs/configuration.md) — XDG paths, remotes, typed options, ignore list, branch spec syntax
+- [Generated files](docs/files.md) — the fixed outputs, ownership, render and file states
 - [Services](docs/services.md) — Docker Compose stack (postgres, pgweb, mailpit)
-- [Sandboxing AI Coding Assistants](docs/sandboxing.md) — bubblewrap isolation for Opencode and Claude Code
+- [Sandboxing AI Coding Assistants](docs/sandboxing.md) — bubblewrap and firejail tasks for Opencode, Claude Code and Pi
 - [Tab Completion](docs/commands.md#tab-completion) — fish, bash, zsh, powershell
-- [Migrating from 1.x](docs/migrating-to-2.0.md) — one-time move from the project-scoped layout
+- [Migrating to 3.0](docs/migrating-to-3.0.md) — schema 2, removed commands, backups
+- [Migrating from 1.x to the 2.0 layout](docs/migrating-to-2.0.md) — the first step of the move, for a project-scoped 1.x install
 
 ## Thanks
 

@@ -40,10 +40,6 @@ def config_file() -> Path:
     return config_home() / "config.toml"
 
 
-def templates_dir() -> Path:
-    return config_home() / "templates"
-
-
 def services_dir() -> Path:
     return config_home() / "services"
 

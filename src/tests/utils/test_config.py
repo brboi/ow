@@ -917,9 +917,9 @@ class TestSelectAliases:
 
     @pytest.mark.parametrize("only", ["", ",", " ", " , "])
     def test_an_only_that_names_nothing_is_a_user_error(self, only):
-        """`ow apply --only ''` used to materialize nothing and print
-        "applied." — an explicit --only that selects no repo is a mistake,
-        not a request to do nothing."""
+        """`ow rebase --only ''` used to rebase nothing and report success —
+        an explicit --only that selects no repo is a mistake, not a request
+        to do nothing."""
         import typer
         with pytest.raises(typer.BadParameter) as exc:
             select_aliases(["a", "b"], only)
