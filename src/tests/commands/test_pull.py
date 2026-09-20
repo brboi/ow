@@ -291,3 +291,54 @@ def test_only_narrows_the_work_to_one_repo(tmp_path, capsys, xdg):
     out = capsys.readouterr().out
     assert "community" in out
     assert "enterprise" not in out
+
+
+def test_a_repo_mid_merge_outside_the_narrowing_blocks_the_refresh(tmp_path, capsys, xdg):
+    """`--only` narrows the Git half, never the inspection: a repo the run
+    did not touch still gets inspected before anything is written, so a
+    workspace with an operation in progress is never rendered on top of."""
+    config, ws_dir, worktree = _workspace(tmp_path)
+    upstream = _git(worktree, "rev-parse", "refs/remotes/origin/featA")
+
+    other = _bare_repo(tmp_path, "enterprise")
+    other_worktree = ws_dir / "enterprise"
+    _git(other, "worktree", "add", "-q", str(other_worktree), "-b", "featA", "master")
+    _git(other_worktree, "switch", "-q", "-c", "conflict", "master")
+    (other_worktree / "a.txt").write_text("theirs")
+    _git(other_worktree, "commit", "-qam", "theirs")
+    _git(other_worktree, "switch", "-q", "featA")
+    (other_worktree / "a.txt").write_text("mine")
+    _git(other_worktree, "commit", "-qam", "mine")
+    # A real, conflicted merge: MERGE_HEAD is on disk and the worktree is
+    # exactly what in_progress_operation exists to notice.
+    subprocess.run(
+        ["git", "-C", str(other_worktree), "merge", "conflict"],
+        capture_output=True, text=True,
+    )
+
+    write_workspace_config(
+        ws_dir / ".ow" / "config.toml",
+        WorkspaceConfig(
+            repos={
+                "community": parse_branch_spec("master..featA"),
+                "enterprise": parse_branch_spec("master..featA"),
+            },
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run_pull(
+            config, ws_dir,
+            _fetched({"community": "origin/master"}, {"community": "origin/featA"}),
+            only="community",
+        )
+
+    assert exit_info.value.code == 1
+    # The Git half really succeeded: community was fast-forwarded.
+    assert _git(worktree, "rev-parse", "HEAD") == upstream
+    # And nothing was generated on top of a workspace that is not ready.
+    assert not (ws_dir / ".ow" / "rendered.lock.toml").exists()
+    assert not (ws_dir / "odoorc").exists()
+    err = capsys.readouterr().err
+    assert "files were not refreshed" in err
+    assert "merge in progress" in err
