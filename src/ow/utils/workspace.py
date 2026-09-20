@@ -197,14 +197,17 @@ def inspect_workspace(config: Config, ws: WorkspaceConfig, root: Path) -> Render
         return _fallback_plan(
             root, config.owignore, probe.messages or (f"odoo core: {probe.kind}",)
         )
+    if probe.kind == "unsupported" and probe.info is not None:
+        core = probe.info
+        supported = ", ".join(str(major) for major in sorted(SUPPORTED_MAJORS))
+        return _fallback_plan(
+            root,
+            config.owignore,
+            (f"{core.alias}: Odoo {core.series} is not a supported major ({supported})",),
+        )
 
     core = probe.info
     warnings: list[str] = []
-    if probe.kind == "unsupported" and core is not None:
-        supported = ", ".join(str(major) for major in sorted(SUPPORTED_MAJORS))
-        warnings.append(
-            f"{core.alias}: Odoo {core.series} is not a supported major ({supported})"
-        )
 
     effective = resolve_options(
         config.odoo, config.mise, ws.odoo, ws.mise, core=core, workspace_name=root.name

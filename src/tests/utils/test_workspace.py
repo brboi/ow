@@ -10,10 +10,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ow.utils import workspace
-from ow.utils.workspace import MISE_FLOOR, require_mise, trust_fragment
-
 import pytest
+
+from ow.utils import paths, workspace
+from ow.utils.config import Config, WorkspaceConfig, parse_branch_spec
+from ow.utils.render import RENDERED_LOCK, write_files
+from ow.utils.workspace import MISE_FLOOR, inspect_workspace, refresh_workspace, require_mise, trust_fragment
 
 
 def _stub_version(monkeypatch, output: str) -> None:
@@ -104,3 +106,124 @@ def test_a_failed_trust_is_not_swallowed(tmp_path, monkeypatch):
 
     with pytest.raises(subprocess.CalledProcessError):
         trust_fragment(tmp_path / "fragment.toml")
+
+
+# ---------------------------------------------------------------------------
+# inspect_workspace / refresh_workspace: a recognized-but-unusable core
+# (invalid, ambiguous, unsupported) blocks every output write. There is no
+# guessed generic fallback for a core ow can identify but must not act on.
+# ---------------------------------------------------------------------------
+
+RELEASE_19_STABLE = """\
+version_info = (19, 0, 0, 'final', 0, '')
+MIN_PY_VERSION = (3, 10)
+MAX_PY_VERSION = (3, 14)
+"""
+
+RELEASE_17_5_DEV = """\
+version_info = (17, 5, 0, 'alpha', 0, '')
+MIN_PY_VERSION = (3, 10)
+MAX_PY_VERSION = (3, 13)
+"""
+
+RELEASE_INVALID_SYNTAX = "def broken(:\n    pass\n"
+
+CONFIG_WITH_DEMO = """\
+class configmanager:
+    def __init__(self):
+        group.add_option('--with-demo', action='store_true')
+"""
+
+
+def _make_core(root: Path, alias: str, *, release_source: str) -> Path:
+    core = root / alias
+    (core / "addons").mkdir(parents=True)
+    (core / "odoo" / "addons").mkdir(parents=True)
+    (core / "odoo-bin").touch()
+    (core / "odoo" / "release.py").write_text(release_source)
+    (core / "odoo" / "tools").mkdir(parents=True)
+    (core / "odoo" / "tools" / "config.py").write_text(CONFIG_WITH_DEMO)
+    return core
+
+
+def test_inspect_workspace_blocks_on_an_invalid_core(tmp_path, xdg):
+    ws_dir = tmp_path / "ws"
+    _make_core(ws_dir, "community", release_source=RELEASE_INVALID_SYNTAX)
+    ws = WorkspaceConfig(repos={"community": parse_branch_spec("master")})
+
+    plan = inspect_workspace(Config(remotes={}), ws, ws_dir)
+
+    assert plan.errors
+    assert plan.outputs == ()
+
+
+def test_inspect_workspace_blocks_on_an_ambiguous_core(tmp_path, xdg):
+    ws_dir = tmp_path / "ws"
+    _make_core(ws_dir, "community", release_source=RELEASE_19_STABLE)
+    _make_core(ws_dir, "fork", release_source=RELEASE_19_STABLE)
+    ws = WorkspaceConfig(repos={
+        "community": parse_branch_spec("master"),
+        "fork": parse_branch_spec("master"),
+    })
+
+    plan = inspect_workspace(Config(remotes={}), ws, ws_dir)
+
+    assert plan.errors
+    assert any("community" in e or "fork" in e for e in plan.errors)
+    assert plan.outputs == ()
+
+
+def test_inspect_workspace_blocks_on_an_unsupported_core(tmp_path, xdg):
+    """Odoo 17.5 is a recognized, well-formed core outside SUPPORTED_MAJORS:
+    it must block exactly like invalid/ambiguous, never render generic
+    fallback output."""
+    ws_dir = tmp_path / "ws"
+    _make_core(ws_dir, "community", release_source=RELEASE_17_5_DEV)
+    ws = WorkspaceConfig(repos={"community": parse_branch_spec("master")})
+
+    plan = inspect_workspace(Config(remotes={}), ws, ws_dir)
+
+    assert plan.errors
+    assert any("17.5" in e for e in plan.errors)
+    assert any("community" in e for e in plan.errors)
+    assert plan.outputs == ()
+
+
+def test_inspect_workspace_unsupported_core_still_shows_retained_locked_outputs(tmp_path, xdg):
+    """A checkout downgraded to an unsupported major after a successful
+    render must still surface what is already on disk, retained — never
+    silently dropped from view."""
+    ws_dir = tmp_path / "ws"
+    _make_core(ws_dir, "community", release_source=RELEASE_19_STABLE)
+    ws = WorkspaceConfig(repos={"community": parse_branch_spec("master")})
+    config = Config(remotes={})
+
+    first = inspect_workspace(config, ws, ws_dir)
+    assert not first.errors
+    write_files(first)
+    assert (ws_dir / "mise" / "conf.d" / "00-ow.toml").exists()
+
+    (ws_dir / "community" / "odoo" / "release.py").write_text(RELEASE_17_5_DEV)
+
+    second = inspect_workspace(config, ws, ws_dir)
+
+    assert second.errors
+    assert second.outputs == ()
+    retained = {s.path for s in second.states}
+    assert "mise/conf.d/00-ow.toml" in retained
+    # The file itself is untouched by the blocked inspection.
+    assert (ws_dir / "mise" / "conf.d" / "00-ow.toml").exists()
+
+
+def test_refresh_workspace_writes_nothing_for_an_unsupported_core(tmp_path, xdg):
+    ws_dir = tmp_path / "ws"
+    _make_core(ws_dir, "community", release_source=RELEASE_17_5_DEV)
+    ws = WorkspaceConfig(repos={"community": parse_branch_spec("master")})
+
+    result = refresh_workspace(Config(remotes={}), ws, ws_dir, trust=True)
+
+    assert result.failed
+    assert result.wrote == () and result.updated == () and result.adopted == ()
+    assert not (ws_dir / "mise").exists()
+    assert not (ws_dir / RENDERED_LOCK).exists()
+    assert not (paths.services_dir() / "compose.yml").exists()
