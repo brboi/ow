@@ -31,7 +31,7 @@ def test_a_worktree_that_disagrees_with_its_config_is_left_alone():
     plan = plan_pull(_facts(detached_drift=True))
 
     assert plan.is_skipped
-    assert "ow apply" in plan.skip_reason
+    assert "ow switch" in plan.skip_reason
 
 
 def test_an_unresolvable_target_is_skipped_rather_than_guessed_at():

@@ -115,7 +115,7 @@ def plan_switch(
     """
     if f.worktree_missing:
         return SwitchPlan(
-            alias=f.alias, skip_reason="worktree not found", hint="run `ow apply` to create it",
+            alias=f.alias, skip_reason="worktree not found", hint="run `ow init` in the workspace to create it",
         )
     if f.busy is not None:
         operation, cont, abort = f.busy

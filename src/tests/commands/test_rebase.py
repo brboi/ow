@@ -278,10 +278,14 @@ class TestMultiRepo:
             cmd_rebase(config, workspace=None)
         assert exc.value.code == 1
         assert mock_git.call_count == 2  # enterprise still ran after community's conflict
-        err = capsys.readouterr().err
-        conflict_line = err.split("CONFLICT")[1].split("\n")[0]
+        captured = capsys.readouterr()
+        conflict_line = captured.err.split("CONFLICT")[1].split("\n")[0]
         assert "community" in conflict_line
         assert "enterprise" not in conflict_line
+        # enterprise's rebase went ahead, but a workspace-wide failure must
+        # never trigger a partial, misleading refresh on top of it.
+        assert not (ws_dir / ".ow" / "rendered.lock.toml").exists()
+        assert "Files were not refreshed" in captured.out
 
     def test_only_touches_the_selected_repo(self, tmp_path):
         """--only must narrow drift-checking and fetching too, not just execution."""
@@ -355,7 +359,7 @@ class TestObservedShape:
         assert mock_git.call_count == 0
         err = capsys.readouterr().err
         assert "Skipping community" in err
-        assert "ow apply" in err
+        assert "ow switch" in err
 
 
 class TestFailedFetch:

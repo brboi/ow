@@ -10,6 +10,8 @@ from ow.utils.status import (
     RepoStatus,
     WorkspaceStatus,
     gather_workspace_status,
+    generation_diagnostics,
+    pending_file_count,
     _display_detached_status,
     _display_attached_status,
 )
@@ -70,6 +72,15 @@ def _render_status(status: WorkspaceStatus, max_alias_len: int) -> None:
         for link_alias, link_url in github_links:
             link_padding = " " * (max_alias_len - len(link_alias) + 1)
             console.print(f"        {escape(link_alias)}:{link_padding}[link={link_url}]{link_url}[/]")
+
+    diagnostics = generation_diagnostics(status.generation)
+    pending = pending_file_count(status.generation)
+    if diagnostics or pending:
+        console.print("    [dim]files[/]")
+        for line in diagnostics:
+            console.print(f"        [yellow]{escape(line)}[/]")
+        if pending:
+            console.print(f"        {pending} pending difference(s) — see `ow files`", markup=False)
 
     console.print()
 

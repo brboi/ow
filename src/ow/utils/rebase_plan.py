@@ -101,7 +101,7 @@ def plan_for(f: RepoFacts, *, autostash: bool = False) -> RebasePlan:
 
     # Planning against the config's shape while the worktree has drifted to
     # the other one rebases something nobody will look at again: the result
-    # lives on a detached HEAD the next `ow apply` throws away, or on a
+    # lives on a detached HEAD the next `ow switch` throws away, or on a
     # branch the config does not name.
     if f.detached_drift:
         found = "a detached HEAD" if f.is_detached else "a branch"
@@ -109,7 +109,7 @@ def plan_for(f: RepoFacts, *, autostash: bool = False) -> RebasePlan:
         return RebasePlan(
             skip_reason=(
                 f"worktree is on {found}, config expects {expected}"
-                " — run `ow apply` to realign"
+                " — run `ow switch` to realign"
             ),
             **carried,
         )

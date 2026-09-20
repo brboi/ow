@@ -25,6 +25,8 @@ from ow.utils.git import (
     resolve_spec_local,
 )
 from ow.utils.refs import FetchOutcome, fetch_workspace_refs
+from ow.utils.render import ABSENT, OUTDATED, RenderPlan, YOURS
+from ow.utils.workspace import inspect_workspace
 from rich.markup import escape
 
 
@@ -79,11 +81,19 @@ class RepoStatus:
 
 @dataclass(frozen=True)
 class WorkspaceStatus:
-    """Every repo's status for a workspace, plus drift."""
+    """Every repo's status for a workspace, plus drift and generation state.
+
+    `generation` is `inspect_workspace`'s single read-only pass, run once
+    per status request rather than once per repo — it is the same
+    diagnostics `ow files` would show, carried here so status can mention
+    them without a second scan. `None` only for a `WorkspaceStatus` built
+    by hand (tests predating this field).
+    """
 
     ws_dir: Path
     repos: list[RepoStatus]
     drift: list[DriftResult]
+    generation: RenderPlan | None = None
 
     @property
     def runbot_branch(self) -> str | None:
@@ -91,6 +101,20 @@ class WorkspaceStatus:
             if r.runbot_branch:
                 return r.runbot_branch
         return None
+
+
+def generation_diagnostics(plan: RenderPlan | None) -> tuple[str, ...]:
+    """Errors, gate blockers and warnings from one inspection, in that order."""
+    if plan is None:
+        return ()
+    return tuple(plan.errors) + tuple(plan.gate_blockers) + tuple(plan.warnings)
+
+
+def pending_file_count(plan: RenderPlan | None) -> int:
+    """How many outputs differ from what ow would write — `ow files`'s count."""
+    if plan is None:
+        return 0
+    return sum(1 for s in plan.states if s.state in (YOURS, OUTDATED, ABSENT))
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +266,7 @@ def gather_workspace_status(
 ) -> WorkspaceStatus:
     """cmd_status's body minus every console.print. No output, no mutation."""
     drift = check_all_drift(ws, ws_dir)
+    generation = inspect_workspace(config, ws, ws_dir)
 
     if fetch:
         fetched = fetch_workspace_refs(ws, ws_dir, config, fetch_upstreams=True)
@@ -317,4 +342,4 @@ def gather_workspace_status(
 
         repos.append(result)
 
-    return WorkspaceStatus(ws_dir=ws_dir, repos=repos, drift=drift)
+    return WorkspaceStatus(ws_dir=ws_dir, repos=repos, drift=drift, generation=generation)

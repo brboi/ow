@@ -165,7 +165,7 @@ def test_warn_if_drifted_names_the_command_that_fixes_it(tmp_path, capsys):
     with patch("ow.utils.drift.get_worktree_branch", return_value="wrong-branch"):
         warn_if_drifted(ws, ws_dir)
 
-    assert "ow apply" in capsys.readouterr().err
+    assert "ow switch" in capsys.readouterr().err
 
 
 def test_drift_message_says_expected_then_found_in_that_order():

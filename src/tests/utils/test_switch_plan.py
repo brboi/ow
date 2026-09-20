@@ -77,12 +77,12 @@ def test_create_without_a_start_point_needs_no_resolution():
     assert result.args == ("switch", "-c", "new-branch")
 
 
-def test_a_missing_worktree_points_at_ow_apply():
+def test_a_missing_worktree_points_at_ow_init():
     result = plan(SwitchFacts(alias="community", worktree_missing=True))
 
     assert result.is_skipped
     assert result.args == ()
-    assert "ow apply" in result.hint
+    assert "ow init" in result.hint
 
 
 def test_a_busy_repo_is_skipped_with_its_resume_commands():

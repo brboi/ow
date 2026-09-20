@@ -67,9 +67,9 @@ def plan_reset(f: ResetFacts, *, hard: bool = False) -> ResetPlan:
 
     if f.drift is not None:
         # Resetting a branch the config does not name would throw away work
-        # ow was never told about. Realigning is `ow apply`'s job, and it
+        # ow was never told about. Realigning is `ow switch`'s job, and it
         # knows how to do it without losing anything.
-        return ResetPlan(skip_reason=f"{f.drift} — run ow apply", **carried)
+        return ResetPlan(skip_reason=f"{f.drift} — run ow switch", **carried)
 
     if f.head is None:
         return ResetPlan(skip_reason="could not resolve HEAD", **carried)

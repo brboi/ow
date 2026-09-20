@@ -331,7 +331,7 @@ class TestObservedShape:
         plan = plan_for(facts)
         assert plan.is_skipped
         assert plan.steps == ()
-        assert "ow apply" in plan.skip_reason
+        assert "ow switch" in plan.skip_reason
 
     def test_an_attached_worktree_under_a_detached_config_is_skipped(self, git_lab):
         build_pushed_branch(git_lab)
