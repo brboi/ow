@@ -11,6 +11,7 @@ from ow.utils import index, paths
 from ow.utils.config import (
     BranchSpec,
     Config,
+    LegacyConfig,
     RemoteConfig,
     WorkspaceConfig,
     load_workspace_config,
@@ -102,6 +103,23 @@ def _source_repo(tmp_path: Path, alias: str = "community") -> Path:
 def _config_with_local_remote(tmp_path: Path, alias: str = "community") -> Config:
     src = _source_repo(tmp_path, alias)
     return Config(remotes={alias: {"origin": RemoteConfig(url=str(src))}})
+
+
+def _legacy_global_config(remotes: dict | None = None) -> Config:
+    """A real schema-1 global config.toml on disk, and the record it loads as.
+
+    `plan_migration`/`commit_migration` recheck the file's bytes against
+    what was read, so the legacy record must come from an actual file. The
+    raw text is never re-parsed for the global side of a migration — only
+    the record's own `remotes` field is serialized into the replacement —
+    so it need not declare them itself.
+    """
+    path = paths.config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# legacy global config\n")
+    return Config(
+        remotes=remotes or {}, version=1, legacy=LegacyConfig(source=path, original=path.read_bytes()),
+    )
 
 
 ONE_REPO = {"community": BranchSpec("origin/master", "a-branch")}
@@ -362,6 +380,31 @@ def test_init_with_a_tty_stops_when_the_prompt_is_cancelled(tmp_path, monkeypatc
                 cmd_init(config, name="parrot")
 
     assert exc.value.code == 2
+    assert not (tmp_path / "parrot" / MARKER).exists()
+
+
+def test_init_with_a_tty_checks_the_final_selection_not_just_the_preselection(tmp_path, monkeypatch, capsys, xdg):
+    """A branch chosen at the interactive repo prompt — not via -r/-c — must
+    still be checked against known workspaces before any write."""
+    monkeypatch.chdir(tmp_path)
+    _remembered_workspace(tmp_path / "existing", "community", "master..shared-branch")
+    config = _config_with_local_remote(tmp_path)
+
+    def prompt_ask(message, **kwargs):
+        if "Select" in message:
+            return "1"
+        if "branch spec" in message:
+            return "master..shared-branch"
+        return kwargs.get("default", "")
+
+    with _tty(True), _mise_ok():
+        with patch("ow.commands.init.Prompt.ask", side_effect=prompt_ask):
+            with pytest.raises(SystemExit) as exc:
+                cmd_init(config, name="parrot")
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "shared-branch" in err
     assert not (tmp_path / "parrot" / MARKER).exists()
 
 
@@ -637,6 +680,46 @@ def test_init_repair_migrates_a_schema_1_workspace(tmp_path, monkeypatch, xdg):
     ws = load_workspace_config(ws_dir / MARKER)
     assert ws.version == 2
     assert ws.repos["community"].local_branch == "feat"
+
+
+def test_init_persists_the_manifest_when_only_the_global_config_is_legacy(tmp_path, monkeypatch, xdg):
+    """A schema-1 global config alongside a brand-new (schema-2) workspace
+    must not skip writing that workspace's own manifest: plan_migration
+    writes the workspace side only when the workspace itself is legacy, and
+    a caller that reloads only that side must still persist the other."""
+    monkeypatch.chdir(tmp_path)
+    config = _legacy_global_config()
+
+    with _tty(False), _mise_ok():
+        cmd_init(config, name="newws")
+
+    assert (tmp_path / "newws" / MARKER).exists()
+    ws = load_workspace_config(tmp_path / "newws" / MARKER)
+    assert ws.version == 2
+    assert ws.repos == {}
+
+
+def test_init_repair_with_legacy_global_config_keeps_retryable_intent_on_repo_failure(
+    tmp_path, monkeypatch, xdg
+):
+    """Same bug, on the repair path: a failing new repo must still land in
+    the on-disk manifest even though only the global config migrated."""
+    monkeypatch.chdir(tmp_path)
+    ws_dir = tmp_path / "parrot"
+    write_workspace_config(ws_dir / MARKER, WorkspaceConfig(repos={}))
+    index.remember(ws_dir)
+    config = _legacy_global_config(
+        remotes={"newalias": {"origin": RemoteConfig(url="/does/not/exist")}}
+    )
+
+    with _tty(False), _mise_ok():
+        with pytest.raises(SystemExit) as exc:
+            cmd_init(config, name="parrot", repos={"newalias": parse_branch_spec("master..feat")})
+
+    assert exc.value.code == 1
+    ws = load_workspace_config(ws_dir / MARKER)
+    assert ws.version == 2
+    assert "newalias" in ws.repos
 
 
 # ---------------------------------------------------------------------------
