@@ -5,6 +5,9 @@ workspaces. What is left is a single question — which directory? — answered
 by exactly one of four forms, each with its own failure. None of them falls
 back to another: a bare name that the index does not know is an error, not
 an invitation to try the same string as a relative path.
+
+Resolution is a read: it loads a config and returns it, and never records
+where the workspace is. The index belongs to the lifecycle commands.
 """
 
 import os
@@ -31,7 +34,13 @@ def _looks_like_path(value: str) -> bool:
 
 
 def _load(ws_dir: Path) -> tuple[Path, WorkspaceConfig]:
-    """Read a directory known to be a workspace, and remember it."""
+    """Read a directory known to be a workspace. Reads, and nothing else.
+
+    Resolving a workspace used to remember it, which made every command that
+    merely looked at a workspace mutate the user's state directory. Only the
+    lifecycle commands that own the index — `ow init`, `ow render`, `ow mv`,
+    unarchive — record a location now.
+    """
     try:
         ws = load_workspace_config(ws_dir / MARKER)
     except (OSError, ValueError) as exc:
@@ -40,9 +49,6 @@ def _load(ws_dir: Path) -> tuple[Path, WorkspaceConfig]:
         # gets, not eight frames of tomllib. TOMLDecodeError is a
         # ValueError, and so is the missing-'templates' complaint.
         _fail(f"Error: could not load {ws_dir / MARKER}: {exc}")
-    # Only a workspace ow can actually read is worth remembering: an entry
-    # that fails to load would fail the same way on every later `ow ls`.
-    index.remember(ws_dir)
     return ws_dir, ws
 
 

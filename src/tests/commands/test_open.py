@@ -19,7 +19,7 @@ def _make_workspace(tmp_path: Path, name: str = "parrot") -> Path:
     (ws / ".ow").mkdir()
     write_workspace_config(
         ws / MARKER,
-        WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"]),
+        WorkspaceConfig(repos={"community": BranchSpec("origin/master")}),
     )
     index.remember(ws)
     return ws
@@ -28,7 +28,7 @@ def _make_workspace(tmp_path: Path, name: str = "parrot") -> Path:
 def test_open_runs_the_configured_editor(tmp_path, monkeypatch, xdg):
     ws = _make_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
-    config = Config(vars={}, remotes={}, editor="myeditor -n")
+    config = Config(remotes={}, editor="myeditor -n")
 
     with patch(
         "ow.commands.open.subprocess.run",
@@ -46,7 +46,7 @@ def test_open_defaults_to_code(tmp_path, monkeypatch, xdg):
     """No `editor` key in the config means `code`."""
     ws = _make_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
-    config = Config(vars={}, remotes={})
+    config = Config(remotes={})
 
     with patch(
         "ow.commands.open.subprocess.run",
@@ -62,7 +62,7 @@ def test_open_defaults_to_code(tmp_path, monkeypatch, xdg):
 def test_open_reports_a_missing_editor(tmp_path, monkeypatch, capsys, xdg):
     _make_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
-    config = Config(vars={}, remotes={}, editor="definitely-not-a-real-binary")
+    config = Config(remotes={}, editor="definitely-not-a-real-binary")
 
     with patch("ow.commands.open.subprocess.run", side_effect=OSError("No such file")):
         with pytest.raises(SystemExit) as exc:
@@ -77,7 +77,7 @@ def test_open_reports_a_missing_editor(tmp_path, monkeypatch, capsys, xdg):
 def test_open_with_an_empty_editor_exits_nonzero(tmp_path, monkeypatch, capsys, xdg):
     _make_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
-    config = Config(vars={}, remotes={}, editor="")
+    config = Config(remotes={}, editor="")
 
     with pytest.raises(SystemExit) as exc:
         cmd_open(config, workspace="parrot")

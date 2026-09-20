@@ -1,11 +1,17 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from rich.markup import escape
 from rich.text import Text
 
 from ow.utils import paths
-from ow.utils.config import Config, WorkspaceConfig, select_aliases
+from ow.utils.config import (
+    Config,
+    WorkspaceConfig,
+    report_pending_migration,
+    select_aliases,
+)
 from ow.utils.display import console, err_console
 from ow.utils.git import count_commits, resolve_spec, rev_parse
 from ow.utils.refs import FetchOutcome
@@ -87,16 +93,15 @@ def cmd_fetch(config: Config, workspace: str | None = None, *, only: str | None 
     whether someone force-pushed under you.
     """
     ws_dir, ws = resolve_workspace(name=workspace)
+    report_pending_migration(config, ws, ws_dir)
     aliases = select_aliases(list(ws.repos), only)
     if not aliases:
         return
 
-    # --only must narrow the fetching itself, not just the report.
-    selected = WorkspaceConfig(
-        repos={a: spec for a, spec in ws.repos.items() if a in aliases},
-        templates=ws.templates,
-        vars=ws.vars,
-    )
+    # --only must narrow the fetching itself, not just the report. `replace`
+    # keeps the schema version, the typed overrides and any legacy evidence:
+    # a narrowed view of the workspace is still the same workspace.
+    selected = replace(ws, repos={alias: ws.repos[alias] for alias in aliases})
 
     outcome = fetch_workspace_refs(
         selected, ws_dir, config, fetch_upstreams=True,

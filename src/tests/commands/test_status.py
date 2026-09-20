@@ -1,21 +1,22 @@
 import os
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ow.commands.status import cmd_status
 from ow.utils.config import BranchSpec, Config, WorkspaceConfig, parse_branch_spec, write_workspace_config
+from ow.utils.options import OdooOverrides
 from ow.utils.refs import FetchOutcome
 from ow.utils import paths
 
 
-def write_ow_config(ws_dir: Path, templates: list[str], repos: dict[str, str], vars: dict | None = None) -> None:
+def write_ow_config(
+    ws_dir: Path, repos: dict[str, str], odoo: OdooOverrides | None = None
+) -> None:
     ws = WorkspaceConfig(
         repos={alias: parse_branch_spec(spec) for alias, spec in repos.items()},
-        templates=templates,
-        vars=vars or {},
+        odoo=odoo if odoo is not None else OdooOverrides(),
     )
     write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
 
@@ -32,11 +33,8 @@ def test_cmd_status_drift_warns(tmp_path, capsys, xdg):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     (paths.repos_dir() / "community.git").mkdir(parents=True)
-    write_ow_config(ws_dir, ["common"], {"community": "master..my-feature"})
-    config = Config(
-        vars={"http_port": 8069, "db_host": "localhost", "db_port": 5432},
-        remotes={},
-    )
+    write_ow_config(ws_dir, {"community": "master..my-feature"})
+    config = Config(remotes={})
 
     resolved_spec = BranchSpec("origin/master")
     fetch_return = FetchOutcome(
@@ -70,11 +68,8 @@ def test_cmd_status_fetches_before_display(tmp_path, xdg):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     (paths.repos_dir() / "community.git").mkdir(parents=True)
-    write_ow_config(ws_dir, ["common"], {"community": "master"})
-    config = Config(
-        vars={"http_port": 8069, "db_host": "localhost", "db_port": 5432},
-        remotes={},
-    )
+    write_ow_config(ws_dir, {"community": "master"})
+    config = Config(remotes={})
 
     fetch_called = [False]
     resolved_spec = BranchSpec("origin/master")
@@ -112,11 +107,8 @@ def test_cmd_status_marks_fetch_failure(tmp_path, capsys, xdg):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     (paths.repos_dir() / "community.git").mkdir(parents=True)
-    write_ow_config(ws_dir, ["common"], {"community": "master"})
-    config = Config(
-        vars={"http_port": 8069, "db_host": "localhost", "db_port": 5432},
-        remotes={},
-    )
+    write_ow_config(ws_dir, {"community": "master"})
+    config = Config(remotes={})
 
     resolved_spec = BranchSpec("origin/master")
     fetch_return = FetchOutcome(
@@ -152,8 +144,8 @@ def test_status_offline_does_not_fetch(tmp_path, xdg, monkeypatch):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     (paths.repos_dir() / "community.git").mkdir(parents=True)
-    write_ow_config(ws_dir, ["common"], {"community": "master"})
-    config = Config(vars={}, remotes={})
+    write_ow_config(ws_dir, {"community": "master"})
+    config = Config(remotes={})
 
     fetch_called = []
     monkeypatch.setattr(
@@ -172,8 +164,8 @@ def test_status_fetch_calls_fetch(tmp_path, xdg, monkeypatch):
     ws_dir = tmp_path / "workspaces" / "test"
     (ws_dir / "community").mkdir(parents=True)
     (paths.repos_dir() / "community.git").mkdir(parents=True)
-    write_ow_config(ws_dir, ["common"], {"community": "master"})
-    config = Config(vars={}, remotes={})
+    write_ow_config(ws_dir, {"community": "master"})
+    config = Config(remotes={})
 
     fetch_called = []
     def mock_fetch(*a, **kw):
@@ -190,3 +182,30 @@ def test_status_fetch_calls_fetch(tmp_path, xdg, monkeypatch):
 
     cmd_status(config, fetch=True)
     assert fetch_called
+
+
+def test_cmd_status_reports_a_pending_migration(tmp_path, capsys, xdg):
+    """`ow status` shows the condition and names the command that resolves it.
+
+    Reporting is not migrating: status must not write a byte of the file it
+    is describing, and the warning is the only thing that explains why typed
+    options are not in play for this workspace yet."""
+    ws_dir = tmp_path / "workspaces" / "legacy"
+    (ws_dir / ".ow").mkdir(parents=True)
+    (ws_dir / ".ow" / "config.toml").write_text('[repos]\ncommunity = "master"\n')
+
+    cmd_status(Config(remotes={}), workspace=str(ws_dir))
+
+    err = capsys.readouterr().err
+    assert "Pending migration" in err
+    assert "ow render" in err
+    assert "version" not in (ws_dir / ".ow" / "config.toml").read_text()
+
+
+def test_cmd_status_says_nothing_about_migration_for_schema_2(tmp_path, capsys, xdg):
+    ws_dir = tmp_path / "workspaces" / "current"
+    write_ow_config(ws_dir, {"community": "master"})
+
+    cmd_status(Config(remotes={}), workspace=str(ws_dir))
+
+    assert "Pending migration" not in capsys.readouterr().err

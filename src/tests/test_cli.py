@@ -418,18 +418,23 @@ def test_ls_archived(xdg):
     mock_load_config.assert_not_called()
 
 
-def test_creates_config_if_missing(xdg):
-    """If the global config doesn't exist yet, it is bootstrapped with default content."""
+def test_does_not_create_a_config_just_by_running(xdg):
+    """Reading the global config creates nothing — no bootstrap on first use.
+
+    Writing a default config from a read made every command a writer, and it
+    silently erased the "no global config yet" condition that
+    `check_legacy_layout()` reads. The command still runs, on the in-memory
+    defaults; `ow init`/`ow render` are what persist a config."""
     assert not paths.config_file().exists()
 
-    with patch("ow.__main__.cmd_status", autospec=True):
+    with patch("ow.__main__.cmd_status", autospec=True) as mock_status:
         result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
-    assert paths.config_file().exists()
-    content = paths.config_file().read_text()
-    assert "community" in content
-    assert "origin.url" in content
+    assert not paths.config_file().exists()
+    assert mock_status.called
+    passed_config = mock_status.call_args.args[0]
+    assert "community" in passed_config.remotes
 
 
 def test_exits_nonzero_if_config_load_fails(xdg):

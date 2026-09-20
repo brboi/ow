@@ -1,4 +1,5 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -6,7 +7,13 @@ from rich.markup import escape
 from rich.text import Text
 
 from ow.utils import paths
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig, select_aliases, write_workspace_config
+from ow.utils.config import (
+    BranchSpec,
+    Config,
+    report_pending_migration,
+    select_aliases,
+    write_workspace_config,
+)
 from ow.utils.display import console, err_console, task_progress
 from ow.utils.git import (
     get_all_remote_refs,
@@ -357,8 +364,8 @@ def cmd_switch(
     Once a repo has actually moved, `.ow/config.toml` is rewritten from
     what git now reports for it — an upstream when the branch tracks
     one, the start point (or the repo's own prior base ref) when it does
-    not, a bare ref when it ends up detached. Templates are not
-    re-rendered here; that is `ow apply`'s job.
+    not, a bare ref when it ends up detached. Files are not re-rendered
+    here; that is `ow render`'s job.
     """
     if detach and create is not None:
         err_console.print("Error: --detach cannot be combined with -c/--create", markup=False)
@@ -371,6 +378,7 @@ def cmd_switch(
         sys.exit(2)
 
     ws_dir, ws = resolve_workspace(name=workspace)
+    report_pending_migration(config, ws, ws_dir)
     aliases = select_aliases(list(ws.repos), only)
     if not aliases:
         return
@@ -470,10 +478,13 @@ def cmd_switch(
     if touched:
         new_repos = dict(ws.repos)
         new_repos.update(touched)
-        new_ws = WorkspaceConfig(repos=new_repos, templates=ws.templates, vars=ws.vars)
-        write_workspace_config(ws_dir / ".ow" / "config.toml", new_ws)
+        # `replace` writes the same workspace back with the specs git was
+        # actually given: schema version, typed overrides and legacy evidence
+        # all travel with it, and the schema-preserving writer decides how
+        # they reach disk.
+        write_workspace_config(ws_dir / ".ow" / "config.toml", replace(ws, repos=new_repos))
         console.print(
-            "\n[dim]Templates are not re-rendered by a switch — run `ow apply` if you need them refreshed.[/]"
+            "\n[dim]Files are not re-rendered by a switch — run `ow render` if you need them refreshed.[/]"
         )
 
     if exec_failed:

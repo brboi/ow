@@ -18,10 +18,9 @@ def make_workspace(tmp_path: Path, repos: dict[str, str]) -> tuple[Config, Path]
     from ow.utils.config import parse_branch_spec
     ws = WorkspaceConfig(
         repos={a: parse_branch_spec(s) for a, s in repos.items()},
-        templates=["common"],
     )
     write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
-    config = Config(vars={}, remotes={})
+    config = Config(remotes={})
     return config, ws_dir
 
 

@@ -77,7 +77,7 @@ def callback(
 
 
 def _load_config() -> Config:
-    """Load the user's global configuration, bootstrapping it on first use."""
+    """Load the user's global configuration. Reading creates nothing."""
     check_legacy_layout()
     try:
         return load_global_config()
@@ -89,11 +89,10 @@ def _load_config() -> Config:
 def _available_repo_aliases() -> list[str]:
     """Return repo aliases from the global config in declaration order.
 
-    Reads the config only if it already exists. Completion must never
-    bootstrap it: load_global_config() would create a default config.toml,
-    silently erasing the "no global config yet" condition that
-    check_legacy_layout() depends on — the guard commands run through, but
-    completion callbacks don't.
+    Reads the config only if it already exists — completion must not create
+    one: an absent config.toml is what `check_legacy_layout()` reads as "no
+    global config yet", and a completion callback writing a default would
+    erase that condition for every command after it.
     """
     if not config_file().exists():
         return []

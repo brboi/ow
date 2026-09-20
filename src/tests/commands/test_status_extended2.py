@@ -14,7 +14,7 @@ class TestCmdStatusErrorPaths:
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         (ws_dir / "community").mkdir()
-        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")})
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         with (
             patch.dict("os.environ", {"OW_WORKSPACE": str(ws_dir)}),
@@ -34,7 +34,7 @@ class TestCmdStatusErrorPaths:
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         (ws_dir / "community").mkdir()
-        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")})
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         resolved = BranchSpec("origin/master")
         fetch_return = FetchOutcome(
@@ -59,7 +59,7 @@ class TestCmdStatusErrorPaths:
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         (ws_dir / "community").mkdir()
-        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")})
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         resolved = BranchSpec("origin/master")
         fetch_return = FetchOutcome(
@@ -86,7 +86,7 @@ class TestCmdStatusErrorPaths:
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
         (ws_dir / "community").mkdir()
-        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"])
+        ws = WorkspaceConfig(repos={"community": BranchSpec("origin/master")})
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         resolved = BranchSpec("origin/master")
         fetch_return = FetchOutcome(
@@ -114,7 +114,7 @@ class TestCmdStatusErrorPaths:
         alias = "[/]evil"
         ws_dir = tmp_path / "workspaces" / "test"
         ws_dir.mkdir(parents=True)
-        ws = WorkspaceConfig(repos={alias: BranchSpec("origin/master")}, templates=["common"])
+        ws = WorkspaceConfig(repos={alias: BranchSpec("origin/master")})
         write_workspace_config(ws_dir / ".ow" / "config.toml", ws)
         fetch_return = FetchOutcome(
             tracks={alias: "origin/master"}, upstreams={},

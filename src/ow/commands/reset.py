@@ -1,11 +1,17 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from rich.markup import escape
 from rich.text import Text
 
-from ow.utils.config import BranchSpec, Config, WorkspaceConfig, select_aliases
+from ow.utils.config import (
+    BranchSpec,
+    Config,
+    report_pending_migration,
+    select_aliases,
+)
 from ow.utils.display import confirm, console, err_console
 from ow.utils.drift import DriftResult, check_drift
 from ow.utils.git import (
@@ -179,11 +185,13 @@ def cmd_reset(
     them first, which is what an upstream that was force-pushed needs.
     """
     ws_dir, ws = resolve_workspace(name=workspace)
+    report_pending_migration(config, ws, ws_dir)
     aliases = select_aliases(list(ws.repos), only)
 
     # --only must also narrow resolution and fetching, not just execution.
-    selected_repos = {a: spec for a, spec in ws.repos.items() if a in aliases}
-    selected_ws = WorkspaceConfig(repos=selected_repos, templates=ws.templates, vars=ws.vars)
+    # `replace` keeps the schema version, the typed overrides and any legacy
+    # evidence: a narrowed view of the workspace is still the same workspace.
+    selected_ws = replace(ws, repos={alias: ws.repos[alias] for alias in aliases})
 
     resolved = fetch_workspace_refs(
         selected_ws, ws_dir, config, fetch_upstreams=True,

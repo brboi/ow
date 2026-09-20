@@ -5,7 +5,7 @@ from rich.text import Text
 from rich.markup import escape
 from ow.utils.drift import warn_if_drifted
 from ow.utils.resolver import resolve_workspace
-from ow.utils.config import Config
+from ow.utils.config import Config, report_pending_migration
 from ow.utils.status import (
     RepoStatus,
     WorkspaceStatus,
@@ -82,6 +82,7 @@ def _render_status(status: WorkspaceStatus, max_alias_len: int) -> None:
 def cmd_status(config: Config, workspace: str | None = None, *, fetch: bool = False) -> None:
     """Show branch status for the current workspace."""
     ws_dir, ws = resolve_workspace(name=workspace)
+    report_pending_migration(config, ws, ws_dir)
     warn_if_drifted(ws, ws_dir)
     status = gather_workspace_status(ws, ws_dir, config, fetch=fetch)
     max_alias_len = max((len(a) for a in ws.repos), default=0)

@@ -1,11 +1,16 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from rich.markup import escape
 from rich.text import Text
 
-from ow.utils.config import Config, WorkspaceConfig, select_aliases
+from ow.utils.config import (
+    Config,
+    report_pending_migration,
+    select_aliases,
+)
 from ow.utils.display import confirm, console, err_console
 from ow.utils.drift import warn_if_drifted
 from ow.utils.git import (
@@ -234,11 +239,11 @@ def cmd_rebase(
 ) -> None:
     """Fetch and rebase the repos of a workspace."""
     ws_dir, ws = resolve_workspace(name=workspace)
+    report_pending_migration(config, ws, ws_dir)
     aliases = select_aliases(list(ws.repos), only)
 
     # --only must also narrow drift-checking and fetching, not just execution.
-    selected_repos = {a: spec for a, spec in ws.repos.items() if a in aliases}
-    selected_ws = WorkspaceConfig(repos=selected_repos, templates=ws.templates, vars=ws.vars)
+    selected_ws = replace(ws, repos={alias: ws.repos[alias] for alias in aliases})
 
     warn_if_drifted(selected_ws, ws_dir)
 

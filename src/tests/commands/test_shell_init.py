@@ -60,7 +60,7 @@ def test_cd_prints_the_workspace_path(tmp_path, capsys, monkeypatch, xdg):
     (ws / ".ow").mkdir()
     write_workspace_config(
         ws / MARKER,
-        WorkspaceConfig(repos={"community": BranchSpec("origin/master")}, templates=["common"]),
+        WorkspaceConfig(repos={"community": BranchSpec("origin/master")}),
     )
     index.remember(ws)
     elsewhere = tmp_path / "elsewhere"

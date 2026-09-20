@@ -14,18 +14,20 @@ from unittest.mock import patch
 
 import pytest
 
-from ow.utils import index
-from ow.utils.config import WorkspaceConfig, write_workspace_config
+from ow.utils import index, paths
+from ow.utils.config import WorkspaceConfig, parse_branch_spec, write_workspace_config
 from ow.utils.resolver import repo_from_cwd, resolve_workspace
 
 
-def _make_ws(base: Path, name: str, *, templates: list[str] | None = None) -> Path:
-    """A real workspace on disk: a directory holding .ow/config.toml."""
+def _make_ws(base: Path, name: str, *, repo: str | None = None) -> Path:
+    """A real workspace on disk: a directory holding .ow/config.toml.
+
+    Schema 2 — what `ow init` writes today. The schema-1 read path has its
+    own tests; resolution is about finding a directory, not about which
+    schema the manifest inside it uses."""
     ws_dir = base / name
-    write_workspace_config(
-        ws_dir / ".ow" / "config.toml",
-        WorkspaceConfig(repos={}, templates=templates or ["common"], vars={}),
-    )
+    repos = {"community": parse_branch_spec(repo)} if repo else {}
+    write_workspace_config(ws_dir / ".ow" / "config.toml", WorkspaceConfig(repos=repos))
     return ws_dir
 
 
@@ -43,7 +45,7 @@ def _no_inherited_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_walks_up_from_a_subdirectory(
     xdg: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws_dir = _make_ws(xdg, "walkup", templates=["common", "odoo"])
+    ws_dir = _make_ws(xdg, "walkup", repo="master")
     deep = ws_dir / "community" / "addons"
     deep.mkdir(parents=True)
     monkeypatch.chdir(deep)
@@ -51,7 +53,7 @@ def test_walks_up_from_a_subdirectory(
     resolved_dir, ws = resolve_workspace()
 
     assert resolved_dir == ws_dir.resolve()
-    assert ws.templates == ["common", "odoo"]
+    assert ws.repos["community"] == parse_branch_spec("master")
 
 
 def test_outside_any_workspace_fails_and_suggests_ow_ls(
@@ -79,7 +81,7 @@ def test_outside_any_workspace_fails_and_suggests_ow_ls(
 def test_unique_name_resolves_through_the_index(
     xdg: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws_dir = _make_ws(xdg / "somewhere", "quattromori", templates=["odoo"])
+    ws_dir = _make_ws(xdg / "somewhere", "quattromori", repo="master")
     index.remember(ws_dir)
     # cwd is deliberately not the workspace: the name is what resolves it.
     monkeypatch.chdir(xdg)
@@ -87,7 +89,7 @@ def test_unique_name_resolves_through_the_index(
     resolved_dir, ws = resolve_workspace(name="quattromori")
 
     assert resolved_dir == ws_dir.resolve()
-    assert ws.templates == ["odoo"]
+    assert ws.repos["community"] == parse_branch_spec("master")
 
 
 def test_unknown_name_fails_and_suggests_ow_ls(
@@ -146,12 +148,12 @@ def test_a_name_never_falls_back_to_a_relative_path(
 
 
 def test_absolute_path_argument_resolves(xdg: Path) -> None:
-    ws_dir = _make_ws(xdg, "by-path", templates=["common"])
+    ws_dir = _make_ws(xdg, "by-path", repo="18.0")
 
     resolved_dir, ws = resolve_workspace(name=str(ws_dir))
 
     assert resolved_dir == ws_dir.resolve()
-    assert ws.templates == ["common"]
+    assert ws.repos["community"] == parse_branch_spec("18.0")
 
 
 def test_relative_path_argument_resolves(
@@ -226,14 +228,14 @@ def test_workspace_config_is_named_config_toml(
     """Regression guard: the per-workspace config file is `.ow/config.toml`,
     not the old extensionless `.ow/config`. Uses the path form of resolution
     so that only the filename literal is under test."""
-    ws_dir = _make_ws(xdg, "toml-check", templates=["common"])
+    ws_dir = _make_ws(xdg, "toml-check", repo="master")
     assert (ws_dir / ".ow" / "config.toml").exists()
     assert not (ws_dir / ".ow" / "config").exists()
 
     resolved_dir, ws = resolve_workspace(name=str(ws_dir))
 
     assert resolved_dir == ws_dir.resolve()
-    assert ws.templates == ["common"]
+    assert ws.version == 2
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +248,7 @@ def test_ow_workspace_empty_string_means_unset(
 ) -> None:
     """An empty OW_WORKSPACE is an absence, not a fifth form: it must fall
     through to the cwd walk-up, consistent with the XDG variables."""
-    ws_dir = _make_ws(xdg, "empty-env", templates=["common"])
+    ws_dir = _make_ws(xdg, "empty-env", repo="master")
     deep = ws_dir / "community"
     deep.mkdir()
     monkeypatch.setenv("OW_WORKSPACE", "")
@@ -255,20 +257,20 @@ def test_ow_workspace_empty_string_means_unset(
     resolved_dir, ws = resolve_workspace()
 
     assert resolved_dir == ws_dir.resolve()
-    assert ws.templates == ["common"]
+    assert ws.repos["community"] == parse_branch_spec("master")
 
 
 def test_ow_workspace_absolute_path_resolves(
     xdg: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws_dir = _make_ws(xdg, "env-ws", templates=["common"])
+    ws_dir = _make_ws(xdg, "env-ws", repo="master")
     monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
     monkeypatch.chdir(xdg)
 
     resolved_dir, ws = resolve_workspace()
 
     assert resolved_dir == ws_dir.resolve()
-    assert ws.templates == ["common"]
+    assert ws.repos["community"] == parse_branch_spec("master")
 
 
 def test_ow_workspace_as_a_bare_name_fails_even_when_the_index_knows_it(
@@ -350,86 +352,63 @@ def test_ow_workspace_absolute_path_that_is_not_a_workspace_fails(
 def test_an_explicit_argument_beats_ow_workspace(
     xdg: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wanted = _make_ws(xdg, "wanted", templates=["wanted"])
-    other = _make_ws(xdg, "other", templates=["other"])
+    wanted = _make_ws(xdg, "wanted", repo="wanted")
+    other = _make_ws(xdg, "other", repo="other")
     monkeypatch.setenv("OW_WORKSPACE", str(other))
 
     resolved_dir, ws = resolve_workspace(name=str(wanted))
 
     assert resolved_dir == wanted.resolve()
-    assert ws.templates == ["wanted"]
+    assert ws.repos["community"] == parse_branch_spec("wanted")
 
 
 # ---------------------------------------------------------------------------
-# 11. Every success is remembered
+# 11. Resolution is a read
 # ---------------------------------------------------------------------------
 
 
-def test_path_form_is_remembered(xdg: Path) -> None:
-    ws_dir = _make_ws(xdg, "remember-path")
-    assert index.known_workspaces() == []
+@pytest.mark.parametrize("form", ["path", "cwd", "name", "env"])
+def test_no_form_writes_the_index(
+    form, xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolving a workspace must not mutate the user's state directory.
+
+    Every form used to remember what it found, which made `ow status`, a
+    dry-run and a completion callback write to the index. Only the
+    lifecycle commands remember now — and a read that leaves no file behind
+    is the only version of this that a read-only home can run."""
+    ws_dir = _make_ws(xdg, "read-only")
+    monkeypatch.chdir(xdg)
+    index.remember(ws_dir)
+    before = paths.index_file().read_bytes()
+
+    if form == "path":
+        resolve_workspace(name=str(ws_dir))
+    elif form == "cwd":
+        inside = ws_dir / "community"
+        inside.mkdir()
+        monkeypatch.chdir(inside)
+        resolve_workspace()
+    elif form == "name":
+        resolve_workspace(name="read-only")
+    else:
+        monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
+        resolve_workspace()
+
+    assert paths.index_file().read_bytes() == before
+
+
+def test_a_workspace_the_index_has_never_seen_is_not_recorded(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point: resolving by path leaves the index exactly as it was."""
+    ws_dir = _make_ws(xdg, "unrecorded")
+    monkeypatch.chdir(xdg)
 
     resolve_workspace(name=str(ws_dir))
 
-    assert index.known_workspaces() == [ws_dir.resolve()]
-
-
-def test_cwd_walkup_is_remembered(
-    xdg: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ws_dir = _make_ws(xdg, "remember-cwd")
-    inside = ws_dir / "community"
-    inside.mkdir()
-    monkeypatch.chdir(inside)
     assert index.known_workspaces() == []
-
-    resolve_workspace()
-
-    assert index.known_workspaces() == [ws_dir.resolve()]
-
-
-def test_name_form_is_remembered(xdg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`find_by_name` only searches what the index already knows, so a
-    workspace must be pre-seeded to be resolvable by name — which means
-    `test_unique_name_resolves_through_the_index` proves resolution works
-    but, since the index already knows the entry, would still pass even if
-    the name path's own `index.remember` call were deleted. Spy on the call
-    itself so this test actually has teeth for that call."""
-    ws_dir = _make_ws(xdg / "somewhere", "remember-name")
-    index.remember(ws_dir)
-    monkeypatch.chdir(xdg)
-
-    with patch("ow.utils.resolver.index.remember", wraps=index.remember) as spy:
-        resolve_workspace(name="remember-name")
-
-    spy.assert_called_once_with(ws_dir.resolve())
-
-
-def test_ow_workspace_form_is_remembered(
-    xdg: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ws_dir = _make_ws(xdg, "remember-env")
-    monkeypatch.setenv("OW_WORKSPACE", str(ws_dir))
-    assert index.known_workspaces() == []
-
-    resolve_workspace()
-
-    assert index.known_workspaces() == [ws_dir.resolve()]
-
-
-def test_a_failed_resolution_is_not_remembered(
-    xdg: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    stray = xdg / "failed"
-    stray.mkdir()
-    monkeypatch.chdir(stray)
-
-    with pytest.raises(SystemExit) as exc:
-        resolve_workspace(name=str(stray))
-
-    assert exc.value.code == 1
-
-    assert index.known_workspaces() == []
+    assert not paths.index_file().exists()
 
 
 # ---------------------------------------------------------------------------
@@ -459,14 +438,14 @@ def test_malformed_workspace_config_fails_cleanly(
     assert "could not load" in err
 
 
-def test_workspace_config_missing_templates_fails_cleanly(
+def test_workspace_config_with_a_legacy_key_fails_cleanly(
     xdg: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    """Valid TOML, missing a required key: a ValueError, not a decode error,
-    and just as much of a traceback before this."""
-    ws_dir = xdg / "keyless"
+    """Valid TOML, a key a schema-2 file may not carry: a ValueError naming
+    the file and the key, not a traceback."""
+    ws_dir = xdg / "legacy-key"
     (ws_dir / ".ow").mkdir(parents=True)
-    (ws_dir / ".ow" / "config.toml").write_text("[repos]\n")
+    (ws_dir / ".ow" / "config.toml").write_text('version = 2\ntemplates = ["common"]\n')
 
     with pytest.raises(SystemExit) as exc:
         resolve_workspace(name=str(ws_dir))
@@ -478,12 +457,14 @@ def test_workspace_config_missing_templates_fails_cleanly(
 
 
 def test_a_workspace_that_will_not_load_is_not_remembered(xdg: Path) -> None:
-    """The index records where a workspace *is*, and a file ow cannot read
-    is not evidence of one — remembering it would hand `ow ls` an entry
-    that fails the same way on every listing."""
+    """A failed resolution writes nothing at all — not even a cached path.
+
+    An entry ow cannot read would fail the same way on every `ow ls`, and
+    caching it would be the read that made a broken workspace the index's
+    problem."""
     ws_dir = xdg / "unreadable"
     (ws_dir / ".ow").mkdir(parents=True)
-    (ws_dir / ".ow" / "config.toml").write_text("templates = [\n")
+    (ws_dir / ".ow" / "config.toml").write_text('templates = ["common\n')
 
     with pytest.raises(SystemExit) as exc:
         resolve_workspace(name=str(ws_dir))
@@ -491,6 +472,7 @@ def test_a_workspace_that_will_not_load_is_not_remembered(xdg: Path) -> None:
     assert exc.value.code == 1
 
     assert index.known_workspaces() == []
+    assert not paths.index_file().exists()
 
 
 def test_a_bare_tilde_is_a_path_not_a_name(
@@ -503,7 +485,7 @@ def test_a_bare_tilde_is_a_path_not_a_name(
     home = xdg / "home"
     write_workspace_config(
         home / ".ow" / "config.toml",
-        WorkspaceConfig(repos={}, templates=["tilde-home"], vars={}),
+        WorkspaceConfig(repos={"community": parse_branch_spec("master")}),
     )
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(xdg)
@@ -511,7 +493,7 @@ def test_a_bare_tilde_is_a_path_not_a_name(
     resolved_dir, ws = resolve_workspace(name="~")
 
     assert resolved_dir == home.resolve()
-    assert ws.templates == ["tilde-home"]
+    assert ws.repos["community"] == parse_branch_spec("master")
 
 
 # ---------------------------------------------------------------------------

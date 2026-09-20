@@ -76,7 +76,7 @@ def _make_workspace(
     ws = tmp_path / "workspaces" / name
     ws.mkdir(parents=True)
     (ws / ".ow").mkdir()
-    ws_cfg = WorkspaceConfig(repos=repos, templates=["common"])
+    ws_cfg = WorkspaceConfig(repos=repos)
     write_workspace_config(ws / MARKER, ws_cfg)
 
     if bare_repos:
@@ -121,7 +121,7 @@ def test_rm_multiple_matches_exits_nonzero(tmp_path, capsys, xdg):
     ws2 = tmp_path / "other" / "dupe"
     ws2.mkdir(parents=True)
     (ws2 / ".ow").mkdir()
-    write_workspace_config(ws2 / MARKER, WorkspaceConfig(repos={}, templates=["common"]))
+    write_workspace_config(ws2 / MARKER, WorkspaceConfig(repos={}))
     index.remember(ws2)
 
     with pytest.raises(SystemExit) as exc:

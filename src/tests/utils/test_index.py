@@ -55,11 +55,18 @@ def test_remember_resolves_relative_path(xdg: Path, monkeypatch: pytest.MonkeyPa
     assert index.known_workspaces() == [ws.resolve()]
 
 
-def test_known_workspaces_prunes_vanished_entries_and_rewrites(xdg: Path) -> None:
+def test_known_workspaces_filters_vanished_entries_without_rewriting(xdg: Path) -> None:
+    """A read reports what is usable and leaves the file exactly as it was.
+
+    Pruning used to happen on read, which made `ow status`, a completion
+    callback and a dry-run mutate the user's state directory. Dropping the
+    entry for good is `ow prune`'s explicit job now, and the raw file still
+    says what it said."""
     alive = _make_workspace(xdg, "alive")
     gone = _make_workspace(xdg, "gone")
     index.remember(alive)
     index.remember(gone)
+    before = paths.index_file().read_text()
 
     # The workspace disappears behind the index's back.
     (gone / ".ow" / "config.toml").unlink()
@@ -67,19 +74,76 @@ def test_known_workspaces_prunes_vanished_entries_and_rewrites(xdg: Path) -> Non
     result = index.known_workspaces()
 
     assert result == [alive.resolve()]
+    assert paths.index_file().read_text() == before
+    assert index.list_workspaces() == [alive.resolve(), gone.resolve()]
+
+
+def test_prune_drops_exactly_the_named_entries(xdg: Path) -> None:
+    """`ow prune` names what died; everything else in the file survives."""
+    alive = _make_workspace(xdg, "alive")
+    gone = _make_workspace(xdg, "gone")
+    index.remember(alive)
+    index.remember(gone)
+    (gone / ".ow" / "config.toml").unlink()
+
+    index.prune([gone.resolve()])
+
     assert paths.index_file().read_text().splitlines() == [str(alive.resolve())]
+    assert index.known_workspaces() == [alive.resolve()]
 
 
-def test_known_workspaces_does_not_rewrite_when_nothing_pruned(xdg: Path) -> None:
+def test_prune_is_a_noop_for_an_empty_set(xdg: Path) -> None:
     ws = _make_workspace(xdg, "alpha")
     index.remember(ws)
+    before = paths.index_file().stat().st_mtime_ns
 
-    # os.replace() consults the *directory's* write permission, not the
-    # target file's mode bits — a read-only file would not stop a write.
-    # Making the directory read-only is what actually forces a write to
-    # raise, which is the only way this test can distinguish "no rewrite
-    # attempted" from "rewrite attempted and happened to produce the same
-    # bytes".
+    index.prune([])
+
+    assert paths.index_file().stat().st_mtime_ns == before
+
+
+def test_prune_keeps_an_entry_written_after_it_was_read(xdg: Path) -> None:
+    """Re-reading under the lock is what saves a concurrent remember().
+
+    The cleanup decides what is dead from a list it read earlier; by the
+    time it writes, another `ow init` may have recorded a workspace. Only
+    the named entries may go."""
+    alive = _make_workspace(xdg, "alive")
+    gone = _make_workspace(xdg, "gone")
+    newcomer = _make_workspace(xdg, "newcomer")
+    index.remember(alive)
+    index.remember(gone)
+
+    doomed = [gone.resolve()]
+    index.remember(newcomer)
+    index.prune(doomed)
+
+    assert set(index.known_workspaces()) == {alive.resolve(), newcomer.resolve()}
+
+
+def test_forget_removes_one_entry_and_is_a_noop_when_absent(xdg: Path) -> None:
+    first = _make_workspace(xdg, "first")
+    second = _make_workspace(xdg, "second")
+    index.remember(first)
+    index.remember(second)
+
+    index.forget(first)
+
+    assert index.known_workspaces() == [second.resolve()]
+    index.forget(xdg / "never-remembered")
+    assert index.known_workspaces() == [second.resolve()]
+
+
+def test_known_workspaces_never_writes_even_when_it_could(xdg: Path) -> None:
+    """The strongest form: a read-only state directory changes nothing.
+
+    A vanished entry is exactly the case that used to trigger a rewrite, so
+    making the directory unwritable is what tells "no rewrite attempted"
+    from "rewrite attempted and happened to produce the same bytes"."""
+    ws = _make_workspace(xdg, "alpha")
+    index.remember(ws)
+    (ws / ".ow" / "config.toml").unlink()
+
     index_dir = paths.index_file().parent
     index_dir.chmod(0o555)
     try:
@@ -87,12 +151,13 @@ def test_known_workspaces_does_not_rewrite_when_nothing_pruned(xdg: Path) -> Non
     finally:
         index_dir.chmod(0o755)  # so tmp_path cleanup can remove it
 
-    assert result == [ws.resolve()]
+    assert result == []
 
 
 def test_known_workspaces_does_not_rewrite_when_nothing_pruned_mtime(xdg: Path) -> None:
     ws = _make_workspace(xdg, "alpha")
     index.remember(ws)
+    (ws / ".ow" / "config.toml").unlink()
 
     before = paths.index_file().stat().st_mtime_ns
 
@@ -102,16 +167,17 @@ def test_known_workspaces_does_not_rewrite_when_nothing_pruned_mtime(xdg: Path) 
     assert after == before
 
 
-def test_known_workspaces_dedupes_and_rewrites(xdg: Path) -> None:
+def test_known_workspaces_dedupes_without_rewriting(xdg: Path) -> None:
     ws = _make_workspace(xdg, "alpha")
     target = paths.index_file()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(f"{ws.resolve()}\n{ws.resolve()}\n")
+    before = target.read_text()
 
     result = index.known_workspaces()
 
     assert result == [ws.resolve()]
-    assert target.read_text().splitlines() == [str(ws.resolve())]
+    assert target.read_text() == before
 
 
 def test_find_by_name(xdg: Path) -> None:
@@ -204,17 +270,17 @@ def test_find_by_name_is_exact_not_a_prefix(xdg: Path) -> None:
     assert index.find_by_name("my-workspace") == [(xdg / "my-workspace").resolve()]
 
 
-def test_blank_lines_are_cleaned_out_of_the_file(xdg: Path) -> None:
-    """Ignoring a blank line on read is not enough — a read that leaves it
-    behind re-reads it forever. Pruning on read is how this file stays
-    honest, and a blank line is as much rubbish as a dead entry."""
+def test_blank_lines_are_ignored_on_read(xdg: Path) -> None:
+    """A blank line is as much rubbish as a dead entry — and like one, it is
+    filtered out of the result rather than erased from a file this call has
+    no business writing. `ow prune` and the next `remember` are what clean it."""
     ws = _make_workspace(xdg, "alpha")
     target = paths.index_file()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(f"\n   \n{ws.resolve()}\n\t\n")
 
     assert index.known_workspaces() == [ws.resolve()]
-    assert target.read_text() == f"{ws.resolve()}\n"
+    assert target.read_text() == f"\n   \n{ws.resolve()}\n\t\n"
 
 
 def test_remember_appends_keeping_insertion_order(xdg: Path) -> None:
@@ -269,11 +335,11 @@ def test_remember_degrades_on_readonly_state_dir(xdg: Path, capsys: pytest.Captu
     assert "index" in captured.err.lower() or "cache" in captured.err.lower() or "cannot write" in captured.err.lower()
 
 
-def test_known_workspaces_degrades_on_readonly_state_dir(xdg: Path) -> None:
-    """Pruning on read must also degrade when the state dir is read-only."""
+def test_known_workspaces_reads_with_a_readonly_state_dir(xdg: Path) -> None:
+    """A read needs no write access at all — not even for a prunable entry."""
     ws = _make_workspace(xdg, "alpha")
     index.remember(ws)
-    # Force a prune by duplicating the entry
+    # The condition that used to force a rewrite: a duplicate line.
     target = paths.index_file()
     target.write_text(target.read_text() + str(ws.resolve()) + "\n")
     state = xdg / "state"
@@ -283,18 +349,15 @@ def test_known_workspaces_degrades_on_readonly_state_dir(xdg: Path) -> None:
     finally:
         state.chmod(0o755)
     assert result == [ws.resolve()]
-    # The warning was already emitted by the write path above; warn-once means
-    # the prune-on-read path is silent, which is acceptable.
 
 
 def test_concurrent_remembers_do_not_lose_entries(xdg: Path) -> None:
     """`ow init` in one terminal must not erase what another just wrote.
 
-    remember() is a read-modify-write, and known_workspaces() rewrites on
-    *read* too — so a tab-completion or an `ow ls` can clobber a concurrent
-    `ow init`. The file is a hint and it self-heals, but silently dropping
-    a workspace someone just created is a hint that lies, and the fix is a
-    lockfile beside the temp file _write already makes.
+    remember() is a read-modify-write, so two concurrent lifecycles can
+    clobber each other's entry. The file is a hint and it self-heals, but
+    silently dropping a workspace someone just created is a hint that lies,
+    and the fix is a lockfile beside the temp file _write already makes.
     """
     workers, per_worker = 8, 8
     plots = [
