@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from textual.widget import Widget
@@ -11,40 +10,6 @@ from textual.binding import Binding
 
 from ow.utils.config import WorkspaceConfig
 from ow.utils.status import WorkspaceStatus
-
-
-def sanitize_id(text: str) -> str:
-    """Turn arbitrary text (a repo alias, a template name) into a valid
-    Textual widget-id fragment.
-
-    Textual ids must match ``[a-zA-Z_-][a-zA-Z0-9_-]*``. Aliases and template
-    names come from user-controlled sources (TOML keys, directory names) and
-    are not restricted the same way — a dotted alias like ``odoo.web`` is
-    valid TOML but not a valid id, and previously crashed compose().
-    """
-    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", text)
-    return slug or "_"
-
-
-def unique_slugs(names: list[str]) -> dict[str, str]:
-    """Map each name to a sanitized, collision-free id fragment.
-
-    Two distinct names can sanitize to the same slug (``odoo.web`` and
-    ``odoo_web``); disambiguate with a numeric suffix so widget ids stay
-    unique.
-    """
-    slugs: dict[str, str] = {}
-    used: set[str] = set()
-    for name in names:
-        base = sanitize_id(name)
-        candidate = base
-        n = 2
-        while candidate in used:
-            candidate = f"{base}_{n}"
-            n += 1
-        used.add(candidate)
-        slugs[name] = candidate
-    return slugs
 
 
 class LabeledInput(Horizontal):
@@ -89,6 +54,7 @@ class LabeledInput(Horizontal):
         value: str = "",
         placeholder: str = "",
         enabled: bool = True,
+        password: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -96,6 +62,7 @@ class LabeledInput(Horizontal):
         self._value = value
         self._placeholder = placeholder
         self._enabled = enabled
+        self._password = password
         self._error_message: str | None = None
 
     def compose(self):
@@ -106,6 +73,7 @@ class LabeledInput(Horizontal):
                 placeholder=self._placeholder,
                 id="li_input",
                 disabled=not self._enabled,
+                password=self._password,
             )
             yield Label("", id="li_error")
 
@@ -291,9 +259,8 @@ class OperationLog(RichLog):
 class WorkspaceDetail(VerticalScroll):
     """The right-hand detail pane.
 
-    Renders workspace config (path, repos, templates, vars) immediately
-    on highlight, then upgrades to a full status table once the gather
-    worker finishes.
+    Renders workspace config (path, repos) immediately on highlight, then
+    upgrades to a full status table once the gather worker finishes.
     """
 
     DEFAULT_CSS = """
@@ -316,7 +283,7 @@ class WorkspaceDetail(VerticalScroll):
     """
 
     def show_config_only(self, ws_dir: Path, ws: WorkspaceConfig) -> None:
-        """Render path, repos (alias/spec), templates, vars. No git."""
+        """Render path and repos (alias/spec). No git."""
         self.remove_children()
         self.mount(self._build_config_view(ws_dir, ws))
 
@@ -350,20 +317,6 @@ class WorkspaceDetail(VerticalScroll):
         else:
             children.append(Static("  (none)", classes="detail-section"))
 
-        # Templates
-        children.append(Static("Templates", classes="detail-heading"))
-        children.append(
-            Static(f"  {', '.join(ws.templates) or '(none)'}", classes="detail-section")
-        )
-
-        # Vars
-        if ws.vars:
-            children.append(Static("Vars", classes="detail-heading"))
-            lines = Text()
-            for k, v in ws.vars.items():
-                lines.append(f"  {k} = {v}\n")
-            children.append(Static(lines, classes="detail-section"))
-
         from textual.containers import Vertical
         return Vertical(*children)
 
@@ -391,20 +344,6 @@ class WorkspaceDetail(VerticalScroll):
         children.append(Static("Repos", classes="detail-heading"))
         table = _render_repos_table(status.repos, drift_map)
         children.append(Static(table, classes="detail-section"))
-
-        # Templates
-        children.append(Static("Templates", classes="detail-heading"))
-        children.append(
-            Static(f"  {', '.join(ws.templates) or '(none)'}", classes="detail-section")
-        )
-
-        # Vars
-        if ws.vars:
-            children.append(Static("Vars", classes="detail-heading"))
-            lines = Text()
-            for k, v in ws.vars.items():
-                lines.append(f"  {k} = {v}\n")
-            children.append(Static(lines, classes="detail-section"))
 
         # Links
         links = self._build_links(status)
