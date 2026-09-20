@@ -244,7 +244,7 @@ def test_find_addon_paths_excludes_paths(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# workspace_addon_paths -- ordering and ambiguous-core rejection.
+# workspace_addon_paths -- ordering, generic-workspace skip, deduplication.
 # ---------------------------------------------------------------------------
 
 
@@ -266,23 +266,41 @@ def test_workspace_addon_paths_orders_loose_then_repos_then_core(tmp_path):
 
     core = _make_core(ws_dir, "community")
 
-    result = workspace_addon_paths(ws_dir, {"other": other_repo, "community": core})
+    result = workspace_addon_paths(ws_dir, ["other", "community"], "community")
 
-    assert result == [
+    assert result == (
         local_addon.parent,
         loose_addon.parent,
         other_addon.parent,
         core / "addons",
         core / "odoo" / "addons",
-    ]
+    )
 
 
-def test_workspace_addon_paths_rejects_multiple_cores(tmp_path):
+def test_workspace_addon_paths_none_core_skips_scan(tmp_path):
+    """A generic workspace never walks the tree, even if addons exist."""
     ws_dir = tmp_path / "ws"
-    core_a = _make_core(ws_dir, "community")
-    core_b = _make_core(ws_dir, "enterprise_core")
-    with pytest.raises(ValueError, match="multiple Odoo cores"):
-        workspace_addon_paths(ws_dir, {"community": core_a, "enterprise_core": core_b})
+    loose_addon = ws_dir / "extra" / "loose_mod"
+    loose_addon.mkdir(parents=True)
+    (loose_addon / "__manifest__.py").touch()
+
+    assert workspace_addon_paths(ws_dir, ["docs"], None) == ()
+
+
+def test_workspace_addon_paths_deduplicates_without_reordering(tmp_path):
+    ws_dir = tmp_path / "ws"
+    other_addon = ws_dir / "other" / "mod"
+    other_addon.mkdir(parents=True)
+    (other_addon / "__manifest__.py").touch()
+    core = _make_core(ws_dir, "community")
+
+    result = workspace_addon_paths(ws_dir, ["other", "other", "community"], "community")
+
+    assert result == (
+        other_addon.parent,
+        core / "addons",
+        core / "odoo" / "addons",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +322,7 @@ def test_probe_odoo_incomplete_when_worktree_missing(tmp_path):
     absent = tmp_path / "absent"
     probe = probe_odoo({"present": present, "community": absent})
     assert probe.kind == "incomplete"
-    assert "community" in probe.reason
+    assert any("community" in m for m in probe.messages)
 
 
 def test_probe_odoo_ambiguous_when_multiple_cores(tmp_path):
@@ -313,7 +331,8 @@ def test_probe_odoo_ambiguous_when_multiple_cores(tmp_path):
     probe = probe_odoo({"community": core_a, "fork": core_b})
     assert probe.kind == "ambiguous"
     assert probe.info is None
-    assert "community" in probe.reason and "fork" in probe.reason
+    assert any("community" in m for m in probe.messages)
+    assert any("fork" in m for m in probe.messages)
 
 
 def test_probe_odoo_supported_19_stable(tmp_path):
@@ -378,7 +397,7 @@ def test_probe_odoo_invalid_unreadable_release(tmp_path):
     probe = probe_odoo({"community": core})
     assert probe.kind == "invalid"
     assert probe.info is None
-    assert "release.py" in probe.reason
+    assert any("release.py" in m for m in probe.messages)
 
 
 def test_probe_odoo_invalid_syntax_error(tmp_path):
@@ -392,7 +411,7 @@ def test_probe_odoo_invalid_ambiguous_version_info_assignment(tmp_path):
     core = _make_core(tmp_path, "community", release_source=RELEASE_AMBIGUOUS)
     probe = probe_odoo({"community": core})
     assert probe.kind == "invalid"
-    assert "version_info" in probe.reason
+    assert any("version_info" in m for m in probe.messages)
 
 
 def test_probe_odoo_invalid_no_demo_flags_declared(tmp_path):
