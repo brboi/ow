@@ -25,6 +25,15 @@ from ow.utils.config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _mise_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refresh boundary's one prerequisite check, stubbed the way every
+    sibling suite stubs it: the host's mise version is not the behavior
+    under test. Everything past the gate — inspection, generation, the
+    write, `trust=False` — stays real."""
+    monkeypatch.setattr("ow.utils.workspace.require_mise", lambda: (2026, 9, 9))
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True,
@@ -280,6 +289,8 @@ def test_dry_run_prints_the_command_and_writes_nothing(tmp_path, capsys, xdg):
     assert unchanged.repos["community"] == parse_branch_spec("master..featA")
     out = capsys.readouterr().out
     assert "git switch -c feature-x origin/feature-x" in out
+    assert "Files were not refreshed" in out
+    assert "ow render" in out
 
 
 def test_a_dirty_worktree_still_switches_when_git_allows_it(tmp_path, capsys, xdg):
@@ -322,6 +333,11 @@ def test_a_repo_already_on_the_target_is_left_alone(tmp_path, capsys, xdg):
     out = capsys.readouterr().out
     assert "already there" in out
     assert "git switch" not in out
+    # Nothing moved, so nothing was refreshed: the run says so and points
+    # at the command that would, instead of leaving the user guessing.
+    assert "Files were not refreshed" in out
+    assert "ow render" in out
+    assert "Generated files refreshed." not in out
 
 
 def test_creating_a_branch_one_repo_already_has_moves_nothing(tmp_path, capsys, xdg):
@@ -703,3 +719,24 @@ def test_only_narrowing_the_core_still_renders_every_repos_addons(tmp_path, caps
     odoorc.read(ws_dir / "odoorc")
     addon_paths = odoorc["options"]["addons_path"].split(",")
     assert "enterprise" in addon_paths
+
+
+def test_a_successful_switch_announces_the_refresh_it_ran(tmp_path, capsys, xdg):
+    """The old note said a switch never re-renders anything; what replaced
+    it has to be visible: the run that refreshed the files says so, on the
+    same stdout the switch itself reported on."""
+    bare, src = _make_repo(tmp_path, "community")
+    _branch_only_on_source(src, "feature-x")
+
+    ws_dir = tmp_path / "workspaces" / "test"
+    _add_worktree(bare, ws_dir, "community")
+    _workspace_config(ws_dir, {"community": "master..featA"})
+
+    config = Config(remotes={"community": {"origin": RemoteConfig(url=str(src))}})
+
+    cmd_switch(config, "feature-x", workspace=str(ws_dir))
+
+    out = capsys.readouterr().out
+    assert "Generated files refreshed." in out
+    assert "Files were not refreshed" not in out
+    assert (ws_dir / ".ow" / "rendered.lock.toml").exists()

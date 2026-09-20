@@ -11,6 +11,14 @@ from ow.utils.rebase_plan import GitStep, RebasePlan, RepoFacts
 from ow.utils.refs import FetchOutcome
 
 
+@pytest.fixture(autouse=True)
+def _mise_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refresh boundary's one prerequisite check, stubbed the way every
+    sibling suite stubs it: the host's mise version is not the behavior
+    under test. Everything past the gate stays real."""
+    monkeypatch.setattr("ow.utils.workspace.require_mise", lambda: (2026, 9, 9))
+
+
 def make_workspace(tmp_path: Path, repos: dict[str, str]) -> tuple[Config, Path]:
     ws_dir = tmp_path / "workspaces" / "test"
     for alias in repos:
