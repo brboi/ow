@@ -227,3 +227,65 @@ def test_refresh_workspace_writes_nothing_for_an_unsupported_core(tmp_path, xdg)
     assert not (ws_dir / "mise").exists()
     assert not (ws_dir / RENDERED_LOCK).exists()
     assert not (paths.services_dir() / "compose.yml").exists()
+
+
+def test_refresh_workspace_reports_a_services_failure_without_trusting(tmp_path, xdg, monkeypatch):
+    """A services write that cannot proceed is reported as data after the
+    workspace files landed, and trust — the step after it — is skipped."""
+    ws_dir = tmp_path / "ws"
+    _make_core(ws_dir, "community", release_source=RELEASE_19_STABLE)
+    ws = WorkspaceConfig(repos={"community": parse_branch_spec("master")})
+    services = paths.services_dir()
+    services.mkdir(parents=True, exist_ok=True)
+    compose = services / "compose.yml"
+    compose.symlink_to(tmp_path / "elsewhere.yml")
+
+    trusted: list[Path] = []
+    monkeypatch.setattr(workspace, "trust_fragment", trusted.append)
+
+    result = refresh_workspace(Config(remotes={}), ws, ws_dir, trust=True)
+
+    assert result.failed
+    assert result.wrote and (ws_dir / "mise" / "conf.d" / "00-ow.toml").exists()
+    assert any(str(compose) in error for error in result.errors)
+    assert trusted == []
+
+
+def test_inspect_workspace_blocks_a_comma_in_an_addon_path(tmp_path, xdg):
+    """`addons_path` is comma-separated: an addon directory whose name could
+    never round-trip through it is a blocker, never a traceback."""
+    ws_dir = tmp_path / "ws"
+    _make_core(ws_dir, "community", release_source=RELEASE_19_STABLE)
+    addon = ws_dir / "extra,addons" / "mod"
+    addon.mkdir(parents=True)
+    (addon / "__manifest__.py").write_text("{}\n")
+    ws = WorkspaceConfig(repos={"community": parse_branch_spec("master")})
+
+    plan = inspect_workspace(Config(remotes={}), ws, ws_dir)
+
+    assert plan.outputs == ()
+    assert any("extra,addons" in error for error in plan.errors)
+
+
+def test_inspect_workspace_reports_an_invalid_owignore_pattern(tmp_path, xdg):
+    ws_dir = tmp_path / "ws"
+    _make_core(ws_dir, "community", release_source=RELEASE_19_STABLE)
+    ws = WorkspaceConfig(repos={"community": parse_branch_spec("master")})
+
+    plan = inspect_workspace(Config(remotes={}, owignore=("!",)), ws, ws_dir)
+
+    assert plan.outputs == ()
+    assert any("owignore" in error and "!" in error for error in plan.errors)
+
+
+def test_inspect_workspace_survives_a_bad_owignore_through_a_fallback(tmp_path, xdg):
+    """An unsupported core routes through `_fallback_plan`, whose `plan_files`
+    compiles the same bad pattern: it must not raise a second time."""
+    ws_dir = tmp_path / "ws"
+    _make_core(ws_dir, "community", release_source=RELEASE_17_5_DEV)
+    ws = WorkspaceConfig(repos={"community": parse_branch_spec("master")})
+
+    plan = inspect_workspace(Config(remotes={}, owignore=("a\\",)), ws, ws_dir)
+
+    assert plan.outputs == ()
+    assert any("17.5" in error for error in plan.errors)

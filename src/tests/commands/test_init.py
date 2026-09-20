@@ -774,3 +774,24 @@ def test_init_generic_workspace_writes_no_python_or_service_files(tmp_path, monk
     assert not (ws_dir / "requirements-dev.txt").exists()
     assert not (ws_dir / ".venv").exists()
     assert not paths.services_dir().joinpath("compose.yml").exists()
+
+
+def test_init_reports_an_unreadable_schema_1_lock_without_a_traceback(tmp_path, capsys, xdg):
+    ws_dir = tmp_path / "workspaces" / "test"
+    (ws_dir / "community").mkdir(parents=True)
+    (ws_dir / ".ow").mkdir()
+    (ws_dir / MARKER).write_text('version = 1\n\n[repos]\ncommunity = "master..my-feature"\n')
+    lock = ws_dir / ".ow" / "rendered.lock.toml"
+    lock.write_bytes(b"")
+    lock.chmod(0o000)
+    try:
+        with _tty(False), _mise_ok():
+            with pytest.raises(SystemExit) as exc:
+                cmd_init(Config(remotes={}), name="test", parent=tmp_path / "workspaces", yes=True)
+    finally:
+        lock.chmod(0o600)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert str(lock) in err
+    assert "Traceback" not in err

@@ -994,3 +994,25 @@ def test_a_partial_commit_must_be_replanned_before_retrying(xdg, tmp_path, monke
     assert [write.path for write in fresh.writes] == [ws_config]
     commit_migration(fresh)
     assert config_module.load_workspace_config(ws_config).version == 2
+
+
+def test_plan_migration_reports_an_unreadable_lock_as_a_blocker(xdg, tmp_path):
+    """An unreadable lock is an OSError, not a ValueError: the retirement
+    needs its bytes, so the migration is blocked and says which path."""
+    from ow.utils import config as config_module
+
+    ws = tmp_path / "ws"
+    ws_config = _legacy_workspace(ws, '[repos]\ncommunity = "master"\n')
+    lock = write_lock(ws, {"bwrap-claude": sha(b"wrapper")})
+    lock.chmod(0o000)
+    try:
+        plan = plan_migration(
+            config_module.Config(remotes={}),
+            config_module.load_workspace_config(ws_config),
+            ws,
+        )
+    finally:
+        lock.chmod(0o600)
+
+    assert plan.writes == ()
+    assert any(str(lock) in error for error in plan.errors)

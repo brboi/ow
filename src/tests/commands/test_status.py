@@ -209,3 +209,24 @@ def test_cmd_status_says_nothing_about_migration_for_schema_2(tmp_path, capsys, 
     cmd_status(Config(remotes={}), workspace=str(ws_dir))
 
     assert "Pending migration" not in capsys.readouterr().err
+
+
+def test_cmd_status_reports_an_unreadable_schema_1_lock_without_a_traceback(tmp_path, capsys, xdg):
+    """The lock blocker reaches the status diagnostics as text, not as a raise."""
+    ws_dir = tmp_path / "workspaces" / "legacy"
+    (ws_dir / "community").mkdir(parents=True)
+    (ws_dir / ".ow").mkdir()
+    (ws_dir / ".ow" / "config.toml").write_text(
+        'version = 1\n\n[repos]\ncommunity = "master..feat"\n'
+    )
+    lock = ws_dir / ".ow" / "rendered.lock.toml"
+    lock.write_bytes(b"")
+    lock.chmod(0o000)
+    try:
+        cmd_status(Config(remotes={}), workspace=str(ws_dir))
+    finally:
+        lock.chmod(0o600)
+
+    captured = capsys.readouterr()
+    assert str(lock) in captured.out + captured.err
+    assert "Traceback" not in captured.out + captured.err
