@@ -1,0 +1,64 @@
+{
+  "bwrap": {
+    "bwrap-claude.j2": [
+      "0a72e342bb48e1ad12504aaa5a9a42d01a2a257aeb97695fa2477d396ec93c53"
+    ],
+    "bwrap-opencode.j2": [
+      "8fa04c18a45d06eb22d7bddcd46cd460dd4542d655b406ed9f30cb9532bd1e01"
+    ]
+  },
+  "common": {
+    "mise.toml.j2": [
+      "d3dd147a7a5928976e93e9341c97c663cccffef68b0cac32afcae1f077580f4c"
+    ],
+    "mise/conf.d/00-ow.toml.j2": [
+      "5620696653619e4326dc0b6e1ef95dd6140449d9eebd0104547ec707603a7f36"
+    ],
+    "odools.toml.j2": [
+      "1f5e4c3ddcb312e6fb42d573a278da5aa3540b63c68edc2c315b8cdb4a6835e4"
+    ],
+    "odoorc.j2": [
+      "59a88f7e74b4b989b20f71b8e7d8301c5d6d8c2e7e572f3cbca7445fbf1a34be"
+    ],
+    "pyrightconfig.json.j2": [
+      "f1aea7c450ccb2cc4679f26536682e8c8a5232a69653795377cb7f941018ad77"
+    ],
+    "requirements-dev.txt": [
+      "f9acef09d6486dbcb8240e44a6f1cb1bae3851253064d8a1d67ae3e1a82e9256"
+    ]
+  },
+  "odoo": {
+    "odools.toml.j2": [
+      "f0c0eadbb3fbf87252919b4c6c1d9047cd05f0e3a4f3badf17d283e729697a28"
+    ],
+    "odoorc.j2": [
+      "59a88f7e74b4b989b20f71b8e7d8301c5d6d8c2e7e572f3cbca7445fbf1a34be"
+    ],
+    "pyrightconfig.json.j2": [
+      "9ba0f464232f01a84819769270287b4d67526f70eb5a22f92fd1a390882414f1"
+    ],
+    "requirements-dev.txt": [
+      "f9acef09d6486dbcb8240e44a6f1cb1bae3851253064d8a1d67ae3e1a82e9256"
+    ]
+  },
+  "vscode": {
+    ".vscode/launch.json.j2": [
+      "7187071566ec7267fc9d53cf66b05d318ddc5685311a813ab68a08e1740f55aa",
+      "e1280c3a2cfa65ee0f596946509ef269df5377d67d2db0fd7d6f6447ff14ad3c"
+    ],
+    ".vscode/settings.json.j2": [
+      "1bd23734fdaacde6bcfc46a59fd4dd8c539f64d3d9c1c398b7486d0949b1385c",
+      "a5af7add63fd6b009afc639721f8ccbcfc6c8da49386cfd0e2ad11cb30354163"
+    ]
+  },
+  "zed": {
+    ".zed/debug.json.j2": [
+      "3a4ef318b2e4e17f98d4f3d6698f82947812d39d705494f67dbd23cc8aab6fc2",
+      "569851d7eaa7d18e65019a96d6633f3817f2a51866413d2a4cc80f62c414a99e"
+    ],
+    ".zed/settings.json.j2": [
+      "407797fdd9e06905ef183a2946adb9bebc2aa7d4029798b9ca53fc172ee51dfb",
+      "8085c3fa67ecb201fccf7278dd73aa5616d6c3e0af19f65d00bb7cae2262f26f"
+    ]
+  }
+}
