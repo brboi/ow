@@ -1,435 +1,278 @@
-# ow, Odoo-centric without losing workspace intent
+# ow: an opinionated Odoo workspace manager
 
-Design for issue #45, revised after the branch review on 2026-09-19.
-**Status: target design, not an implementation report.** The current branch still uses
-Jinja bundles, workspace `[vars]`, `ow apply` and `ow templates`. Its direct rendering,
-output lock and `mise/conf.d/00-ow.toml` are implemented. The command and schema changes
-below belong to the subsequent refactor, not to the review corrections.
+Decision record for issue #45, revised 2026-09-20 under the user's mandate to choose the most KISS, opinionated and pragmatic solution.
 
-## 0. Direction and boundaries
+**Status: implementation target, not shipped behavior.** The reviewed branch still has Jinja bundles, `templates`, `[vars]`, `ow apply` and `ow templates`. This document supersedes its earlier target design. The executable work breakdown is [the implementation plan](../superpowers/plans/2026-09-20-odoo-workspace-cutover.md). Both documents describe one coordinated breaking release, **ow 3.0**, with **configuration schema 2**; those version numbers are not interchangeable.
 
-ow is an Odoo workspace manager, not a general configuration-management framework.
-A workspace remains a plain directory of Git worktrees, not a Git repository at its root.
-Infrastructure and documentation workspaces remain valid: without an Odoo core checkout,
-ow manages the worktrees and generic tooling but generates no Odoo configuration.
+## 1. Product boundary and rejected alternatives
 
-Three different kinds of information must stay separate:
+ow manages a directory of Git worktrees for an Odoo developer: multiple repositories, multiple remotes, feature branches, detached series, missing-worktree repair, relocation and archival. A documentation or infrastructure workspace is equally valid. It is not a template engine, provisioning framework, sandbox implementation or dependency installer.
 
-- **Observed state belongs to Git:** current branch, HEAD, upstream, dirty files and
-  operations in progress.
-- **Workspace intent belongs to ow:** which repos should exist, the base a feature follows,
-  a detached ref or SHA, and explicit workspace options.
-- **Generated contents belong to the renderer:** values derived from the checkout and
-  options. A hand-edited output is not a reliable source of configuration.
+Three sources of truth remain separate:
 
-Deleting an intent file does not make its information derivable. Conversely, retaining a
-small manifest does not require retaining a template framework.
+- Git owns observed HEAD, branch, upstream, dirty state and operations in progress.
+- `.ow/config.toml` owns membership, the base a feature follows, detached pins and explicit local options.
+- The generator owns proposed file contents; `.ow/rendered.lock.toml` records the bytes ow last wrote or adopted.
 
-### Decisions
+**Base is not upstream.** Rebasing a feature onto `origin/19.0` is distinct from pulling its published history from `dev/feature`. Preserve the current `BranchSpec`, planners and remotes model. Do not introduce an organization abstraction over remote names.
 
-| Concern | Decision |
+Chosen: a fixed set of generators with typed options, invoked at the right lifecycle boundaries. Rejected: keeping a nicer public bundle framework (the user still has to configure the machinery), and putting membership/base intent in per-worktree Git config (removed worktrees lose the information needed to repair them). Do not enable `extensions.worktreeConfig`, invent a registry/plugin system, or turn the workspace root into a Git repository.
+
+### Release invariants
+
+| ID | Requirement |
 |---|---|
-| Odoo identity | Parse the checkout without executing it; probe capabilities separately |
-| Support window | master, the three current stable majors, and their saas branches |
-| Rendering | A fixed table of generators, no user-defined template engine |
-| Output ownership | Keep the existing output lock and protection of divergent files |
-| Workspace state | Keep `.ow/config.toml` as the intent manifest and workspace marker |
-| Options | Typed global defaults, with sparse typed workspace overrides |
-| Ignore | Global `owignore`, workspace-relative gitignore patterns |
-| Commands | Explicit `ow render`, read-only `ow files`, re-runnable `ow init` |
-| Sandboxes | Alias scripts present in the Odoo checkout; stop vendoring copies |
-| Local files | Optional copy-once seed before the addon scan, not another renderer |
+| R01 | Preserve multirepo/multi-remote Git semantics and manifest intent, including missing members and base versus upstream. |
+| R02 | Derive Odoo identity and capabilities from checkout files without executing checkout Python. |
+| R03 | Use one effective, validated Python minor and capability-correct debug arguments. |
+| R04 | Replace vars with typed global defaults and sparse local overrides; do not copy defaults into new workspaces. |
+| R05 | Replace bundles/Jinja with fixed serialized outputs; a generic workspace gets no Odoo runtime and no implicit Python. |
+| R06 | Retain byte ownership, adoption, divergent-file protection and retired-file visibility; reject unsafe output paths. |
+| R07 | Implement global-only `owignore` using gitignore semantics, not a second configuration hierarchy. |
+| R08 | Migrate explicitly, back up original config bytes, preserve unknown legacy data and reject lossy conversion. |
+| R09 | Make init re-runnable and create-only for missing worktrees; never switch existing ones during repair. |
+| R10 | Refresh once after successful Git mutation batches, not dry-runs/no-ops/conflicts; preserve Git outcomes. |
+| R11 | Preserve intent and ownership through copy/move/archive/unarchive/removal backup. |
+| R12 | Remove template/vars UI, provide typed inherited/local options, and preserve editor/theme/remotes behavior. |
+| R13 | Remove the service template engine without adding a YAML dependency or starting services. |
+| R14 | Copy optional local seeds once, before addon scanning, without interpolation or overwrites. |
+| R15 | Delegate sandbox execution to scripts present in the checkout; do not vendor sandbox implementations. |
+| R16 | Remove old commands, flags, imports, assets and dependency together; no compatibility command aliases. |
+| R17 | Make inspection genuinely read-only, including config bootstrap, resolver and index behavior. |
+| R18 | Deliver a documented major-version cutover with offline regression evidence and actual CLI/TUI smoke verification. |
 
-**Support snapshot:** master, 20.0, 19.0, 18.0, and `saas-18.*`, `saas-19.*`,
-`saas-20.*`. A new stable major requires an ow support-table update; an unknown newer
-major is not silently supported. Removing a major from the window is a documented support
-change. The window is not inferred from the wall clock or the branch name.
+## 2. Runtime and supported Odoo checkouts
 
-## 1. Detect the checkout, not its branch name
+- ow's own Python floor stays **3.11**. This is independent of workspace Python.
+- Generated fragments stay at **`mise/conf.d/00-ow.toml`**. Do not cause a second relocation.
+- Their supported mise floor is **2026.8.13**, which introduced that visible fragment directory. Document it and check `mise --version` before explicit init/render mutates anything. Parse the first `YYYY.M.PATCH` token as an integer tuple; absent, unparseable or older mise is an actionable error. Inspection does not invoke mise. Automatic refresh checks this prerequisite after Git, never reverses Git if it is missing.
+- Odoo support is the explicit set **18, 19, 20**, their saas series, and current master whose inspected identity is `(20, 1)`. No wall-clock calculation or branch-name inference. A future major requires a support-table change.
 
-Keep `is_odoo_main_repo`: `odoo-bin`, `addons/` and `odoo/addons/` identify a core
-checkout. Read `<main_repo>/odoo/release.py` for its identity. Branch names are unsuitable
-because a checkout may be on a feature branch or a detached SHA.
+Keep the three core markers: `odoo-bin`, `addons/`, `odoo/addons/`. Inspect only declared repositories. Missing declared worktrees or an in-progress Git operation in any existing declared repository block generation of the whole workspace. They must not make a missing core look like a valid non-Odoo workspace.
 
-Read Python syntax with the standard-library AST parser, never `import`, `exec`, or
-`odoo-bin --version`. Inspect the literal first two elements of the `version_info`
-assignment; the later `FINAL`/`ALPHA` names do not need evaluation. Python bounds are
-literal integer tuples. An unfamiliar expression is a diagnostic, not code to execute.
+Probe outcomes are `none`, `supported`, `unsupported`, `invalid`, `ambiguous`, `incomplete`. More than one core is ambiguous: do not choose the first alias. No core, with all declared worktrees present and stable, is the ordinary generic case.
 
-| First two values | Identity |
+Read `odoo/release.py` with `ast.parse`. Inspect the first two literal elements of the module-level `version_info` assignment; later names such as `FINAL` are irrelevant. Accept `(18, 0)`, `(20, 1)`, and `('saas~19', 4)` shapes; validate the major for every shape. Reject booleans, malformed values and multiple ambiguous assignments. Never import the file, use `exec`, or run `odoo-bin --version`.
+
+Read literal two-integer `MIN_PY_VERSION`/`MAX_PY_VERSION` tuples from `release.py`; for a missing bound, inspect `odoo/__init__.py` for the 18.0 layout. A present but invalid bound is an error, not permission to fall back. Require ordered bounds with Python major 3. Probe literal flag arguments in actual `add_option`/`add_argument` calls in `odoo/tools/config.py`; a string in a comment or unrelated expression is not a declaration.
+
+| Capability | Default debug arguments |
 |---|---|
-| `(18, 0)`, `(19, 0)`, `(20, 0)` | Stable series |
-| `(20, 1)` | Development series; not a promise that the branch is current master |
-| `('saas~19', 4)` | saas series; not the capability profile of stable 19.0 |
+| `--with-demo` declared | `["--dev=all"]` |
+| Only `--without-demo` declared | `["--dev=all", "--without-demo=all"]` |
+| Neither recognized, file unreadable or AST invalid | Blocking diagnostic |
 
-Check the numeric major against the supported window for **all** these shapes. An old
-`(17, 5)` snapshot must not bypass the window merely because it looks like trunk.
-Historical development snapshots inside the window use their actual capabilities, not
-those of today's master. If more than one configured repo matches the core markers,
-report the ambiguity and do not choose by incidental dictionary order.
+Defaults intentionally avoid enabling demo data. `debug_test_args` defaults to `["--test-tags=<workspace-name>"]`; the test launch combines effective debug arguments and effective test arguments, as the existing launchers do. An explicit list replaces its corresponding whole list, including an explicit empty list.
 
-Distinguish these outcomes:
+Unsupported, invalid, ambiguous and incomplete outcomes block **all output writes**, including services and trust. Inspection still names the reason and existing locked files retained on disk. There is no guessed generic fallback for a recognized but unusable core. This fail-before-writing policy replaces the earlier generic-only fallback proposal.
 
-1. **No core checkout:** normal non-Odoo workspace; generic outputs only.
-2. **Recognized, supported core:** generate generic and Odoo outputs.
-3. **Recognized but unsupported version:** warn with series and support window; no new
-   Odoo outputs.
-4. **Recognized but unreadable/unparseable core metadata:** report the failing path and
-   reason; do not classify it as a non-Odoo workspace or guess a version.
+## 3. Typed configuration and inheritance
 
-For outcomes 3 and 4, list existing Odoo outputs that will remain untouched. The renderer
-never deletes them, so it cannot promise that an old launch configuration is safe for the
-new checkout. `ow render`, `ow files` and `ow files --diff` all print the diagnostic and
-exit non-zero for these two outcomes: a workspace whose Odoo configuration cannot be
-generated is not a workspace whose files are in order. `ow status` prints the same
-diagnostic and keeps its own exit contract, because it reports state rather than gating on
-it. Outcome 1 is not a diagnostic: a workspace with no core checkout is aligned as soon as
-its generic outputs are.
+Both global and workspace configs use `version = 2`. Omitted version means legacy schema 1. Reject versions above 2. Preserve the XDG locations, `repos`, remotes (`url`, `pushurl`, `fetch`), `editor` and `theme`.
 
-## 2. Capabilities and Python selection
-
-### Demo arguments
-
-The option table lives in `odoo/tools/config.py`. Probe actual option declarations, not
-an arbitrary string in a comment. A literal `--with-demo` argument in an option declaration
-is the capability of interest; do not execute the module to construct its parser.
-
-| Readable option table | Default `debug_args` |
-|---|---|
-| Declares `--with-demo` | `["--dev=all"]` |
-| Declares `--without-demo`, but not `--with-demo` | `["--dev=all", "--without-demo=all"]` |
-| Neither declaration recognized, table missing, or parse failed | Diagnostic; no guessed Odoo output |
-
-18.0 uses the second row. saas-18.4 already uses the first, as do 19.0 and later checked
-series. This is why there is no `saas~X -> stable X` profile mapping.
-`debug_test_args` defaults to `["--test-tags=<workspace-name>"]`. An explicit typed override
-replaces the whole argument list. ow does not silently rewrite user-supplied arguments.
-The odoorc keys emitted today are shared by the supported series; no per-major key map is
-needed. Do not add a profile abstraction for hypothetical future differences.
-
-### Python
-
-Read `MIN_PY_VERSION` and `MAX_PY_VERSION` from `release.py`, falling back to
-`odoo/__init__.py` for the 18.0 layout. Missing or invalid bounds are a metadata error,
-not an excuse to silently use defaults in a recognized Odoo checkout.
-
-`[mise].python` is a quoted `major.minor` preference, default `"3.12"`. Compare integer
-pairs, never floats or lexical strings. Clamp it to the checkout's inclusive minor-version
-bounds and warn with requested version, effective version and checkout series when changed.
-`MAX_PY_VERSION` is Odoo's declared support ceiling, not necessarily a fatal runtime limit:
-19.0's server warns when `sys.version_info[:2] > MAX_PY_VERSION`.
-The exact same effective version goes to mise and Pyright. Non-Odoo workspaces use the
-preference unchanged. Patch pins and mise aliases are not part of this typed option.
-
-Rendering does not install Python, recreate a venv, or run dependency installation.
-When changing the effective minor, warn that an existing `.venv` may need rebuilding;
-never delete it. File consistency is not proof of interpreter consistency.
-PostgreSQL bounds can be checked against the bundled service image, but rendering does
-not inspect or upgrade a user's external database server.
-
-## 3. A small renderer, with the existing ownership boundary
-
-Replace workspace Jinja bundles with `ow/utils/generate.py`: a fixed table of relative
-output paths and generator functions `(context) -> str | None`. `None` means no output
-for this workspace. Use JSON/TOML serializers where appropriate rather than interpolating
-unescaped values. A typed context carries workspace name/path, repo aliases, core identity
-and capabilities, addon paths, service locations, and effective options.
-
-No generator registry, plugin API, override tree, inheritance, or multiple render passes.
-Generators do not create addons. Optional local seed copying happens before the context is
-built (§5), so one scan sees everything. Keep `.local` scanning and loose-addons-first
-ordering. Generic and Odoo-specific outputs are explicit table entries, not implicit bundles.
-Editor outputs can be opted out globally through `owignore`; their Odoo portions are absent
-without a supported core checkout.
-
-### Keep `.ow/rendered.lock.toml`
-
-The lock stores the hash of the last output ow wrote or adopted, keyed by output path.
-It is independent of Jinja and survives the generator cutover:
-
-- Absent output: write and record it.
-- Existing bytes equal the proposed output: adopt without rewriting.
-- Existing bytes match the lock but not the proposed output: update and record it.
-- Existing bytes differ from both: preserve them and report `yours`.
-- No proposed output: leave disk untouched and report any retained, previously managed file.
-
-Adoption is deliberate: a file classified `yours` may become managed again if a later
-render exactly matches it. Do not promise that ownership can never change again.
-A missing file can be recreated; the lock is not a tombstone mechanism.
-
-Keep the user-visible states `up to date`, `outdated`, `yours`, `absent`, and `not rendered`;
-add `ignored` for the explicit opt-out. An obsolete path recorded in the lock remains
-visible while its file exists. Neither removing a generator nor changing Odoo versions
-silently hides its retained output. Directories or unsafe output-path conflicts must be
-reported as errors, not treated as writable missing files.
-
-`ow files --diff` shows textual changes, additions from `/dev/null`, and a path-naming
-notice for binary differences. It does not assert that every output is UTF-8 text.
-The preview never writes, adopts, trusts, installs or seeds files.
-
-The global services compose file is outside the workspace path namespace. Keep its existing
-`ensure_services_compose` lifecycle as a separate operation; do not pretend workspace ignore
-patterns or a workspace lock govern a machine-wide file. `ow files` checks workspace outputs,
-not the availability or configuration of running services.
-
-## 4. Global defaults and explicit local exceptions
-
-Replace untyped `[vars]` with typed `[odoo]` and `[mise]` tables. Effective values are:
-**built-in default < global value < explicit workspace value**. Override by key, not by
-replacing a whole table. Argument arrays replace whole arrays. Validate values before Git
-mutations or file writes; unknown keys are configuration errors, not silently ignored data.
-
-Global configuration:
-
-```toml
-owignore = [".zed/**", "!.zed/settings.json"]
-
-[odoo]
-http_port = 8069
-db_host = "localhost"
-db_port = 5432
-db_user = "odoo"
-db_password = "odoo"
-admin_passwd = "Password"
-smtp_server = "localhost"
-smtp_port = 25
-# debug_args and debug_test_args are optional complete-list overrides.
-
-[mise]
-python = "3.12"
-```
-
-Workspace exceptions remain sparse in `.ow/config.toml`:
+New workspace example:
 
 ```toml
 version = 2
 
 [repos]
 community = "19.0..feature"
+enterprise = "19.0..feature"
 
 [odoo]
 http_port = 8068
 ```
 
-This allows two instances to run on different ports while both keep generated addon paths.
-Changing a global default affects the next render in workspaces that do not override it.
-The TUI displays inherited values separately from overrides; clearing an override means
-inherit, not copying the current global value into the workspace.
+Global example; tables and individual options are optional:
 
-### `owignore`
+```toml
+version = 2
+editor = "code"
+theme = "textual-dark"
+owignore = [".zed/**"]
 
-Keep the requested **global-only** pattern list. Match workspace-relative output paths
-using `pathspec.GitIgnoreSpec`, in order, with gitignore-style negation. Test anchored names,
-nested paths, directory patterns and re-inclusion against that library's documented semantics.
-Do not reimplement gitignore with `fnmatch` or shell out to Git at the non-repository root.
+[remotes.community]
+origin.url = "git@github.com:odoo/odoo.git"
+dev.url = "git@github.com:odoo-dev/odoo.git"
 
-Ignored outputs are neither written nor adopted, and are not counted as missing or differing
-by the file gate. Existing ignored files stay on disk. The lock entry may remain; removing
-an ignore resumes the ordinary ownership check, not unconditional overwrite.
+[odoo]
+db_host = "localhost"
+db_user = "odoo"
+db_password = "odoo"
+```
 
-An `odoorc` ignore applies to **every** workspace. It is for a machine-wide preference,
-not a workaround for phone-service's port. Workspace-specific settings use the typed
-options above; an arbitrary hand-edited file is protected by the lock.
+Effective precedence is **built-in default < explicit global key < explicit workspace key**. Merge by key, not by replacing tables. No generic dictionaries in the public options API. No user-defined keys, substitution language or arbitrary generator options.
 
-## 5. Local seed files and upstream sandboxes
+Both configs can hold `odoo.db_password` and `odoo.admin_passwd`, so every writer — init, render, migration, switch, relocation and the TUI — creates or atomically replaces `$XDG_CONFIG_HOME/ow/config.toml` and `.ow/config.toml` with mode 0600. Atomic replacement installs a new inode, so the mode is set on the temp file before the rename rather than inherited. One rule for all writers: a migrated file that the next ordinary save turns world-readable would defeat the whole point.
 
-### A copy-once seed, not a custom bundle
+| Table/key | Type and validation | Built-in value |
+|---|---|---|
+| `odoo.http_port` | integer 1..65535, not bool | 8069 |
+| `odoo.db_port` | integer 1..65535, not bool | 5432 |
+| `odoo.smtp_port` | integer 1..65535, not bool | 25 |
+| `odoo.db_host` | nonempty string | `localhost` |
+| `odoo.db_user` | nonempty string | `odoo` |
+| `odoo.db_password` | string, empty permitted | `odoo` |
+| `odoo.admin_passwd` | string, empty permitted | `Password` |
+| `odoo.smtp_server` | nonempty string | `localhost` |
+| `odoo.debug_args` | list of strings | capability-dependent above |
+| `odoo.debug_test_args` | list of strings | workspace-name default above |
+| `mise.python` | string matching `3.MINOR`, integer minor | Odoo: `3.12`; generic: absent |
+| global `owignore` | list of strings | `[]` |
 
-The existing `local` bundle serves a real use: a dev addon and a helper script. Retain that
-use without a second template system. If `$XDG_CONFIG_HOME/ow/local/` exists, `ow init`
-copies missing regular files into `<workspace>/.local/`, preserving executable bits,
-**before** scanning addons. Existing destinations are never overwritten or deleted.
-Report conflicting paths; do not follow seed symlinks outside the source tree.
-This is an init-time seed, not a continuously synchronized tree; `render`, `files` and
-`status` never copy it. Re-running init may add newly supplied, previously absent files.
+Reject NUL/CR/LF in scalar options and argument elements. Empty argument arrays are valid. Unknown keys in schema-2 owned tables are configuration errors. A workspace `owignore` is rejected: there is only the global list. Workspace options remain sparse when written; equal-to-global explicit values remain explicit. In the TUI, disabling an override means inheritance, while an enabled empty password means the empty string.
 
-There is no interpolation and no bundle declaration. Existing `.local` contents stay
-valid and continue to participate in addon discovery. Migration does not automatically
-reinterpret every arbitrary user template as a seed (§8).
+Clamp an Odoo Python preference to the checkout's inclusive minor bounds with integer tuples; warn with requested/effective version and series. Use the same string for mise and Pyright. A generic workspace has no Python tool, venv or pip hook unless global or local `mise.python` is explicitly set. When opted in, use that minor unchanged and only the generic ensurepip hook. Global defaults are live, so a later render uses changed global keys unless locally overridden.
 
-### Sandbox tasks
+Rendering never installs Python/dependencies or rebuilds `.venv`. If `.venv/pyvenv.cfg` exposes a different minor, warn; do not launch that interpreter or delete the environment. Workspace names used in regexes are escaped; reject comma/newline-bearing addon paths that Odoo's comma-separated `addons_path` cannot represent rather than producing malformed configuration.
 
-Stop vendoring the bwrap copies. Inspect each known script in the detected core checkout's
-`setup/sandboxing/` and generate a mise task only when that specific script exists.
-Use the detected alias, never hardcode `community`. `ODOO_BASE` is the workspace root;
-file tasks pass arguments through to the upstream script. Serialize TOML and quote shell
-arguments independently, including paths containing spaces.
+## 4. Fixed generation, no public framework
 
-Expose the firejail task only when its profile exists. Use the profile by its actual
-checkout path; editor-local firejail setup remains a manual upstream-documented action.
-These are commands from the checkout, not a sandbox implementation audited or owned by ow.
+Use one typed context and a fixed ordered table of generator functions. Each proposes UTF-8 bytes or no output. JSON uses `json.dumps`, TOML uses the already installed `tomli_w`; INI uses `ConfigParser(interpolation=None)` with explicit formatting. No Jinja, user overrides tree, registry, plugin API, inheritance chain or multiple render passes.
 
-The reviewed upstream snapshot has these scripts on master/20.0, not 18.0/19.0. Detection
-is by presence so backports work. A non-Odoo workspace such as voip-infra gets no upstream
-sandbox tasks either. This is an intentional feature reduction: users needing a sandbox
-there supply their own mise task. Existing wrappers are not deleted; migration reports
-that they are no longer maintained rather than presenting them as the new tasks.
+| Output | When | Notes |
+|---|---|---|
+| `mise/conf.d/00-ow.toml` | Every complete workspace | `OW_WORKSPACE`, workspace PATH; optional Python; Odoo env/tasks only for a supported core |
+| `.vscode/settings.json` | Every complete workspace | Odoo settings only with core |
+| `.zed/settings.json` | Every complete workspace | Include the actual `mise/conf.d/*.toml` path, not just retired `mise.toml`; Odoo settings only with core |
+| `odoorc` | Supported core | Addons/data/database paths derived from workspace; typed connection options |
+| `odools.toml` | Supported core | Detected alias, relative addon paths |
+| `pyrightconfig.json` | Supported core | Effective Python minor and detected alias |
+| `requirements-dev.txt` | Supported core | Preserve `inotify\n` |
+| `.vscode/launch.json` | Supported core | Preserve existing run/test actions, effective arguments |
+| `.zed/debug.json` | Supported core | Preserve existing run/test actions, effective arguments |
 
-## 6. Keep a manifest of intent; do not move it into Git internals
+Both editors are generated by default. Opting out is a global output-path ignore, not a resurrected bundle choice. JSONC comments are not a compatibility API: generated editor files become valid JSON, which both editors accept. Generated files are 0644 except new/replaced `odoorc` at 0600. Ownership is byte-based; do not chmod an adopted or divergent existing file merely to normalize mode.
 
-`.ow/config.toml` remains the workspace marker and versioned intent store. Its target schema
-contains `version`, `[repos]`, and optional typed `[odoo]`/`[mise]` overrides. `templates`
-and free-form `vars` disappear, not the file itself. The workspace directory supplies its name.
+The mise fragment keeps `{{config_root}}` in environment values where mise performs its own expansion. Serialize the surrounding TOML. Shell hooks refer to the resulting `"$OW_WORKSPACE"` environment variable; never inject a Tera-expanded root into shell source and assume prior quoting still protects a quote in that root. Quote literal relative operands separately with `shlex.quote`. Odoo emits `ODOO_RC`, `COMPOSE_FILE`, the core directory on PATH, `osh`, and a postinstall hook for core requirements plus `requirements-dev.txt`. If `requirements-dev.txt` is ignored and absent, omit that `-r` operand; if it already exists, it remains usable. Ignoring `odoorc` is an intentional user takeover; document that Odoo launch commands require their own usable file. No generated root shell wrappers remain.
 
-Keep BranchSpec's distinction between an attached branch and a detached ref/SHA. Git remains
-the observed truth: a manual branch switch or detach is displayed honestly, never hidden by
-the manifest. Keep drift detection wherever a command might otherwise act on stale intent.
+### Addon ordering and local seeds
 
-**Base is not upstream.** A branch may rebase onto `origin/19.0` while pulling its own
-published history from `dev/feature`. A `git push -u` must not replace the rebase base.
-Preserve the separate concepts already present in `RepoFacts.base` and `RepoFacts.up`.
+Retain the existing tested discovery rules (`__manifest__.py`/`__openerp__.py`, not `__init__.py`; hidden-directory pruning; cycle protection). Preserve this order: `.local` addons, other loose workspace addons, non-core repos in manifest order, core `addons/`, core `odoo/addons/`. Deduplicate paths without reordering.
 
-A missing declared worktree is reportable and repairable even after `git worktree remove`
-or `git worktree prune`, because its alias and spec still exist in the manifest. Worktree
-discovery corroborates state; it does not silently add unrelated repos or remove declarations.
-Use Git's supported worktree interfaces rather than making private `worktrees/*/gitdir`
-layout a new persistence API. A repo observed on an unexpected branch is not automatically
-switched back by a routine render or status command.
+`$XDG_CONFIG_HOME/ow/local/` is an optional copy-once source, not a shipped bundle. Init copies missing regular files to `<ws>/.local/` before building the context. Preserve executable bits but not special permission bits. Reject source/destination symlinks and non-regular path conflicts; do not follow them. Existing destination regular files, including changed files, are untouched. An existing destination directory is allowed only as a directory ancestor, never as a file replacement. Preflight the seed tree before copying. Render/files/status never seed; rerunning init may add new missing seed files. There is no interpolation.
 
-### Why the per-worktree `ow.ref` proposal is rejected
+### Services
 
-The review exercised disposable bare repositories:
+Move compose generation to `utils/services.py`, with a fixed Python dictionary serialized as JSON into the existing `services/compose.yml` (JSON is accepted by Compose as YAML). Preserve postgres `pgvector/pgvector:pg17` on 5432, mailpit on 8025/1025, pgweb on 8081, environments and volume locations. Prefer Compose's long bind-mount syntax so a colon in an absolute source path is not misparsed. No PyYAML dependency.
 
-- `git switch --detach <sha>` leaves a pre-existing `ow.ref` unchanged. Comparing HEAD with
-  the current ref cannot distinguish manual movement from a remote ref advancing after fetch.
-- `git worktree remove` deletes its registration and per-worktree configuration; discovery
-  cannot reconstruct the removed workspace membership or pin.
-- Enabling `extensions.worktreeConfig` while `core.bare=true` remains in the shared config
-  makes worktree commands fail with `fatal: this operation must be run in a work tree`.
-  Git requires moving that setting to the principal worktree's `config.worktree` first.
+The machine-wide compose file remains ow-managed, outside workspace ignore/lock rules, and is refreshed only by a successful supported-Odoo write render. Generic workspaces do not create services. Equal bytes preserve mtime; writes are atomic. Existing service customization is not silently protected by the workspace lock: document that ow regenerates this file and user-owned compose files must be separate. Never start Docker/Podman or upgrade a running database.
 
-Those problems can be engineered around, but they introduce more state and migration risk
-than retaining the existing manifest. ow does not enable this extension for the redesign.
+### Sandboxes
 
-`ow init -c` continues to copy a workspace's declared intent and explicit overrides, not
-its transient observed branch state or inherited global values. `mv`, archive/unarchive and
-`rm` retain the manifest; rm backs it up with the local options, not merely an alias list.
-The index remains a location aid, not a second source of workspace truth.
+Do not vendor bwrap scripts. Probe these actual checkout-relative paths separately:
 
-## 7. Command lifecycle
+- `setup/sandboxing/bwrap/bwrap-claude.sh` → task `bwrap-claude`;
+- `setup/sandboxing/bwrap/bwrap-opencode.sh` → task `bwrap-opencode`;
+- `setup/sandboxing/bwrap/bwrap-pi.sh` → task `bwrap-pi`;
+- `setup/sandboxing/firejail/claude.profile` → task `firejail-claude`.
 
-| Command | Target behavior |
+Tasks live in the same mise fragment. Use a short shebang `run` task that `exec`s the upstream command and forwards `"$@"` exactly once; there is no copied wrapper file. Bwrap tasks set `ODOO_BASE` to the workspace root. Pass each distinct existing declared worktree's absolute `git rev-parse --git-common-dir` as `--add-dir`, so the worktrees' external Git storage is accessible without mounting every unrelated ow repository. Firejail uses the checkout profile and explicit workspace/common-dir whitelists. Quote every path independently of TOML serialization. Do not expose a task for a missing/non-executable bwrap script or missing profile.
+
+This is upstream delegation, not a guarantee that every upstream sandbox profile supports every host. Do not install sandbox software or copy `code.local` into the home directory. Editor sandbox setup stays upstream-documented. Older 18/19 checkouts and non-Odoo workspaces normally get no sandbox tasks; presence detection permits backports. Retain and report old generated wrappers rather than deleting them.
+
+## 5. Ownership, ignore and inspection
+
+Keep `.ow/rendered.lock.toml` as a sorted output-path → SHA-256 mapping. No format migration is necessary.
+
+| Disk/proposal | Action/state |
 |---|---|
-| `ow init` | Create a workspace or materialize missing declared repos; seed local files; render |
-| `ow init -r alias:spec` | Add intent and materialize an absent repo; refuse changing an existing conflicting spec |
-| `ow switch` | Explicit branch move; persist resulting intent as today; render actual resulting state |
-| `ow render` | Render files and refresh services compose; trust the generated mise fragments |
-| `ow files` | Read-only output states; non-zero only on the §1 diagnostics |
-| `ow files --diff` | Read-only diff/file gate; 0 aligned, 1 differences or §1 diagnostics, including missing outputs |
-| `ow status` | Observed Git state, intent drift, missing repos and render diagnostics; no writes |
-| `ow fetch` | Refresh the refs followed by declared specs and upstreams; no worktree or render changes |
+| Proposed, absent | Write, record hash / `absent` before write |
+| Equal to proposal | Adopt without rewriting / `up to date` |
+| Equals locked hash but not proposal | Update, record hash / `outdated` before write |
+| Differs from lock and proposal | Preserve / `yours` |
+| No proposal, previously locked file still exists | Preserve lock and file / `not rendered` |
+| Ignored | Neither write nor adopt / `ignored` |
 
-**The migration has one entry point: `ow render`.** It is the first command that must read
-the new options to do its job, it already writes, and it is explicit — so it validates the
-whole new configuration, backs up the original and rewrites the manifest before rendering
-(§8). `ow init` performs it too, for the workspace it materializes. Every other command
-reads a version-1 manifest for as long as one exists: `status`, `files`, `ls`, `fetch` and
-the Git commands interpret the legacy `templates`/`[vars]` data, name the pending migration
-once, and change nothing on disk. `switch` is the one exception worth stating: it persists
-intent after a move, so it writes back the schema it read — a version-1 manifest stays
-version 1 with its unknown keys intact, and `ow render` remains the only thing that
-converts it. Nothing refuses to run because a manifest is old, and nothing migrates as a
-side effect of being asked a question.
+An ignored path absent from disk is still shown if it has a generator. An obsolete locked path disappears from listings when its file is absent; the lock is not a tombstone mechanism. Removing an ignore resumes normal ownership checks, never unconditional overwrite. Identical future content can adopt a formerly divergent file again.
 
-A re-runnable init is not permission to reset existing worktrees. Refuse conflicting `-r`
-intent with an actionable `ow switch` message. Report existing branch drift rather than
-silently reconciling it. Materialize an absent worktree only from its recorded spec; failures
-remain visible and leave enough intent for retry.
+Use `pathspec.GitIgnoreSpec` with workspace-relative POSIX paths, ordered patterns and negation. Match known proposed/locked paths individually, not via a pruning walker that would prevent re-inclusion. Compile once per operation.
 
-`switch`, `pull`, `rebase` and `reset` may change the checkout's rendering inputs. After an
-actual successful mutation, refresh generated files from the resulting checkout; dry runs
-and aborted/conflicted repos do not trigger rendering from an unstable core checkout.
-If a multi-repo operation partly succeeds, report both Git results and any render skip/failure.
-Never claim a Git rollback because a later render failed. File rendering does not turn a
-failed Git operation into success. Existing hand edits remain protected by the lock.
+Before any write, validate every nonignored generated or locked path: relative normalized POSIX form, no `..`, no reserved config/lock destination, no symlink in destination ancestry, no directory at a proposed file path, no non-regular file. Validate `.ow` and lock storage too. Never follow a lock entry outside the workspace. Ignored paths are not opened. Invalid lock TOML/hash values are diagnostics, not permission to reset ownership. Use atomic same-directory replace for outputs and lock; recheck the destination before replacing so a file changed since inspection becomes `yours`. Successfully written files remain written if a later I/O operation fails; record only completed writes and report partial results. Do not pretend there is a filesystem transaction or roll back Git.
 
-`mv` and unarchive re-render after relocation so computed paths stay current. Archive itself
-parks the workspace without running installation. Direct Git commands and global option
-edits do not invoke ow: use `ow render`, with `status` able to report pending changes.
+A nonignored generated output must not land inside a declared worktree; report a path conflict instead of making that repository dirty. A declared `.local` worktree likewise conflicts with the seed destination. The user can choose nonconflicting aliases or globally ignore a colliding output; ow does not silently redirect generated paths.
 
-`ow apply` is removed only when init's materialization path and render are complete.
-`ow templates` becomes `ow files`. Update CLI help, TUI bindings and all callers together;
-no compatibility alias. The TUI workspace screen remains useful for repo intent and typed
-local overrides; it is not deleted merely because the template selector disappears.
+`ow files` lists states; `ow files --diff` produces diffs from `/dev/null` for additions and path-naming notices for non-UTF-8 differences. `yours` is a file difference; `ignored` and retained `not rendered` are not proposed changes. Do not read secrets into diagnostic summaries. Existing generated root `mise.toml` identified by the legacy `OW_WORKSPACE` marker is a shared diagnostic in files/render/status: it may shadow the fragment. Preserve it; instruct the user to review and remove/move it. It makes the diff gate fail until resolved, not merely the writing command warn.
 
-The old `apply --check` checked both Git intent and files. `files --diff` is explicitly a
-**file gate**, not proof that the worktrees match their declarations. Status remains the
-place to inspect Git drift. File differences include `yours`; `ignored` and deliberately
-retained `not rendered` outputs are shown but not proposed changes. Unsupported/broken Odoo
-metadata is a diagnostic failure, even if every old output remains on disk.
+## 6. Configuration migration and real read-only operation
 
-## 8. Migration and delivery boundaries
+Only explicit **init** and **render** migrate schema 1. Loaders translate known old values in memory but retain original text and migration diagnostics in a `LegacyConfig` record. The runtime model has no `vars` or `templates` aliases. Never execute old Jinja to interpret a legacy manifest.
 
-This is a breaking schema/CLI refactor, not an invisible implementation swap. Keep the
-current phase-1 fixes independently usable; do not publish intermediate states that remove
-ownership protection before the replacement renderer and options are ready.
+Map `python` to `mise.python`; map `http_port`, `db_host`, `db_port`, `db_user`, `db_password`, `admin_passwd`, `smtp_server`, `smtp_port`, `debug_args`, `debug_test_args` to their `odoo` counterparts. New typed keys, if present in a transitional version-1 document, win. Preserve every known workspace value as an explicit override even if it equals a global default; historical files cannot prove whether it was deliberately set.
 
-### Configuration migration
+Both global and workspace migrations preflight together. Unknown vars, unrepresentable selectors/types and unknown owned configuration keys are blocking migration diagnostics naming paths/keys, never a reason to silently discard data. Customized template sources do **not** block: ow cannot keep rendering them, and it must not overwrite what they produced, so both outcomes are handled by retirement instead of a dead end. Known old bundle names (`common`, `odoo`, `vscode`, `zed`, `bwrap`) and declared custom bundles alike are retired with an explicit report naming each source and the outputs it produced; sources and outputs stay on disk and ow stops rendering them. A custom bundle is inventoried by relative source/output names without rendering. Stock copies proven byte-identical by a frozen last-v2 source-hash inventory are not customizations; no runtime legacy templates need be shipped. The old source lock can aid inventory but cannot prove that its original source was stock. Unknown or unprovable copies are conservatively treated as customized. The source-hash inventory contains digests and paths only, never a second rendering implementation.
 
-The target workspace schema is version 2. A version-1 manifest remains recognizable; its
-presence is not a migration marker by itself. Read-only commands may interpret legacy data
-and warn, but never rewrite it. A mutating migration validates the complete new configuration,
-preserves the original in `$XDG_STATE_HOME/ow/backups/`, then atomically writes the version-2
-manifest. Write the version only with the completed new content; an interrupted migration
-must be retryable without consulting a stale, supposedly dead config file.
+Ownership must follow that report, because a retained lock entry is what authorizes overwriting. Migration retires the lock entry of every output produced by a customized or overridden source **that a fixed 3.0 generator also produces**, so that file becomes `yours` and stock content never replaces it — `.vscode/settings.json`, `.zed/settings.json`, `odoorc` and `pyrightconfig.json` are exactly the paths users override. An output is attributed to every bundle that declared it, and a single overriding or custom contributor is enough to retire it: over-retiring only makes ow own less. A locked path no 3.0 generator produces keeps its entry and stays visible as `not rendered`; retiring it would hide an old bwrap wrapper or custom output from `ow files` while protecting nothing. Shipped bundle names remain attributable through the frozen digest inventory even though 3.0 ships no template tree. Only a declared **custom** bundle — a name that inventory does not know — whose source directory under `$XDG_CONFIG_HOME/ow/templates/` is gone cannot be attributed at all: there, retire every entry of that workspace whose path a 3.0 generator produces and report it, leaving those files `yours` until the user reviews `ow files --diff` and deletes the ones ow should own again. Retirement rewrites the lock only; it never deletes or edits a generated file, and a later byte-identical render re-adopts the path normally.
 
-Map supported global `[vars]` keys to typed global tables; explicit new typed keys win.
-Map supported workspace `[vars]` keys to **explicit local overrides**, including ports,
-Python and debug argument arrays. Do not erase equal-looking workspace values: the old file
-cannot tell whether a copied value was meant as an override. Report the preserved overrides
-so the user may later clear any they want to inherit globally.
+Do not automatically convert arbitrary templates into seeds. The retirement report describes copying already-reviewed static files under the new global `local/` source, or simply keeping the workspace outputs as they now are. Old files are not deleted.
 
-Unknown custom variables, unsupported Python selectors and template customizations require
-an explicit migration diagnostic naming what cannot be represented; do not drop them and
-mark the migration complete. Before retiring custom bundles, inventory their outputs and
-explain which will remain as user-maintained files. Old per-workspace `.ow/templates` edits
-are not equivalent to new generated contents and must not be silently discarded.
+Migration sequence:
 
-Keep the output lock throughout. Existing divergent outputs remain protected; identical
-outputs may be adopted under the ordinary rule. Preserve and report old root `mise.toml`,
-which can override the fragment. Do not auto-delete it, recreate `.venv`, or run install.
+1. Parse both configs, translate, validate, inventory customizations and report the typed overrides retained.
+2. If either plan has blockers, write nothing: no config backup, no worktree mutation, no output or lock change.
+3. Save each original file's exact bytes — both configs, plus `.ow/rendered.lock.toml` when retirement will rewrite it — under `$XDG_STATE_HOME/ow/backups/migrations/<sha256-of-absolute-source-path>/<sha256-of-original-bytes>.toml`; directories 0700, files 0600. Write a same-directory temp file, flush and fsync it, then `os.replace` onto the hashed name: an interrupted backup must never leave a truncated file whose bytes contradict its own name and block every later retry. An existing destination with equal bytes is reuse; a mismatching one is an error naming the path. Backup failure aborts conversion.
+4. Atomically rewrite `.ow/rendered.lock.toml` without the retired entries, when there are any. Retirement precedes config replacement because it only ever makes ow own less: interrupted here, the workspace is still schema 1, the next attempt re-plans the same retirement, and no customized file was at risk in between. A failure aborts before any config is replaced.
+5. Atomically replace each config with complete schema-2 content, preserving remotes/editor/theme and supported non-render fields. No version bump before content is ready. This is atomic per file, not across global/workspace; interruption after global migration leaves the workspace v1 and safely retryable.
+6. Re-read the committed configs, then perform requested materialization/rendering. A later render failure does not invalidate a completed config migration or its backup.
 
-### Dependency order, not independent promises
+A schema-1 switch updates only `[repos]` in the retained TOML document, preserving unknown data/comments and schema version. Global remotes/editor/theme edits similarly round-trip a legacy document. TUI typed-option editing is disabled until migration, with `ow render` guidance; existing repo/remotes/editor/theme operations remain available. Automatic post-Git/relocation refresh never migrates a legacy global or workspace config: report the skipped refresh and the exact `ow render -w PATH` action, without turning successful Git/relocation into failure solely for this pending migration.
 
-- Establish and test checkout identity/capabilities and typed option resolution before
-  replacing version-sensitive output defaults.
-- Introduce the fixed renderer with the existing ownership algorithm and manifest intact.
-  Migrate configuration, bundle customizations and command callers in the same deliverable;
-  Jinja leaves only after both workspace and service rendering no longer depend on it.
-- The optional local seed must precede the one-pass addon scan. Sandbox aliases use that
-  renderer and are delivered with the explicit 18/19/non-Odoo feature-loss documentation.
-- Remove apply/template APIs only after every CLI/TUI/move/archive caller has moved to the
-  replacement behavior. Current command docs must never describe this target as already shipped.
+Read-only means read-only: `load_global_config()` returns in-memory defaults if absent; it no longer bootstraps on reads. Init/render explicitly write initial schema-2 config. `resolve_workspace` does not remember locations, and `known_workspaces` filters dead entries without rewriting the index. Successful init/render/move/unarchive remember locations; archive/rm forget; prune removes dead entries. `status`, `files`, `ls`, completion and dry-runs do not create or modify configs, outputs, services, index or trust state. Fetch still updates Git refs, but no config, worktree, render or index state. Keep read-v1/write-v1 support through the 3.x release line; it is data compatibility, not old command aliases.
 
-### Behavioral acceptance
+Git inspection must also disable optional index-refresh writes on status probes (`--no-optional-locks` or probe-local `GIT_OPTIONAL_LOCKS=0`). Do not disable the real locks of mutation commands. Read-only acceptance includes the worktrees' Git index files, not only ow's location index.
 
-Keep regression coverage for observable contracts, not a test per renamed function:
+## 7. Lifecycle and exit contracts
 
-- Stable, saas and historical development shapes; unsupported or unreadable metadata;
-  option presence distinguished from parse failure; no checkout code execution.
-- Demo arguments on both eras; inclusive integer Python bounds; one effective version for
-  mise/Pyright; no venv deletion or installation during rendering.
-- Sparse workspace overrides and global inheritance, especially distinct concurrent ports.
-- First render over an unknown divergent file, identical adoption, subsequent edits,
-  ignored/retired paths, missing and binary output diffs, and no destructive migration.
-- Base distinct from pushed upstream, manual Git drift, missing worktrees after remove/prune,
-  and copying/relocating/archiving intent without replacing it with observed state.
-- Init repair without switching existing repos; dry-run/conflict/partial-success rendering
-  boundaries; Git success reported separately from a later generation failure.
+| Operation | Behavior |
+|---|---|
+| New `ow init [NAME] [-r alias:spec] [-c CONFIG]` | Resolve target as today; create intent, create worktrees, seed, render. No `-t`, no vars questionnaire. In non-TTY mode, no repos is a valid empty workspace. |
+| Existing `ow init [NAME]` | Repair declared missing worktrees, seed missing files, render; no prompt to reselect existing repos. |
+| Existing init with `-r` | Add undeclared repos; identical specs allowed; conflicting existing specs refused before writes with `ow switch` guidance. Existing `-c` is refused before writes. |
+| `ow render [WORKSPACE]` | Explicit migration/creation of config if needed, file generation, supported-Odoo services refresh, trust only safe generated mise content. Never materialize repos, fetch, switch or seed. |
+| `ow files [WORKSPACE]` | Read-only states; exit 0 even for ordinary differences, 1 for blocking input/path/migration diagnostics. |
+| `ow files --diff` | File gate: exit 1 for differences, blocking diagnostics or legacy mise shadowing; 0 otherwise. Not a Git-drift gate. |
+| `ow status` | Existing Git status plus generation diagnostics/pending difference counts. Preserve its existing exit contract; never write. |
+| `ow switch/pull/rebase/reset` | Keep Git semantics and existing exit codes; refresh from the full resulting workspace once after a successful mutating batch. |
+| `ow fetch` | Ref-only; no render. |
+| `ow mv`, unarchive | Relocate and update index, then refresh paths for schema 2. No implicit migration. |
+| Archive | Move the entire workspace including manifest/lock without render/install/migration. |
+| rm | Preserve existing safeguards and raw complete manifest backup, including typed overrides. |
 
-## Evidence and limits
+Initial repository selection has no magic `community` alias: selected repos may propose `master` as the existing simple default; do not preselect a core repo merely because of its name. `-c` copies declared intent and sparse overrides, not inherited defaults or transient observed branches. A v1 source is translated/validated in memory for the new target and never rewritten as a side effect of copying it.
 
-The earlier R&D collected Odoo checkout facts and mise fragment probes; those are snapshots,
-not guarantees for future branches. Relevant upstream sources include
-[18.0's Python bounds](https://github.com/odoo/odoo/blob/18.0/odoo/__init__.py),
-[19.0's release metadata](https://github.com/odoo/odoo/blob/19.0/odoo/release.py), and
-[19.0's inclusive Python ceiling check](https://github.com/odoo/odoo/blob/19.0/odoo/cli/server.py).
-The latter three were re-read during this revision. Git's shared/per-worktree configuration
-rules are documented in [git-worktree](https://git-scm.com/docs/git-worktree#_configuration_file).
-The pin/removal/configuration failure cases above were exercised during the review in
-throwaway repositories, without modifying the user's bare repos or workspaces.
+**Create-only repair:** the current `ensure_workspace_materialized` attaches/detaches existing worktrees and rewrites upstreams. Replace that behavior, do not merely call it from a newly re-runnable init. For every existing valid declared worktree, leave HEAD/branch/upstream/index/worktree untouched and report drift. For an absent path, ensure bare repo/ref and create from its recorded spec. A path occupied by an unrelated directory or invalid registration is an error, never deleted or commandeered. Persist complete intended membership before creation so failed repos remain retryable. Never clean up an existing workspace; retain a new manifest on partial or total repo-creation failure too.
 
-The review corrections do not implement this target architecture: they fix legacy `init -c`,
-mise fragment trust, binary/missing diffs, generated Python agreement, second-pass reporting,
-and visibility of retained locked outputs. They intentionally retain today's public commands
-and configuration format until the coordinated refactor described here.
+When the absent worktree's local branch already exists, preserve its HEAD and published upstream (or intentionally absent upstream). Set the base as upstream only when creating a new local branch. The current `create_worktree` writes upstream even for an existing branch, so that helper must change with repair; otherwise recreating a feature worktree would erase the base/upstream distinction.
+
+**Automatic refresh gate:** track successful executed mutating plans, not just command exit or HEAD hashes (a hard reset can change files without changing HEAD). No refresh for dry-run, declined action, no-op batch or fetch. If any repo operation in the batch failed, or any configured existing repo is busy afterwards, skip the whole refresh and report why. This conservative partial-failure policy avoids rendering a mixed state. The original Git failure remains nonzero. An all-success batch refreshes using the full workspace, never the `--only` subset.
+
+Generation failure after successful Git or relocation makes the overall command exit 1, while explicitly reporting that Git/the move succeeded and files were not refreshed. It does not print a fictitious rollback. Pending legacy migration alone is a warning/skip, not a new Git failure. User cancellation keeps code 2 for prompted destructive operations; init cancellation is standardized to 2.
+
+Trust is explicit: init/render may `mise trust` only the one fragment written, updated or equal to the current generated proposal, never `yours`, ignored or unsafe content. Automatic refresh does not newly trust files. A paranoid mise setup may require the user to run explicit render after generated changes. Trust failure is reported as incomplete environment preparation with exit 1; generated files and successful Git operations stay in place.
+
+## 8. CLI, TUI and dependency cutover
+
+Remove `ow apply`, `ow templates`, init `-t/--template`, template completion, bundle APIs, `VarsEditor`, `.vars`/`.templates` public model fields, vendored wrappers and all packaged Jinja assets. No aliases or deprecated forwarding modules. `ow render` and `ow files` support the existing positional/`-w` workspace-resolution rule. `--check` is not transferred blindly: its old Git-and-files meaning is replaced by status plus the explicit file gate.
+
+Removing the command means removing its name from the messages that recommend it, and the replacement is not one command. A worktree that drifted from its spec, or sits detached where the config names a branch, is realigned by `ow switch` — rendering never moves a worktree. A missing worktree or bare repo is repaired by `ow init` inside the workspace. Only "files were not re-rendered" becomes `ow render`, and the old `ow apply --check` becomes `ow files --diff` for file state plus `ow status` for Git state. Guidance that still names a removed command is a cutover defect, not cosmetic wording.
+
+TUI retains the dashboard and Git workflows. Replace `a Apply` with `a Render`; add `F Files` (diff/file gate) and `I Repair` (existing-workspace init). Keep `f` fetch, `r` reset, `R` rebase, `P` pull, `S` switch and other bindings. Update HelpScreen and operation labels together. Repo edits save intent and offer repair; option-only edits offer render. Saving global defaults never iterates and mutates every known workspace.
+
+Use a finite typed options editor, not a renamed arbitrary key/value table. Show inherited value and source (built-in/global/local), and an explicit override switch. Support integers, strings and JSON-style argument arrays; unset means inherit, an enabled empty string/list is a real override. Mask passwords in summaries/logs. Global editor exposes fixed Odoo/mise defaults and a simple ordered ignore-pattern list; keep remote URL editing and theme/editor behavior. Preserve the dashboard's shared Config object when reloading, including new fields and legacy metadata.
+
+Keep Typer, Rich, Textual, tomli-w and tomlkit. Add **`pathspec>=0.12,<1`**. Remove Jinja2 only when workspace and service rendering no longer depend on it; no new templating or YAML package. Update all callers, constructors, fixtures, completion/help, package data and migration scripts in the same release. Historical plans remain historical; current user docs must describe only shipped behavior after implementation.
+
+## 9. Acceptance and evidence
+
+The implementation plan maps every R01–R18 requirement to exact tasks and checks. Permanent tests defend observable behavior: inheritance/reset, no code execution, supported shapes, ownership transitions, ignore precedence, migration interruption/unknown data, repair without switching, dry-run/failure boundaries, relocation, and meaningful CLI/TUI interaction. Do not retain tests that merely pin renamed symbols, headers, plumbing or incidental wording.
+
+Required end-to-end evidence before implementation is declared complete: isolated XDG directories; disposable local bare repositories with separate base and upstream histories; valid synthetic Odoo metadata; generic and Odoo init; repair, switch/pull/rebase/reset including conflict; files gate; move/archive/unarchive; v1 migration; wheel-installed CLI and actual TUI interaction. No production workspace or network clone is needed. Recheck the supported mise floor in addition to the installed newer version. No implementation is claimed by this planning document.
+
+Planning evidence checked on 2026-09-20:
+
+- Current source CLI reports `2.4.2.dev4+gbcb32de84.d20260919`; plain source invocation needs `PYTHONPATH=src` in this environment.
+- [mise 2026.8.13 release](https://github.com/jdx/mise/releases/tag/v2026.8.13) introduced visible `mise/conf.d` fragments; [configuration precedence](https://mise.jdx.dev/configuration.html) documents root overrides.
+- A disposable fragment on installed mise 2026.9.9 resolved `config_root` to a workspace with spaces, and a file task preserved arguments with spaces and quotes. The proposed shebang-task wrappers and sandbox mounts still require their implementation smoke checks; this is not a sandbox-security certification.
+- [Odoo 18 Python bounds](https://github.com/odoo/odoo/blob/18.0/odoo/__init__.py), [19 release](https://github.com/odoo/odoo/blob/19.0/odoo/release.py), [20 release](https://github.com/odoo/odoo/blob/20.0/odoo/release.py), and [master release](https://github.com/odoo/odoo/blob/master/odoo/release.py) were read. 18/19 currently declare 3.10–3.14, 20/master 3.12–3.14. Runtime code reads the checkout rather than embedding these bounds.
+- [Upstream sandbox README](https://github.com/odoo/odoo/blob/master/setup/sandboxing/README.md) and actual bwrap/firejail paths were inspected. `ODOO_BASE` alone does not expose external Git common directories.
+- Four read-only inventories covered config/migration/index, Git lifecycle, CLI/TUI/docs, and every generated asset. No application implementation was performed.
