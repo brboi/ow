@@ -361,19 +361,42 @@ class TestLegacyGlobal:
         assert path.read_bytes() == migrated
 
 
-def test_a_stale_legacy_record_is_stale_after_a_save(xdg):
-    """The retained bytes are evidence, not state: a second save must reload.
-
-    Documented on the writer: a caller that saves twice without reloading
-    writes the same *old* document again, which is exactly why the reload is
-    the caller's contract and why the TUI reloads after every save."""
+def test_write_global_config_returns_refreshed_legacy_evidence(xdg):
+    """The return value is the record to keep using, not a `None` a caller
+    has to discard. For a schema-1 save, `legacy.original` comes back as
+    exactly the bytes just written — the evidence a caller holding the
+    object needs for its *next* save, or for `_reject_typed_change` on one
+    after that."""
     path = paths.config_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(LEGACY_GLOBAL)
     cfg = load_config(path)
 
-    write_global_config(replace(cfg, editor="nvim"))
-    write_global_config(replace(load_config(path), theme="dracula"))
+    saved = write_global_config(replace(cfg, editor="nvim"))
+
+    assert saved.legacy is not None
+    assert saved.legacy.original == path.read_bytes()
+    assert saved.legacy.issues == cfg.legacy.issues
+
+
+def test_saving_from_the_returned_record_does_not_revert_an_earlier_edit(xdg):
+    """Chaining from the returned record — never from the object that was
+    loaded — is what keeps a second save from reverting the first one.
+
+    `_set_optional_scalar` writes a record's own field whenever the on-disk
+    key already exists, so building the second save on `cfg` (whose
+    `editor` is still whatever it was before either save) would reapply
+    that stale value over the one the first save just wrote — the "shared
+    Config object" hazard the TUI's theme picker hits on a second save.
+    Both saves below come only from what `write_global_config` returned;
+    neither reloads from disk by hand."""
+    path = paths.config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(LEGACY_GLOBAL)
+    cfg = load_config(path)
+
+    saved = write_global_config(replace(cfg, editor="nvim"))
+    write_global_config(replace(saved, theme="dracula"))
 
     reloaded = load_config(path)
     assert reloaded.editor == "nvim"

@@ -651,6 +651,46 @@ def test_write_workspace_config_keeps_a_legacy_file_legacy(tmp_path):
     assert (config_path.stat().st_mode & 0o777) == 0o600
 
 
+def test_write_workspace_config_returns_refreshed_legacy_evidence(tmp_path):
+    """The return value is the record to keep using, not a `None` a caller
+    has to discard: `legacy.original` comes back as exactly the bytes just
+    written, ready for the caller's *next* save."""
+    config_path = _write_ws(tmp_path, 'templates = ["common"]\n[repos]\ncommunity = "master"\n')
+    ws = load_workspace_config(config_path)
+
+    saved = write_workspace_config(
+        config_path, replace(ws, repos={"community": BranchSpec("origin/master", "feat")})
+    )
+
+    assert saved.legacy is not None
+    assert saved.legacy.original == config_path.read_bytes()
+    assert saved.legacy.issues == ws.legacy.issues
+
+
+def test_saving_from_the_returned_workspace_record_does_not_revert_an_earlier_edit(tmp_path):
+    """The same hazard `write_global_config` has, on the repos this writer owns:
+    chaining the second save from what the first one returned — never from the
+    object that was loaded — is what keeps it from undoing the first edit."""
+    config_path = _write_ws(
+        tmp_path,
+        'templates = ["common"]\n[repos]\ncommunity = "master"\nenterprise = "master"\n',
+    )
+    ws = load_workspace_config(config_path)
+
+    saved = write_workspace_config(
+        config_path,
+        replace(ws, repos={**ws.repos, "community": BranchSpec("origin/master", "feat")}),
+    )
+    write_workspace_config(
+        config_path,
+        replace(saved, repos={**saved.repos, "enterprise": BranchSpec("origin/master", "other")}),
+    )
+
+    reloaded = load_workspace_config(config_path)
+    assert reloaded.repos["community"] == BranchSpec("origin/master", "feat")
+    assert reloaded.repos["enterprise"] == BranchSpec("origin/master", "other")
+
+
 def test_write_workspace_config_refuses_a_migrated_destination(tmp_path):
     """A stale schema-1 record must not revert a file `ow render` migrated.
 

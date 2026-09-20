@@ -20,7 +20,7 @@ import os
 import tempfile
 import tomllib
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -828,15 +828,25 @@ def _atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
-def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
+def write_workspace_config(path: Path, ws: WorkspaceConfig) -> WorkspaceConfig:
     """Write `.ow/config.toml`, replacing it atomically at mode 0600.
 
     A schema-2 record is serialized whole. A schema-1 record is not: its
     destination is re-read first, its schema must still be 1, and only
     `[repos]` is updated in the document that is actually there — comments
     and unknown data survive, and a file migrated meanwhile is refused
-    rather than reverted. This call does not update the record's retained
-    bytes: a later `dumps_workspace_config` or migration must reload it.
+    rather than reverted.
+
+    Returns the record to keep using: for a schema-1 record this is `ws`
+    with `legacy.original` refreshed to the bytes just written, so a caller
+    holding the object — the TUI, a second save in the same command — saves
+    from what is actually on disk rather than from what it was when this
+    record was loaded. A caller that discards the return value and reloads
+    instead gets the same document either way; one that keeps the *old*
+    object and saves it again would silently reapply stale editor/theme/
+    remotes over an edit that landed in between, which is exactly the
+    revert this return value exists to prevent. A schema-2 record is
+    returned unchanged — it carries no legacy evidence to refresh.
     """
     if ws.version == 1 and ws.legacy is not None:
         _reject_typed_change(ws.legacy, odoo=ws.odoo, mise=ws.mise)
@@ -847,14 +857,19 @@ def write_workspace_config(path: Path, ws: WorkspaceConfig) -> None:
         data = dumps_workspace_config(ws)
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(path, data)
+    if ws.version == 1 and ws.legacy is not None:
+        return replace(ws, legacy=LegacyConfig(source=path, original=data, issues=ws.legacy.issues))
+    return ws
 
 
-def write_global_config(config: Config) -> None:
+def write_global_config(config: Config) -> Config:
     """Rewrite `$XDG_CONFIG_HOME/ow/config.toml` to match `config`.
 
-    Same contract as `write_workspace_config`: a schema-2 record is
-    serialized whole from the documented bootstrap; a schema-1 record is
-    re-read and only its remotes, editor and theme are updated, in place.
+    Same contract as `write_workspace_config`, returned record included: a
+    schema-1 config comes back with `legacy.original` refreshed to the
+    bytes just written, so a repeated save — the TUI's theme picker is the
+    caller this matters for — starts from the file as it now is rather than
+    reapplying a save-time-stale document over an edit made in between.
     """
     path = paths.config_file()
     if config.version == 1 and config.legacy is not None:
@@ -868,6 +883,11 @@ def write_global_config(config: Config) -> None:
         data = dumps_global_config(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(path, data)
+    if config.version == 1 and config.legacy is not None:
+        return replace(
+            config, legacy=LegacyConfig(source=path, original=data, issues=config.legacy.issues)
+        )
+    return config
 
 
 def select_aliases(available: list[str], only: str | None) -> list[str]:
