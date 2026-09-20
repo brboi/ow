@@ -1371,8 +1371,25 @@ class MainScreen(Screen):
         )
 
     def _do_save_global_config(self, new_cfg: Config) -> None:
+        # The screen owns editor/odoo/mise/owignore/remotes and nothing else.
+        # A field some other writer changed while the modal was open — the
+        # command palette's theme is the one that actually happens, since a
+        # theme commit goes straight to the file — must not be reverted by
+        # writing the screen's open-time snapshot back over it. So apply the
+        # screen's own sections onto the record the holder has *now*: any
+        # field the screen does not own, plus version/legacy, comes from the
+        # freshest read of the file.
+        current = self._config_holder.value
+        merged = replace(
+            current,
+            editor=new_cfg.editor,
+            remotes=new_cfg.remotes,
+            odoo=new_cfg.odoo,
+            mise=new_cfg.mise,
+            owignore=new_cfg.owignore,
+        )
         try:
-            written = write_global_config(new_cfg)
+            written = write_global_config(merged)
         except (OSError, ValueError) as exc:
             self.notify(f"Global config not saved: {exc}", severity="error")
             return
