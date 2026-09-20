@@ -23,8 +23,10 @@ Nine paths, always the same nine:
 
 A declared repo is "the Odoo core" when it has `odoo-bin`, `addons/` and `odoo/addons/`
 (`is_odoo_main_repo`). Two repos matching the markers is an error, not a guess. The six Odoo-only
-outputs appear for any recognised core, supported major or not — an unsupported major is reported
-as a warning and the files are still written.
+outputs appear only for a **supported** major — 18, 19, 20 and their `saas` series. A recognised
+core whose major is not supported blocks every write exactly like an invalid or ambiguous one: the
+diagnostic names the alias, the series and the supported set, and nothing is written, not even for
+the three always-on outputs.
 
 `odoorc` is the only output written `0600`, because it carries the database password and the
 admin password.
@@ -55,12 +57,12 @@ inspection owns. Two things trigger it:
 Both paths run the same inspection and the same writes. The difference is only who decides when.
 
 A render refuses to touch anything when the inspection is blocked: a declared worktree is missing
-or mid-rebase, the Odoo core is unrecognised or ambiguous, an output would land inside a declared
-worktree, or a schema-1 manifest has diagnostics the migration cannot represent. The blockers are
-printed and the command exits non-zero without writing a byte. A legacy root `mise.toml` is a
-*warning* rather than a blocker — the render still writes, and ow will not delete a file it did not
-write — but it makes `ow files --diff` fail the file gate, because the fragment it shadows is not
-what mise will actually read.
+or mid-rebase, the Odoo core is unrecognised, unsupported, invalid or ambiguous, an output would
+land inside a declared worktree, or a schema-1 manifest has diagnostics the migration cannot
+represent. The blockers are printed and the command exits non-zero without writing a byte. A legacy
+root `mise.toml` is a *warning* rather than a blocker — the render still writes, and ow will not
+delete a file it did not write — but it makes `ow files --diff` fail the file gate, because the
+fragment it shadows is not what mise will actually read.
 
 ## Ownership: the rendered lock
 
