@@ -19,6 +19,7 @@ from ow.utils.git import (
     get_rev_list_count,
     get_upstream,
     get_worktree_branch,
+    get_worktree_common_dir,
     get_worktree_head,
     git,
     ordered_remotes,
@@ -800,6 +801,63 @@ def test_worktree_exists_does_not_match_substring(tmp_path):
     assert worktree_exists(bare_repo, wt_old) is True
 
 
+
+# ---------------------------------------------------------------------------
+# get_worktree_common_dir
+# ---------------------------------------------------------------------------
+
+def _bare_repo_with_commit(tmp_path: Path, name: str) -> Path:
+    """A real bare repository at `tmp_path/name`, with one commit so `worktree add` works."""
+    src_repo = tmp_path / f"{name}-src"
+    src_repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "master", str(src_repo)], check=True)
+    subprocess.run(["git", "-C", str(src_repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src_repo), "config", "user.name", "T"], check=True)
+    (src_repo / "init.txt").write_text("init")
+    subprocess.run(["git", "-C", str(src_repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(src_repo), "commit", "-q", "-m", "init"], check=True)
+
+    bare_repo = tmp_path / name
+    subprocess.run(["git", "clone", "--bare", "-q", str(src_repo), str(bare_repo)], check=True)
+    return bare_repo
+
+
+def test_get_worktree_common_dir_resolves_to_the_bare_repo(tmp_path):
+    bare_repo = _bare_repo_with_commit(tmp_path, "community.git")
+    worktree_path = tmp_path / "community"
+    subprocess.run(
+        ["git", "-C", str(bare_repo), "worktree", "add", "--detach", str(worktree_path), "master"],
+        check=True, capture_output=True,
+    )
+
+    assert get_worktree_common_dir(worktree_path) == bare_repo.resolve()
+
+
+def test_get_worktree_common_dir_none_for_a_plain_directory(tmp_path):
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+
+    assert get_worktree_common_dir(plain) is None
+
+
+def test_get_worktree_common_dir_resolves_a_symlinked_ancestor(tmp_path):
+    """A symlinked $HOME must not make a healthy worktree compare unequal
+    to its own bare repo: both sides are resolved before comparison."""
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    linked_home = tmp_path / "linked-home"
+    linked_home.symlink_to(real_home)
+
+    bare_repo = _bare_repo_with_commit(real_home, "community.git")
+    worktree_path = real_home / "community"
+    subprocess.run(
+        ["git", "-C", str(bare_repo), "worktree", "add", "--detach", str(worktree_path), "master"],
+        check=True, capture_output=True,
+    )
+
+    via_symlink = linked_home / "community"
+    assert get_worktree_common_dir(via_symlink) == bare_repo.resolve()
+
 # ---------------------------------------------------------------------------
 # create_worktree
 # ---------------------------------------------------------------------------
@@ -868,7 +926,9 @@ def test_create_worktree_attached_new_branch_sets_upstream(tmp_path):
 
 
 def test_create_worktree_attached_existing_branch(tmp_path):
-    """Branch already exists (prunable worktree re-created) — omits -b, still sets upstream."""
+    """Branch already exists (prunable worktree re-created) — omits -b, and
+    never touches its upstream: it may carry one the user set deliberately,
+    including none at all, and a repair must not reset it."""
     bare_repo = tmp_path / "community.git"
     bare_repo.mkdir()
     worktree_path = Path("/fake/workspaces/test/community")
@@ -876,23 +936,14 @@ def test_create_worktree_attached_existing_branch(tmp_path):
 
     branch_exists = MagicMock(returncode=0)
 
-    with patch("ow.utils.git._run", side_effect=[branch_exists, MagicMock(), MagicMock(), MagicMock()]) as mock_run:
+    with patch("ow.utils.git._run", side_effect=[branch_exists, MagicMock()]) as mock_run:
         create_worktree(bare_repo, worktree_path, spec)
 
-    assert mock_run.call_count == 4
+    assert mock_run.call_count == 2
     assert mock_run.call_args_list[1] == call(
         ["git", "-C", str(bare_repo), "worktree", "add", str(worktree_path), "master-feature"],
         check=True,
     )
-    assert mock_run.call_args_list[2] == call(
-        ["git", "-C", str(bare_repo), "config", "branch.master-feature.remote", "origin"],
-        check=True,
-    )
-    assert mock_run.call_args_list[3] == call(
-        ["git", "-C", str(bare_repo), "config", "branch.master-feature.merge", "refs/heads/master"],
-        check=True,
-    )
-
 
 # ---------------------------------------------------------------------------
 # get_rev_list_count

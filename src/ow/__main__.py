@@ -7,10 +7,10 @@ import typer
 
 from ow import __version__
 from ow.commands import (
-    cmd_apply,
     cmd_archive,
     cmd_cd,
     cmd_fetch,
+    cmd_files,
     cmd_init,
     cmd_ls,
     cmd_mv,
@@ -18,12 +18,12 @@ from ow.commands import (
     cmd_prune,
     cmd_pull,
     cmd_rebase,
+    cmd_render,
     cmd_reset,
     cmd_rm,
     cmd_shell_init,
     cmd_status,
     cmd_switch,
-    cmd_templates,
     cmd_unarchive,
 )
 from ow.utils import askpass, index, paths
@@ -33,7 +33,6 @@ from ow.utils.git import get_all_remote_refs, git
 from ow.utils.legacy import check_legacy_layout
 from ow.utils.paths import config_file
 from ow.utils.resolver import resolve_workspace
-from ow.utils.templates import selectable_templates
 
 
 def _version_callback(value: bool) -> None:
@@ -122,16 +121,6 @@ def _parse_repo_value(value: list[str] | None) -> dict[str, Any] | None:
             )
         repo_pairs[alias] = parse_branch_spec(spec)
     return repo_pairs
-
-
-def complete_gen_templates(ctx: typer.Context, incomplete: str) -> list[str]:
-    """Tab completion for -t/--template."""
-    try:
-        templates = selectable_templates()
-    except Exception:
-        # Completion must never crash the shell, whatever state the config is in.
-        templates = []
-    return [name for name in templates if name.startswith(incomplete)]
 
 
 def complete_gen_repos(ctx: typer.Context, incomplete: str) -> list[str]:
@@ -226,24 +215,34 @@ def _pick_workspace(positional: Optional[str], option: Optional[str]) -> Optiona
 @app.command()
 def init(
     name: Optional[str] = typer.Argument(None, help="Workspace directory to create under the current one (default: the current directory itself)"),
-    configuration: Optional[str] = typer.Option(None, "--configuration", "-c", help="Path to existing workspace config to duplicate"),
-    template: Optional[list[str]] = typer.Option(None, "--template", "-t", help="Templates to apply (repeatable)", autocompletion=complete_gen_templates),
+    configuration: Optional[str] = typer.Option(None, "--configuration", "-c", help="Path to existing workspace config to duplicate (new workspaces only)"),
     repo: Optional[list[str]] = typer.Option(None, "--repo", "-r", help="Repo alias and branch spec (repeatable, e.g. -r community:master..x)", autocompletion=complete_gen_repos),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
 ) -> None:
-    """Create a workspace here, or in ./NAME."""
+    """Create a workspace here, or in ./NAME — or repair one already there."""
     config = _load_config()
-    cmd_init(config, name=name, templates=template, repos=_parse_repo_value(repo), configuration=configuration)
+    cmd_init(config, name=name, repos=_parse_repo_value(repo), configuration=configuration, yes=yes)
 
 
 @app.command()
-def apply(
+def render(
     workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
     workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
-    check: bool = typer.Option(False, "--check", help="Report drift and outdated templates without modifying anything; exit non-zero if either is found"),
 ) -> None:
-    """Re-render templates and materialize worktrees."""
+    """Migrate the config if needed, then write every generated file."""
     config = _load_config()
-    cmd_apply(config, workspace=_pick_workspace(workspace, workspace_opt), check=check)
+    cmd_render(config, workspace=_pick_workspace(workspace, workspace_opt))
+
+
+@app.command()
+def files(
+    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
+    diff: bool = typer.Option(False, "--diff", help="Show a unified diff of every file that differs, from yours to what ow would render"),
+) -> None:
+    """Show the files ow manages and their state, or diff the ones that differ."""
+    config = _load_config()
+    cmd_files(config, workspace=_pick_workspace(workspace, workspace_opt), show_diff=diff)
 
 
 @app.command()
@@ -401,16 +400,6 @@ def prune(
     # it. The legacy gate is the only part of that path prune needs.
     check_legacy_layout()
     cmd_prune(dry_run=dry_run, yes=yes, also_backups=also_backups)
-
-@app.command()
-def templates(
-    workspace: Optional[str] = typer.Argument(None, help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
-    workspace_opt: Optional[str] = typer.Option(None, "-w", "--workspace", help=WORKSPACE_HELP, autocompletion=complete_workspace_name),
-    diff: bool = typer.Option(False, "--diff", help="Show a unified diff of every file that differs, from yours to what ow would render"),
-) -> None:
-    """List the files ow manages and their state, or diff the ones that differ."""
-    config = _load_config()
-    cmd_templates(config, workspace=_pick_workspace(workspace, workspace_opt), show_diff=diff)
 
 
 @app.command()

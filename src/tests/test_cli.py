@@ -80,20 +80,18 @@ def test_short_v_is_not_version():
 
 
 def test_init_with_args(xdg):
-    """ow init myws -r community:master..x -t vscode calls cmd_init with correct args."""
+    """ow init myws -r community:master..x calls cmd_init with correct args."""
     with patch("ow.__main__.cmd_init", autospec=True) as mock_init:
         result = runner.invoke(app, [
             "init",
             "myws",
             "-r", "community:master..x",
-            "-t", "vscode",
         ])
 
     assert result.exit_code == 0
     mock_init.assert_called_once()
     call_kwargs = mock_init.call_args
     assert call_kwargs.kwargs["name"] == "myws"
-    assert call_kwargs.kwargs["templates"] == ["vscode"]
     assert "community" in call_kwargs.kwargs["repos"]
     assert call_kwargs.kwargs["repos"]["community"] == BranchSpec("origin/master", "x")
 
@@ -101,11 +99,10 @@ def test_init_with_args(xdg):
 def test_init_without_name_passes_none(xdg):
     """`ow init` with no argument means "here" — the name must reach cmd_init as None."""
     with patch("ow.__main__.cmd_init", autospec=True) as mock_init:
-        result = runner.invoke(app, ["init", "-r", "community:master..x", "-t", "vscode"])
+        result = runner.invoke(app, ["init", "-r", "community:master..x"])
 
     assert result.exit_code == 0
     assert mock_init.call_args.kwargs["name"] is None
-
 
 def test_init_rejects_repo_without_spec(xdg):
     """-r ALIAS with no ':' must fail loudly, not silently drop the repo."""
@@ -142,26 +139,26 @@ def test_init_accepts_several_repos(xdg):
     assert sorted(repos) == ["community", "enterprise"]
 
 
-def test_apply(xdg):
-    """ow apply calls cmd_apply."""
-    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
-        result = runner.invoke(app, ["apply"])
+def test_render(xdg):
+    """ow render calls cmd_render."""
+    with patch("ow.__main__.cmd_render", autospec=True) as mock_render:
+        result = runner.invoke(app, ["render"])
 
     assert result.exit_code == 0
-    mock_apply.assert_called_once()
+    mock_render.assert_called_once()
 
 
-def test_apply_with_workspace(xdg):
-    """ow apply myws calls cmd_apply with workspace="myws"."""
-    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
-        result = runner.invoke(app, ["apply", "myws"])
+def test_render_with_workspace(xdg):
+    """ow render myws calls cmd_render with workspace="myws"."""
+    with patch("ow.__main__.cmd_render", autospec=True) as mock_render:
+        result = runner.invoke(app, ["render", "myws"])
 
     assert result.exit_code == 0
-    mock_apply.assert_called_once()
-    assert mock_apply.call_args.kwargs["workspace"] == "myws"
+    mock_render.assert_called_once()
+    assert mock_render.call_args.kwargs["workspace"] == "myws"
 
 
-@pytest.mark.parametrize("command", ["apply", "status", "rebase"])
+@pytest.mark.parametrize("command", ["render", "status", "rebase"])
 def test_workspace_argument_help_names_every_form(command):
     """[WORKSPACE] accepts four forms; the help has to name all four.
 
@@ -214,7 +211,7 @@ def test_rebase_with_workspace(xdg):
     assert mock_rebase.call_args.kwargs["workspace"] == "myws"
 
 
-@pytest.mark.parametrize("command,mock_target", [("apply", "cmd_apply"), ("status", "cmd_status")])
+@pytest.mark.parametrize("command,mock_target", [("render", "cmd_render"), ("status", "cmd_status")])
 @pytest.mark.parametrize("flag", ["-w", "--workspace"])
 def test_workspace_option_reaches_command(xdg, command, mock_target, flag):
     """-w/--workspace is a synonym for the positional WORKSPACE."""
@@ -227,22 +224,22 @@ def test_workspace_option_reaches_command(xdg, command, mock_target, flag):
 
 def test_workspace_positional_and_option_agreeing_is_accepted(xdg):
     """Naming the same workspace twice is redundant, not an error."""
-    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
-        result = runner.invoke(app, ["apply", "myws", "-w", "myws"])
+    with patch("ow.__main__.cmd_render", autospec=True) as mock_render:
+        result = runner.invoke(app, ["render", "myws", "-w", "myws"])
 
     assert result.exit_code == 0
-    assert mock_apply.call_args.kwargs["workspace"] == "myws"
+    assert mock_render.call_args.kwargs["workspace"] == "myws"
 
 
 def test_workspace_positional_and_option_disagreeing_is_rejected(xdg):
     """Two different workspaces named at once must fail loudly, not pick one."""
-    with patch("ow.__main__.cmd_apply", autospec=True) as mock_apply:
-        result = runner.invoke(app, ["apply", "myws", "-w", "otherws"])
+    with patch("ow.__main__.cmd_render", autospec=True) as mock_render:
+        result = runner.invoke(app, ["render", "myws", "-w", "otherws"])
 
     assert result.exit_code != 0
     assert "myws" in result.output
     assert "otherws" in result.output
-    mock_apply.assert_not_called()
+    mock_render.assert_not_called()
 
 
 def test_rm_requires_a_name(xdg):
@@ -538,38 +535,10 @@ def _complete(args, incomplete):
     return []
 
 
-def _make_templates(*names):
-    for name in names:
-        (paths.templates_dir() / name).mkdir(parents=True)
-
-
 def _write_remotes(*names):
     body = "".join(f'{n}.origin.url = "git@github.com:odoo/{n}.git"\n' for n in names)
     paths.config_home().mkdir(parents=True, exist_ok=True)
     paths.config_file().write_text("[remotes]\n" + body)
-
-
-def test_complete_gen_templates(xdg):
-    """Template completion returns selectable names, but never common."""
-    _make_templates("common", "vscode", "zed")
-    names = _complete(["init", "-t"], "")
-    assert "common" not in names
-    assert "vscode" in names
-    assert "zed" in names
-
-
-def test_complete_gen_templates_with_prefix(xdg):
-    """Template completion filters by prefix."""
-    _make_templates("common", "vscode")
-    assert _complete(["init", "-t"], "v") == ["vscode"]
-
-
-def test_complete_gen_templates_none_taken(xdg):
-    """Template completion still offers the packaged templates when nothing local exists."""
-    names = _complete(["init", "-t"], "")
-    assert "common" not in names
-    assert "odoo" not in names
-    assert "vscode" in names
 
 
 def test_complete_gen_repos(xdg):
