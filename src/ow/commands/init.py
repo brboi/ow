@@ -318,7 +318,7 @@ def cmd_init(
                 sys.exit(2)
         else:
             ws = _workspace_config_from_flags(source_ws, repos)
-            _check_duplicate_branches(ws.repos)
+        _check_duplicate_branches(ws.repos)
 
     try:
         require_mise()
@@ -354,6 +354,12 @@ def cmd_init(
             config = load_global_config()
         if ws.version == 1:
             ws = load_workspace_config(ow_config_path)
+        else:
+            # plan_migration only ever writes the workspace side when the
+            # workspace itself is schema 1 — a schema-1 *global* config
+            # migrating alongside a schema-2 workspace writes nothing for
+            # this workspace at all, and the manifest must still land.
+            write_workspace_config(ow_config_path, ws)
     else:
         write_workspace_config(ow_config_path, ws)
 
