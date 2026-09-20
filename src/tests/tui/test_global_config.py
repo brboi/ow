@@ -15,11 +15,17 @@ no indication whether anything still depended on it; it now goes through
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 from textual.widgets import Button, Checkbox, Static
 
-from ow.utils.config import Config, RemoteConfig, load_global_config
+from ow.utils.config import (
+    Config,
+    RemoteConfig,
+    load_global_config,
+    write_global_config,
+)
 from ow.utils.options import OdooOverrides
 from ow.tui.global_config import AddRemoteScreen, GlobalConfigScreen
 from ow.tui.widgets import ConfirmDialog, LabeledInput
@@ -254,3 +260,88 @@ def test_schema1_global_disables_typed_options_and_keeps_its_file(
     assert "# my notes" in text
     assert "version = 1" in text, "the TUI save migrated the file: only init/render may"
     assert 'mystery = "kept"' in text, "a save dropped legacy data it has no model for"
+
+
+def test_saving_defaults_keeps_a_theme_committed_while_the_modal_was_open(
+    xdg, dashboard_pilot
+):
+    """The modal is opened with a snapshot; the theme is not its business.
+
+    A palette theme commit writes the file and swaps the holder while the
+    global screen sits open on top. Saving the screen must apply only the
+    sections it owns onto the record the holder has *now* — writing the
+    open-time snapshot back would silently revert the theme the user just
+    chose.
+    """
+    write_global_config(replace(_global_config(), theme="textual-dark"))
+    config = load_global_config()
+
+    async def _run():
+        async with dashboard_pilot(config, size=_SIZE) as (pilot, screen):
+            gc_screen = await _open_section(pilot, _EDITOR)
+            assert pilot.app.theme == "textual-dark"
+
+            # The palette's commit path: set the reactive, let the watcher
+            # persist it, exactly as a theme selection does.
+            pilot.app.theme = "nord"
+            await pilot.pause()
+            assert load_global_config().theme == "nord", "watcher did not persist"
+
+            gc_screen.query_one("#gc_editor").query_one("#li_input").value = "vim"
+            await pilot.click("#btn_save")
+            await pilot.pause()
+
+            assert pilot.app._config_holder.value.theme == "nord", (
+                "the holder was left holding the modal's stale theme"
+            )
+
+    asyncio.run(_run())
+
+    reloaded = load_global_config()
+    assert reloaded.theme == "nord", (
+        "saving the modal reverted the theme committed while it was open"
+    )
+    assert reloaded.editor == "vim"
+
+
+def test_ignore_edit_in_place_opens_on_enter(dashboard_pilot):
+    """Enter on the focused ignore table opens the edit prompt for the
+    highlighted row (the table's own Enter binding wins, or the affordance
+    is dead), and the edit is what gets saved."""
+    seeded = Config(
+        remotes={"community": {"origin": RemoteConfig(url="git@github.com:odoo/odoo.git")}},
+        owignore=("*.log",),
+    )
+
+    async def _run():
+        async with dashboard_pilot(seeded, size=_SIZE) as (pilot, screen):
+            gc_screen = await _open_section(pilot, _IGNORE)
+            table = gc_screen.query_one("#ignore_table")
+
+            # Tab to the table the way a user does — Save, Cancel, the section
+            # list, the panel scroller, then the table — and assert it really
+            # is the focused widget before pressing the key.
+            for _ in range(4):
+                await pilot.press("tab")
+                await pilot.pause()
+            assert pilot.app.focused is table, (
+                f"tabbing never reaches the ignore table, focus is {pilot.app.focused!r}"
+            )
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, PromptScreen), (
+                f"Enter did not open the edit prompt, got {pilot.app.screen!r}"
+            )
+            prompt_input = pilot.app.screen.query_one("#prompt_input")
+            assert prompt_input.value == "*.log", "the prompt must carry the row's value"
+            prompt_input.query_one("#li_input").value = "*.bak"
+            await pilot.click("#btn_ok")
+            await pilot.pause()
+
+            await pilot.click("#btn_save")
+            await pilot.pause()
+
+    asyncio.run(_run())
+
+    assert load_global_config().owignore == ("*.bak",)

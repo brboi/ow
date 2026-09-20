@@ -11,8 +11,10 @@ selected section's content.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
+from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -226,6 +228,27 @@ class AddRemoteScreen(ModalScreen[AddRemoteRequest | None]):
 # ---------------------------------------------------------------------------
 
 
+class _PatternTable(DataTable):
+    """The ignore list's table, with Enter wired to edit-in-place.
+
+    `DataTable` binds Enter to `select_cursor`, and a key's bindings are
+    tried in order — so ours has to come first, or the inherited one would
+    answer the key before the editor ever saw it.
+    """
+
+    BINDINGS = [
+        Binding("enter", "edit_pattern", "Edit", show=True),
+        *DataTable.BINDINGS,
+    ]
+
+    def __init__(self, on_edit: Callable[[], None], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._on_edit = on_edit
+
+    def action_edit_pattern(self) -> None:
+        self._on_edit()
+
+
 class _IgnoreEditor(Vertical):
     """An ordered `DataTable` of ignore patterns, with add/remove/edit.
 
@@ -252,18 +275,17 @@ class _IgnoreEditor(Vertical):
     }
     """
 
-    BINDINGS = [
-        Binding("enter", "edit_cell", "Edit", show=True),
-    ]
-
     def __init__(self, initial: tuple[str, ...], *, disabled: bool = False, **kwargs) -> None:
         super().__init__(**kwargs)
         self._initial = initial
         self._locked = disabled
+        self._pattern_column: Any = None
+        # Set in `compose()`: the ColumnKey `update_cell` needs. A column
+        # index is not accepted there — it raises a bare KeyError.
 
     def compose(self) -> ComposeResult:
-        table = DataTable(id="ignore_table")
-        table.add_column("pattern")
+        table = _PatternTable(self._edit_selected_pattern, id="ignore_table")
+        self._pattern_column = table.add_column("pattern")
         for pattern in self._initial:
             table.add_row(pattern)
         yield table
@@ -307,7 +329,7 @@ class _IgnoreEditor(Vertical):
             return
         table.remove_row(row_key)
 
-    def action_edit_cell(self) -> None:
+    def _edit_selected_pattern(self) -> None:
         if self._locked:
             return
         table = self.query_one("#ignore_table", DataTable)
@@ -327,9 +349,9 @@ class _IgnoreEditor(Vertical):
                 return
             table = self.query_one("#ignore_table", DataTable)
             try:
-                table.update_cell(row_key, table.columns[0].key, result)
+                table.update_cell(row_key, self._pattern_column, result)
             except Exception:
-                pass
+                self.app.notify("Could not update the pattern", severity="warning")
         self.app.push_screen(PromptScreen("pattern", default=current), callback=_on_result)
 
 
@@ -345,7 +367,11 @@ class GlobalConfigScreen(ModalScreen[Config | None]):
     Full-screen modal with a sidebar for section navigation and a right
     panel showing the selected section's content.
 
-    Dismisses with a new `Config` on Save, None on Cancel.
+    Dismisses with a new `Config` on Save, None on Cancel. The caller owns
+    the write and applies this screen's sections (editor, odoo, mise,
+    owignore, remotes) onto the config it currently holds — so `theme`, which
+    this screen does not edit, comes from whoever wrote it last (the command
+    palette) rather than from this screen's open-time snapshot.
     """
 
     DEFAULT_CSS = """
