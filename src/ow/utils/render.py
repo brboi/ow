@@ -155,7 +155,8 @@ def read_lock(root: Path) -> dict[str, str]:
     Corrupt structure (bad TOML, a non-table, a non-hex value) is a
     `ValueError` naming the lock path — never silently reset to empty,
     since an empty lock would strip every existing output of the
-    protection its lock entry gives it.
+    protection its lock entry gives it. An unreadable lock raises
+    `OSError` naming the path, so a caller reports it rather than guessing.
     """
     lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
     ancestry_problem = _ancestry_problem(root, lock_rel)
@@ -175,6 +176,8 @@ def read_lock(root: Path) -> dict[str, str]:
             data = tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"rendered lock at {lock_path.as_posix()} is not valid TOML: {exc}") from exc
+    except OSError as exc:
+        raise OSError(f"cannot read rendered lock at {lock_path.as_posix()}: {exc}") from exc
 
     if not isinstance(data, dict):
         raise ValueError(f"rendered lock at {lock_path.as_posix()} must be a table")
@@ -250,6 +253,14 @@ def _unsafe_destination(name: str, st: os.stat_result) -> str | None:
     return None
 
 
+def _read_destination(name: str, dest: Path) -> tuple[bytes | None, str | None]:
+    """`dest`'s bytes, or the error `name` should be planned with."""
+    try:
+        return dest.read_bytes(), None
+    except OSError as exc:
+        return None, f"cannot read {name}: {exc}"
+
+
 def plan_files(
     root: Path, outputs: tuple["GeneratedFile", ...], ignore: tuple[str, ...]
 ) -> RenderPlan:
@@ -257,11 +268,13 @@ def plan_files(
 
     `outputs` is the caller's complete fixed proposal — `data=None` marks
     a path no generator wants in this context, which is handled exactly
-    like a lock entry no current proposal produces any more.
+    like a lock entry no current proposal produces any more. Every path
+    problem, and every unreadable lock or destination, becomes an entry
+    in `errors`; nothing here raises.
     """
     try:
         lock = read_lock(root)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         return RenderPlan(root=root, outputs=(), states=(), lock={}, errors=(str(exc),))
 
     errors: list[str] = []
@@ -302,7 +315,10 @@ def plan_files(
 
         if gf is None or gf.data is None:
             if name in lock and st is not None:
-                current = dest.read_bytes()
+                current, read_error = _read_destination(name, dest)
+                if read_error:
+                    errors.append(read_error)
+                    continue
                 states.append(RenderedFile(name, NOT_RENDERED, None, _as_text(current)))
             continue
 
@@ -311,7 +327,10 @@ def plan_files(
             states.append(RenderedFile(name, ABSENT, _as_text(gf.data), None))
             continue
 
-        current = dest.read_bytes()
+        current, read_error = _read_destination(name, dest)
+        if read_error:
+            errors.append(read_error)
+            continue
         if current == gf.data:
             states.append(RenderedFile(name, UP_TO_DATE, _as_text(gf.data), _as_text(current)))
         elif lock.get(name) == _sha256_bytes(current):

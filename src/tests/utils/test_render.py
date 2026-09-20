@@ -255,6 +255,40 @@ def test_parent_escaping_output_path_is_rejected(tmp_path):
     assert not (tmp_path.parent / "escape.txt").exists()
 
 
+def test_absolute_output_path_is_rejected(tmp_path):
+    plan = plan_files(tmp_path, (gf("/etc/passwd", b"x\n"),), ())
+    assert plan.errors
+    assert plan.outputs == ()
+    assert not (tmp_path / "etc" / "passwd").exists()
+
+
+def test_retired_locked_local_path_is_allowed_and_not_rendered(tmp_path):
+    """`.local/...` is a safe retired workspace path: listed, never errored."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    retired = ws / ".local" / "plugin" / "notes.txt"
+    retired.parent.mkdir(parents=True)
+    retired.write_bytes(b"retired\n")
+    lock_dir = ws / ".ow"
+    lock_dir.mkdir()
+    (lock_dir / "rendered.lock.toml").write_bytes(
+        dumps_lock({".local/plugin/notes.txt": "a" * 64})
+    )
+
+    plan = plan_files(ws, (), ())
+    assert not plan.errors
+    rendered = states_by_path(plan)[".local/plugin/notes.txt"]
+    assert rendered.state == NOT_RENDERED
+    assert rendered.ow_text is None
+    assert rendered.your_text == "retired\n"
+
+    result = write_files(plan)
+    assert not result.failed
+    assert result.skipped == (".local/plugin/notes.txt",)
+    assert retired.read_bytes() == b"retired\n"
+    assert read_lock(ws)[".local/plugin/notes.txt"] == "a" * 64
+
+
 def test_lock_entry_escaping_workspace_is_never_read(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -356,6 +390,42 @@ def test_lock_with_non_hex_value_is_a_blocking_error(tmp_path):
 
     plan = plan_files(tmp_path, (gf("settings.json", b"x\n"),), ())
     assert plan.errors
+
+
+def test_unreadable_lock_is_a_planned_error_not_a_raise(tmp_path):
+    lock_path = tmp_path / ".ow" / "rendered.lock.toml"
+    lock_path.parent.mkdir()
+    lock_path.write_bytes(dumps_lock({}))
+    lock_path.chmod(0o000)
+    try:
+        plan = plan_files(tmp_path, (gf("settings.json", b"x\n"),), ())
+    finally:
+        lock_path.chmod(0o600)
+
+    assert plan.errors
+    assert any(str(lock_path) in message for message in plan.errors)
+    assert plan.outputs == ()
+
+    result = write_files(plan)
+    assert result.failed
+    assert not (tmp_path / "settings.json").exists()
+
+
+def test_unreadable_destination_is_a_planned_error(tmp_path):
+    dest = tmp_path / "settings.json"
+    dest.write_bytes(b"old\n")
+    dest.chmod(0o000)
+    try:
+        plan = plan_files(tmp_path, (gf("settings.json", b"new\n"),), ())
+    finally:
+        dest.chmod(0o600)
+
+    assert plan.errors
+    assert any("settings.json" in message for message in plan.errors)
+
+    result = write_files(plan)
+    assert result.failed
+    assert dest.read_bytes() == b"old\n"
 
 
 def test_lock_with_wrong_value_type_is_a_blocking_error(tmp_path):
