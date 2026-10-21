@@ -1,0 +1,424 @@
+
+━━ first-run ━━  X, Y published on dev/work; the target moved to D.
+   expected on top of origin/master: X, Y
+   [ow2] correct
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase origin/master
+       replayed: X, Y
+       result:   X, Y
+   [pull] correct
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+
+━━ second-run ━━  Run the same recipe twice; nothing moved in between (dev/work is still the pre-rebase X, Y).
+   expected on top of origin/master: X, Y
+   [ow2] correct
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       replayed: —
+       result:   X, Y
+   [pull] correct
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       $ git rebase -q origin/master
+       replayed: C, D, X, Y
+       result:   X, Y
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: C, D, X, Y
+       result:   X, Y
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       replayed: —
+       result:   X, Y
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       replayed: —
+       result:   X, Y
+
+━━ second-run-after-conflict ━━  I rebased onto the target myself and resolved a conflict (E vs X2), not pushed yet; now run the recipe.
+   expected on top of origin/master: X, Y, X2
+   [ow2] conflict
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase --onto dev/work 7b704a39280cd9be709026352f0c1e723395aabd
+       ! CONFLICT (content): Merge conflict in f.txt
+       replayed: —
+       result:   X, Y, X2
+   [pull] conflict
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       ! CONFLICT (content): Merge conflict in f.txt
+       replayed: C, D
+       result:   X, Y, X2
+   [fetch+rebase] conflict
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       ! CONFLICT (content): Merge conflict in f.txt
+       replayed: C, D
+       result:   X, Y, X2
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       replayed: —
+       result:   X, Y, X2
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       replayed: —
+       result:   X, Y, X2
+
+━━ colleague-pushed ━━  After my first run (not pushed), I add W; a colleague pushes Z on top of the old dev/work.
+   expected on top of origin/master: X, Y, Z, W
+   [ow2] correct
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase --onto dev/work ef86f7804c39b3a0d345635a9ebccdf7daabce72
+       $ git rebase origin/master
+       replayed: W, X, Y, Z, W
+       result:   X, Y, Z, W
+   [pull] correct
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       $ git rebase -q origin/master
+       replayed: C, D, W, X, Y, Z, W
+       result:   X, Y, Z, W
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: C, D, W, X, Y, Z, W
+       result:   X, Y, Z, W
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: C, D, W, X, Y, Z, W
+       result:   X, Y, Z, W
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git cherry-pick 989e395a5d..dev/work
+       replayed: Z
+       result:   X, Y, W, Z
+
+━━ colleague-pushed-after-conflict ━━  I levelled through the conflict (E vs X2) and added W, unpushed; the colleague pushed Z on the old dev/work.
+   expected on top of origin/master: X, Y, X2, Z, W
+   [ow2] conflict
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase --onto dev/work b3196feaa7cab3a52d1481ff1296ecae5d91b916
+       ! CONFLICT (content): Merge conflict in f.txt
+       replayed: —
+       result:   X, Y, X2, W
+   [pull] conflict
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       ! CONFLICT (content): Merge conflict in f.txt
+       replayed: C, D
+       result:   X, Y, X2, W
+   [fetch+rebase] conflict
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       ! CONFLICT (content): Merge conflict in f.txt
+       replayed: C, D
+       result:   X, Y, X2, W
+   [guarded] conflict
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       ! CONFLICT (content): Merge conflict in f.txt
+       replayed: C, D
+       result:   X, Y, X2, W
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git cherry-pick 6451ee5e43..dev/work
+       replayed: Z
+       result:   X, Y, X2, W, Z
+
+━━ squash-force-push ━━  I have local W; the colleague squashes X, Y into XY (same files) and force-pushes.
+   expected on top of origin/master: XY, W
+   [ow2] correct
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase --onto dev/work 2705ffa8427326644a432ad5e14ae3eb80cb9a8e
+       $ git rebase origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [pull] correct
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+
+━━ squash-already-fetched ━━  Same, but a plain fetch (ow status --fetch) absorbed the force-push before the recipe runs.
+   expected on top of origin/master: XY, W
+   [ow2] correct
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase --onto dev/work 37396e2553505d777418af8c1496f289f55d6db0
+       $ git rebase origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [pull] correct
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+
+━━ squash-no-reflog ━━  Same, and the remote-tracking reflog is gone (bare repo cloned before logAllRefUpdates).
+   expected on top of origin/master: XY, W
+   [ow2] correct
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase --onto dev/work 4bae2e6619919494e39afa07871f955e0cb371ec
+       $ git rebase origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [pull] correct
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: W, XY, W
+       result:   XY, W
+
+━━ weekly-level-by-colleague ━━  I have local W on the old X, Y; the colleague rebases dev/work onto D and force-pushes.
+   expected on top of origin/master: X, Y, W
+   [ow2] correct
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase --onto dev/work 74d01d3a6cdc04e5527c3a051f8e5b9f4bfda01c
+       $ git rebase origin/master
+       replayed: W
+       result:   X, Y, W
+   [pull] correct
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       replayed: W
+       result:   X, Y, W
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       replayed: W
+       result:   X, Y, W
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       replayed: W
+       result:   X, Y, W
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       replayed: W
+       result:   X, Y, W
+
+━━ weekly-level-both ━━  I already levelled onto D and added W; the colleague levelled too and force-pushed first.
+   expected on top of origin/master: X, Y, W
+   [ow2] correct
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase --onto dev/work 0a3faa1082f43dee0d7781ad20e2dcf72c2853cb
+       $ git rebase origin/master
+       replayed: W
+       result:   X, Y, W
+   [pull] correct
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       replayed: W
+       result:   X, Y, W
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       replayed: W
+       result:   X, Y, W
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       replayed: W
+       result:   X, Y, W
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       replayed: W
+       result:   X, Y, W
+
+━━ weekly-level-colleague-resolved ━━  The colleague levelled through a conflict (E vs X2) and force-pushed; I have W on the old branch.
+   expected on top of origin/master: X, Y, X2, W
+   [ow2] correct
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       $ git rebase --onto dev/work 457b2b31c32b3c1f9ce85d0028c78f45b4fc0c7e
+       $ git rebase origin/master
+       replayed: W
+       result:   X, Y, X2, W
+   [pull] correct
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       replayed: W
+       result:   X, Y, X2, W
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       replayed: W
+       result:   X, Y, X2, W
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       replayed: W
+       result:   X, Y, X2, W
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       replayed: W
+       result:   X, Y, X2, W
+
+━━ upstream-deleted ━━  dev/work was deleted on the server (merged); @{u} is still configured locally.
+   expected on top of origin/master: X, Y
+   [ow2] skipped
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       ! fetch failed, refs are stale (fatal: couldn't find remote ref work)
+       replayed: —
+       result:   X, Y   (HEAD does not contain origin/master)
+   [pull] failed
+       $ git fetch -q origin
+       $ git pull -q --rebase
+       ! Your configuration specifies to merge with the ref 'refs/heads/work'
+       replayed: —
+       result:   X, Y   (HEAD does not contain origin/master)
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+
+━━ never-pushed ━━  Local X, Y never pushed, no @{u}; the target moved to D.
+   expected on top of origin/master: X, Y
+   [ow2] skipped
+       $ git fetch -q origin +refs/heads/master:refs/remotes/origin/master
+       $ git fetch -q -f dev +work:refs/remotes/dev/work
+       ! fetch failed, refs are stale (fatal: couldn't find remote ref work)
+       replayed: —
+       result:   X, Y   (HEAD does not contain origin/master)
+   [pull] correct
+       $ git fetch -q origin
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+   [fetch+rebase] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+   [guarded] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+   [guarded+pick] correct
+       $ git fetch -q --multiple origin dev
+       $ git rebase -q origin/master
+       replayed: X, Y
+       result:   X, Y
+
+
+Summary
+  scenario                         ow2                pull               fetch+rebase       guarded            guarded+pick     
+  first-run                        correct (2 picks)  correct (2 picks)  correct (2 picks)  correct (2 picks)  correct (2 picks)
+  second-run                       correct (0 picks)  correct (4 picks)  correct (4 picks)  correct (0 picks)  correct (0 picks)
+  second-run-after-conflict        conflict           conflict           conflict           correct (0 picks)  correct (0 picks)
+  colleague-pushed                 correct (5 picks)  correct (7 picks)  correct (7 picks)  correct (7 picks)  correct (1 picks)
+  colleague-pushed-after-conflict  conflict           conflict           conflict           conflict           correct (1 picks)
+  squash-force-push                correct (3 picks)  correct (3 picks)  correct (3 picks)  correct (3 picks)  correct (3 picks)
+  squash-already-fetched           correct (3 picks)  correct (3 picks)  correct (3 picks)  correct (3 picks)  correct (3 picks)
+  squash-no-reflog                 correct (3 picks)  correct (3 picks)  correct (3 picks)  correct (3 picks)  correct (3 picks)
+  weekly-level-by-colleague        correct (1 picks)  correct (1 picks)  correct (1 picks)  correct (1 picks)  correct (1 picks)
+  weekly-level-both                correct (1 picks)  correct (1 picks)  correct (1 picks)  correct (1 picks)  correct (1 picks)
+  weekly-level-colleague-resolved  correct (1 picks)  correct (1 picks)  correct (1 picks)  correct (1 picks)  correct (1 picks)
+  upstream-deleted                 skipped            failed             correct (2 picks)  correct (2 picks)  correct (2 picks)
+  never-pushed                     skipped            correct (2 picks)  correct (2 picks)  correct (2 picks)  correct (2 picks)
