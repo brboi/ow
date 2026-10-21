@@ -703,3 +703,56 @@ def test_plugins_call_with_undeclared_hook_returns_empty_list():
     results = plugins.call("nonexistent_hook")
 
     assert results == []
+
+
+def test_plugins_call_with_errors_collect():
+    """Test that call(errors='collect') collects PluginErrors instead of raising."""
+    plugin_a = types.ModuleType("plugin_a")
+    plugin_b = types.ModuleType("plugin_b")
+    plugin_c = types.ModuleType("plugin_c")
+
+    @hookimpl
+    def ow_diagnostics_a(ws):
+        return [Diagnostic("info", "diagnostic from a")]
+
+    @hookimpl
+    def ow_diagnostics_b(ws):
+        raise ValueError("Something went wrong in b")
+
+    @hookimpl
+    def ow_diagnostics_c(ws):
+        return [Diagnostic("warning", "diagnostic from c")]
+
+    plugin_a.ow_diagnostics = ow_diagnostics_a
+    plugin_a.HOOKSPECS = ()
+
+    plugin_b.ow_diagnostics = ow_diagnostics_b
+    plugin_b.HOOKSPECS = ()
+
+    plugin_c.ow_diagnostics = ow_diagnostics_c
+    plugin_c.HOOKSPECS = ()
+
+    plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b), ("c", plugin_c)))
+    fake_ws = FakeWorkspace(root=Path("/tmp"), settings={})
+
+    # With errors="collect", all results including errors should be returned
+    results = plugins.call("ow_diagnostics", ws=fake_ws, errors="collect")
+
+    # Should have 3 results: a, b (error), c
+    assert len(results) == 3
+
+    # First result should be from plugin a
+    assert results[0][0] == "a"
+    assert isinstance(results[0][1], list)
+    assert results[0][1][0].text == "diagnostic from a"
+
+    # Second result should be the error from plugin b as a PluginError
+    assert results[1][0] == "b"
+    assert isinstance(results[1][1], PluginError)
+    assert "Something went wrong in b" in str(results[1][1].cause)
+
+    # Third result should be from plugin c
+    assert results[2][0] == "c"
+    assert isinstance(results[2][1], list)
+    assert results[2][1][0].text == "diagnostic from c"
+

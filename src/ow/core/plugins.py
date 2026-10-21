@@ -174,13 +174,16 @@ class Plugins:
         return tuple(result)
 
     def call(
-        self, hook: str, ws: Workspace | None = None, **kwargs: Any
+        self, hook: str, ws: Workspace | None = None, *,
+        errors: Literal["raise", "collect"] = "raise", **kwargs: Any
     ) -> list[tuple[str, object]]:
         """Call a hook on all enabled plugins.
 
         Returns (plugin_name, result) tuples in tuple order.
         Skips disabled plugins when ws is given.
-        Converts exceptions to PluginError and re-raises.
+        
+        With errors="raise" (default), raises on first PluginError.
+        With errors="collect", yields (name, PluginError(...)) and continues.
         Drops None results.
         """
         result = []
@@ -213,11 +216,16 @@ class Plugins:
                 ret = impl.function(**impl_kwargs)
                 if ret is not None:
                     result.append((name, ret))
-            except PluginError:
-                # Re-raise existing PluginError unchanged (keep original plugin name)
-                raise
+            except PluginError as e:
+                # Keep an existing PluginError unchanged (original plugin name and cause)
+                if errors == "raise":
+                    raise
+                result.append((name, e))
             except Exception as e:
-                raise PluginError(name, hook, e) from e
+                error = PluginError(name, hook, e)
+                if errors == "raise":
+                    raise error from e
+                result.append((name, error))
 
         return result
 
