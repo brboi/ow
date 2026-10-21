@@ -98,11 +98,12 @@ def show(argv: Sequence[str], root: Path | None = None) -> str:
             path_val = argv[i]
             path = Path(path_val)
             
-            # Try to relativize to root if it's given
+            # Relativize to root: the root itself prints as ".", anything under it
+            # as its relative remainder, so the line stays runnable from the root.
             if root:
                 try:
-                    path.relative_to(root)
-                    result.append(".")
+                    rel = path.relative_to(root)
+                    result.append(shlex.quote(str(rel)) if str(rel) != "." else ".")
                     i += 1
                     continue
                 except ValueError:
