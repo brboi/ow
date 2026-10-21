@@ -202,15 +202,38 @@ class Lab:
         with_demo: bool = True,
     ) -> dict[str, str]:
         """Generate Odoo project files structure."""
+        # `odoo/tools/config.py` as real Odoo writes it: the option group's
+        # `add_option("--with-demo"/"--without-demo", ...)` lives in a method
+        # body, never as a bare module-level call.
+        config_py = (
+            '"""Reduced copy of odoo/tools/config.py."""\n'
+            "import optparse\n"
+            "\n"
+            "\n"
+            "class OdooConfig:\n"
+            "    def __init__(self, args=None):\n"
+            "        parser = optparse.OptionParser()\n"
+            '        group = optparse.OptionGroup(parser, "Common options")\n'
+        )
+        if with_demo:
+            config_py += (
+                '        group.add_option("--with-demo", dest="with_demo",'
+                ' action="store_true", my_default=False)\n'
+            )
+        else:
+            config_py += (
+                '        group.add_option("--without-demo", dest="without_demo",'
+                " my_default=False)\n"
+            )
+        config_py += "        parser.add_option_group(group)\n"
+
         files = {
             "odoo-bin": "#!/usr/bin/env python\n# odoo binary\n",
             "addons/web/__manifest__.py": "{'name': 'Web', 'version': '1.0'}",
             "odoo/addons/base/__manifest__.py": "{'name': 'Base', 'version': '1.0'}",
+            "odoo/__init__.py": "# Odoo package\n",
             "odoo/release.py": f"MIN_PY_VERSION = {python[0]}\nMAX_PY_VERSION = {python[-1]}\n",
-            "odoo/tools/config.py": (
-                "def add_option(name, **kwargs):\n    pass\n"
-                + (f"add_option('--with-demo', action='store_true')\n" if with_demo else "add_option('--without-demo', action='store_true')\n")
-            ),
+            "odoo/tools/config.py": config_py,
             "requirements.txt": "# requirements\n",
         }
         return files
