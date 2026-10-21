@@ -1,0 +1,49 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-ubuntu:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.x']
+    
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install pytest
+      - name: Run tests
+        run: python -m pytest -q src/tests
+
+  test-alpine:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
+    
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apk add --no-cache git=2.45.4-r0 python3 py3-pip py3-virtualenv
+      - name: Verify git version
+        run: |
+          git --version | grep "git version 2.45.4"
+      - name: Create venv and install
+        run: |
+          python3 -m venv venv
+          . venv/bin/activate
+          pip install -e .
+          pip install pytest
+      - name: Run tests
+        run: |
+          . venv/bin/activate
+          python -m pytest -q src/tests
