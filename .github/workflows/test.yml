@@ -1,7 +1,9 @@
 name: Test
 
 on:
+  # Branches are tested through their pull request; main is tested on push.
   push:
+    branches: [main]
   pull_request:
 
 jobs:
