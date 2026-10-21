@@ -161,3 +161,352 @@ class TestInferDefaultBase:
         base, source = result
         assert base == "origin/18.0"
         assert source == "origin/HEAD"
+
+
+class TestFollowedRef:
+    """Test cases for followed_ref()."""
+
+    def test_branch_with_upstream(self):
+        """On a branch with an upstream: return the upstream."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.follow import followed_ref
+
+        facts = RepoFacts(
+            name="test",
+            path=None,
+            bare=None,
+            remotes=("origin",),
+            head=None,
+            branch="main",
+            upstream="origin/upstream-branch",
+            upstream_ab=None,
+            base="origin/main",
+            default_base="origin/main",
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        assert followed_ref(facts) == "origin/upstream-branch"
+
+    def test_branch_with_upstream_equal_to_base(self):
+        """When upstream == base: treat as no upstream, return base."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.follow import followed_ref
+
+        facts = RepoFacts(
+            name="test",
+            path=None,
+            bare=None,
+            remotes=("origin",),
+            head=None,
+            branch="main",
+            upstream="origin/main",
+            upstream_ab=None,
+            base="origin/main",
+            default_base="origin/main",
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        assert followed_ref(facts) == "origin/main"
+
+    def test_branch_without_upstream(self):
+        """On a branch without upstream: return the base."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.follow import followed_ref
+
+        facts = RepoFacts(
+            name="test",
+            path=None,
+            bare=None,
+            remotes=("origin",),
+            head=None,
+            branch="feature",
+            upstream=None,
+            upstream_ab=None,
+            base="origin/18.0",
+            default_base="origin/18.0",
+            explicit_base="origin/18.0",
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        assert followed_ref(facts) == "origin/18.0"
+
+    def test_branch_without_base(self):
+        """On a branch without explicit base: return default base."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.follow import followed_ref
+
+        facts = RepoFacts(
+            name="test",
+            path=None,
+            bare=None,
+            remotes=("origin",),
+            head=None,
+            branch="feature",
+            upstream=None,
+            upstream_ab=None,
+            base=None,
+            default_base="origin/18.0",
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        # base is computed as explicit_base or default_base, so it should be None in the facts
+        facts = RepoFacts(
+            name="test",
+            path=None,
+            bare=None,
+            remotes=("origin",),
+            head=None,
+            branch="feature",
+            upstream=None,
+            upstream_ab=None,
+            base="origin/18.0",
+            default_base="origin/18.0",
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        assert followed_ref(facts) == "origin/18.0"
+
+    def test_detached_head(self):
+        """On a detached HEAD: return the default base."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.follow import followed_ref
+
+        facts = RepoFacts(
+            name="test",
+            path=None,
+            bare=None,
+            remotes=("origin",),
+            head="abc123def456",
+            branch=None,
+            upstream=None,
+            upstream_ab=None,
+            base="origin/18.0",
+            default_base="origin/18.0",
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        assert followed_ref(facts) == "origin/18.0"
+
+    def test_detached_head_without_default_base(self):
+        """On a detached HEAD without default base: return None."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.follow import followed_ref
+
+        facts = RepoFacts(
+            name="test",
+            path=None,
+            bare=None,
+            remotes=("origin",),
+            head="abc123def456",
+            branch=None,
+            upstream=None,
+            upstream_ab=None,
+            base=None,
+            default_base=None,
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        assert followed_ref(facts) is None
+
+
+class TestFetchSteps:
+    """Test cases for fetch_steps()."""
+
+    def test_fetch_base_only(self):
+        """Fetch the base branch from the correct remote."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.fetch import fetch_steps
+        from pathlib import Path
+
+        facts = RepoFacts(
+            name="community",
+            path=Path("/ws/community"),
+            bare=Path("/data/repos/community.git"),
+            remotes=("origin",),
+            head=None,
+            branch="main",
+            upstream=None,
+            upstream_ab=None,
+            base="origin/18.0",
+            default_base="origin/18.0",
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        steps = fetch_steps(facts)
+        assert len(steps) == 1
+        assert steps[0].argv == ("git", "-C", "/data/repos/community.git", "fetch", "origin", "18.0")
+        assert not steps[0].mutating
+
+    def test_fetch_base_and_upstream(self):
+        """Fetch both base and upstream from different remotes."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.fetch import fetch_steps
+        from pathlib import Path
+
+        facts = RepoFacts(
+            name="enterprise",
+            path=Path("/ws/enterprise"),
+            bare=Path("/data/repos/enterprise.git"),
+            remotes=("origin", "dev"),
+            head=None,
+            branch="main",
+            upstream="dev/upstream-branch",
+            upstream_ab=(1, 2),
+            base="origin/18.0",
+            default_base="origin/18.0",
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        steps = fetch_steps(facts)
+        assert len(steps) == 2
+        # First fetch from origin
+        assert steps[0].argv == ("git", "-C", "/data/repos/enterprise.git", "fetch", "origin", "18.0")
+        # Then fetch from dev
+        assert steps[1].argv == ("git", "-C", "/data/repos/enterprise.git", "fetch", "dev", "upstream-branch")
+        for step in steps:
+            assert not step.mutating
+
+    def test_fetch_upstream_equal_to_base(self):
+        """When upstream equals base, fetch only once."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.fetch import fetch_steps
+        from pathlib import Path
+
+        facts = RepoFacts(
+            name="community",
+            path=Path("/ws/community"),
+            bare=Path("/data/repos/community.git"),
+            remotes=("origin",),
+            head=None,
+            branch="main",
+            upstream="origin/18.0",
+            upstream_ab=(0, 0),
+            base="origin/18.0",
+            default_base="origin/18.0",
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        steps = fetch_steps(facts)
+        assert len(steps) == 1
+        assert steps[0].argv == ("git", "-C", "/data/repos/community.git", "fetch", "origin", "18.0")
+
+    def test_fetch_no_base_no_upstream(self):
+        """No base and no upstream: no fetch needed."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.fetch import fetch_steps
+        from pathlib import Path
+
+        facts = RepoFacts(
+            name="test",
+            path=Path("/ws/test"),
+            bare=Path("/data/repos/test.git"),
+            remotes=("origin",),
+            head=None,
+            branch=None,
+            upstream=None,
+            upstream_ab=None,
+            base=None,
+            default_base=None,
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        steps = fetch_steps(facts)
+        assert steps == ()
+
+    def test_fetch_remote_with_slash_in_name(self):
+        """Remote names can contain slashes: use the longest match."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.fetch import fetch_steps
+        from pathlib import Path
+
+        facts = RepoFacts(
+            name="test",
+            path=Path("/ws/test"),
+            bare=Path("/data/repos/test.git"),
+            remotes=("origin", "gitlab-group/test"),
+            head=None,
+            branch="feature",
+            upstream=None,
+            upstream_ab=None,
+            base="gitlab-group/test/main",
+            default_base="gitlab-group/test/main",
+            explicit_base="gitlab-group/test/main",
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem=None,
+        )
+
+        steps = fetch_steps(facts)
+        assert len(steps) == 1
+        assert steps[0].argv == ("git", "-C", "/data/repos/test.git", "fetch", "gitlab-group/test", "main")
+
+    def test_fetch_problem_repo(self):
+        """A problem repo should not generate fetch steps."""
+        from ow.core.facts import RepoFacts
+        from ow.recipes.fetch import fetch_steps
+        from pathlib import Path
+
+        facts = RepoFacts(
+            name="test",
+            path=Path("/ws/test"),
+            bare=Path("/data/repos/test.git"),
+            remotes=("origin",),
+            head=None,
+            branch=None,
+            upstream=None,
+            upstream_ab=None,
+            base="origin/18.0",
+            default_base="origin/18.0",
+            explicit_base=None,
+            operation=None,
+            modified=(),
+            untracked=(),
+            problem="prunable",
+        )
+
+        steps = fetch_steps(facts)
+        assert steps == ()
