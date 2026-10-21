@@ -30,13 +30,20 @@ jobs:
       image: alpine:3.20
     
     steps:
-      - uses: actions/checkout@v4
+      # git must exist before checkout: without it, actions/checkout downloads a tarball
+      # with no .git, and setuptools-scm cannot compute the version.
       - name: Install dependencies
         run: |
           apk add --no-cache git=2.45.4-r0 python3 py3-pip py3-virtualenv bash
       - name: Verify git version
         run: |
           git --version | grep "git version 2.45.4"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The container runs as root over a checkout owned by the runner user.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Create venv and install
         run: |
           python3 -m venv venv
