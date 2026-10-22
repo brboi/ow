@@ -50,7 +50,8 @@ jobs:
         run: |
           curl -fsSL https://www.kernel.org/pub/software/scm/git/git-2.45.4.tar.gz -o /tmp/git.tar.gz
           tar -C /tmp -xzf /tmp/git.tar.gz
-          make -C /tmp/git-2.45.4 -j4 prefix=/usr/local NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 install
+          make -C /tmp/git-2.45.4 -j4 prefix=/usr/local NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 \
+            NO_REGEX=NeedsStartEnd install
       - name: Verify git 2.45.4 wins on PATH
         run: |
           command -v git
