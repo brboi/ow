@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import json
 import re
 from configparser import ConfigParser
 from io import StringIO
@@ -19,7 +18,7 @@ from ow.core.plugins import (
     Setting,
     hookimpl,
 )
-from ow.specs.editors import DebugLaunch, EditorContribution
+from ow.specs.editors import DebugLaunch, EditorContribution, json_text
 from ow.specs.mise import MiseEnvironment
 
 if TYPE_CHECKING:
@@ -37,13 +36,24 @@ def _is_odoo_core(repo_path: Path) -> bool:
 
 
 # Python bounds reading
+_parse_cache: dict[tuple[Path, int], ast.Module | None] = {}
+
+
 def _parse_module(path: Path) -> ast.Module | None:
-    """Parse a Python module, returning None on any error."""
+    """Parse a Python module, returning None on any error; cached by path and mtime."""
     try:
-        source = path.read_text(encoding="utf-8")
-        return ast.parse(source, filename=str(path))
-    except (OSError, SyntaxError):
+        mtime = path.stat().st_mtime_ns
+    except OSError:
         return None
+    key = (path, mtime)
+    if key not in _parse_cache:
+        try:
+            _parse_cache[key] = ast.parse(
+                path.read_text(encoding="utf-8"), filename=str(path)
+            )
+        except (OSError, SyntaxError):
+            _parse_cache[key] = None
+    return _parse_cache[key]
 
 
 def _module_assignments(tree: ast.Module, name: str) -> list[ast.expr]:
@@ -78,11 +88,10 @@ def _read_python_bounds(core_path: Path) -> tuple[int, int] | None:
     """Read MIN_PY_VERSION and MAX_PY_VERSION from release.py or odoo/__init__.py."""
     release_path = core_path / "odoo" / "release.py"
     init_path = core_path / "odoo" / "__init__.py"
-    
+
     python_min = None
     python_max = None
-    
-    # Try release.py first
+
     if release_path.exists():
         tree = _parse_module(release_path)
         if tree:
@@ -92,7 +101,7 @@ def _read_python_bounds(core_path: Path) -> tuple[int, int] | None:
                 python_min = _literal_int_pair(min_assigns[0])
             if max_assigns:
                 python_max = _literal_int_pair(max_assigns[0])
-    
+
     # Fall back to odoo/__init__.py if needed
     if (python_min is None or python_max is None) and init_path.exists():
         tree = _parse_module(init_path)
@@ -105,31 +114,28 @@ def _read_python_bounds(core_path: Path) -> tuple[int, int] | None:
                 assigns = _module_assignments(tree, "MAX_PY_VERSION")
                 if assigns:
                     python_max = _literal_int_pair(assigns[0])
-    
+
     if python_min and python_max:
         return (python_min, python_max)
     return None
 
 
 def _read_demo_capability(core_path: Path) -> bool | None:
-    """Check if config.py declares --with-demo or --without-demo."""
+    """True when config.py declares `--with-demo`, False for `--without-demo` or neither."""
     config_path = core_path / "odoo" / "tools" / "config.py"
     tree = _parse_module(config_path)
-    if not tree:
+    if tree is None:
         return None
-    
-    # Look for calls to add_option/add_argument with demo flags
+
+    declared: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Attribute):
-                if node.func.attr in {"add_option", "add_argument"}:
-                    for arg in node.args:
-                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                            if arg.value == "--with-demo":
-                                return True
-                            elif arg.value == "--without-demo":
-                                return False
-    return None
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in {"add_option", "add_argument"}:
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        if arg.value in ("--with-demo", "--without-demo"):
+                            declared.add(arg.value)
+    return "--with-demo" in declared
 
 
 def _find_addon_paths(
@@ -186,7 +192,7 @@ def _find_addon_paths(
 
 
 def _is_dir(path: Path) -> bool:
-    """`path.is_dir()`, with unreadable paths simply not directories (spec §11)."""
+    """`path.is_dir()`, with unreadable paths simply not directories."""
     try:
         return path.is_dir()
     except OSError:
@@ -230,6 +236,51 @@ def _workspace_addon_paths(ws: Workspace, core: Repo) -> list[Path]:
             seen.add(path)
             result.append(path)
     return result
+
+
+_PORT_KEYS = ("odoo.http_port", "odoo.db_port", "odoo.smtp_port")
+_PLAIN_KEYS = ("odoo.db_name", "odoo.db_host", "odoo.db_user", "odoo.smtp_server")
+_PASSWORD_KEYS = ("odoo.db_password", "odoo.admin_passwd")
+_LIST_KEYS = ("odoo.debug_args", "odoo.debug_test_args")
+_VALIDATED_KEYS = _PORT_KEYS + _PLAIN_KEYS + _PASSWORD_KEYS + _LIST_KEYS
+
+_SETTING_DEFAULTS: dict[str, object] = {}
+
+
+def _setting_default(key: str, ws: Workspace) -> object:
+    """The `Setting` table's default for `key`, resolving a per-workspace callable with `ws`."""
+    if not _SETTING_DEFAULTS:
+        for setting in ow_settings():
+            _SETTING_DEFAULTS[setting.key] = setting.default
+    default = _SETTING_DEFAULTS.get(key)
+    return default(ws) if callable(default) else default
+
+
+def _get_setting(
+    key: str, settings: Mapping[str, object], ws: Workspace
+) -> tuple[object, Diagnostic | None]:
+    """Validated setting value; an unusable one falls back to its `Setting` default with a warning."""
+    val = settings.get(key)
+    default = _setting_default(key, ws)
+
+    if key in _PORT_KEYS:
+        if isinstance(val, int) and not 1 <= val <= 65535:
+            return default, Diagnostic("warning", f"{key} must be 1-65535, using default")
+        return (val if isinstance(val, int) else default), None
+
+    if key in _LIST_KEYS:
+        if val is None:
+            return default, None
+        cleaned = _clean_args(val)
+        if cleaned is None:
+            return default, Diagnostic("warning", f"{key} contains invalid item, using default")
+        return cleaned, None
+
+    if not isinstance(val, str):
+        return default, None
+    if "\n" in val or "\r" in val or "\x00" in val or (key in _PLAIN_KEYS and not val):
+        return default, Diagnostic("warning", f"{key} invalid, using default")
+    return val, None
 
 
 @hookimpl
@@ -305,8 +356,6 @@ def ow_settings() -> list[Setting]:
     ]
 
 
-# One core computation, shared by every hook: `ow_diagnostics` names the problem
-# once, the other hooks stay silent so the plugin contributes nothing.
 def _get_core(ws: Workspace) -> tuple[Repo | None, list[Diagnostic]]:
     """Find the workspace's single readable Odoo core.
 
@@ -318,7 +367,12 @@ def _get_core(ws: Workspace) -> tuple[Repo | None, list[Diagnostic]]:
 
     if len(cores) > 1:
         names = ", ".join(repo.name for repo in cores)
-        return None, [Diagnostic("warning", f"Multiple Odoo cores found: {names}")]
+        return None, [
+            Diagnostic(
+                "warning",
+                f"Multiple Odoo cores found: {names}; keep exactly one and remove the rest",
+            )
+        ]
 
     if not cores:
         return None, []
@@ -326,11 +380,18 @@ def _get_core(ws: Workspace) -> tuple[Repo | None, list[Diagnostic]]:
     core = cores[0]
     if _read_python_bounds(core.path) is None:
         return None, [
-            Diagnostic("warning", "Could not read Python version bounds from Odoo")
+            Diagnostic(
+                "warning",
+                f"{core.name}: cannot read Python version bounds from odoo/release.py;"
+                " restore or fix the file",
+            )
         ]
     if _read_demo_capability(core.path) is None:
         return None, [
-            Diagnostic("warning", "Could not read --with-demo capability from Odoo")
+            Diagnostic(
+                "warning",
+                f"{core.name}: cannot parse odoo/tools/config.py; restore or fix the file",
+            )
         ]
 
     return core, []
@@ -361,29 +422,13 @@ def _clean_args(value: object) -> list[str] | None:
     return list(value)
 
 
-def _validate_settings(settings: Mapping[str, object]) -> list[Diagnostic]:
+def _validate_settings(ws: Workspace) -> list[Diagnostic]:
     """Warn about semantically invalid settings, each with a per-key fallback."""
     diagnostics: list[Diagnostic] = []
-
-    for key in ("odoo.http_port", "odoo.db_port", "odoo.smtp_port"):
-        val = settings.get(key)
-        if isinstance(val, int) and not 1 <= val <= 65535:
-            diagnostics.append(
-                Diagnostic("warning", f"{key} must be 1-65535, using default")
-            )
-
-    for key in ("odoo.db_name", "odoo.db_host", "odoo.db_user", "odoo.smtp_server"):
-        val = settings.get(key)
-        if isinstance(val, str) and (not val or "\n" in val or "\r" in val or "\x00" in val):
-            diagnostics.append(Diagnostic("warning", f"{key} invalid, using default"))
-
-    for key in ("odoo.debug_args", "odoo.debug_test_args"):
-        value = settings.get(key)
-        if value is not None and _clean_args(value) is None:
-            diagnostics.append(
-                Diagnostic("warning", f"{key} contains invalid item, using default")
-            )
-
+    for key in _VALIDATED_KEYS:
+        _, diag = _get_setting(key, ws.settings, ws)
+        if diag is not None:
+            diagnostics.append(diag)
     return diagnostics
 
 
@@ -395,7 +440,7 @@ def ow_diagnostics(ws: Workspace) -> list[Diagnostic]:
         return core_diagnostics
     if core is None:
         return []
-    return _validate_settings(ws.settings)
+    return _validate_settings(ws)
 
 
 @hookimpl
@@ -407,7 +452,7 @@ def ow_generated_files(
     core, _ = _get_core(ws)
     if core is None:
         return []
-    
+
     diagnostics: list[Diagnostic] = []
     files: list[GeneratedFile] = []
 
@@ -423,31 +468,18 @@ def ow_generated_files(
             continue
         addon_paths.append(path)
 
-    # Prepare settings for generation
     settings = ws.settings
-    
-    def get_setting(key: str, default: object) -> object:
-        val = settings.get(key, default)
-        # Basic validation
-        if key.endswith("_port") and isinstance(val, int):
-            if val < 1 or val > 65535:
-                return default
-        elif key in ("odoo.db_name", "odoo.db_host", "odoo.db_user", "odoo.smtp_server"):
-            if isinstance(val, str) and (not val or "\n" in val or "\r" in val or "\x00" in val):
-                return default
-        return val
-    
-    http_port = get_setting("odoo.http_port", 8069)
-    db_name = get_setting("odoo.db_name", ws.name)
-    db_host = get_setting("odoo.db_host", "localhost")
-    db_port = get_setting("odoo.db_port", 5432)
-    db_user = get_setting("odoo.db_user", "odoo")
-    db_password = get_setting("odoo.db_password", "odoo")
-    admin_passwd = get_setting("odoo.admin_passwd", "Password")
-    smtp_server = get_setting("odoo.smtp_server", "localhost")
-    smtp_port = get_setting("odoo.smtp_port", 25)
 
-    # Generate odoorc
+    http_port, _ = _get_setting("odoo.http_port", settings, ws)
+    db_name, _ = _get_setting("odoo.db_name", settings, ws)
+    db_host, _ = _get_setting("odoo.db_host", settings, ws)
+    db_port, _ = _get_setting("odoo.db_port", settings, ws)
+    db_user, _ = _get_setting("odoo.db_user", settings, ws)
+    db_password, _ = _get_setting("odoo.db_password", settings, ws)
+    admin_passwd, _ = _get_setting("odoo.admin_passwd", settings, ws)
+    smtp_server, _ = _get_setting("odoo.smtp_server", settings, ws)
+    smtp_port, _ = _get_setting("odoo.smtp_port", settings, ws)
+
     parser = ConfigParser(interpolation=None)
     parser["options"] = {
         "http_port": str(http_port),
@@ -466,7 +498,7 @@ def ow_generated_files(
     buf = StringIO()
     parser.write(buf, space_around_delimiters=True)
     odoorc_content = buf.getvalue()
-    
+
     files.append(
         GeneratedFile(
             path=PurePosixPath("odoorc"),
@@ -474,8 +506,7 @@ def ow_generated_files(
             mode=0o600,
         )
     )
-    
-    # Generate odools.toml
+
     odools_content = tomli_w.dumps({
         "config": [
             {
@@ -494,42 +525,39 @@ def ow_generated_files(
             data=odools_content.encode("utf-8"),
         )
     )
-    
-    # Generate pyrightconfig.json
-    pyright_content = json.dumps({
+
+    pyright_content = json_text({
         "venvPath": ".",
         "venv": ".venv",
-    }, indent=2) + "\n"
+    })
     files.append(
         GeneratedFile(
             path=PurePosixPath("pyrightconfig.json"),
             data=pyright_content.encode("utf-8"),
         )
     )
-    
-    # Generate requirements-dev.txt
+
     files.append(
         GeneratedFile(
             path=PurePosixPath("requirements-dev.txt"),
             data=b"inotify\n",
         )
     )
-    
+
     return files + diagnostics
 
 
 @hookimpl
 def mise_environment(ws: Workspace) -> MiseEnvironment | None:
     """Contribute mise environment from Odoo."""
-    # Use _get_core to ensure single readable core
     core, core_diagnostics = _get_core(ws)
     if core_diagnostics or not core:
         return None
-    
+
     env = {"ODOO_RC": "{{config_root}}/odoorc"}
     path = (f"{{{{config_root}}}}/{core.name}",)
-    postinstall = (f"pip install -r {{{{config_root}}}}/{core.name}/requirements.txt -r {{{{config_root}}}}/requirements-dev.txt",)
-    aliases = {"osh": "odoo-bin shell --no-http -c $ODOO_RC"}
+    postinstall = (f"python -m ensurepip --default-pip && pip install -r \"{{{{config_root}}}}/{core.name}/requirements.txt\" -r \"{{{{config_root}}}}/requirements-dev.txt\"",)
+    aliases = {"osh": "odoo-bin shell --no-http -c \"$ODOO_RC\""}
 
     return MiseEnvironment(
         env=env,
@@ -543,23 +571,14 @@ def mise_environment(ws: Workspace) -> MiseEnvironment | None:
 @hookimpl
 def editors_contribution(ws: Workspace) -> EditorContribution | None:
     """Contribute debug launches and settings for editors."""
-    # Use _get_core to ensure single readable core
     core, core_diagnostics = _get_core(ws)
     if core_diagnostics or not core:
         return None
-    
-    # `odoo.debug_args`/`odoo.debug_test_args` defaults are resolved with the
-    # workspace, but a hand-built workspace may hold no settings at all.
-    settings = ws.settings
-    debug_args = _clean_args(settings.get("odoo.debug_args"))
-    if debug_args is None:
-        debug_args = _default_debug_args(ws)
 
-    debug_test_args = _clean_args(settings.get("odoo.debug_test_args"))
-    if debug_test_args is None:
-        debug_test_args = [f"--test-tags={ws.name}"]
-    
-    # Create debug launches
+    settings = ws.settings
+    debug_args, _ = _get_setting("odoo.debug_args", settings, ws)
+    debug_test_args, _ = _get_setting("odoo.debug_test_args", settings, ws)
+
     core_path = core.path
     program = core_path / "odoo-bin"
     cwd = core_path
@@ -568,7 +587,7 @@ def editors_contribution(ws: Workspace) -> EditorContribution | None:
         "PYDEVD_DISABLE_FILE_VALIDATION": "1",
         "PYTHONPATH": str(core_path),
     }
-    
+
     launches = (
         DebugLaunch(
             name="Run Instance With Debug",
@@ -585,15 +604,15 @@ def editors_contribution(ws: Workspace) -> EditorContribution | None:
             env=env,
         ),
     )
-    
+
     language_servers = {
         "odoo": {
             "Odoo.selectedProfile": f"[Odoo Workspace] {ws.name}",
         }
     }
-    
+
     excludes = ("**/*.po", "**/*.pot")
-    
+
     return EditorContribution(
         launches=launches,
         language_servers=language_servers,

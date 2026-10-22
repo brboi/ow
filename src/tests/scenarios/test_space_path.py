@@ -6,22 +6,21 @@ import subprocess
 from pathlib import Path
 
 from ow.core.paths import repos_dir
+from tests.conftest import add_repo, init_workspace
+from tests.lab import file_url
 
 
 def test_space_path_lines_run_through_bash(lab):
-    remote = lab.remote("community", {"18.0": {"README.md": "c"}}, head="18.0")
-    assert lab.ow("repo", "add", "community", f"file://{remote}").exit_code == 0
+    add_repo(lab, "community", {"18.0": {"README.md": "c"}})
 
-    ws = lab.home / "ws" / "my voip"
-    result = lab.ow("init", str(ws), "community", "--base", "18.0")
-    assert result.exit_code == 0
+    ws = init_workspace(lab, "community", root=lab.home / "ws" / "my voip")
     assert (ws / "community" / ".git").is_file()
 
     # A second repo added inside the space-path workspace: its printed lines are
-    # the specimen (plan §1.7). Each one, run through `bash -c` from the
-    # workspace root, must give the same result.
+    # the specimen. Each one, run through `bash -c` from the workspace root, must
+    # give the same result.
     other = lab.remote("extra", {"18.0": {"README.md": "c"}}, head="18.0")
-    result = lab.ow("repo", "add", "extra", f"file://{other}", "-w", str(ws))
+    result = lab.ow("repo", "add", "extra", file_url(other), "-w", str(ws))
     assert result.exit_code == 0
     lines = [line for line in result.stdout.splitlines() if line.startswith("git ")]
 

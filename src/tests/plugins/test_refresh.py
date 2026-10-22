@@ -451,9 +451,64 @@ def test_write_error_stops_and_locks_what_was_written(tmp_path, monkeypatch):
         refresh(make_ws(tmp_path), plugins_of(("a", mod)))
 
     assert "cannot write two.txt" in str(exc.value)
+    assert "already wrote one.txt" in str(exc.value)
     assert (tmp_path / "one.txt").read_bytes() == b"1"
     assert not (tmp_path / "two.txt").exists()
     assert lock_entries(tmp_path) == {"one.txt": _sha256_bytes(b"1")}
+
+
+def test_hand_edit_between_projection_and_write_is_never_overwritten(tmp_path, monkeypatch):
+    import ow.core.refresh as refresh_mod
+
+    target = tmp_path / "test.txt"
+    target.write_bytes(b"old")
+    write_lock(tmp_path, {"test.txt": _sha256_bytes(b"old")})
+    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"ow's")])
+
+    real_project = refresh_mod.project
+
+    def project_then_hand_edit(ws, plugins):
+        projection = real_project(ws, plugins)
+        target.write_bytes(b"hand edit")  # lands after classification, before the write
+        return projection
+
+    monkeypatch.setattr(refresh_mod, "project", project_then_hand_edit)
+
+    _, written = refresh(make_ws(tmp_path), plugins_of(("a", mod)))
+
+    assert written == ()
+    assert target.read_bytes() == b"hand edit"
+    assert lock_entries(tmp_path)["test.txt"] == _sha256_bytes(b"old")
+    status = by_path(real_project(make_ws(tmp_path), plugins_of(("a", mod))))[
+        PurePosixPath("test.txt")
+    ]
+    assert status.state == "yours"
+
+
+def test_hand_created_file_between_projection_and_write_is_not_locked(tmp_path, monkeypatch):
+    import ow.core.refresh as refresh_mod
+
+    target = tmp_path / "test.txt"
+    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"ow's")])
+
+    real_project = refresh_mod.project
+
+    def project_then_hand_edit(ws, plugins):
+        projection = real_project(ws, plugins)
+        target.write_bytes(b"hand edit")
+        return projection
+
+    monkeypatch.setattr(refresh_mod, "project", project_then_hand_edit)
+
+    _, written = refresh(make_ws(tmp_path), plugins_of(("a", mod)))
+
+    assert written == ()
+    assert target.read_bytes() == b"hand edit"
+    assert lock_entries(tmp_path) == {}
+    status = by_path(real_project(make_ws(tmp_path), plugins_of(("a", mod))))[
+        PurePosixPath("test.txt")
+    ]
+    assert status.state == "yours"
 
 
 # --- the lock file itself ----------------------------------------------------
@@ -489,6 +544,7 @@ def test_report_prints_writes_yours_skipped_and_blocked(tmp_path, monkeypatch):
     projection = Projection(
         files=(
             FileStatus(PurePosixPath("y.txt"), "a", "yours", b"p", b"c"),
+            FileStatus(PurePosixPath("d.txt"), "a", "yours", b"p", None, "d.txt is a directory"),
             FileStatus(PurePosixPath("s.txt"), "a", "skipped", b"p", None, "link is a symlink"),
         ),
         stale_lock=(),
@@ -501,6 +557,10 @@ def test_report_prints_writes_yours_skipped_and_blocked(tmp_path, monkeypatch):
     assert written_out == ["wrote w.txt"]
     assert any(
         "delete it and run `ow refresh` to get ow's version back" in line for line in warnings
+    )
+    assert any(
+        "d.txt: not overwritten (yours); move it away and run `ow refresh`" in line
+        for line in warnings
     )
     assert any("s.txt: skipped (link is a symlink)" in line for line in warnings)
     assert any(line == "a: w" for line in warnings)

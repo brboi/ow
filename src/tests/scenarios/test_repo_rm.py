@@ -6,22 +6,16 @@ The workspace is built with plain git, `write_workspace` and the index, like
 
 from __future__ import annotations
 
-import subprocess
+import shutil
 import tomllib
 from pathlib import Path
 
-from ow.core.config import write_workspace
-from ow.core.index import add as index_add
 from ow.core.paths import repos_dir
+from tests.conftest import git_ok, workspace
 
 REPO = "community"
 BASE = "18.0"
 BARE = "~/.local/share/ow/repos"
-
-
-def _ok(path: Path, *args: str) -> bool:
-    """Whether a git command in `path` succeeds; used where a failure is the expected state."""
-    return subprocess.run(["git", "-C", str(path), *args], capture_output=True).returncode == 0
 
 
 def _workspace(lab, *, branch: str | None = None, local_commit: bool = False) -> Path:
@@ -29,27 +23,7 @@ def _workspace(lab, *, branch: str | None = None, local_commit: bool = False) ->
 
     `local_commit` adds a commit no remote has, so the worktree's branch is unpushed.
     """
-    origin = lab.remote(REPO, {BASE: {"README.md": "c\n"}}, head=BASE)
-    bare = repos_dir() / f"{REPO}.git"
-    bare.parent.mkdir(parents=True, exist_ok=True)
-    lab.git(bare.parent, "init", "--bare", str(bare))
-    lab.git(bare, "remote", "add", "origin", str(origin))
-    lab.git(bare, "fetch", "origin")
-
-    root = lab.ws("voip")
-    root.mkdir(parents=True, exist_ok=True)
-    if branch is None:
-        lab.git(bare, "worktree", "add", "--detach", str(root / REPO), f"origin/{BASE}")
-    else:
-        lab.git(bare, "worktree", "add", "-b", branch, str(root / REPO), f"origin/{BASE}")
-        if local_commit:
-            (root / REPO / "local.txt").write_text("x\n")
-            lab.git(root / REPO, "add", "local.txt")
-            lab.git(root / REPO, "commit", "-m", "local work")
-
-    write_workspace(root / ".ow" / "config.toml", {REPO: f"origin/{BASE}"}, {}, declared={})
-    index_add(root)
-    return root
+    return workspace(lab, branch=branch, local_commit=local_commit)
 
 
 def test_rm_drops_the_worktree_a_pushed_branch_and_the_repos_entry(lab):
@@ -66,7 +40,7 @@ def test_rm_drops_the_worktree_a_pushed_branch_and_the_repos_entry(lab):
     assert dry.stdout.splitlines() == plan
     # `-n` changes nothing: worktree, branch and entry all stay.
     assert (root / REPO).is_dir()
-    assert _ok(bare, "rev-parse", "--verify", "refs/heads/18.0-voip")
+    assert git_ok(bare, "rev-parse", "--verify", "refs/heads/18.0-voip")
     config = tomllib.loads((root / ".ow" / "config.toml").read_text())
     assert config["repos"] == {REPO: f"origin/{BASE}"}
 
@@ -75,7 +49,7 @@ def test_rm_drops_the_worktree_a_pushed_branch_and_the_repos_entry(lab):
     assert result.exit_code == 0
     assert result.stdout.splitlines() == plan
     assert not (root / REPO).exists()
-    assert not _ok(bare, "rev-parse", "--verify", "refs/heads/18.0-voip")
+    assert not git_ok(bare, "rev-parse", "--verify", "refs/heads/18.0-voip")
     listing = lab.git(bare, "worktree", "list", "--porcelain")
     assert f"worktree {root / REPO}" not in listing
     config = tomllib.loads((root / ".ow" / "config.toml").read_text())
@@ -90,10 +64,13 @@ def test_rm_keeps_and_lists_an_unpushed_branch(lab):
 
     assert result.exit_code == 0
     lines = result.stdout.splitlines()
-    assert f"# {REPO}: kept unpushed branch dev" in lines
+    assert (
+        f"# {REPO}: kept unpushed branch dev; delete it with "
+        f"`git -C {BARE}/{REPO}.git branch -D dev`"
+    ) in lines
     assert lines[-1] == f"git -C {BARE}/{REPO}.git worktree remove ~/ws/voip/{REPO}"
     assert not (root / REPO).exists()
-    assert _ok(bare, "rev-parse", "--verify", "refs/heads/dev")
+    assert git_ok(bare, "rev-parse", "--verify", "refs/heads/dev")
 
 
 def test_the_prompt_is_asked_and_a_decline_removes_nothing(lab, monkeypatch):
@@ -106,7 +83,7 @@ def test_the_prompt_is_asked_and_a_decline_removes_nothing(lab, monkeypatch):
     assert result.exit_code == 2
     assert result.stdout.count("Proceed?") == 1
     assert (root / REPO).is_dir()
-    assert _ok(bare, "rev-parse", "--verify", "refs/heads/18.0-voip")
+    assert git_ok(bare, "rev-parse", "--verify", "refs/heads/18.0-voip")
     config = tomllib.loads((root / ".ow" / "config.toml").read_text())
     assert config["repos"] == {REPO: f"origin/{BASE}"}
 
@@ -120,20 +97,56 @@ def test_rm_of_an_unknown_repo_is_a_usage_error(lab):
     assert f"error: unknown repo 'nope'; this workspace has: {REPO}" in result.stderr
 
 
-def test_rm_never_forces_a_dirty_worktree_and_keeps_the_entry(lab):
+def test_a_dirty_worktree_refuses_before_the_prompt(lab):
     root = _workspace(lab, branch="18.0-voip")
     bare = repos_dir() / f"{REPO}.git"
+    (root / REPO / "README.md").write_text("changed\n")
     (root / REPO / "scratch.txt").write_text("x\n")
+
+    result = lab.ow("repo", "rm", REPO, cwd=root)
+
+    # Refused before the prompt: no `-y`, no terminal, and still no usage error.
+    assert result.exit_code == 1
+    lines = result.stdout.splitlines()
+    assert f"# {REPO}: modified README.md" in lines
+    assert f"# {REPO}: untracked scratch.txt" in lines
+    assert f"# {REPO}: commit or stash these changes first" in lines
+    assert not [line for line in lines if line.startswith("git ")]
+    assert (root / REPO / "scratch.txt").is_file()
+    assert git_ok(bare, "rev-parse", "--verify", "refs/heads/18.0-voip")
+    config = tomllib.loads((root / ".ow" / "config.toml").read_text())
+    assert config["repos"] == {REPO: f"origin/{BASE}"}
+
+
+def test_a_detached_worktree_with_local_commits_refuses(lab):
+    root = _workspace(lab)
+    bare = repos_dir() / f"{REPO}.git"
+    worktree = root / REPO
+    (worktree / "local.txt").write_text("x\n")
+    lab.git(worktree, "add", "local.txt")
+    lab.git(worktree, "commit", "-m", "local work")
+    sha = lab.sha(worktree, "HEAD")
 
     result = lab.ow("repo", "rm", REPO, "-y", cwd=root)
 
-    # Git refuses the untracked file, ow never adds --force, and the failed
-    # batch leaves the `[repos]` entry and the branch alone.
     assert result.exit_code == 1
-    shown = f"git -C {BARE}/{REPO}.git worktree remove ~/ws/voip/{REPO}"
-    assert f"error: {REPO}: {shown}" in result.stderr
-    assert "contains modified or untracked files" in result.stderr
-    assert (root / REPO / "scratch.txt").is_file()
-    assert _ok(bare, "rev-parse", "--verify", "refs/heads/18.0-voip")
+    lines = result.stdout.splitlines()
+    assert any(f"# {REPO}: detached HEAD has 1 commit(s) no remote has" in line for line in lines)
+    assert any("switch -c <branch>" in line for line in lines)
+    assert worktree.is_dir()
+    assert lab.sha(worktree, "HEAD") == sha
+    assert git_ok(bare, "rev-parse", "--verify", f"refs/remotes/origin/{BASE}")
     config = tomllib.loads((root / ".ow" / "config.toml").read_text())
     assert config["repos"] == {REPO: f"origin/{BASE}"}
+
+
+def test_a_repos_entry_with_a_missing_worktree_can_be_removed(lab):
+    root = _workspace(lab, branch="18.0-voip")
+    shutil.rmtree(root / REPO)
+
+    result = lab.ow("repo", "rm", REPO, "-y", cwd=root)
+
+    assert result.exit_code == 0
+    assert f"# {REPO}: worktree already gone" in result.stdout.splitlines()
+    config = tomllib.loads((root / ".ow" / "config.toml").read_text())
+    assert config.get("repos", {}) == {}

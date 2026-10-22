@@ -36,7 +36,7 @@ def merge(answers: Sequence[MiseEnvironment]) -> MiseEnvironment | None:
 
     - path and postinstall are concatenated
     - env, aliases, and tasks: later answer wins per key
-    - python: later non-None wins (P14)
+    - python: later non-None wins
     - Returns None when there are no answers
     """
     if not answers:
@@ -50,9 +50,6 @@ def merge(answers: Sequence[MiseEnvironment]) -> MiseEnvironment | None:
     merged_python = None
 
     for answer in answers:
-        if answer is None:
-            continue
-
         # Concatenate path and postinstall
         if answer.path:
             merged_path.extend(answer.path)
@@ -72,10 +69,10 @@ def merge(answers: Sequence[MiseEnvironment]) -> MiseEnvironment | None:
             merged_python = answer.python
 
     return MiseEnvironment(
-        env=merged_env if merged_env else {},
-        path=tuple(merged_path) if merged_path else (),
+        env=merged_env,
+        path=tuple(merged_path),
         python=merged_python,
-        postinstall=tuple(merged_postinstall) if merged_postinstall else (),
-        aliases=merged_aliases if merged_aliases else {},
-        tasks=merged_tasks if merged_tasks else {},
+        postinstall=tuple(merged_postinstall),
+        aliases=merged_aliases,
+        tasks=merged_tasks,
     )

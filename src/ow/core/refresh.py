@@ -1,10 +1,6 @@
 """Generated file ownership, lock tracking, and atomic writes.
 
-`.ow/rendered.lock.toml` records the SHA-256 of the bytes ow last wrote or
-adopted at each output path — not the bytes of the source that produced
-them. Locking the output rather than the generator lets a hand edit survive
-a generator change: a file whose bytes no longer match the lock is "yours",
-and ow never writes it again.
+`.ow/rendered.lock.toml` records the SHA-256 of what ow last wrote or adopted at each path; bytes that no longer match are "yours" and ow never rewrites them.
 """
 
 from __future__ import annotations
@@ -111,8 +107,7 @@ def _ancestry_problem(root: Path, rel: PurePosixPath) -> str | None:
 def read_lock(root: Path) -> dict[str, str]:
     """The rendered lock at `root`, or `{}` if it does not exist yet.
 
-    Corrupt structure (bad TOML, a non-table, a non-hex value) is an
-    `OwError` naming the lock path — never silently reset to empty.
+    Corrupt structure (bad TOML, a non-table, a non-hex value) raises `OwError` naming the lock path.
     """
     lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
     ancestry_problem = _ancestry_problem(root, lock_rel)
@@ -141,6 +136,18 @@ def read_lock(root: Path) -> dict[str, str]:
         if not isinstance(name, str) or not isinstance(value, str) or not _SHA256_HEX.fullmatch(value):
             raise OwError(f"rendered lock at {lock_path.as_posix()}: invalid entry {name!r}")
     return data
+
+
+def _read_lock_or_warn(root: Path) -> tuple[dict[str, str], Diagnostic | None]:
+    """The lock, or `{}` and a core warning when the lock file is malformed."""
+    try:
+        return read_lock(root), None
+    except OwError:
+        diag = Diagnostic(
+            "warning",
+            f"malformed lock at {RENDERED_LOCK.as_posix()}; files that differ from ow's are treated as yours",
+        )
+        return {}, diag
 
 
 def dumps_lock(lock: dict[str, str]) -> bytes:
@@ -187,8 +194,7 @@ def _write_lock_if_changed(root: Path, lock: dict[str, str]) -> None:
 def _atomic_write(dest: Path, data: bytes, mode: int) -> None:
     """Write `data` to `dest` via a same-directory temp file and `os.replace`.
 
-    Never truncates the destination inode and never follows a link at
-    `dest`: `os.replace` swaps whatever sits at that path in one step.
+    `os.replace` swaps whatever sits at `dest`, so the destination inode is never truncated and a link there is never followed.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp")
@@ -225,16 +231,7 @@ def _unsafe_destination(name: str, st: os.stat_result) -> str | None:
 def project(ws: "Workspace", plugins: Plugins) -> Projection:
     """Inspect generated files and return their status against the lock.
 
-    Collects diagnostics and generated files from plugins, classifies each
-    file against the lock, and returns a read-only projection.
-
-    Files and diagnostics keep the plugins' tuple order: every plugin's
-    ``ow_diagnostics`` answers come first, then that plugin's contribution
-    diagnostics, and files follow the order each plugin returned them.
-
-    Raises PluginError if a hook raises, if a path is absolute/escaping/
-    reserved, or if two plugins produce the same path. A symlinked parent
-    only marks that one file ``skipped``; the others are still handled.
+    Raises `PluginError` on a bad path or two owners of one path; a symlinked parent marks just that file `skipped`.
     """
     # Collect per plugin, then flatten in plugin tuple order.
     answers: dict[str, list[Diagnostic]] = {}
@@ -284,15 +281,7 @@ def project(ws: "Workspace", plugins: Plugins) -> Projection:
                     f"expected GeneratedFile or Diagnostic, got {type(item).__name__}",
                 )
 
-    # A malformed lock reads as empty, with a core warning diagnostic.
-    core_diag: Diagnostic | None = None
-    try:
-        lock = read_lock(ws.root)
-    except OwError:
-        lock = {}
-        core_diag = Diagnostic(
-            "warning", f"malformed lock at {RENDERED_LOCK.as_posix()}, re-creating"
-        )
+    lock, core_diag = _read_lock_or_warn(ws.root)
 
     # Flatten in plugin tuple order: a plugin's ow_diagnostics answers, then
     # its contribution diagnostics, then its files in the order it returned them.
@@ -367,24 +356,13 @@ def project(ws: "Workspace", plugins: Plugins) -> Projection:
 def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePosixPath, ...]]:
     """Write the generated files a projection says are missing or stale.
 
-    One collection only: the projection already carries every file's
-    ``proposal`` bytes and ``mode``. Blocked by an ``error`` diagnostic:
-    nothing is written. Files are written in tuple order; a write failure
-    stops there, persists the lock for what was written, and raises
-    ``OwError``. The lock records the written and up-to-date files with their
-    new hash, keeps a ``yours``/``skipped`` entry it already had, and drops
-    stale entries; it is rewritten only when its bytes change. Then
-    ``ow_refreshed(ws, owned)`` runs with the written + up-to-date paths (P2);
-    its ``PluginError`` propagates after the writes are durable.
+    A destination is re-read right before writing, so a hand edit landing since projection is left alone; a write failure raises `OwError` naming what already landed.
     """
     projection = project(ws, plugins)
     if projection.blocked:
         return projection, ()
 
-    try:
-        lock = read_lock(ws.root)
-    except OwError:
-        lock = {}
+    lock, _ = _read_lock_or_warn(ws.root)
 
     written: list[PurePosixPath] = []
     owned: list[PurePosixPath] = []
@@ -394,10 +372,25 @@ def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePo
     for status in projection.files:
         path_key = status.path.as_posix()
         if status.state in ("absent", "outdated"):
+            dest = ws.root / status.path
+            # Re-read right before writing: bytes that changed since projection are
+            # a hand edit, which wins. Leave it alone and keep the old lock entry,
+            # so the next projection reads it as "yours".
+            if _destination_stat(dest) is not None:
+                try:
+                    current = dest.read_bytes()
+                except OSError:
+                    continue
+                if current != status.current:
+                    continue
             try:
-                _atomic_write(ws.root / status.path, status.proposal, status.mode)
+                _atomic_write(dest, status.proposal, status.mode)
             except OSError as exc:
-                failure = OwError(f"cannot write {path_key}: {exc}")
+                msg = f"cannot write {path_key}: {exc}"
+                if written:
+                    written_paths = ", ".join(p.as_posix() for p in written)
+                    msg = f"{msg} (already wrote {written_paths})"
+                failure = OwError(msg)
                 break
             new_lock[path_key] = _sha256_bytes(status.proposal)
             written.append(status.path)
@@ -421,7 +414,7 @@ def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePo
 
 
 def report(projection: Projection, written: Sequence[PurePosixPath]) -> None:
-    """Print the refresh summary every refreshing command shares (§12)."""
+    """Print the refresh summary every refreshing command shares."""
     from ow.term import error, out, warn
 
     for path in written:
@@ -429,10 +422,11 @@ def report(projection: Projection, written: Sequence[PurePosixPath]) -> None:
 
     for status in projection.files:
         if status.state == "yours":
-            warn(
-                f"{status.path.as_posix()}: not overwritten (yours); "
-                "delete it and run `ow refresh` to get ow's version back"
-            )
+            if status.reason and "is a directory" in status.reason:
+                hint = "move it away and run `ow refresh` to get ow's version back"
+            else:
+                hint = "delete it and run `ow refresh` to get ow's version back"
+            warn(f"{status.path.as_posix()}: not overwritten (yours); {hint}")
         elif status.state == "skipped" and status.reason:
             warn(f"{status.path.as_posix()}: skipped ({status.reason})")
 

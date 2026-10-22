@@ -1,35 +1,38 @@
-"""The `local` plugin's seed copy: on `ow init`'s create path, before the first refresh (§17.3)."""
+"""The `local` plugin seeds `.local/` on `ow init`'s create path."""
 
 from __future__ import annotations
 
 import configparser
 
-def test_seed_copies_before_the_first_refresh(lab):
-    # `.local/` before refreshing, so the Odoo plugin already sees the addon.
-    seed = lab.home / ".config" / "ow" / "local"
-    (seed / "l10n_seed").mkdir(parents=True)
-    (seed / "l10n_seed" / "__manifest__.py").write_text("{'name': 'Seed'}")
+from tests.conftest import add_repo
 
-    community = lab.remote("community", {"18.0": lab.odoo_files()}, head="18.0")
-    assert lab.ow("repo", "add", "community", f"file://{community}").exit_code == 0
+
+def _seed(lab):
+    seed = lab.home / ".config" / "ow" / "local"
+    seed.mkdir(parents=True, exist_ok=True)
+    return seed
+
+
+def test_seed_copies_before_the_first_refresh(lab):
+    seed = _seed(lab)
+    (seed / "l10n_seed").mkdir()
+    (seed / "l10n_seed" / "__manifest__.py").write_text("{'name': 'Seed'}")
+    add_repo(lab)
     ws = lab.ws("voip")
 
     result = lab.ow("init", str(ws), "community", "--base", "18.0")
 
     assert result.exit_code == 0
-    manifest = ws / ".local" / "l10n_seed" / "__manifest__.py"
-    assert manifest.is_file(), "the seed did not land in .local/"
-    parser = _odoorc(lab, ws)
+    assert (ws / ".local" / "l10n_seed" / "__manifest__.py").is_file()
+    parser = _odoorc(ws)
     assert parser["options"]["addons_path"].startswith(str(ws / ".local"))
 
 
 def test_a_later_init_does_not_seed_again(lab):
-    # The event fires on the create path only: a repair re-run copies nothing new.
-    seed = lab.home / ".config" / "ow" / "local"
-    (seed / "first").mkdir(parents=True)
+    seed = _seed(lab)
+    (seed / "first").mkdir()
     (seed / "first" / "__manifest__.py").write_text("{}")
-    community = lab.remote("community", {"18.0": lab.odoo_files()}, head="18.0")
-    assert lab.ow("repo", "add", "community", f"file://{community}").exit_code == 0
+    add_repo(lab)
     ws = lab.ws("voip")
     assert lab.ow("init", str(ws), "community", "--base", "18.0").exit_code == 0
 
@@ -41,7 +44,21 @@ def test_a_later_init_does_not_seed_again(lab):
     assert not (ws / ".local" / "second").exists()
 
 
-def _odoorc(lab, ws):
+def test_a_disabled_local_plugin_does_not_seed(lab):
+    seed = _seed(lab)
+    (seed / "first").mkdir()
+    (seed / "first" / "__manifest__.py").write_text("{}")
+    add_repo(lab)
+    ws = lab.ws("voip")
+    assert lab.ow("config", "set", "--global", "local.enabled", "false").exit_code == 0
+
+    result = lab.ow("init", str(ws), "community", "--base", "18.0")
+
+    assert result.exit_code == 0
+    assert not (ws / ".local" / "first").exists()
+
+
+def _odoorc(ws):
     parser = configparser.ConfigParser(interpolation=None)
     parser.read_string((ws / "odoorc").read_text())
     return parser

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Sequence
-
 from ow.core.plugins import hookspec
+from ow.errors import PluginError
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
@@ -44,7 +45,7 @@ def merge(answers: Sequence[EditorContribution]) -> EditorContribution:
     """Merge editor contributions in tuple order.
 
     - launches: concatenated
-    - excludes: concatenated and deduplicated
+    - excludes: concatenated and deduplicated in order
     - language_servers: merged per server id and per key, later answer winning
     - Empty input returns EditorContribution()
     """
@@ -53,24 +54,26 @@ def merge(answers: Sequence[EditorContribution]) -> EditorContribution:
     merged_language_servers = {}
 
     for answer in answers:
-        if answer is None:
-            continue
-
         # Concatenate launches
         if answer.launches:
             merged_launches.extend(answer.launches)
 
-        # Concatenate excludes (deduplicate by converting to set and back)
+        # Concatenate excludes (deduplicate later)
         if answer.excludes:
             merged_excludes.extend(answer.excludes)
 
         # Merge language servers: per server id, per key, later wins
         if answer.language_servers:
             for server_id, settings in answer.language_servers.items():
+                if not isinstance(settings, Mapping):
+                    raise PluginError(
+                        server_id,
+                        "editors_contribution",
+                        f"language server {server_id!r} settings must be a mapping, not {type(settings).__name__}",
+                    )
                 if server_id not in merged_language_servers:
                     merged_language_servers[server_id] = {}
-                if isinstance(settings, Mapping):
-                    merged_language_servers[server_id].update(settings)
+                merged_language_servers[server_id].update(settings)
 
     # Deduplicate excludes while preserving order
     seen = set()
@@ -82,6 +85,11 @@ def merge(answers: Sequence[EditorContribution]) -> EditorContribution:
 
     return EditorContribution(
         launches=tuple(merged_launches),
-        language_servers=merged_language_servers if merged_language_servers else {},
+        language_servers=merged_language_servers,
         excludes=tuple(deduped_excludes),
     )
+
+
+def json_text(data: object) -> str:
+    """Serialize to JSON with two-space indentation and a trailing newline."""
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"

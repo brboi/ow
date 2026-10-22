@@ -2,40 +2,33 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from ow.core import git
 from ow.core.facts import RepoFacts
 
 # Mutating commands that can't continue if an operation is in progress
-MUTATING = frozenset(
-    ("pull", "rebase", "reset", "switch", "switch --detach", "repo rm", "rm")
-)
+MUTATING = frozenset(("pull", "rebase", "reset", "switch", "repo rm", "rm"))
 
 
-def refusal(facts: RepoFacts, command: str, *, autostash: bool = False) -> str | None:
-    """Check if a command should be refused for this repository.
-    
-    Args:
-        facts: RepoFacts for the repository.
-        command: One of: status, fetch, pull, rebase, reset, switch, switch --detach, repo rm, rm.
-        autostash: Whether --autostash flag is set (for rebase only).
-    
-    Returns:
-        Refusal message, or None if the command is allowed.
-    """
-    # Problem with the worktree
+def refusal(
+    facts: RepoFacts, command: str, *, autostash: bool = False, root: Path | None = None
+) -> str | None:
+    """Return the refusal message for command on this repository, or None."""
     if facts.problem:
         return f"worktree is broken ({facts.problem}); run `ow init`"
-    
-    # Operation in progress on mutating commands
+
     if command in MUTATING and facts.operation:
-        return f"{facts.operation} in progress; finish it or run `git -C {facts.path} {facts.operation} --abort`"
-    
-    # Modified tracked files on rebase without autostash
+        # bisect has no --abort; `git bisect reset` returns to the original HEAD
+        abort = ["bisect", "reset"] if facts.operation == "bisect" else [facts.operation, "--abort"]
+        hint = git.show(["git", "-C", str(facts.path), *abort], root)
+        return f"{facts.operation} in progress; finish it or run `{hint}`"
+
     if command == "rebase" and not autostash and facts.modified:
         return "modified files; commit, stash, or pass --autostash"
-    
-    # Missing default base when needed
-    if command in ("switch --detach", "pull", "rebase", "reset"):
+
+    if command in ("pull", "rebase", "reset"):
         if facts.branch is None and facts.base is None:
             return "no default base; run `ow init`"
-    
+
     return None

@@ -8,12 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import stat
-from pathlib import Path
 
-from ow.core.config import write_workspace
-from ow.core.index import add as index_add
-from ow.core.paths import repos_dir
 from ow.core.refresh import dumps_lock, read_lock
+from tests.conftest import workspace
 
 REPO = "community"
 BASE = "18.0"
@@ -32,26 +29,8 @@ NINE = (
 )
 
 
-def workspace(lab, files: dict[str, str], *, name: str = "voip") -> Path:
-    """A real workspace: a bare repo, a worktree, a config file and an index entry."""
-    origin = lab.remote(REPO, {BASE: files}, head=BASE)
-    bare = repos_dir() / f"{REPO}.git"
-    bare.parent.mkdir(parents=True, exist_ok=True)
-    lab.git(bare.parent, "init", "--bare", str(bare))
-    lab.git(bare, "remote", "add", "origin", str(origin))
-    lab.git(bare, "fetch", "origin")
-
-    root = lab.ws(name)
-    root.mkdir(parents=True, exist_ok=True)
-    lab.git(bare, "worktree", "add", "--detach", str(root / REPO), f"origin/{BASE}")
-
-    write_workspace(root / ".ow" / "config.toml", {REPO: f"origin/{BASE}"}, {}, declared={})
-    index_add(root)
-    return root
-
-
 def test_refresh_writes_the_nine_outputs(lab):
-    root = workspace(lab, lab.odoo_files())
+    root = workspace(lab, branches={BASE: lab.odoo_files()})
 
     result = lab.ow("refresh", cwd=root)
     assert result.exit_code == 0
@@ -69,7 +48,7 @@ def test_refresh_writes_the_nine_outputs(lab):
 
 
 def test_files_states_yours_diff_and_untouched_refresh(lab):
-    root = workspace(lab, lab.odoo_files())
+    root = workspace(lab, branches={BASE: lab.odoo_files()})
     assert lab.ow("refresh", cwd=root).exit_code == 0
 
     listing = lab.ow("files", cwd=root)
@@ -90,11 +69,12 @@ def test_files_states_yours_diff_and_untouched_refresh(lab):
     diff = lab.ow("files", "--diff", cwd=root)
     assert diff.exit_code == 0
     lines = diff.stdout.splitlines()
-    assert lines[0] == "--- ow's odoorc"
-    assert lines[1] == "+++ odoorc"
+    assert lines[0] == "--- odoorc"
+    assert lines[1] == "+++ ow's odoorc"
     assert lines[2].startswith("@@ ")
-    assert [line for line in lines[3:] if line.startswith("+")] == ["+# hand edit"]
-    assert lines[-1] == "+# hand edit"
+    # The diff reads current -> ow's proposal, so the hand edit is a line ow would drop.
+    assert [line for line in lines[3:] if line.startswith("-")] == ["-# hand edit"]
+    assert lines[-1] == "-# hand edit"
 
     # A hand-edited file is yours: the next refresh leaves its bytes and its
     # mtime alone and says how to get ow's version back.
@@ -110,24 +90,24 @@ def test_files_states_yours_diff_and_untouched_refresh(lab):
 
 
 def test_files_diff_of_a_workspace_nothing_was_written_to(lab):
-    root = workspace(lab, lab.odoo_files())
+    root = workspace(lab, branches={BASE: lab.odoo_files()})
 
     result = lab.ow("files", "--diff", cwd=root)
     assert result.exit_code == 0
     lines = result.stdout.splitlines()
-    # One block per absent file, ow's proposal against an empty file, so every
-    # body line of every hunk is one ow would add.
-    assert [line for line in lines if line.startswith("--- ")] == [
-        f"--- ow's {path}" for path in NINE
+    # One block per absent file, an empty current file against ow's proposal, so
+    # every body line of every hunk is one ow would add.
+    assert [line for line in lines if line.startswith("--- ")] == [f"--- {path}" for path in NINE]
+    assert [line for line in lines if line.startswith("+++ ")] == [
+        f"+++ ow's {path}" for path in NINE
     ]
-    assert [line for line in lines if line.startswith("+++ ")] == [f"+++ {path}" for path in NINE]
     body = [line for line in lines if not line.startswith(("--- ", "+++ ", "@@ "))]
-    assert body and all(line.startswith("-") for line in body)
-    assert "@@ -1," in result.stdout and " +0,0 @@" in result.stdout
+    assert body and all(line.startswith("+") for line in body)
+    assert "@@ -0,0" in result.stdout and " +1," in result.stdout
 
 
 def test_files_diff_reports_a_binary_file(lab):
-    root = workspace(lab, lab.odoo_files())
+    root = workspace(lab, branches={BASE: lab.odoo_files()})
     assert lab.ow("refresh", cwd=root).exit_code == 0
 
     (root / "odoorc").write_bytes(b"\xff\xfe\x00 not text")
@@ -138,7 +118,7 @@ def test_files_diff_reports_a_binary_file(lab):
 
 
 def test_files_stale_lock_entry_and_the_refresh_that_drops_it(lab):
-    root = workspace(lab, lab.odoo_files())
+    root = workspace(lab, branches={BASE: lab.odoo_files()})
     assert lab.ow("refresh", cwd=root).exit_code == 0
 
     # A lock entry no plugin produces any more, and the file it was for.
@@ -159,3 +139,24 @@ def test_files_stale_lock_entry_and_the_refresh_that_drops_it(lab):
     assert "old/thing.txt" not in read_lock(root)
     # The file itself stays: ow never deletes a workspace file.
     assert (root / "old" / "thing.txt").read_text() == "gone\n"
+
+
+def test_files_names_the_error_that_blocks_it(lab, monkeypatch, capsys):
+    """`ow files` exits 1 with the error diagnostic, not a bare listing."""
+    from ow.commands import files as files_cmd
+    from ow.core.plugins import Diagnostic, load_plugins
+    from ow.core.refresh import Projection
+    from ow.core.session import open_session
+
+    root = workspace(lab, branches={BASE: lab.odoo_files()})
+    session = open_session(str(root), need_workspace=True, plugins=load_plugins())
+    blocked = Projection(
+        files=(),
+        stale_lock=(),
+        diagnostics=(("odoo", Diagnostic("error", "bad setting")),),
+        blocked=True,
+    )
+    monkeypatch.setattr(files_cmd.refresh, "project", lambda ws, plugins: blocked)
+
+    assert files_cmd.run(session, diff=False) == 1
+    assert "error: odoo: bad setting" in capsys.readouterr().err

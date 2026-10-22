@@ -16,8 +16,6 @@ class UsageError(OwError):
 class Refused(OwError):
     """At least one repo was refused or failed (exit 1)."""
 
-    exit_code = 1
-
 
 class PluginError(OwError):
     """A plugin hook raised, or returned something the core refuses (exit 1).
@@ -25,8 +23,6 @@ class PluginError(OwError):
     `plugin` names the plugin to blame (two owners of one path name both, joined by
     " and "), `hook` the hook that was running, `cause` the exception or the problem.
     """
-
-    exit_code = 1
 
     def __init__(self, plugin: str, hook: str, cause: BaseException | str) -> None:
         self.plugin = plugin

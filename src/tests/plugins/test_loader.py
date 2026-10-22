@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import types
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Mapping
-from unittest.mock import MagicMock
 
 import pytest
 import typer
-import typer.testing
 from ow.core.plugins import (
-    CoreSpec,
     Diagnostic,
     GeneratedFile,
     KnownRepo,
@@ -22,7 +21,7 @@ from ow.core.plugins import (
     hookimpl,
     load_plugins,
 )
-from ow.specs.editors import DebugLaunch, EditorContribution, EditorsSpec, merge as merge_editors
+from ow.specs.editors import DebugLaunch, EditorContribution, merge as merge_editors
 from ow.specs.mise import MiseEnvironment, MiseSpec, merge as merge_mise
 
 
@@ -34,70 +33,21 @@ class FakeWorkspace:
     settings: Mapping[str, object]
 
 
-@pytest.fixture
-def fake_ws(tmp_path) -> FakeWorkspace:
-    """Create a fake workspace."""
-    return FakeWorkspace(root=tmp_path, settings={})
-
-
-def test_settings_record_fields():
-    """Test Setting record has all required fields."""
-    setting = Setting(
-        key="test.setting",
-        type=str,
-        default="value",
-        help="A test setting",
-    )
-    assert setting.key == "test.setting"
-    assert setting.type == str
-    assert setting.default == "value"
-    assert setting.help == "A test setting"
-
-
-def test_generated_file_record_fields(tmp_path):
-    """Test GeneratedFile record with path conversion."""
-    # Test with PurePosixPath
-    gf = GeneratedFile(
-        path=PurePosixPath("config/file.txt"),
-        data=b"content",
-        mode=0o755,
-    )
-    assert gf.path == PurePosixPath("config/file.txt")
-    assert gf.data == b"content"
-    assert gf.mode == 0o755
-
-    # Test with string path (should be converted)
-    gf2 = GeneratedFile(
-        path="another/file.txt",  # type: ignore
-        data=b"more content",
-    )
-    assert isinstance(gf2.path, PurePosixPath)
-    assert gf2.path == PurePosixPath("another/file.txt")
-
-
-def test_diagnostic_record_fields():
-    """Test Diagnostic record."""
-    diag = Diagnostic(level="warning", text="Something went wrong")
-    assert diag.level == "warning"
-    assert diag.text == "Something went wrong"
-
-
-def test_known_repo_record_fields():
-    """Test KnownRepo record."""
-    repo = KnownRepo(name="enterprise", url="git@github.com:odoo/enterprise.git")
-    assert repo.name == "enterprise"
-    assert repo.url == "git@github.com:odoo/enterprise.git"
+def test_generated_file_coerces_string_path():
+    """GeneratedFile normalizes a str path to PurePosixPath."""
+    gf = GeneratedFile(path="another/file.txt", data=b"content")  # type: ignore[arg-type]
+    assert isinstance(gf.path, PurePosixPath)
+    assert gf.path == PurePosixPath("another/file.txt")
 
 
 def test_load_plugins_basic():
     """Test loading plugins with minimal stub modules."""
-    # Create stub plugin modules
     plugin_a = types.ModuleType("plugin_a")
     plugin_b = types.ModuleType("plugin_b")
 
     @hookimpl
     def ow_settings():
-        return [Setting(key="a.enabled", type=bool, default=True, help="A plugin")]
+        return []
 
     @hookimpl
     def ow_settings_b():
@@ -115,7 +65,7 @@ def test_load_plugins_basic():
     assert plugins.names == ("a", "b")
 
 
-def test_plugins_settings_includes_enabled_and_plugin_settings(fake_ws):
+def test_plugins_settings_includes_enabled_and_plugin_settings():
     """Test that settings() includes synthesized enabled setting and plugin settings."""
     plugin_a = types.ModuleType("plugin_a")
 
@@ -231,8 +181,8 @@ def test_plugins_call_skips_disabled_plugin():
     assert results[0][0] == "a"
 
 
-def test_plugins_call_still_collects_disabled_plugin_settings():
-    """Test that settings() includes settings from disabled plugins."""
+def test_plugins_settings_lists_every_plugin_in_order():
+    """settings() lists each plugin's enabled flag before its own settings, in plugin order."""
     plugin_a = types.ModuleType("plugin_a")
     plugin_b = types.ModuleType("plugin_b")
 
@@ -254,14 +204,7 @@ def test_plugins_call_still_collects_disabled_plugin_settings():
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
 
-    settings = plugins.settings()
-    setting_keys = [s.key for s in settings]
-
-    # Both enabled settings should be present even if we later disable b
-    assert "a.enabled" in setting_keys
-    assert "b.enabled" in setting_keys
-    # And b's custom setting too
-    assert "b.setting" in setting_keys
+    assert [s.key for s in plugins.settings()] == ["a.enabled", "b.enabled", "b.setting"]
 
 
 def test_plugins_call_raises_plugin_error_on_exception():
@@ -303,8 +246,10 @@ def test_plugins_call_reraises_existing_plugin_error():
 
     @hookimpl
     def ow_diagnostics(ws):
-        # This raises a PluginError from another plugin
-        raise PluginError("a", "ow_diagnostics", "something broke")
+        # Plugin a raises a PluginError claiming to be from plugin b
+        # This tests whether call() re-raises it unchanged (preserving "b")
+        # vs wrapping it (which would change it to "a")
+        raise PluginError("b", "ow_diagnostics", "something broke")
 
     @hookimpl
     def ow_settings_b():
@@ -332,9 +277,9 @@ def test_plugins_call_reraises_existing_plugin_error():
     with pytest.raises(PluginError) as exc_info:
         plugins.call("ow_diagnostics", ws=fake_ws)
 
-    # The error should still blame plugin a (original plugin)
+    # The error should be re-raised unchanged, still blaming plugin b
     error = exc_info.value
-    assert error.plugin == "a"
+    assert error.plugin == "b"
 
 
 def test_plugins_answers_returns_callable():
@@ -430,8 +375,8 @@ def test_plugins_add_commands_creates_subapps():
     root_app = typer.Typer()
     plugins.add_commands(root_app)
 
-    # Verify the subapp was added
-    assert len(root_app.registered_commands) >= 0  # May have subcommand
+    # Verify the subapp group was added under the plugin name
+    assert [g.name for g in root_app.registered_groups] == ["a"]
 
 
 def test_plugins_add_commands_skips_plugins_with_no_commands():
@@ -475,7 +420,7 @@ def test_plugins_add_commands_skips_plugins_with_no_commands():
     plugins.add_commands(root_app)
 
     # Plugin b should be added (has command), plugin a should not
-    # (This is a simplified check; full verification would require inspecting the app)
+    assert [g.name for g in root_app.registered_groups] == ["b"]
 
 
 def test_hookspecs_declared_once():
@@ -537,6 +482,38 @@ def test_check_pending_rejects_misspelled_hookimpl():
 
     error = exc_info.value
     assert error.hook == "check_pending"
+
+
+def test_load_plugins_rejects_non_tuple_hookspecs():
+    """A non-tuple HOOKSPECS is a PluginError labelled HOOKSPECS, not check_pending."""
+    plugin_a = types.ModuleType("plugin_a")
+    plugin_a.HOOKSPECS = MiseSpec  # not a tuple
+
+    with pytest.raises(PluginError) as exc_info:
+        load_plugins(builtins=(("a", plugin_a),))
+
+    error = exc_info.value
+    assert error.plugin == "a"
+    assert error.hook == "HOOKSPECS"
+
+
+def test_load_plugins_wraps_hookimpl_signature_mismatch():
+    """A hookimpl whose signature does not match its spec becomes a PluginError."""
+    plugin_a = types.ModuleType("plugin_a")
+
+    @hookimpl
+    def ow_diagnostics(ws, unexpected):  # 'unexpected' is not in the spec
+        return []
+
+    plugin_a.ow_diagnostics = ow_diagnostics
+    plugin_a.HOOKSPECS = ()
+
+    with pytest.raises(PluginError) as exc_info:
+        load_plugins(builtins=(("a", plugin_a),))
+
+    error = exc_info.value
+    assert error.plugin == "a"
+    assert error.hook == "HOOKSPECS"
 
 
 def test_merge_mise_environment_empty():
@@ -755,4 +732,54 @@ def test_plugins_call_with_errors_collect():
     assert results[2][0] == "c"
     assert isinstance(results[2][1], list)
     assert results[2][1][0].text == "diagnostic from c"
+
+
+def test_plugins_call_skips_disabled_plugin_without_ws():
+    """Test that call() skips disabled plugins even without ws by reading global config."""
+    plugin_a = types.ModuleType("plugin_a")
+    plugin_b = types.ModuleType("plugin_b")
+
+    @hookimpl
+    def ow_settings():
+        return []
+
+    @hookimpl
+    def ow_known_repos():
+        return [KnownRepo(name="a-repo", url="git@github.com:a/repo.git")]
+
+    @hookimpl
+    def ow_settings_b():
+        return []
+
+    ow_settings_b.__name__ = "ow_settings"
+
+    @hookimpl
+    def ow_known_repos_b():
+        return [KnownRepo(name="b-repo", url="git@github.com:b/repo.git")]
+
+    ow_known_repos_b.__name__ = "ow_known_repos"
+
+    plugin_a.ow_settings = ow_settings
+    plugin_a.ow_known_repos = ow_known_repos
+    plugin_a.HOOKSPECS = ()
+
+    plugin_b.ow_settings = ow_settings_b
+    plugin_b.ow_known_repos = ow_known_repos_b
+    plugin_b.HOOKSPECS = ()
+
+    # Create a temporary global config file with b.enabled=false
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+        f.write("b.enabled = false\n")
+        config_file = f.name
+
+    import ow.core.paths
+
+    original = ow.core.paths.global_config
+    ow.core.paths.global_config = lambda: Path(config_file)
+    try:
+        plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
+        assert [name for name, _ in plugins.call("ow_known_repos")] == ["a"]
+    finally:
+        ow.core.paths.global_config = original
+        os.unlink(config_file)
 

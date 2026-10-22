@@ -3,310 +3,88 @@
 Pure tests with no git or filesystem access.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from ow.core.facts import RepoFacts
-from ow.recipes.preflight import MUTATING, refusal
+from ow.recipes.preflight import refusal
+
+
+@pytest.fixture
+def facts():
+    """A healthy repo on a branch; override fields with dataclasses.replace()."""
+    return RepoFacts(
+        name="test",
+        path=Path("/ws/test"),
+        bare=Path("/bare/test.git"),
+        remotes=("origin",),
+        head="abc123",
+        branch="18.0-voip",
+        upstream="origin/18.0-voip",
+        upstream_ab=(0, 0),
+        base="origin/18.0",
+        default_base="origin/18.0",
+        explicit_base=None,
+        operation=None,
+        modified=(),
+        untracked=(),
+        problem=None,
+    )
 
 
 class TestRefusal:
-    """Test cases for refusal()."""
+    def test_problem_repo_refused_on_any_command(self, facts):
+        msg = refusal(replace(facts, problem="prunable"), "status")
+        assert msg == "worktree is broken (prunable); run `ow init`"
 
-    def test_problem_repo_always_refused(self):
-        """A problem repo is refused on any command."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head=None,
-            branch="main",
-            upstream=None,
-            upstream_ab=None,
-            base="origin/18.0",
-            default_base="origin/18.0",
-            explicit_base=None,
-            operation=None,
-            modified=(),
-            untracked=(),
-            problem="prunable",
-        )
-
-        for command in ("status", "fetch", "pull", "rebase", "reset", "switch"):
-            msg = refusal(facts, command)
-            assert msg is not None
-            assert "worktree is broken" in msg
-            assert "run `ow init`" in msg
-
-    def test_operation_in_progress_on_mutating_command(self):
-        """Operation in progress refuses mutating commands."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head=None,
-            branch="main",
-            upstream=None,
-            upstream_ab=None,
-            base="origin/18.0",
-            default_base="origin/18.0",
-            explicit_base=None,
-            operation="rebase",
-            modified=(),
-            untracked=(),
-            problem=None,
-        )
-
-        # Mutating commands should be refused
+    def test_operation_refuses_every_mutating_command(self, facts):
+        dirty = replace(facts, operation="rebase")
         for command in ("pull", "rebase", "reset", "switch", "repo rm", "rm"):
-            msg = refusal(facts, command)
-            assert msg is not None
-            assert "rebase in progress" in msg
+            assert refusal(dirty, command) is not None
 
-    def test_operation_in_progress_not_refused_for_status_fetch(self):
-        """Operation in progress does not refuse status or fetch."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head=None,
-            branch="main",
-            upstream=None,
-            upstream_ab=None,
-            base="origin/18.0",
-            default_base="origin/18.0",
-            explicit_base=None,
-            operation="rebase",
-            modified=(),
-            untracked=(),
-            problem=None,
-        )
+    def test_operation_allows_status_and_fetch(self, facts):
+        dirty = replace(facts, operation="rebase")
+        assert refusal(dirty, "status") is None
+        assert refusal(dirty, "fetch") is None
 
-        # Non-mutating commands should not be refused
-        assert refusal(facts, "status") is None
-        assert refusal(facts, "fetch") is None
+    @pytest.mark.parametrize(
+        "operation, command",
+        [
+            ("rebase", "rebase --abort"),
+            ("cherry-pick", "cherry-pick --abort"),
+            ("merge", "merge --abort"),
+            ("revert", "revert --abort"),
+            ("bisect", "bisect reset"),
+        ],
+    )
+    def test_operation_hint_names_the_real_abort_command(self, facts, operation, command):
+        msg = refusal(replace(facts, operation=operation), "pull")
+        assert msg == f"{operation} in progress; finish it or run `git -C /ws/test {command}`"
 
-    def test_modified_files_on_rebase_without_autostash(self):
-        """Modified tracked files on rebase without autostash."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head=None,
-            branch="main",
-            upstream=None,
-            upstream_ab=None,
-            base="origin/18.0",
-            default_base="origin/18.0",
-            explicit_base=None,
-            operation=None,
-            modified=("src/file.py", "README.md"),
-            untracked=(),
-            problem=None,
-        )
+    def test_operation_hint_prints_workspace_relative_with_root(self, facts):
+        msg = refusal(replace(facts, operation="bisect"), "pull", root=Path("/ws"))
+        assert msg == "bisect in progress; finish it or run `git -C test bisect reset`"
 
-        # Without autostash, should be refused
-        msg = refusal(facts, "rebase", autostash=False)
-        assert msg is not None
-        assert "modified files" in msg
+    def test_modified_files_refuse_rebase_without_autostash(self, facts):
+        dirty = replace(facts, modified=("file.py",))
+        assert refusal(dirty, "rebase") == "modified files; commit, stash, or pass --autostash"
 
-        # With autostash, should not be refused
-        msg = refusal(facts, "rebase", autostash=True)
-        assert msg is None
+    def test_modified_files_allowed_with_autostash(self, facts):
+        dirty = replace(facts, modified=("file.py",))
+        assert refusal(dirty, "rebase", autostash=True) is None
 
-    def test_missing_default_base_on_switch_detach(self):
-        """Missing default base on switch --detach."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head="abc123",
-            branch=None,
-            upstream=None,
-            upstream_ab=None,
-            base=None,
-            default_base=None,
-            explicit_base=None,
-            operation=None,
-            modified=(),
-            untracked=(),
-            problem=None,
-        )
+    @pytest.mark.parametrize("command", ["pull", "rebase", "reset"])
+    def test_detached_without_base_refused(self, facts, command):
+        detached = replace(facts, branch=None, base=None)
+        assert refusal(detached, command) == "no default base; run `ow init`"
 
-        msg = refusal(facts, "switch --detach")
-        assert msg is not None
-        assert "no default base" in msg
+    @pytest.mark.parametrize("command", ["pull", "rebase", "reset"])
+    def test_detached_with_base_allowed(self, facts, command):
+        detached = replace(facts, branch=None, base="origin/18.0")
+        assert refusal(detached, command) is None
 
-    def test_missing_default_base_on_pull_when_detached(self):
-        """Missing default base on pull when detached."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head="abc123",
-            branch=None,
-            upstream=None,
-            upstream_ab=None,
-            base=None,
-            default_base=None,
-            explicit_base=None,
-            operation=None,
-            modified=(),
-            untracked=(),
-            problem=None,
-        )
-
-        msg = refusal(facts, "pull")
-        assert msg is not None
-        assert "no default base" in msg
-
-    def test_missing_default_base_on_rebase_when_detached(self):
-        """Missing default base on rebase when detached."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head="abc123",
-            branch=None,
-            upstream=None,
-            upstream_ab=None,
-            base=None,
-            default_base=None,
-            explicit_base=None,
-            operation=None,
-            modified=(),
-            untracked=(),
-            problem=None,
-        )
-
-        msg = refusal(facts, "rebase")
-        assert msg is not None
-        assert "no default base" in msg
-
-    def test_missing_default_base_on_reset_when_detached(self):
-        """Missing default base on reset when detached."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head="abc123",
-            branch=None,
-            upstream=None,
-            upstream_ab=None,
-            base=None,
-            default_base=None,
-            explicit_base=None,
-            operation=None,
-            modified=(),
-            untracked=(),
-            problem=None,
-        )
-
-        msg = refusal(facts, "reset")
-        assert msg is not None
-        assert "no default base" in msg
-
-    def test_default_base_exists_on_detached_no_refusal(self):
-        """Default base exists when detached: no refusal."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head="abc123",
-            branch=None,
-            upstream=None,
-            upstream_ab=None,
-            base="origin/18.0",
-            default_base="origin/18.0",
-            explicit_base=None,
-            operation=None,
-            modified=(),
-            untracked=(),
-            problem=None,
-        )
-
-        # Should not be refused even when detached
-        assert refusal(facts, "switch --detach") is None
-        assert refusal(facts, "pull") is None
-        assert refusal(facts, "rebase") is None
-        assert refusal(facts, "reset") is None
-
-    def test_branch_with_base_no_refusal(self):
-        """On a branch with a base: no refusal for most commands."""
-        facts = RepoFacts(
-            name="test",
-            path=Path("/ws/test"),
-            bare=Path("/data/repos/test.git"),
-            remotes=("origin",),
-            head=None,
-            branch="main",
-            upstream=None,
-            upstream_ab=None,
-            base="origin/18.0",
-            default_base="origin/18.0",
-            explicit_base=None,
-            operation=None,
-            modified=(),
-            untracked=(),
-            problem=None,
-        )
-
-        assert refusal(facts, "status") is None
-        assert refusal(facts, "fetch") is None
-        assert refusal(facts, "pull") is None
-        assert refusal(facts, "rebase") is None
-        assert refusal(facts, "reset") is None
-        assert refusal(facts, "switch") is None
-
-    def test_mutating_constant(self):
-        """MUTATING constant contains the right commands."""
-        assert "status" not in MUTATING
-        assert "fetch" not in MUTATING
-        assert "pull" in MUTATING
-        assert "rebase" in MUTATING
-        assert "reset" in MUTATING
-        assert "switch" in MUTATING
-        assert "switch --detach" in MUTATING
-        assert "repo rm" in MUTATING
-        assert "rm" in MUTATING
-
-    def test_different_operations(self):
-        """Different operations produce appropriate messages."""
-        for operation, name in [
-            ("rebase", "rebase"),
-            ("cherry-pick", "cherry-pick"),
-            ("merge", "merge"),
-            ("revert", "revert"),
-            ("bisect", "bisect"),
-        ]:
-            facts = RepoFacts(
-                name="test",
-                path=Path("/ws/test"),
-                bare=Path("/data/repos/test.git"),
-                remotes=("origin",),
-                head=None,
-                branch="main",
-                upstream=None,
-                upstream_ab=None,
-                base="origin/18.0",
-                default_base="origin/18.0",
-                explicit_base=None,
-                operation=operation,
-                modified=(),
-                untracked=(),
-                problem=None,
-            )
-
-            msg = refusal(facts, "pull")
-            assert msg is not None
-            assert f"{name} in progress" in msg
+    def test_healthy_branch_allowed_everywhere(self, facts):
+        for command in ("status", "fetch", "pull", "rebase", "reset", "switch"):
+            assert refusal(facts, command) is None

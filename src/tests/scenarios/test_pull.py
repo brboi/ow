@@ -1,29 +1,33 @@
-"""`ow pull` scenarios (§7/§16): the fast-forward, the divergence, and `--no-fetch`.
+"""`ow pull` scenarios: the fast-forward, the divergence refusal, and `--no-fetch`.
 
 The workspace's branch tracks the branch the collaborator publishes, so `ow pull` is a
-`merge --ff-only` onto a fresh `@{u}`. A HEAD with commits of its own is left alone with
-a note, and `--no-fetch` plans against the cached refs.
+`merge --ff-only` onto a fresh `@{u}`. A HEAD with commits of its own (diverged) is refused
+with exit 1, and `--no-fetch` plans against the cached refs.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from ow.core.paths import repos_dir
+from tests.conftest import add_repo, init_workspace
+
 BARE = "~/.local/share/ow/repos"
+# The base and the upstream are fetched in separate steps, each with its own refspec.
+FETCH = (
+    f"git -C {BARE}/community.git fetch origin +refs/heads/18.0:refs/remotes/origin/18.0",
+    f"git -C {BARE}/community.git fetch origin"
+    " +refs/heads/18.0-voip:refs/remotes/origin/18.0-voip",
+)
 
 
 def _workspace(lab) -> tuple[Path, object]:
     """A workspace on `18.0-voip`, tracking the branch the collaborator publishes."""
-    remote = lab.remote("community", {"18.0": lab.odoo_files()}, head="18.0")
-    assert lab.ow("repo", "add", "community", f"file://{remote}").exit_code == 0
+    remote = add_repo(lab)
     collaborator = lab.collaborator("dev", of=remote)
     collaborator.commit({"feature.py": "v1\n"}, message="feature v1", branch="18.0-voip")
     collaborator.push("18.0-voip")
-    ws = lab.ws("voip")
-    assert (
-        lab.ow("init", str(ws), "community", "--base", "18.0", "--branch", "18.0-voip").exit_code
-        == 0
-    )
+    ws = init_workspace(lab, "community", branch="18.0-voip")
     return ws, collaborator
 
 
@@ -39,7 +43,7 @@ def test_pull_fast_forwards_to_the_followed_ref(lab):
 
     assert result.exit_code == 0
     assert result.stdout.splitlines() == [
-        f"git -C {BARE}/community.git fetch origin 18.0 18.0-voip",
+        *FETCH,
         "git -C community merge --ff-only origin/18.0-voip",
     ]
     assert lab.git(worktree, "rev-parse", "HEAD") == tip
@@ -57,10 +61,10 @@ def test_pull_leaves_a_diverged_head_alone(lab):
 
     result = lab.ow("pull", cwd=ws)
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert result.stdout.splitlines() == [
-        f"git -C {BARE}/community.git fetch origin 18.0 18.0-voip",
-        "# community: diverged from origin/18.0-voip — run `ow rebase`",
+        *FETCH,
+        "# community: diverged from origin/18.0-voip; run `ow rebase`",
     ]
     assert lab.git(worktree, "rev-parse", "HEAD") == before
 
@@ -77,3 +81,20 @@ def test_pull_no_fetch_uses_the_cached_refs(lab):
     assert result.exit_code == 0
     assert result.stdout.splitlines() == ["git -C community merge --ff-only origin/18.0-voip"]
     assert lab.git(worktree, "rev-parse", "HEAD") == tip
+
+
+def test_pull_skips_on_failed_fetch(lab):
+    """A failed fetch skips the repo with the standard refusal and exits 1."""
+    ws, _collaborator = _workspace(lab)
+    worktree = ws / "community"
+    head = lab.git(worktree, "rev-parse", "HEAD")
+    lab.git(repos_dir() / "community.git", "remote", "set-url", "origin", "/nonexistent/ow")
+
+    result = lab.ow("pull", cwd=ws)
+
+    assert result.exit_code == 1
+    assert result.stdout.splitlines() == [
+        *FETCH,
+        "# community: fetch failed; pass --no-fetch to work on cached refs",
+    ]
+    assert lab.git(worktree, "rev-parse", "HEAD") == head

@@ -1,4 +1,4 @@
-"""`ow refresh` — recompute and write the generated files (§8)."""
+"""`ow refresh` — recompute and write the generated files."""
 
 from __future__ import annotations
 

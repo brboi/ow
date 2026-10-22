@@ -1,11 +1,6 @@
-"""`ow files` — the generated files' states, or the diff of the ones that differ (§8).
+"""`ow files` — the generated files' states, or the diff of the ones that differ.
 
-Read-only: it projects, it never writes. A hook that raises propagates as
-`PluginError` (exit 1), and an `error` diagnostic blocks the refresh, so the
-command exits 1 for the same reason `ow refresh` would refuse to write.
-
-The listing is tab-separated, so its lines go to stdout verbatim: `term.out`
-renders through Rich, which expands every tab to the next tab stop.
+Read-only: it projects, it never writes. An `error` diagnostic exits 1 for the same reason `ow refresh` would refuse to write; the listing is tab-separated and written to stdout verbatim.
 """
 
 from __future__ import annotations
@@ -13,6 +8,7 @@ from __future__ import annotations
 import difflib
 import sys
 
+from ow import term
 from ow.core import refresh
 from ow.core.refresh import Projection
 from ow.core.session import Session
@@ -29,7 +25,13 @@ def run(session: Session, *, diff: bool) -> int:
         _print_diffs(projection)
     else:
         _print_states(projection)
-    return 1 if projection.blocked else 0
+
+    if projection.blocked:
+        for plugin_name, diag in projection.diagnostics:
+            if diag.level == "error":
+                term.error(f"{plugin_name}: {diag.text}")
+        return 1
+    return 0
 
 
 def _print_states(projection: Projection) -> None:
@@ -45,25 +47,23 @@ def _print_states(projection: Projection) -> None:
 def _print_diffs(projection: Projection) -> None:
     """A unified diff per file ow would write, plus the stale lock entries.
 
-    `fromfile` is ow's proposal, `tofile` what is there now, so the diff reads
-    as the change that would be made. A file ow has no text for — a binary
-    proposal, or a destination that cannot be read — gets one line instead.
+    Each diff reads current → ow's proposal, so `+` lines are what ow would add; a file ow has no text for gets one line instead.
     """
     for status in projection.files:
         if status.state not in ("absent", "outdated", "yours"):
             continue
         path = status.path.as_posix()
         proposal = _text(status.proposal)
-        # An absent file diffs against nothing, so the whole proposal is an addition.
+        # An absent file has no current bytes, so every proposal line is an addition.
         current = "" if status.state == "absent" else _text(status.current)
         if proposal is None or current is None:
             _line(f"{path}: binary")
             continue
         for line in difflib.unified_diff(
-            proposal.splitlines(),
             current.splitlines(),
-            fromfile=f"ow's {path}",
-            tofile=path,
+            proposal.splitlines(),
+            fromfile=path,
+            tofile=f"ow's {path}",
             lineterm="",
         ):
             _line(line)
