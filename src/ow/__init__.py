@@ -1,4 +1,4 @@
-"""ow — Odoo workspace manager.
+"""ow — Odoo Workspaces.
 
 `_version.py` is written by setuptools-scm at build time and gitignored, so
 it is there in an installed ow and absent from a plain source checkout. The

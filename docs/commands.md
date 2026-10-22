@@ -1,551 +1,512 @@
 # Commands
 
-## Overview
+Every ow command, its flags, its exit codes and the lines it prints. Commands run inside a
+workspace unless stated otherwise, and print each git command as they run it. Every output
+below comes from a real run.
 
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `ow init` | `[NAME]`, `-c/--configuration`, `-r/--repo`, `-y/--yes` | Create a workspace here, or in `./NAME` — or repair one already there |
-| `ow render` | `[workspace]`, `-w/--workspace` | Migrate the config if needed, then write every generated file |
-| `ow files` | `[workspace]`, `-w/--workspace`, `--diff` | List the files ow manages and their state, or diff the ones that differ |
-| `ow status` | `[workspace]`, `-w/--workspace`, `-f/--fetch` | Show branch status with behind/ahead counts |
-| `ow fetch` | `[workspace]`, `-w/--workspace`, `--only` | Refresh the refs a workspace follows, without touching any worktree |
-| `ow rebase` | `[workspace]`, `-w/--workspace`, `--only`, `--autostash`, `--dry-run`, `-y/--yes`, `--no-fetch` | Fetch and rebase repos in a workspace |
-| `ow pull` | `[workspace]`, `-w/--workspace`, `--only`, `--dry-run` | Fetch and fast-forward repos in a workspace |
-| `ow reset` | `[workspace]`, `-w/--workspace`, `--only`, `--hard`, `-f/--fetch`, `--dry-run`, `-y/--yes` | Put repos back on the refs they follow |
-| `ow switch` | `[target]`, `-w/--workspace`, `-c/--create`, `--detach`, `--only`, `-a/--all`, `--dry-run`, `--include-detached-specs` | Switch every repo in a workspace to a branch; repos configured detached are pins and left alone by default |
-| `ow mv` | `<source>`, `<dest>`, `-y/--yes` | Move a workspace to a new path, repairing its worktrees |
-| `ow archive` | `<name>`, `-y/--yes` | Park a workspace without losing its worktrees or branches |
-| `ow unarchive` | `<name>`, `[dest]`, `-y/--yes` | Restore an archived workspace |
-| `ow rm` | `<name>`, `-w/--workspace` (alias for `<name>`), `-y/--yes` | Remove a workspace: worktrees, local branches, directory, and index entry |
-| `ow prune` | `--dry-run`, `-y/--yes`, `--also-backups` | Clean up stale worktree references, orphaned branches, dead index entries |
-| `ow ls` | `--archived` | List every known workspace, its path, and its repos |
-| `ow cd` | `[workspace]`, `-w/--workspace` | Print a workspace path — with `ow shell-init`, changes directory |
-| `ow shell-init` | `<shell>` | Print the shell snippet that makes `ow cd` change directory |
-| `ow open` | `[workspace]`, `-w/--workspace` | Open a workspace in the configured editor |
-A command that takes a `[workspace]` resolves it in exactly one of four forms, never falling
-back from one to the next:
+## Exit codes
 
-- a **path** (starts with `~`, is `.`/`..`, or contains a separator, e.g. `./canary`) — must
-  contain `.ow/config.toml` or the command fails
-- a bare **name** (e.g. `ow status canary`) — looked up in the discovery index; zero matches or
-  more than one is an error naming the fix (`ow ls`, or pass a path)
-- no argument, **`OW_WORKSPACE` set** — must be an absolute path (not a name, not `~`, not
-  relative); `mise` exports it as such automatically inside a generated workspace
-- no argument, **`OW_WORKSPACE` unset** — walk up from the current directory looking for
-  `.ow/config.toml`
+- **0** — the command did its work, or nothing needed doing.
+- **1** — a repo was refused, or a step failed.
+- **2** — a usage error, a declined prompt, or a prompt with no terminal and no `-y`.
 
-Every one of these commands also accepts `-w/--workspace` naming the same workspace as the
-positional form. Passing both with different values is an error; passing both with the same
-value is accepted. `ow rm` is the exception: `-w` is a plain alias for its mandatory `<name>`
-argument rather than another way to spell the same resolution, and `ow rm` never resolves a
-workspace implicitly — it is the destructive command, so it insists on being told.
+Notes and refusals print on stdout as `# <repo>: <text>`; errors print as `error: <text>` on
+stderr:
 
-`ow init` doesn't go through this: it resolves its *target* directory itself (the current
-directory, or `./NAME`), since the workspace doesn't exist yet.
+```
+# community: diverged from origin/18.0; run `ow rebase`
+# community: modified files; commit, stash, or pass --autostash
+```
 
-## `ow init`
+Commands that change or delete print their plan, then ask:
 
-Creates a workspace — in the current directory by default, or in `./NAME` if given — or repairs
-one already there. Mirrors `git init`, and is re-runnable: run it again inside an existing
-workspace and it creates only what is missing, leaves every existing worktree's HEAD, branch,
-upstream and index untouched, and reports what drifted instead of realigning it.
+```
+Proceed? [y/N]
+```
 
-Interactive by default (repos → branch specs, pre-filled from any flags given); when stdin isn't
-a terminal it takes everything from flags or from `-c/--configuration`, and refuses to guess.
-Repair never asks.
+`-y/--yes` skips the question, `-n/--dry-run` prints the plan and stops before running it. A
+command with nothing to run does not prompt. Without a terminal and without `-y`, a prompt is an
+error (exit 2). A frontend confirms in two runs: `-n` to show the plan, then `-y --no-fetch` to
+execute against the same cached refs.
+
+## Shared options
+
+- **`-w, --workspace WS`** — the workspace to act on, by name or path (default: the one holding
+  the current directory). On every command except `ls`, `shell-init` and `prune`.
+- **`--only REPO`** — repeatable; on `fetch`, `switch`, `pull`, `rebase` and `reset`. An unknown
+  name is exit 2: `error: unknown repo 'x' in --only; this workspace has: community, enterprise`.
+- **`-n, --dry-run`** — on `switch`, `pull`, `rebase`, `reset`, `repo rm`, `rm`, `prune`.
+- **`-y, --yes`** — on `rebase`, `reset`, `repo rm`, `rm`, `prune`.
+- **`--no-fetch`** — on `pull`, `rebase`, `reset`: work on the cached refs.
+- **`ow --version`** prints `ow <version>`; a bare `ow` prints the help and exits 0.
+
+Commands that move branches refresh the generated files afterwards, and their exit code is the
+worse of the batch's and the refresh's.
+
+---
+
+## Setup
+
+### `ow init [DIR] [REPO…] [--base REF] [--branch BRANCH]`
+
+Create, adopt or repair the workspace at `DIR` (default: the current directory).
+
+- **`DIR`** — created when missing; an existing directory holding `.ow/config.toml` is adopted.
+- **`REPO…`** — repos to add. Each needs a registered bare, or a name ow knows
+  (`community`, `enterprise`, `design-themes`).
+- **`--base REF`** — base for the repos added: `18.0` is stored as `origin/18.0`.
+- **`--branch BRANCH`** — create and switch to this branch in every repo.
+
+Adding a repo fetches its base with an explicit refspec, then adds a worktree on `--branch`, or
+detached at the base. Adoption repairs what ow 2 left behind (`remote.origin.tagOpt`, ref logs,
+`origin/HEAD`; it adds no fetch refspec), relinks a moved worktree, re-adds a repo whose worktree is gone, and rewrites
+`.ow/config.toml`, warning about every key it drops. Unknown settings and rejected bases warn once
+per config file, ending with `run \`ow init\``. Re-running is idempotent; a repo already present
+is reported instead of switched:
+
+```
+$ ow init ws/voip community enterprise --base 18.0 --branch 18.0-voip
+git -C ~/.local/share/ow/repos/community.git fetch origin +refs/heads/18.0:refs/remotes/origin/18.0
+git -C ~/.local/share/ow/repos/community.git worktree add --no-track -b 18.0-voip ~/ws/voip/community origin/18.0
+git -C community config branch.18.0-voip.ow-base origin/18.0
+…
+added community (base origin/18.0)
+added enterprise (base origin/18.0)
+
+$ ow init ws/voip community --branch other
+# community: present; run `ow switch other`
+```
+
+**Exit**: 0 on success; 1 when a step failed or the refresh was blocked; 2 for an unknown repo or
+an invalid base, before anything is written.
+
+### `ow repo add NAME [URL] [--base REF] [-w WS]`
+
+Register a repo, and add its worktree to the workspace.
+
+- **`NAME`** — repo name; the worktree lands at `<workspace>/<name>`.
+- **`URL`** — clone URL. May be omitted for a name ow knows (`community`, `enterprise`,
+  `design-themes`) or a bare already registered.
+- **`--base REF`** — default base for this repo, stored fully qualified.
+
+On first registration the bare is created at `~/.local/share/ow/repos/<name>.git`, with a
+blobless fetch of the default branch and no fetch refspec, so other branches arrive only when a workspace needs them. Outside a workspace only the bare is registered. Inside one
+the worktree is added too, detached at the base. A URL that differs from a registered one is
+ignored, with a note naming the registered one.
+
+```
+$ ow repo add payments ~/remotes/payments.git
+git init --bare ~/.local/share/ow/repos/payments.git
+git -C ~/.local/share/ow/repos/payments.git config remote.origin.url ~/remotes/payments.git
+git -C ~/.local/share/ow/repos/payments.git config remote.origin.tagOpt --no-tags
+git -C ~/.local/share/ow/repos/payments.git config core.logAllRefUpdates true
+git -C ~/.local/share/ow/repos/payments.git ls-remote --symref origin HEAD
+git -C ~/.local/share/ow/repos/payments.git fetch --filter=blob:none origin +refs/heads/master:refs/remotes/origin/master
+git -C ~/.local/share/ow/repos/payments.git remote set-head origin master
+
+$ ow repo add payments --base 18.0
+# payments: default base origin/18.0 (shared by community, enterprise)
+git -C ~/.local/share/ow/repos/payments.git fetch origin +refs/heads/18.0:refs/remotes/origin/18.0
+git -C ~/.local/share/ow/repos/payments.git worktree add --detach ~/ws/voip/payments origin/18.0
+```
+
+**Exit**: 0 on success; 1 when the clone fails; 2 for an unknown name without a URL.
+
+### `ow repo ls [-w WS]`
+
+One line per registered bare: `<name>: <url>`, with `(in this workspace)` on the repos the
+workspace uses and `(no origin)` on a bare without a remote.
+
+```
+$ ow repo ls
+community: ~/remotes/community.git (in this workspace)
+enterprise: ~/remotes/enterprise.git (in this workspace)
+payments: ~/remotes/payments.git
+```
+
+**Exit**: 0 always.
+
+### `ow repo rm NAME [-n] [-y] [-w WS]`
+
+Remove a repo's worktree from the workspace. The bare stays registered.
+
+The plan removes the worktree, then deletes the branch when a remote-tracking ref contains it; an
+unpushed branch is kept, with the command that deletes it. A dirty worktree, or a detached HEAD
+holding commits no remote has, refuses before the prompt. A worktree already gone is reported and
+the `[repos]` entry dropped.
+
+```
+$ ow repo rm payments -n
+git -C ~/.local/share/ow/repos/payments.git worktree remove ~/ws/voip/payments
+
+$ ow repo rm enterprise -n
+# enterprise: kept unpushed branch local-only; delete it with `git -C ~/.local/share/ow/repos/enterprise.git branch -D local-only`
+git -C ~/.local/share/ow/repos/enterprise.git worktree remove ~/ws/voip/enterprise
+
+$ ow repo rm enterprise
+# enterprise: untracked scratch.txt
+# enterprise: commit or stash these changes first
+```
+
+**Exit**: 0 on success; 1 refused; 2 declined or no terminal.
+
+---
+
+## Settings
+
+### `ow config [get|set|unset …] [-w WS] [--global]`
+
+Read and write settings. Bare `ow config` lists every declared setting with its effective value,
+its origin and its help; `--global` lists the global layer and the defaults only.
+
+- **`ow config get KEY`** — print the effective value; a string prints raw, an unset key prints
+  nothing (exit 0).
+- **`ow config set KEY VALUE…`** — one item per value; multi-word strings join with spaces.
+- **`ow config unset KEY`** — unknown keys are accepted: unsetting is how you clear the
+  unknown-key warning.
+- **`--global`** — read or write `$XDG_CONFIG_HOME/ow/config.toml` instead of the workspace's.
+
+Every write rewrites the whole file, prints the keys it drops, then refreshes the generated files.
+A config write leaves a sidecar lock next to the file it wrote.
+
+```
+$ ow config
+odoo.http_port = 8069 (default) # HTTP port for Odoo
+odoo.db_name = "voip" (default) # Database name (defaults to workspace name)
+odoo.smtp_port = 25 (default) # SMTP port
+…
+
+$ ow config set odoo.http_port 8080
+wrote odoorc
+
+$ ow config get odoo.http_port
+8080
+
+$ ow config get --global odoo.smtp_port
+1025
+
+$ ow config set odoo.http_prot 80
+error: unknown setting 'odoo.http_prot'; did you mean 'odoo.http_port'?
+```
+
+**Exit**: 0 on success; 1 when a write or the refresh fails; 2 for an unknown key (`set` only) or
+a bad value. See [Configuration](configuration.md) for the key table and the layer rules.
+
+---
+
+## Status and files
+
+### `ow status [-w WS]`
+
+One line per repo: name, state (branch, or `detached at <sha>`), base, upstream, base counts,
+dirty file count, and the operation in progress. Never touches the network. On a terminal the
+columns are aligned under a header; piped, the fields are tab-separated with no header.
+
+```
+$ ow status
+community	18.0-voip	origin/18.0	(none)	(even)
+enterprise	18.0-voip	origin/18.0	(none)	(even)
+```
+
+`(none)` is an upstream that is unset or equal to the base, `(even)` a 0/0 count, `(default)` a
+base falling back to the repo's default, `no base` a repo ow has no base for, `detached at <sha>`
+a detached HEAD, `dirty N` uncommitted files, and `rebase in progress` (or merge, cherry-pick,
+…) a repo holding an unfinished operation.
+
+
+**Exit**: 0 always. Outside a workspace: 2.
+
+### `ow fetch [-w WS] [--only REPO]…`
+
+Print every fetch line, run them in parallel, then print the status table. Each line names its
+refspec explicitly, so a bare without a `remote.<r>.fetch` config still fetches, and the base and a
+distinct upstream are separate steps. A force-pushed ref and an upstream branch that no longer
+exists are notes, not failures.
+
+```
+$ ow fetch
+git -C ~/.local/share/ow/repos/community.git fetch origin +refs/heads/18.0:refs/remotes/origin/18.0
+git -C ~/.local/share/ow/repos/community.git fetch origin +refs/heads/saas-18.1:refs/remotes/origin/saas-18.1
+git -C ~/.local/share/ow/repos/enterprise.git fetch origin +refs/heads/18.0:refs/remotes/origin/18.0
+# community: upstream origin/saas-18.1 is gone; `git branch --unset-upstream`
+community	18.0-voip	origin/18.0	origin/saas-18.1 (ahead 1, behind 1)	ahead 0, behind 1
+enterprise	18.0-voip	origin/18.0	(none)	(even)
+```
+
+A force-pushed base prints the same kind of note: `# community: origin/18.0 was force-pushed`.
+A failing fetch prints git's output and the other repos go on; `pull`, `rebase` and `reset` refuse
+the repo instead, with `# <repo>: fetch failed; pass --no-fetch to work on cached refs`.
+
+
+**Exit**: 0 on success; 1 when a fetch failed.
+
+### `ow refresh [-w WS]`
+
+Write every generated file that is missing or outdated. Prints `wrote <path>` per file. A file
+edited by hand is left alone with a warning naming how to get ow's version back; a file behind a
+symlinked directory is skipped. An error diagnostic from a plugin means nothing is written.
+
+```
+$ ow refresh
+wrote pyrightconfig.json
+warning: odoorc: not overwritten (yours); delete it and run `ow refresh` to get ow's version back
+```
+
+**Exit**: 0 on success; 1 when a plugin reported an error and nothing was written.
+
+### `ow files [-w WS] [--diff]`
+
+List the generated files, one `<path>\t<state>` line each:
+
+- **`up to date`** — the file matches ow's output.
+- **`outdated`** — the file matches the lock but ow's output changed; `ow refresh` rewrites it.
+- **`yours`** — edited by hand since ow wrote it; never overwritten.
+- **`skipped`** — not written, with the reason (a symlinked parent directory).
+- **`absent`** — missing; `ow refresh` writes it.
+
+Lock entries no plugin produces any more print as `stale (no longer produced)`; their files stay.
+`--diff` prints a unified diff per differing file, read as current → ow's proposal, so `+` lines
+are what ow would write. An absent file is all additions; a binary one prints `<path>: binary`.
+
+```
+$ ow files
+odoorc	yours
+pyrightconfig.json	absent
+.vscode/settings.json	skipped	.vscode is a symlink
+…
+
+$ ow files --diff
+--- pyrightconfig.json
++++ ow's pyrightconfig.json
+@@ -0,0 +1,4 @@
++{
++  "venvPath": ".",
++  "venv": ".venv"
++}
+```
+
+**Exit**: 0; 1 when a plugin error blocks the refresh.
+
+---
+
+## Branch operations
+
+### `ow switch [BRANCH] [-c BRANCH] [--base REF] [--detach] [-w WS] [--only REPO]… [-n]`
+
+Put every repo of the workspace on one branch, create one, or detach.
+
+- **`BRANCH`** — switch to an existing branch. A branch only a remote publishes is fetched and
+  tracked; a repo without the branch is left alone with `no <branch>`.
+- **`-c, --create BRANCH`** — create the branch from `--base`, or from the repo's default base,
+  and record `branch.<b>.ow-base`. Re-running switches to the branch, re-writes a missing
+  `ow-base`, and says `--base ignored; <b> already exists` when `--base` was passed.
+- **`--detach`** — detach at each repo's default base.
+- **`-n, --dry-run`** — print the steps without running them.
+
+Exactly one of `BRANCH`, `-c` and `--detach` is required; `--base` needs `-c`. Pre-flight is
+all-or-nothing: an operation in progress, a broken worktree, a branch checked out in another
+worktree, a detached HEAD holding commits no branch has, a branch two remotes publish, or a
+failing `ls-remote` refuses every repo (the others print `nothing switched`). When a step fails
+mid-run, the split is reported.
+
+```
+$ ow switch master
+git -C community switch -c master --no-track origin/master
+git -C community config branch.master.remote origin
+git -C community config branch.master.merge refs/heads/master
+git -C community config branch.master.ow-base origin/18.0
+git -C enterprise switch -c master --no-track origin/master
+git -C enterprise config branch.master.remote origin
+git -C enterprise config branch.master.merge refs/heads/master
+git -C enterprise config branch.master.ow-base origin/18.0
+
+$ ow switch -c 18.0-voip2 --base 18.0
+git -C community switch --no-track -c 18.0-voip2 origin/18.0
+git -C community config branch.18.0-voip2.ow-base origin/18.0
+…
+
+$ ow switch master
+# community: commits on no branch; save them with `git -C community switch -c <b>`
+# enterprise: nothing switched
+
+$ ow switch nope
+# community: nothing switched
+# enterprise: ls-remote origin failed: fatal: '/nonexistent/repo.git' does not appear to be a git repository
+
+$ ow switch nope
+error: no repo has nope; create it with `ow switch -c nope`
+```
+
+Upstreams are recorded in the bare's config (`branch.<b>.remote`, `branch.<b>.merge`) with no fetch refspec behind them. A manual `git fetch` or `git pull` only touches the current branch. The trade-off: after a manual `git push` or `git pull`, `refs/remotes/<r>/<b>` stays old until the next `ow fetch`, so `git status` and editors show no ahead/behind until then.
+
+**Exit**: 0 on success; 1 refused or failed; 2 for an invalid combination of arguments.
+
+### `ow pull [-w WS] [--only REPO]… [--no-fetch] [-n]`
+
+Fetch, then fast-forward each repo to the ref it follows: its upstream when set and different
+from the base, else its base. Only a strict fast-forward runs; a repo that is ahead and behind is
+refused and the others go on. No prompt: this never drops a commit.
+
+```
+$ ow pull -n
+git -C ~/.local/share/ow/repos/community.git fetch origin +refs/heads/18.0:refs/remotes/origin/18.0
+git -C ~/.local/share/ow/repos/enterprise.git fetch origin +refs/heads/18.0:refs/remotes/origin/18.0
+git -C enterprise merge --ff-only origin/18.0
+
+$ ow pull
+# enterprise: diverged from origin/18.0; run `ow rebase`
+```
+
+**Exit**: 0 on success; 1 when a repo was refused or failed.
+
+### `ow rebase [-w WS] [--only REPO]… [--base REF] [--autostash] [--no-fetch] [-n] [-y]`
+
+Fetch, then rebase each branch onto its base, replaying the branch's own commits on top.
+
+- **`--base REF`** — rebase onto this ref with `--onto`, then record it as the new `ow-base`.
+- **`--autostash`** — stash uncommitted changes before the rebase, restore them after.
+- **`-n` / `-y`** — print the plan / skip the prompt.
+
+The guard refuses an operation already in progress, a modified worktree without `--autostash`,
+and a failed fetch. A plan that only moves the branch to a commit it already contains is a
+fast-forward: it runs without asking. On a conflict the run stops with the labelled tail:
+
+```
+$ ow rebase --autostash -y
+git -C community stash push -m 'ow rebase --autostash'
+git -C community rebase origin/18.0
+git -C community stash pop
+CONFLICT (add/add): Merge conflict in conflict.txt
+# resolve the conflict, then:
+git -C community rebase --continue
+# or give up:
+git -C community rebase --abort
+# then:
+git -C community stash pop
+
+$ ow rebase
+# community: modified files; commit, stash, or pass --autostash
+
+$ ow rebase
+# community: rebase in progress; finish it or run `git -C community rebase --abort`
+```
+
+**Exit**: 0 on success; 1 refused or failed; 2 declined or no terminal.
+
+### `ow reset [-w WS] [--only REPO]… [--hard] [--no-fetch] [-n] [-y]`
+
+Fetch, then put each repo back on the ref it follows (the same rule as `ow pull`), dropping
+commits. Without `--hard` a behind-only HEAD uses `--keep`, so local changes survive; dropping
+commits uses a plain `git reset <ref>`, which leaves the working tree as it is. `--hard` discards
+the working tree too.
+
+The plan names what is at stake: the commits that exist on no remote, the modified files, and the
+untracked files the ref also tracks (`--hard` overwrites those). It prompts whenever there is
+something to run.
+
+```
+$ ow reset -n
+# enterprise: drops 1 commit(s) on no remote
+git -C enterprise reset origin/18.0
+
+$ ow reset --no-fetch -n
+git -C enterprise reset --keep origin/18.0
+
+$ ow reset --hard -n
+# enterprise: modified: VERSION
+…
+# enterprise: untracked, overwritten: VERSION
+git -C enterprise reset --hard origin/18.0
+```
+
+**Exit**: 0 on success; 1 refused or failed; 2 declined or no terminal.
+
+---
+
+## Machine-wide
+
+### `ow ls`
+
+One line per indexed workspace: `<name>\t<path>\t<repos>`, each repo as `<name>:<branch>`. An
+index entry whose directory is gone prints `missing`.
+
+```
+$ ow ls
+voip	~/ws/voip	community:18.0-voip2, enterprise:behind-only
+buried	~/ws/buried	missing
+```
+
+**Exit**: 0 always.
+
+### `ow cd [WS]`
+
+Print the path of a workspace (default: the one holding the current directory), one line. The
+shell wrapper installed by `ow shell-init` turns it into a real `cd`.
+
+**Exit**: 0 on success; 2 when the name is unknown, ambiguous (two indexed paths), or dead
+(`run \`ow prune\``).
+
+### `ow shell-init SHELL`
+
+Print the shell integration for `bash`, `zsh` or `fish`: an `ow()` function that turns
+`ow cd …` into a real `cd` and leaves every other call to the binary, then a completion script.
+The zsh completion is registered through a `compdef` guard, so it works whether or not `compinit`
+has run.
 
 ```sh
-ow init my_work -r community:master..my-feature -r enterprise:master..my-feature
-ow init -r community:master..my-feature        # here (the current directory)
-ow init my_work -c ./other-workspace           # duplicate another workspace's config
+eval "$(ow shell-init bash)"   # bash, zsh
+ow shell-init fish | source    # fish
 ```
 
-`-r` takes a single `ALIAS:SPEC` argument; repeat it for more than one. A `-r` value without a
-`:` is rejected rather than ignored. `NAME`, when given, must be alphanumeric plus `-`/`_`.
-`-c/--configuration` duplicates an existing workspace's config into a **new** workspace only —
-against an existing one it is refused, and the message says to edit `.ow/config.toml` or run
-`ow init` there to repair. A `-r` that disagrees with a spec the existing workspace already
-declares is refused before anything is written; run `ow switch` to change a repo's branch.
-`-y/--yes` skips the confirmation prompt (the prompt only exists on a TTY and only for a new
-workspace).
+**Exit**: 0; 2 for any other shell name.
 
-After confirmation, `ow` sets up each repo's bare clone and required refs, creates the worktrees
-that are missing, writes `.ow/config.toml`, seeds `.local` from `$XDG_CONFIG_HOME/ow/local/`,
-writes and trusts the generated files (`mise/conf.d/00-ow.toml` included) so `mise` will load
-them, and remembers the workspace in the discovery index. A repo that fails to set up is
-reported; the manifest is still written and the workspace is still usable as long as at least one
-repo succeeded, and the command exits non-zero — the workspace exists, but it is not the one you
-asked for. `ow init` never cleans up a directory that was already there, and never migrates the
-global config unless the workspace itself needs it.
+### `ow rm WS [-n] [-y]`
 
-## `ow render`
+Remove a workspace: its worktrees, its pushed branches, its directory and its index entry.
 
-Migrates a workspace's config if it is still schema 1, then writes every generated file it owns.
-It is the explicit form of what `ow init` does on creation and what `ow switch`, `ow pull`,
-`ow rebase` and `ow reset` do after a successful Git batch: one inspection, one write.
-
-```sh
-ow render                    # the current workspace (OW_WORKSPACE or walk-up)
-ow render parrot             # by name
-ow render -w ./parrot        # by path
-```
-
-`ow render` never creates a missing repo or seeds `.local` — that is `ow init`'s job — and it
-stops before writing anything if the workspace is blocked: a declared worktree missing or
-mid-rebase, an unrecognised or ambiguous Odoo core, an output that would land inside a declared
-worktree, or migration diagnostics it cannot represent. A prerequisite it can check itself (a
-mise older than the floor) stops it too.
-
-It prints each path as `wrote`, `updated` or `adopted`, lists the files that are `yours, left
-alone` (with `ow files --diff` as the way to see what it would write), names the paths it no
-longer renders, warns about a legacy `mise.toml` left at the workspace root by an older ow, and
-trusts the mise fragment it wrote. It exits non-zero if any file failed to write or the trust
-failed. See [Generated files](files.md) for the states, the ownership lock, and the fixed output
-table.
-
-## `ow files`
-
-Lists every file `ow` manages in one workspace, with its state — `absent`, `up to date`,
-`outdated`, `yours`, `not rendered`, or `ignored` — and writes nothing.
-
-```sh
-ow files                 # the listing
-ow files --diff          # a unified diff of everything that differs
-ow files --diff -w ./ws  # ... for a workspace named by path
-```
-
-`--diff` prints, from your file to what `ow` would write, for every file that differs; a file
-that isn't there yet is an addition from `/dev/null`, and a file whose bytes aren't UTF-8 text is
-named with a one-line reason instead of a diff. `ow files` exits `1` only when the inspection is
-blocked; `ow files --diff` exits `1` when anything differs *or* the inspection is blocked, and
-`0` otherwise. Neither writes, fetches, or migrates. See [Generated files](files.md) for the
-states, the ignore rules, and why file alignment is not Git-drift alignment.
-
-## Interactive Dashboard
-
-Running `ow` without a subcommand in a terminal launches the interactive dashboard — a
-two-pane TUI for managing workspaces without memorising flags. In a non-TTY environment
-(scripts, pipes) it prints help and exits 2, so `ow` without arguments is safe to type
-anywhere.
-
-The left pane lists every known workspace (active, then archived, separated); the right
-pane shows the highlighted workspace's config and, once status has been gathered, a
-per-repo table with behind/ahead counts, drift warnings, and links. A log pane at the
-bottom captures every operation's output.
-
-### Key bindings
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Move up/down in the workspace list |
-| `tab` / `shift+tab` | Cycle focus between list, detail, and log |
-| `enter` | Focus the detail pane |
-| `s` | Status (local — no fetch) |
-| `f` | Fetch + status |
-| `a` | Render (migrate and write the generated files) |
-| `F` | Files — the generated-file diff |
-| `I` | Repair (`ow init` in the highlighted workspace) |
-| `S` | Switch |
-| `R` | Rebase |
-| `P` | Pull |
-| `r` | Reset |
-| `p` | Prune |
-| `n` | New workspace |
-| `e` | Edit workspace config |
-| `E` | Edit global config |
-| `o` | Open in editor |
-| `m` | Move workspace |
-| `A` | Archive / unarchive |
-| `x` | Remove workspace |
-| `ctrl+r` | Reload workspace list |
-| `ctrl+l` | Clear log |
-| `ctrl+c` | Cancel running operation, or quit if idle |
-| `?` | Help screen |
-| `q` | Quit |
-
-Operations that touch worktrees run on a worker thread; the log pane shows their output
-in real time and a progress row appears for multi-step operations. `ctrl+c` cancels the
-running operation (killing child git processes) without exiting the dashboard; pressed
-again when idle, it quits.
-
-### Theme
-
-Press `Ctrl+P` to open Textual's command palette, then type "theme" to search and select a theme. The choice is persisted to `theme` in the global config and survives across sessions. You can also click the header icon at the top-left to open the palette. See [Configuration](configuration.md) for the config field.
-## `ow status`
-
-Shows local branch status with behind/ahead counts — no network by default, like `git status`:
+Refused, before the prompt, when a worktree is dirty, when a detached HEAD holds commits no
+branch has, or when a directory holds a checkout ow does not manage (a second worktree, a plain
+clone). The plan first names the top-level entries `rm -rf` takes besides the worktrees, with
+their file counts, then each removal, the branch deletions, and the index drop.
 
 ```
-[canary]
-    branches
-        community:  dev/master-canary ↓0 ↑0 (origin/master ↓34 ↑0)
-        enterprise: dev/master-canary ↓1 ↑1 (origin/master ↓12 ↑0)
-    links
-        runbot: master-canary
-        community:  https://github.com/odoo-dev/odoo/tree/master-canary
-        enterprise: https://github.com/odoo-dev/enterprise/tree/master-canary
+$ ow rm ws/gone -y
+# .ow/ (3 files), .vscode/ (2 files), .zed/ (2 files), mise/ (1 file), notes/ (2 files), odools.toml, odoorc, pyrightconfig.json, requirements-dev.txt, scratch.txt
+# community: kept unpushed branch kept; delete it with `git -C ~/.local/share/ow/repos/community.git branch -D kept`
+git -C ~/.local/share/ow/repos/community.git worktree remove ~/ws/gone/community
+rm -rf ~/ws/gone
+# drop ~/ws/gone from the index
+
+$ ow rm ws/gone
+# community: untracked dirty.txt; commit, stash or discard, then re-run
 ```
 
-Pass `-f`/`--fetch` to fetch latest refs before showing status. Behind/ahead counts are then
-relative to fresh remote-tracking refs; without it, they reflect the last fetch.
+**Exit**: 0 on success; 1 refused; 2 declined or no terminal.
 
-A `files` block appears under the branches when the workspace's generated files have pending
-differences or the inspection has diagnostics: the inspection's diagnostics and a
-`N pending difference(s)` count, never a per-file state or a diff — `ow files` is the listing and
-`ow files --diff` the diff.
+### `ow prune [-n] [-y]`
 
-## `ow fetch`
+Clean up machine-wide, in one batch with one prompt:
 
-Refreshes the refs a workspace follows — `git fetch`, into the bare repos, one repo at a time —
-and reports what arrived. The network half of `ow pull` and `ow rebase`, on its own: no worktree
-moves, no branch changes, nothing but the bare repos' remote-tracking refs.
-
-```sh
-ow fetch                                    # every repo of the current workspace
-ow fetch parrot --only community            # one repo of a named workspace
-```
-
-What each ref is after the fetch is compared to what it was before, which is the one thing
-`git fetch`'s own output does not say: `+34` means the ref advanced by 34 commits, `up to date`
-means it did not move, `force-pushed +N -M` means the remote rewrote it under you — which is
-what `ow rebase` will have to replay around and what `ow reset -f` exists to adopt.
-
-Each repo follows its base ref and, when its branch is pushed somewhere, its upstream — two
-refs, two rows, because a fetch moves them independently. A repo whose worktree is missing or
-whose remote is unreachable is reported and skipped; the run exits non-zero if any fetch failed.
-
-## `ow rebase`
-
-Fetches the latest refs and rebases each repo of a workspace onto its base branch.
-Shows a summary and asks for confirmation before touching anything.
-
-```sh
-ow rebase                                  # every repo of the current workspace
-ow rebase parrot --only community          # one repo of a named workspace
-ow rebase --dry-run                        # fetch, then print the plan — no worktree touched
-```
-
-Running it twice in a row with nothing changed in between does nothing the second
-time — no commit is rewritten.
-
-For a repo whose branch is also published on a remote (`master..my-feature` with
-`dev/my-feature` pushed), `ow` first integrates that remote copy only when it
-carries commits yours does not, then rebases everything onto the base branch. A
-force-pushed remote copy is detected by comparing the ref before and after the
-fetch, and handled with a single `git rebase --onto`.
-
-A repo is skipped, and the run exits non-zero, when a git operation is already in
-progress (the message gives the exact `--continue` / `--abort` command), when the
-worktree has uncommitted changes, or when the worktree is missing. `--autostash` stashes and restores uncommitted changes instead.
-`--only` restricts the whole run to the selected repos, including drift warnings and ref fetching.
-
-On conflict, resolve, `git rebase --continue`, then re-run `ow rebase --only <alias>`. Nothing is
-ever pushed: the `git push --force-with-lease` stays yours.
-
-
-`--no-fetch` rebases against the refs already in the bare repos rather than fetching first —
-for a workspace whose remotes are unreachable, or for replaying the same rebase the second time.
-`--dry-run` fetches refs to show you what would happen, but runs no command that
-touches your worktrees.
-
-## `ow pull`
-
-Brings every repo of a workspace up to date without moving any of them off the
-base branch they are configured on. `ow rebase` is the command that does move
-them.
-
-```sh
-ow pull                                    # every repo of the current workspace
-ow pull parrot --only community            # one repo of a named workspace
-ow pull --dry-run                          # fetch, then print the plan — no worktree touched
-```
-
-Each repo follows its upstream when it has one — its own branch as pushed
-elsewhere — and its base ref otherwise.
-
-- already there: left alone
-- detached: re-detaches onto the fetched ref
-- behind: `git merge --ff-only`, which git refuses if the move would clobber a
-  local modification
-- diverged **from its upstream**: `git rebase <upstream>`, exactly what
-  `git pull --rebase` does — same branch, same base, nobody else's commits
-- diverged **from its base ref**, with no upstream: reported and left alone.
-  Carrying local work over to a moved base needs force-push detection and a
-  replay floor, and is `ow rebase`'s job
-
-A repo is also left alone, and the run exits non-zero, when a git operation is
-already in progress, when a replay would be needed but the worktree is dirty
-(the message names the files), when the worktree is missing, or when the fetch
-failed — moving onto the stale cached ref would look like success.
-
-On conflict during a replay, resolve, `git rebase --continue`, then re-run
-`ow pull --only <alias>`. Nothing is ever pushed.
-
-## `ow reset`
-
-Puts every repo back on the ref it follows — `git reset`, one repo at a time.
-Use it when a workspace has wandered, or when an upstream was force-pushed and
-you want the remote's version of the branch, whatever yours has become.
-
-```sh
-ow reset                                   # every repo of the current workspace
-ow reset parrot --only enterprise          # one repo of a named workspace
-ow reset --hard                            # discard the working tree too
-ow reset --hard -f                         # ... against freshly fetched refs
-ow reset --dry-run                         # print the plan, touch nothing
-```
-
-**The ref each repo is reset to** is the one `git reset @{u}` would have used:
-the branch's upstream — its own copy on a remote — or, for a branch nobody has
-pushed and for a detached repo, the base ref it was cut from. An attached branch
-is never reset onto its base: that would not put the repo back, it would throw
-the whole branch away.
-
-The two forms differ exactly as git's do:
-
-- `ow reset` moves HEAD and leaves the working tree alone. The commits are gone
-  from the branch, but their content is still on disk as unstaged changes —
-  **nothing on disk is lost**.
-- `ow reset --hard` discards the working tree as well. Untracked files are left
-  alone, exactly as `git reset --hard` leaves them; `git clean` is its own
-  command.
-
-No fetch by default: it resets to the refs already in the bare repos, the way
-`git reset origin/master` does. `-f/--fetch` refreshes them first, which is what
-an upstream that was force-pushed needs — otherwise you land on the copy the
-last fetch happened to cache.
-
-The summary counts what each repo loses before anything runs, and flags the
-commits no remote carries — the only ones a reset makes unrecoverable outside
-the reflog. The confirmation defaults to no; `-y/--yes` skips it.
-
-A repo is skipped, and the run exits non-zero, when a git operation is already
-in progress, when the worktree is missing, when its refs will not resolve
-locally, or when it is not on the branch the config names. That last one
-matters: resetting whatever else happens to be checked out would throw away
-work ow was never told about, and realigning a repo onto the branch its config
-names is `ow switch`'s job.
-
-## `ow switch`
-
-Switches a workspace to a branch — `git switch`, one repo at a time — or just the repo you are
-standing in, if you run it from inside one. Unlike `ow init`'s `base..feature` specs, the
-argument here is always a branch: `ow switch` moves a workspace that already exists, it does not
-define one.
-
-```sh
-ow switch 18.0                              # every repo, run from the workspace root
-ow switch -c feat-x origin/master           # create feat-x from origin/master and switch to it
-ow switch --detach origin/master            # detached HEAD at origin/master
-ow switch 18.0 --include-detached-specs     # ... including the repos pinned to a bare ref
-cd community && ow switch 18.0              # only community — you are standing in it
-cd community && ow switch 18.0 --all        # ... the whole workspace anyway
-```
-
-A repo configured detached — a bare ref in `.ow/config.toml`, no `..branch` — is a **pin**: the
-config names the exact ref it should sit on, and a run that moves the workspace's branches has no
-business rewriting it. Pins are left alone by default, reported as such in the summary, and join
-the run only when you insist: `--include-detached-specs` for all of them, or `--only` naming one
-(with a branch target they switch like any other repo and become attached specs; with `--detach`
-they are re-pinned at the new ref).
-
-A branch that exists on exactly one remote is created locally and switched to as a tracking
-branch — the DWIM `git switch --guess` performs. `ow` does that guessing itself: its bare repos
-are cloned `--single-branch` and extra branches are fetched outside the remote's configured
-refspec, which makes git's own `--guess` refuse to find them.
-
-The same guess settles the two forms git does not guess for at all. `git switch --detach 18.0`
-on a branch that is only remote does not detach — git turns it into a branch creation and then
-refuses its own combination with `'--detach' cannot be used with -b/-B/--orphan` — and
-`git switch -c fix 18.0` simply fails with `invalid reference: 18.0`. Both get the
-remote-tracking ref by name, so `--detach 18.0` detaches at `origin/18.0` and pins the repo to
-that ref, not to the short name (which would always mean `origin`'s).
-
-Run from inside one of the repos, with no workspace named on the command line and no `--only`,
-the run narrows to that repo and says so: `cd community && ow switch 18.0` is the question `git`
-would have answered there, and answering it for the whole workspace instead moves repos nobody
-mentioned. `-a/--all` asks for the whole workspace anyway, and `-w` never narrows — naming a
-workspace asks about all of it. `$OW_WORKSPACE` does narrow: it is an ambient default rather
-than a naming, and the narrowing can only fire when the cwd really is inside the workspace it
-points at. A pin narrowed to this way is still left alone: standing in a directory is not
-insisting on it, `--only` and `--include-detached-specs` are.
-
-No fetch happens by default. When the target isn't already known locally, `ow` asks each remote
-the repository actually has — not the ones `[remotes.<alias>]` happens to declare, since a
-workspace outlives its config entries — for that one branch, and asks them all at once. A name
-no remote carries therefore costs a single round trip and no fetch at all, and a repo already on
-the target costs nothing: it is reported as `already there`, nothing is run for it, and its spec
-is left exactly as it was.
-
-The run opens with the same summary the other commands print, before anything moves:
-```
-[voip] switch to 18.0
-  community   master..master  new branch tracking origin/18.0
-  enterprise  18.0..18.0      already there
-  voip        master..voip    local branch
-  upgrade     master          left alone — detached spec
-```
-
-Pre-flight is all-or-nothing, unlike `ow rebase`, `ow pull`, and `ow reset`, which skip a bad
-repo and continue: every selected repo must have its worktree present, no git operation already
-in progress, a resolvable target, and — with `-c` — no branch of that name yet, or nothing is
-switched at all and the command exits 2. The table marks every offending repo `refused`, and the
-way out is printed once rather than once per repo:
+- worktrees whose directory is gone, each announced with a hint to run `ow init` there first;
+- branches no worktree has checked out: deleted when a remote-tracking ref contains them, kept
+  with the deleting command otherwise;
+- index entries whose workspace no longer exists.
 
 ```
-  enterprise  18.0..18.0  refused — no branch named 'master-voip-2' here or on any remote
-
-Nothing was switched: a switch moves the whole workspace or none of it.
-  create it with `ow switch -c master-voip-2`
+$ ow prune -y
+# ~/ws/dead/community: prunable (moved a workspace? run `ow init` there first)
+# community: kept unpushed branch temp-orphan; delete it with `git -C ~/.local/share/ow/repos/community.git branch -D temp-orphan`
+git -C ~/.local/share/ow/repos/community.git worktree prune
+git -C ~/.local/share/ow/repos/community.git branch -D 18.0-voip
+# drop ~/ws/dead from the index
 ```
 
-A workspace half on 17.0 and half on 18.0 is exactly what `ow` exists to prevent, and there is
-no `ow unswitch` to walk it back.
+**Exit**: 0 on success; 1 refused or failed; 2 declined or no terminal.
 
-A dirty worktree is not a reason to refuse: `git switch` carries uncommitted changes across when
-it can, and `ow` does not second-guess it.
+---
 
-Once a repo has actually moved, `.ow/config.toml` is rewritten from what git left on disk, not
-from what was asked for: an attached branch with an upstream gets `<upstream>..<branch>`, an
-attached branch without one keeps its start point (`-c`) or the repo's previous base ref, and a
-detached repo gets the bare ref you asked for. Each repo's `Done.` line carries the spec that
-was written for it. A switch that moved at least one repo refreshes the generated files once at
-the end — an Odoo core that appeared or disappeared changes what `odoorc` and the debug configs
-should say — and says so. When nothing moved, a dry run, a refusal or a declined prompt, it says
-the files were left alone and points at `ow render` instead.
+## See also
 
-`--dry-run` prints the same summary, then the exact `git switch` invocation per repo, and writes
-nothing.
-
-## `ow prune`
-
-Cleans up stale worktree references and orphaned local branches from every bare repo, and drops
-dead entries from the workspace discovery index. Run after manually removing a workspace
-directory:
-
-```sh
-rm -rf ~/wherever/my-workspace
-ow prune
-```
-
-Deleting a branch is the one step that can lose work, so it is confirmed first,
-defaulting to no; `-y/--yes` skips the prompt and `--dry-run` stops after the
-survey. A branch holding commits no remote has is never deleted — it is listed,
-with the command to delete it by hand.
-`--also-backups` lists every `.ow/config.toml` backup `ow rm` has saved over time, and deletes
-them with the same prompt — the last safety net before they go.
-
-## `ow rm`
-
-Removes a workspace and everything `ow` created for it: worktrees unregistered from their bare
-repos, local branches deleted, the workspace directory removed, and the index entry dropped.
-Bare repos are shared and stay.
-
-```sh
-ow rm canary              # asks for confirmation after showing what will go
-ow rm canary -y           # skip the prompt
-```
-
-Before touching anything, `ow rm` shows a summary of each repo: its branch spec, whether the
-local branch is safe to delete (pushed to a remote), and warns about unpushed commits and
-uncommitted changes in the working tree. Confirmation defaults to no — `-y/--yes` skips it.
-
-A workspace whose bare repo is missing still has its directory and index entry cleaned up.
-
-Before the workspace directory goes, its `.ow/config.toml` is copied — byte for byte, at mode
-`0600` — to `$XDG_STATE_HOME/ow/backups/<name>-<timestamp>.toml`, and the command prints the
-path with a restore hint: `ow init <name> -c <backup>`. `ow prune --also-backups` deletes those
-backups; it never touches `backups/migrations/`, which holds the schema-migration backups.
-
-## `ow mv`
-
-Moves a workspace to a new path, repairing what `mv` alone would break: the bare repos still
-point at the old worktree paths, the discovery index still names the old directory, and
-`odoorc` holds an absolute `data_dir` that only a refresh can regenerate. All three are
-fixed, in that order — the worktrees have to work again before the addon scan that re-renders
-`odoorc` can see anything.
-
-The refresh is skipped for a workspace still on schema 1 (its own manifest or the global
-config): the move leaves the manifest and the rendered lock exactly as they were and tells you
-to run `ow render -w <new path>` afterwards. Relocation and the index update are already done
-by the time the refresh runs, so a prerequisite or render failure exits non-zero with the
-workspace left at its new path — never rolled back.
-
-```sh
-ow mv parrot ~/odoo/parrot          # rename
-ow mv ./parrot ..                    # move into the parent (mv(1) semantics)
-```
-
-`mv(1)` semantics: an existing directory means "move into it", anything else is the new path
-itself. Renaming changes `db_name` and `dbfilter` in `odoorc` to the new name — the existing
-Odoo database is not renamed. A `.venv` holds absolute paths and must be rebuilt at the new
-location (`mise install`); the move warns when one is present.
-
-## `ow archive` / `ow unarchive`
-
-Parks a workspace without losing it, then brings it back. Archiving is relocation to a
-canonical place (`$XDG_DATA_HOME/ow/archives/<name>`) plus dropping the index entry; the
-worktrees stay registered — repaired at the archive path — and the local branches stay, which
-is the whole point: an archived workspace comes back exactly as it left.
-
-```sh
-ow archive parrot                    # park it
-ow ls --archived                     # see what's parked
-ow unarchive parrot                  # restore it to ./parrot
-ow unarchive parrot ~/odoo/parrot   # ... or somewhere else
-```
-
-Unarchiving is the same move in reverse, plus a refresh for a schema-2 workspace so the
-absolute `data_dir` in `odoorc` names wherever it landed. A schema-1 archive comes back exactly
-as it left — restoring it never migrates it; only `ow render` does, and the command tells you
-so. `ow ls --archived` lists the archive — it is not in the index by design, so it is read
-straight off the filesystem.
-
-## `ow cd` / `ow shell-init`
-
-A process cannot change its parent shell's directory, so `ow cd` prints a path and a shell
-function — installed by `ow shell-init` — does the actual `cd`. Add the integration to your
-shell rc:
-
-```sh
-eval "$(ow shell-init bash)"    # or zsh, or: ow shell-init fish | source
-```
-
-Then `ow cd parrot` changes directory; without the snippet, the same command prints the path.
-
-## `ow open`
-
-Opens a workspace in the configured editor — `editor` in the global config, defaulting to `code`.
-No `xdg-open`, `$EDITOR`, or `$VISUAL` cascade: a cascade makes the command's behaviour depend on
-ambient environment, which is the opposite of what a workspace manager should do.
-
-```sh
-ow open parrot                       # opens ~/odoo/parrot in `code`
-ow open                               # the current workspace (OW_WORKSPACE or walk-up)
-```
-
-## `ow ls`
-
-Lists every workspace `ow` currently knows about, in name order — name, path (home-relative), and its repos
-with their branch specs — read from the discovery index and each workspace's own
-`.ow/config.toml`. No git, no network: this is local files only. `--archived` lists the archive
-instead, which is not in the index by design — see `ow archive`. A workspace config that fails
-to parse shows as an error in place of its repos rather than aborting the listing.
-
-## Tab Completion
-
-One-time setup for your current shell:
-```sh
-ow --install-completion
-```
-
-Then restart your shell. To inspect the generated script instead of installing it:
-```sh
-ow --show-completion
-```
-
-Completion covers repo aliases (`ow init -r <TAB>`, which only offers aliases you haven't already
-passed), workspace names (`ow status <TAB>`, `ow rm <TAB>`, from the same discovery index `ow ls`
-reads — so a workspace `ow` has never resolved is not offered), archived names (`ow unarchive
-<TAB>`) and branch names (`ow switch <TAB>`, local and remote-tracking). There is no template
-completion: 3.0 removed the template system.
+- [Configuration](configuration.md) — settings, layers, and every key.
+- [Generated files](files.md) — what ow writes, ownership, and the refresh model.
+- [Migrating to 3.0](migrating-to-3.0.md) — adopting a 2.x workspace, removed commands.

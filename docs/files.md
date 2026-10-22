@@ -1,135 +1,133 @@
 # Generated files
 
-`ow` writes a fixed set of files into a workspace and remembers what it wrote. There is no
-template system any more: no bundles, no `.j2` sources, no user override tree. The generators are
-plain Python serializers in `ow/utils/generate.py`, the set of outputs is a fixed ordered table,
-and ownership is tracked by the SHA-256 of the bytes `ow` last put there.
+ow generates and maintains a set of workspace files: Odoo config, Python environment and IDE settings. It tracks what it wrote, never overwrites a hand edit, and never deletes.
 
-## The fixed outputs
+## The lock
 
-Nine paths, always the same nine:
-
-| Output | Mode | Written when |
-|--------|------|--------------|
-| `mise/conf.d/00-ow.toml` | `0644` | always |
-| `.vscode/settings.json` | `0644` | always |
-| `.zed/settings.json` | `0644` | always |
-| `odoorc` | `0600` | a declared repo is the Odoo core |
-| `odools.toml` | `0644` | a declared repo is the Odoo core |
-| `pyrightconfig.json` | `0644` | a declared repo is the Odoo core |
-| `requirements-dev.txt` | `0644` | a declared repo is the Odoo core |
-| `.vscode/launch.json` | `0644` | a declared repo is the Odoo core |
-| `.zed/debug.json` | `0644` | a declared repo is the Odoo core |
-
-A declared repo is "the Odoo core" when it has `odoo-bin`, `addons/` and `odoo/addons/`
-(`is_odoo_main_repo`). Two repos matching the markers is an error, not a guess. The six Odoo-only
-outputs appear only for a **supported** major — 18, 19, 20 and their `saas` series. A recognised
-core whose major is not supported blocks every write exactly like an invalid or ambiguous one: the
-diagnostic names the alias, the series and the supported set, and nothing is written, not even for
-the three always-on outputs.
-
-`odoorc` is the only output written `0600`, because it carries the database password and the
-admin password.
-
-The mise fragment is `mise/conf.d/00-ow.toml`, never `mise.toml`: `mise` gives `mise.toml` and
-`mise.local.toml` higher precedence than anything under `conf.d/`, so those two are yours to keep
-permanently. A `mise.toml` written by an ow older than 3.0 shadows the fragment — ow recognises
-its own `OW_WORKSPACE` marker, warns, and never deletes the file.
-
-The services compose file is *not* one of these nine: it lives outside any workspace, is not
-locked, and is refreshed only by a render with a supported Odoo core. See
-[Services](services.md).
-
-## Automatic versus explicit render
-
-A render is one inspection of the workspace plus, when nothing blocks it, one write of what that
-inspection owns. Two things trigger it:
-
-- **Automatically.** `ow init` renders the workspace it just created or repaired. `ow switch`,
-  `ow pull`, `ow rebase` and `ow reset` refresh the files once after a batch of Git mutations that
-  actually executed — never after a dry run, a refusal, a declined prompt, a no-op, or a batch
-  where any repo's Git operation failed. `ow mv` and `ow unarchive` refresh at the new path for a
-  schema-2 workspace.
-- **Explicitly.** `ow render` does it on its own, for the current workspace or one named
-  positionally or with `-w`. It is also the command that migrates a schema-1 config — see
-  [Migrating to 3.0](migrating-to-3.0.md).
-
-Both paths run the same inspection and the same writes. The difference is only who decides when.
-
-A render refuses to touch anything when the inspection is blocked: a declared worktree is missing
-or mid-rebase, the Odoo core is unrecognised, unsupported, invalid or ambiguous, an output would
-land inside a declared worktree, or a schema-1 manifest has diagnostics the migration cannot
-represent. The blockers are printed and the command exits non-zero without writing a byte. A legacy
-root `mise.toml` is a *warning* rather than a blocker — the render still writes, and ow will not
-delete a file it did not write — but it makes `ow files --diff` fail the file gate, because the
-fragment it shadows is not what mise will actually read.
-
-## Ownership: the rendered lock
-
-`<workspace>/.ow/rendered.lock.toml` records the SHA-256 of the bytes `ow` last wrote — or adopted
-as already identical — at each output path. The lock is of *outputs*, not of the sources that
-produced them, which is what lets a hand edit survive a generator change.
-
-`ow files` lists every path ow speaks for, in one of six states:
-
-| State | Meaning | What a render does |
-|-------|---------|--------------------|
-| `absent` | ow would write this path and it is not there | writes it |
-| `up to date` | the file already equals what ow would write | adopts it into the lock, no write |
-| `outdated` | ow wrote these bytes before, and the current proposal differs | rewrites it |
-| `yours` | the file does not match the lock — you changed it | leaves it alone |
-| `not rendered` | a locked path no current generator produces, still on disk | leaves it alone |
-| `ignored` | the path matches `owignore` | leaves it alone |
-
-Adoption is the bridge from before the lock existed: a file that happens to be byte-identical to
-the proposal is taken under management without being rewritten, and the next generator change
-updates it like any other owned file.
-
-`yours` is the opt-out. Edit a managed file and ow stops touching it; there is no reconciliation
-step and no flag to take it back. A later render that happens to be byte-identical to your file
-adopts it back. Deleting a file is *not* an opt-out: a file whose proposal is non-empty comes back
-on the next render. A path a generator no longer produces stays `not rendered` while the file is
-on disk and is dropped from the listing once you delete it — ow keeps no tombstone.
-
-**ow never deletes a workspace file, and there is no `--force`.** Removing an output from the
-generator table retires it; it does not remove it. To get rid of a generated file, delete it
-yourself.
-
-### Ignoring paths
-
-`owignore` in the global config is a list of gitignore-style patterns:
+`.ow/rendered.lock.toml` records, for each generated path, the SHA-256 of the bytes ow last wrote or adopted. It is the source of truth for ownership.
 
 ```toml
-owignore = [".zed/**", "!.zed/settings.json"]
+# Managed by ow.
+".vscode/settings.json" = "d89faae4d0f4ed3f137c2ebab18f9eed714a3a6cfbca1db87551352bbe797c9c"
+"mise/conf.d/00-ow.toml" = "0b65e75ac6cfe566dbad81cc1711d03880c718ac28474ce7841b0e34a8cfb8e0"
+odoorc = "4bbae601dedf2efc38cdd231f885c4bc3f166b21c87c763191bd1e7679ae7f1a"
 ```
 
-A pattern matching an output path keeps ow from writing it, and the path is listed as `ignored`.
-The syntax is `pathspec`'s gitignore dialect, so a directory pattern such as `.zed/**` covers
-everything under that directory and a leading `!` re-includes a path. An ignored path that
-already has a lock entry keeps it: ignoring is
-not retiring, and un-ignoring restores the file to ow's ownership with the same bytes.
+A flat path → hash map with a one-line header, sorted, keys quoted only when TOML needs it. ow rewrites it only when its bytes change. Do not edit it by hand. A malformed lock is reported (`malformed lock at .ow/rendered.lock.toml; files that differ from ow's are treated as yours`) and treated as empty.
 
-`.ow/config.toml` and `.ow/rendered.lock.toml` are reserved: a generator proposing either is a
-blocking error. So is an output whose path is absolute, escapes the workspace, or whose parent
-directory is a symlink.
+## States
 
-## `ow files` and `ow files --diff`
+Every generated file has one state, comparing disk with the lock and ow's proposal:
 
-`ow files` lists the paths and their states. It writes nothing, fetches nothing and migrates
-nothing, and it exits `1` only when the inspection is blocked (missing worktree, migration
-diagnostics, legacy shadowing, an unsafe output). Ordinary `yours` differences are a normal state,
-not a failure, and exit `0`.
+- **`absent`** — the file should exist and doesn't. The next refresh writes it.
+- **`up to date`** — disk matches ow's proposal.
+- **`outdated`** — disk differs from the proposal but matches the lock: ow wrote it, and something else changed. The next refresh rewrites it.
+- **`yours`** — disk matches neither. Someone edited it by hand, or it is not a writable regular file (a directory, a symlink, an unreadable file). ow leaves it alone.
+- **`skipped`** — a parent directory is a symlink, or is not a directory, so writing through it is unsafe.
 
-`ow files --diff` prints a unified diff for every path that differs — from your file to what ow
-would write, with an addition diffed from `/dev/null`, and a file whose bytes are not UTF-8 named
-with a one-line reason instead of a diff. It writes nothing, and it exits:
+During a refresh, `yours` and `skipped` files are reported:
 
-- `0` when every path is `up to date`, `not rendered` or `ignored`;
-- `1` when any path is `yours`, `outdated` or `absent`, or when the inspection is blocked.
+```
+warning: odoorc: not overwritten (yours); delete it and run `ow refresh` to get ow's version back
+warning: .zed/settings.json: skipped (.zed is a symlink)
+```
 
-The Git half of the same question is `ow status`: file alignment is not Git-drift alignment.
-`ow files` says nothing about branches, commits or remotes, and `ow status` never lists a path or
-prints a diff — it shows the same inspection's *diagnostics* (errors, blockers and warnings) plus a
-`N pending difference(s)` count that points back at `ow files` for the listing and the diff. A repo
-whose branch drifted from its spec is realigned by `ow switch`; a missing worktree or bare repo is
-repaired by `ow init`; the files are `ow render`'s business.
+A `yours` file that is a directory gets a different hint: `move it away and run \`ow refresh\` to get ow's version back`.
+
+## `ow files`
+
+```sh
+ow files            # path <tab> state
+ow files --diff     # unified diff of every file that differs
+ow files -w myws
+```
+
+```
+mise/conf.d/00-ow.toml	up to date
+odoorc	yours
+odools.toml	up to date
+pyrightconfig.json	absent
+.vscode/settings.json	up to date
+.zed/settings.json	skipped	.zed is a symlink
+```
+
+Tab-separated, one line per file, no header, stdout verbatim. `yours` and `skipped` lines carry a reason. A lock entry no plugin produces any more has no state column and prints as `stale (no longer produced)`; its file stays on disk:
+
+```
+.zed/debug.json	stale (no longer produced)
+```
+
+`--diff` reads current → ow's proposal, so `+` lines are what ow would add:
+
+```
+--- odoorc
++++ ow's odoorc
+@@ -1,5 +1,5 @@
+ [options]
+-http_port = 9069
++http_port = 8070
+```
+
+An absent file has no current bytes, so its diff is all additions. A file ow has no text for prints as `path: binary`.
+
+If any plugin reports an `error` diagnostic, the errors are printed and `ow files` exits 1 — the same diagnostic that would block a refresh. Otherwise it exits 0. `ow files` only reads; it never writes.
+
+## What ow generates
+
+| Plugin | Path | Written when |
+|---|---|---|
+| mise | `mise/conf.d/00-ow.toml` | a plugin answers `mise_environment`, or `mise.python` is set |
+| odoo | `odoorc` (mode `0600`) | the workspace has exactly one readable Odoo core |
+| odoo | `odools.toml` | same |
+| odoo | `pyrightconfig.json` | same |
+| odoo | `requirements-dev.txt` | same |
+| vscode | `.vscode/settings.json` | a plugin contributes a language server or an exclude |
+| vscode | `.vscode/launch.json` | a plugin contributes a launch config |
+| zed | `.zed/settings.json` | a plugin contributes a language server or an exclude |
+| zed | `.zed/debug.json` | a plugin contributes a launch config |
+
+`odoorc` holds the `[options]` Odoo loads: ports, database settings, `addons_path`, and `data_dir` pointing at `.odoo/`. A workspace with no Odoo core and no `mise.python` gets nothing.
+
+The local plugin is different: instead of generating files, it copies the regular files under `~/.config/ow/local` into `.local/` when the workspace is created, and only where nothing is there yet. Those copies are not tracked in the lock.
+
+## Never overwrite
+
+ow writes a file only when its state is `absent` or `outdated`. Before writing, it re-reads the destination: if the bytes changed since the projection, that is a hand edit landing in between, so ow leaves the file alone and keeps the old lock entry — the next run reads it as `yours`.
+
+Other guarantees:
+
+- No `--force`. A `yours` file stays until you delete it or make the config match it.
+- Writes go through a same-directory temp file and a rename, so a destination is never truncated in place, and a symlink there is never followed.
+- ow never deletes files. When a plugin is disabled, its lock entries are dropped and the files stay. Re-enabling regenerates them.
+
+To get ow's version of a `yours` file back:
+
+```sh
+ow files --diff                 # see the difference
+rm .vscode/settings.json        # accept that yours goes away
+ow refresh
+```
+
+A corrupted lock is recoverable the same way: delete `.ow/rendered.lock.toml` and refresh. Files matching ow's proposal are relocked as `up to date`; files that differ are reported as `yours`.
+
+## When refresh runs
+
+- After `ow init`, `ow repo add` and `ow repo rm`.
+- After `ow switch`, `ow pull`, `ow rebase` and `ow reset`, when a repo actually changed.
+- After `ow config set` and `ow config unset`.
+- On explicit `ow refresh`.
+
+A dry run or a declined prompt does not refresh.
+
+## Diagnostics
+
+- A `yours` or `skipped` file produces a warning (above).
+- A plugin `info` diagnostic is not shown by a refresh; `ow status` prints it as `# <plugin>: <text>`.
+- A plugin `warning` diagnostic is reported by its name during a refresh.
+- A plugin `error` diagnostic blocks the whole refresh: nothing is written and the command exits 1.
+- A generated path that is absolute, escapes the workspace, or targets `.ow/config.toml` or the lock aborts the command, naming the plugin.
+
+## See also
+
+- [Configuration](configuration.md) — the settings behind these files.
+- [Commands](commands.md) — `ow refresh` and every other command.

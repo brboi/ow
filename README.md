@@ -1,76 +1,70 @@
 # ow — Odoo Workspaces
 
-CLI tool that turns interactive prompts into ready-to-code Odoo workspaces using git worktrees.
+ow keeps Odoo's repos on one machine and gives each task its own workspace of git worktrees. The
+bare repos are shared, so Odoo is cloned once and every fetch is visible to every workspace; a
+worktree is a cheap checkout, so a new branch costs seconds, not gigabytes. The core is plain git
+and knows nothing about Odoo: Odoo, mise, VSCode and Zed support are built-in plugins.
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/brboi/ow)
-
-## What it is
-
-`ow` manages Odoo development workspaces. Each workspace is a directory holding git worktrees for
-the Odoo repos you work on, plus generated IDE configs, Python environment, and Odoo config files
-— all ready to open and start coding.
-
-Every workspace on the machine shares the same set of bare repos, so you clone Odoo once and
-fetch updates that are immediately visible to every workspace. Worktrees are cheap (no duplicate
-working trees), so you can keep multiple feature branches side by side without re-cloning
-gigabytes of history.
-
-## What it solves
-
-- **Clone fatigue** — Odoo repos are large. Shared bare repos mean one clone, many worktrees.
-- **Setup boilerplate** — the mise fragment, `odoorc`, `odools.toml`, `pyrightconfig.json`, and
-  the IDE configs are [generated](docs/files.md) every time, from a fixed set of outputs.
-- **Branch juggling** — concise `base..feature` branch specs control detached vs attached
-  worktrees; `ow rebase` keeps them up to date idempotently, and `ow switch` moves every repo in
-  a workspace to a branch at once.
-- **Workspace discovery** — workspaces live anywhere; an index remembers where, so `ow status
-  myfeature` finds it by name.
-
-## Prerequisites
-
-- **[mise](https://mise.jdx.dev/)** — manages Python, virtualenvs, and dependencies in generated workspaces
-- **Odoo system dependencies** — see [Odoo source install docs](https://www.odoo.com/documentation/master/administration/on_premise/source.html#dependencies) (includes wkhtmltopdf, PostgreSQL client libs, etc.)
-- **SSH** — configured for access to Odoo repositories
-- **Docker or Podman** (optional) — `ow` writes a compose file for postgres, pgweb and mailpit; see [Services](docs/services.md)
-
-## Installation
+## Install
 
 ```sh
 pipx install odoo-workspaces   # recommended
-pip install odoo-workspaces    # or in an active venv
+pip install odoo-workspaces    # or, inside a venv
 ```
 
-## Quick Start
+`ow` needs git ≥ 2.45 and an SSH key with access to the Odoo repos. Odoo's own system
+dependencies (PostgreSQL client libraries, wkhtmltopdf, …) stay yours to install: see the
+[Odoo source install docs](https://www.odoo.com/documentation/master/administration/on_premise/source.html#dependencies).
+mise (≥ 2026.8.13) is optional; with it, ow writes a mise fragment and trusts it, and mise builds
+the workspace's `.venv` and installs Odoo's requirements.
+
+## First workspace
 
 ```sh
-mkdir my_work && cd my_work
-ow init                            # interactive form: repos and branch specs
-mise install
-code .                             # open in your IDE and enjoy
-ow                                 # launch the interactive dashboard
+ow repo add community      # no URL needed: ow knows community, enterprise, design-themes
+ow repo add enterprise
+ow init ws/voip community enterprise --base 18.0 --branch 18.0-voip
+cd ws/voip && mise install
+ow status
 ```
 
-There is no global config until you save one: `ow` runs on built-in defaults, the community remote
-included, and the dashboard's global-config editor writes a commented
-`~/.config/ow/config.toml` for you to edit. See [Configuration](docs/configuration.md) for the
-full layout.
+`ow repo add` registers a bare repo under `~/.local/share/ow/repos/<name>.git` — one clone per
+machine. `ow init` creates the workspace directory, adds one worktree per repo on the branch,
+indexes the workspace, and writes every generated file:
+
+```
+ws/voip/
+├── .ow/config.toml            the repos and their bases, plus your settings
+├── community/                 worktree of the community bare, on 18.0-voip
+├── enterprise/                worktree of the enterprise bare, on 18.0-voip
+├── mise/conf.d/00-ow.toml     mise: .venv, env, Odoo's postinstall
+├── odoorc                     Odoo config, addons paths pointing at the worktrees
+├── odools.toml                Odoo LSP config
+├── pyrightconfig.json         pyright, resolving into .venv
+├── requirements-dev.txt      inotify and friends
+├── .vscode/settings.json      search excludes and language servers
+├── .vscode/launch.json        run and debug-test launches
+├── .zed/settings.json
+└── .zed/debug.json
+```
+
+`mise install` builds `.venv` and installs `community/requirements.txt` and
+`requirements-dev.txt` into it. `ow status` then prints, one line per repo:
+
+```
+community	18.0-voip	origin/18.0	(none)	(even)
+enterprise	18.0-voip	origin/18.0	(none)	(even)
+```
+
+From there: `ow switch -c <branch>` for the next task, `ow fetch` to refresh the cached refs,
+`ow rebase` to move onto a newer base, `ow rm <ws>` to clean up. Every command prints the git it
+runs.
 
 ## Documentation
 
-- [Commands](docs/commands.md) — full command reference with flags and workspace resolution
-- [Interactive Dashboard](docs/commands.md#interactive-dashboard) — TUI for managing workspaces without memorising flags
-- [Configuration](docs/configuration.md) — XDG paths, remotes, typed options, ignore list, branch spec syntax
-- [Generated files](docs/files.md) — the fixed outputs, ownership, render and file states
-- [Services](docs/services.md) — Docker Compose stack (postgres, pgweb, mailpit)
-- [Sandboxing AI Coding Assistants](docs/sandboxing.md) — bubblewrap and firejail tasks for Opencode, Claude Code and Pi
-- [Tab Completion](docs/commands.md#tab-completion) — fish, bash, zsh, powershell
-- [Migrating to 3.0](docs/migrating-to-3.0.md) — schema 2, removed commands, backups
-- [Migrating from 1.x to the 2.0 layout](docs/migrating-to-2.0.md) — the first step of the move, for a project-scoped 1.x install
-
-## Thanks
-
-This is a small personal project I built with AI coding. It scratches a very specific itch I have — managing multiple Odoo worktrees side by side.
-
-If you find it useful, please consider contributing!
-
-Contributions are welcome! If something is broken, confusing, or missing — open an issue. If you have a fix or improvement in mind, PRs are appreciated.
+- [Commands](docs/commands.md) — every command, its flags, exit codes and confirmation rules
+- [Configuration](docs/configuration.md) — settings, precedence, and `ow config`
+- [Generated files](docs/files.md) — the fixed outputs, ownership, file states and the refresh model
+- [Services](docs/services.md) — the postgres + pgvector + mailpit compose stack
+- [Sandboxing AI Coding Assistants](docs/sandboxing.md) — bwrap recipe for AI assistants with repo access
+- [Migrating to 3.0](docs/migrating-to-3.0.md) — adoption path from 2.x, command changes, git requirements

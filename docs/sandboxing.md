@@ -1,82 +1,101 @@
-# Sandboxing AI Coding Assistants
+# Sandboxing AI assistants
 
-An Odoo checkout ships its own sandbox wrappers under `setup/sandboxing/` — bubblewrap scripts
-for Opencode, Claude Code and Pi, and a firejail profile for Claude Code. `ow` does not ship
-sandboxes and does not install them: when it finds those assets in the core checkout, it wires
-them into the generated mise fragment as tasks, so `mise run <task>` — or the task name directly
-in a mise-activated shell — launches the assistant behind them.
+ow ships no sandbox of its own. Odoo's checkout carries the wrappers, under `setup/sandboxing/`: bubblewrap scripts for Opencode, Claude Code and Pi, and a firejail profile for Claude Code. They run an assistant with filesystem isolation, so it sees only the directories you mount in.
 
-## Prerequisites
+An ow workspace needs two paths visible: the workspace itself, which holds the worktrees, and the bare repos at `$XDG_DATA_HOME/ow/repos` (usually `~/.local/share/ow/repos`). A worktree's `.git` is a file pointing into its bare repo, so git inside the sandbox cannot work without that second path.
 
-The wrappers are the checkout's, so their prerequisites are too:
+## Bubblewrap
 
-- **[bubblewrap](https://github.com/containers/bubblewrap)** for the `bwrap-*` tasks:
+Install bubblewrap and put Odoo's scripts on `PATH`:
 
-  ```sh
-  sudo apt install bubblewrap   # Debian/Ubuntu
-  sudo dnf install bubblewrap   # Fedora
-  sudo pacman -S bubblewrap     # Arch
-  ```
+```sh
+sudo apt install bubblewrap                    # Debian / Ubuntu; use your package manager elsewhere
+mkdir -p ~/.local/bin
+cp setup/sandboxing/bwrap/*.sh ~/.local/bin/   # from the Odoo checkout
+```
 
-- **[firejail](https://firejail.wordpress.com/)** for the `firejail-claude` task.
+On Ubuntu 24.04 and later, load the AppArmor profile bwrap needs, or it fails with `bwrap: setting up uid map: Permission denied`:
 
-`ow` never checks for either binary, never installs one, and never runs a wrapper. It only reads
-the checkout's filesystem to see what the checkout provides.
+```sh
+sudo apt install apparmor-profiles
+sudo ln -s /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/
+sudo apparmor_parser /etc/apparmor.d/bwrap-userns-restrict
+```
 
-## The tasks
+Each script is a drop-in replacement for its CLI: `bwrap-claude.sh` starts Claude, not a shell. `ODOO_BASE` is the directory mounted read-write and the sandbox's working directory; it defaults to `~/src/odoo`. `--add-dir <path>` mounts one more directory read-write, and `bwrap-claude.sh` also passes it to Claude's own `--add-dir`.
 
-| Task | Wired from | Runs |
-|------|-----------|------|
-| `bwrap-claude` | `setup/sandboxing/bwrap/bwrap-claude.sh` | that script, with `--add-dir` per Git metadata dir, and `ODOO_BASE={{config_root}}` |
-| `bwrap-opencode` | `setup/sandboxing/bwrap/bwrap-opencode.sh` | that script, with the same `--add-dir` arguments and `ODOO_BASE` |
-| `bwrap-pi` | `setup/sandboxing/bwrap/bwrap-pi.sh` | that script, with the same `--add-dir` arguments and `ODOO_BASE` |
-| `firejail-claude` | `setup/sandboxing/firejail/claude.profile` | `firejail --profile=<profile> --whitelist=<workspace> --whitelist=<git metadata dir>… claude` |
+### Claude Code
 
-A task is generated only when its asset is present *and usable*:
+Add to `~/.bashrc`, `~/.zshrc` or equivalent:
 
-- a `bwrap` script must be a regular file and executable;
-- the firejail profile must be a regular file — firejail reads it, it is never executed;
-- a path whose resolved real location leaves the checkout (a symlinked leaf, or a symlinked
-  ancestor directory) is rejected rather than followed.
+```bash
+claude-sandbox() {
+  ws=$(command ow cd) || return
+  ODOO_BASE="$ws" bwrap-claude.sh --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos" "$@"
+}
+```
 
-`ow` probes presence and executability, never content. A checkout with none of these assets gets
-no `tasks` table at all, which is also the state of an older checkout, a checkout that does not
-carry the sandboxing directory, and any non-Odoo workspace.
+Then, in a workspace:
 
-## Why the extra directories
+```sh
+claude-sandbox
+```
 
-A linked worktree's `.git` is a file pointing at the shared bare repo, which lives outside the
-workspace — and every worktree of a repo shares one such store. A sandbox that only sees the
-workspace therefore breaks every git command inside it. `ow` gives each task the checkout's Git
-common directories:
+Claude starts on the workspace, with the bare repos mounted so git works. `command ow cd` bypasses the `ow cd` shell function installed by `ow shell-init`.
 
-- the `bwrap` tasks get `--add-dir <git common dir>` for each distinct one, followed by whatever
-  arguments you passed;
-- `firejail-claude` gets `--whitelist=<git common dir>` for each, alongside
-  `--whitelist=<workspace>`.
+### Opencode and Pi
 
-The `bwrap` tasks also export `ODOO_BASE={{config_root}}` — the workspace root — for the
-checkout's own scripts to consume. The firejail task sets no task environment: its wrapper is a
-profile, not a script ow runs.
+```sh
+ODOO_BASE=$(command ow cd) bwrap-opencode.sh --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos"
+ODOO_BASE=$(command ow cd) bwrap-pi.sh --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos"
+```
 
-## Security assumptions
+## Firejail
 
-The wrappers own their security. `ow` does not add sandbox flags, widen a profile, or audit what
-the checkout's scripts do; it reproduces the invocation they expect. If a wrapper's isolation
-changes, that is the checkout's change, not ow's.
+Firejail applies a profile. Copy the ones Odoo ships, then edit `~/.config/firejail/code.local`: it whitelists `~/src` by default.
 
-Two consequences worth being plain about:
+```sh
+sudo apt install firejail
+mkdir -p ~/.config/firejail
+cp setup/sandboxing/firejail/* ~/.config/firejail/   # from the Odoo checkout
+```
 
-- The `firejail-claude` task runs Claude Code behind the checkout's profile. `ow` does not
-  configure any editor to be launched inside that sandbox, and does not install editor
-  integrations.
-- The wrappers are only as good as the checkout they come from. Running one from an untrusted
-  checkout runs that checkout's own shell script.
+### Claude Code standalone
 
-## Upgrading from an older ow
+From a workspace:
 
-Older ow rendered its own wrapper scripts into the workspace root (`bwrap-claude`,
-`bwrap-opencode`). 3.0 removes the template system, so those files are no longer generated. They
-are left on disk and reported as `not rendered` by `ow files` — ow never deletes a workspace file.
-The tasks now point at the checkout's own scripts instead, so you can delete the stale copies
-yourself.
+```sh
+firejail --profile=~/.config/firejail/claude.profile \
+  --whitelist=$PWD --whitelist="${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos" claude
+```
+
+Firejail always creates a PID namespace, so `claude /ide` cannot attach to your editor; use `bwrap-claude.sh` when you need that.
+
+Claude's auto-update breaks under the sandbox: `~/.local/bin/claude` is a symlink and the sandbox hides its parent directory. Reinstall outside the sandbox when Claude stops starting:
+
+```sh
+rm -f ~/.local/bin/claude && curl -fsSL https://claude.ai/install.sh | bash
+```
+
+### The whole editor
+
+`code.local` whitelists your projects directory and the editor's own config, so the editor, its extensions, the integrated terminal and any agent started from it all run inside the sandbox:
+
+```sh
+firejail code                                          # VSCode: code.profile includes code.local
+firejail --profile=/etc/firejail/code.profile codium   # VSCodium, Cursor: no codium.profile
+```
+
+## Trade-offs
+
+- Writes stay inside the mounted directories. `~/.ssh`, `~/.gnupg` and the rest of `$HOME` are hidden; `bwrap-claude.sh` refuses to start if it can still read them.
+- The whole `$XDG_DATA_HOME/ow/repos` directory is visible, not only the current workspace's bare repos.
+- Network stays available: the bwrap scripts share the network namespace, and the firejail profile keeps `inet`.
+- System binaries are mounted read-only.
+
+For network or resource isolation beyond this, use a container.
+
+## See also
+
+- [Commands](commands.md) — `ow cd` and `ow shell-init`.
+- [Migrating to 3.0](migrating-to-3.0.md) — the sandbox tasks ow 2 had are gone.

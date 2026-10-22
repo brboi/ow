@@ -1,84 +1,91 @@
-"""`ow files` — see the files ow generates for a workspace, and diff them.
+"""`ow files` — the generated files' states, or the diff of the ones that differ.
 
-Read-only: `inspect_workspace` is the whole implementation, and nothing
-here writes a byte, fetches a ref, or migrates a config. A workspace still
-on schema 1 is inspected as-is, its pending conversion surfaced alongside
-the file states rather than converted.
+Read-only: it projects, it never writes. An `error` diagnostic exits 1 for the same reason `ow refresh` would refuse to write; the listing is tab-separated and written to stdout verbatim.
 """
+
+from __future__ import annotations
 
 import difflib
 import sys
 
-from ow.utils.config import Config
-from ow.utils.display import console, err_console
-from ow.utils.render import ABSENT, OUTDATED, RenderedFile, YOURS
-from ow.utils.resolver import resolve_workspace
-from ow.utils.workspace import inspect_workspace
+from ow import term
+from ow.core import refresh
+from ow.core.refresh import Projection
+from ow.core.session import Session
+from ow.errors import UsageError
 
 
-def _list(states: list[RenderedFile]) -> None:
-    if not states:
-        console.print("nothing to render.")
-        return
-    width = max(len(s.path) for s in states)
-    for s in states:
-        console.print(f"{s.path.ljust(width)}  {s.state}", markup=False)
+def run(session: Session, *, diff: bool) -> int:
+    """List the files and their states, or diff the ones that differ; 1 when blocked."""
+    if session.workspace is None:
+        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
+
+    projection = refresh.project(session.workspace, session.plugins)
+    if diff:
+        _print_diffs(projection)
+    else:
+        _print_states(projection)
+
+    if projection.blocked:
+        for plugin_name, diag in projection.diagnostics:
+            if diag.level == "error":
+                term.error(f"{plugin_name}: {diag.text}")
+        return 1
+    return 0
 
 
-def _binary_note(s: RenderedFile) -> str:
-    """One line for a file whose bytes are not text, so no line diff exists."""
-    if s.state == ABSENT:
-        return f"{s.path}: binary file, ow would write it (absent)"
-    if s.ow_text is None:
-        return f"{s.path}: binary file, differs from yours"
-    return f"{s.path}: yours is not text, ow would write text"
+def _print_states(projection: Projection) -> None:
+    """One `<path>\\t<state>` line per file, with the reason for yours/skipped."""
+    for status in projection.files:
+        line = f"{status.path.as_posix()}\t{status.state}"
+        if status.state in ("yours", "skipped") and status.reason:
+            line += f"\t{status.reason}"
+        _line(line)
+    _print_stale(projection)
 
 
-def _diff(states: list[RenderedFile]) -> None:
-    """What ow would change, line by line wherever both sides are text.
+def _print_diffs(projection: Projection) -> None:
+    """A unified diff per file ow would write, plus the stale lock entries.
 
-    An output not there yet is diffed against `/dev/null`, the file the
-    addition would be made to.
+    Each diff reads current → ow's proposal, so `+` lines are what ow would add; a file ow has no text for gets one line instead.
     """
-    diffable = [s for s in states if s.state in (YOURS, OUTDATED, ABSENT)]
-    if not diffable:
-        console.print("nothing differs from what ow would write.")
-        return
-    for s in diffable:
-        if s.state == ABSENT:
-            yours, fromfile = "", "/dev/null"
-        else:
-            yours, fromfile = s.your_text, f"{s.path} (yours)"
-        if s.ow_text is None or yours is None:
-            console.print(_binary_note(s), markup=False)
+    for status in projection.files:
+        if status.state not in ("absent", "outdated", "yours"):
             continue
-        lines = difflib.unified_diff(
-            yours.splitlines(keepends=True),
-            s.ow_text.splitlines(keepends=True),
-            fromfile=fromfile,
-            tofile=f"{s.path} (ow)",
-        )
-        for line in lines:
-            console.print(line, end="" if line.endswith("\n") else "\n", markup=False)
+        path = status.path.as_posix()
+        proposal = _text(status.proposal)
+        # An absent file has no current bytes, so every proposal line is an addition.
+        current = "" if status.state == "absent" else _text(status.current)
+        if proposal is None or current is None:
+            _line(f"{path}: binary")
+            continue
+        for line in difflib.unified_diff(
+            current.splitlines(),
+            proposal.splitlines(),
+            fromfile=path,
+            tofile=f"ow's {path}",
+            lineterm="",
+        ):
+            _line(line)
+    _print_stale(projection)
 
 
-def cmd_files(config: Config, workspace: str | None = None, *, show_diff: bool = False) -> None:
-    """Show the files ow manages in the workspace, or diff the ones that differ."""
-    ws_dir, ws = resolve_workspace(name=workspace)
-    plan = inspect_workspace(config, ws, ws_dir)
+def _print_stale(projection: Projection) -> None:
+    """The lock entries no plugin produces any more; their files stay put."""
+    for path in projection.stale_lock:
+        _line(f"{path}\tstale (no longer produced)")
 
-    for line in plan.errors:
-        err_console.print(f"Error: {line}", markup=False)
-    for line in plan.gate_blockers:
-        err_console.print(f"Error: {line}", markup=False)
-    for line in plan.warnings:
-        err_console.print(line, markup=False)
 
-    states = list(plan.states)
-    if show_diff:
-        _diff(states)
-        sys.exit(1 if plan.file_gate_failed else 0)
+def _line(text: str) -> None:
+    """Write one line to stdout verbatim."""
+    sys.stdout.write(f"{text}\n")
 
-    _list(states)
-    if plan.errors or plan.gate_blockers:
-        sys.exit(1)
+
+def _text(data: bytes | None) -> str | None:
+    """The bytes as text, or None when no line diff exists for them."""
+    if data is None:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None

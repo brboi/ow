@@ -1,100 +1,180 @@
-from pathlib import Path
+"""Print each repo's table in columns (TTY) or tab-separated (piped).
 
-from ow.utils.display import console
-from rich.text import Text
-from rich.markup import escape
-from ow.utils.drift import warn_if_drifted
-from ow.utils.resolver import resolve_workspace
-from ow.utils.config import Config, report_pending_migration
-from ow.utils.status import (
-    RepoStatus,
-    WorkspaceStatus,
-    gather_workspace_status,
-    generation_diagnostics,
-    pending_file_count,
-    _display_detached_status,
-    _display_attached_status,
-)
+One tab-separated line per repo when piped; when stdout is a TTY, aligned columns with header.
+The fields are: name, state, base, upstream, base counts, dirty, operation.
+"""
 
+from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# Render
-# ---------------------------------------------------------------------------
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from typing import Sequence
+
+from ow import term
+from ow.core import git
+from ow.core.facts import RepoFacts, gather_all
+from ow.core.session import Session
 
 
-def _format_status_line(rs: RepoStatus, max_alias_len: int) -> str:
-    if rs.kind == "detached":
-        return _display_detached_status(rs, max_alias_len)
-    return _display_attached_status(rs, max_alias_len)
+def run(session: Session) -> int:
+    """Print every repo's table line; always 0."""
+    print_table(session, gather_all(session.locations))
+    return 0
 
 
-def _render_status(status: WorkspaceStatus, max_alias_len: int) -> None:
-    """Produce byte-identical CLI output from a WorkspaceStatus."""
-    header = Text(f"[{status.ws_dir.name}]", style="bold cyan")
-    console.print(header)
-    console.print("    [dim]branches[/]")
-
-    first_attached_branch: str | None = None
-    github_links: list[tuple[str, str]] = []
-
-    for rs in status.repos:
-        alias = rs.alias
-        padding = " " * (max_alias_len - len(alias) + 1)
-
-        if rs.state == "not_applied":
-            console.print(f"        {escape(alias)}:{padding}[dim](not applied)[/]")
-            continue
-
-        if rs.state == "unresolved":
-            console.print(f"        {escape(alias)}:{padding}[red](error: could not resolve)[/]")
-            continue
-
-        if rs.state == "error":
-            console.print(f"        {escape(alias)}:{padding}[red](error)[/]")
-            if rs.fetch_failed:
-                console.print(f"        {escape(alias)}:{padding}[red](fetch failed; showing stale)[/]")
-            continue
-
-        # state == "ok"
-        console.print(_format_status_line(rs, max_alias_len))
-        if rs.fetch_failed:
-            console.print(f"        {escape(alias)}:{padding}[red](fetch failed; showing stale)[/]")
-        if first_attached_branch is None and rs.runbot_branch:
-            first_attached_branch = rs.runbot_branch
-        if rs.github_url:
-            github_links.append((alias, rs.github_url))
-
-    if first_attached_branch or github_links:
-        console.print("    [dim]links[/]")
-        if first_attached_branch:
-            runbot_url = f"https://runbot.odoo.com/runbot/bundle/{first_attached_branch}"
-            console.print(f"        runbot: [link={runbot_url}]{first_attached_branch}[/]")
-        for link_alias, link_url in github_links:
-            link_padding = " " * (max_alias_len - len(link_alias) + 1)
-            console.print(f"        {escape(link_alias)}:{link_padding}[link={link_url}]{link_url}[/]")
-
-    diagnostics = generation_diagnostics(status.generation)
-    pending = pending_file_count(status.generation)
-    if diagnostics or pending:
-        console.print("    [dim]files[/]")
-        for line in diagnostics:
-            console.print(f"        [yellow]{escape(line)}[/]")
-        if pending:
-            console.print(f"        {pending} pending difference(s) — see `ow files`", markup=False)
-
-    console.print()
+def print_table(session: Session, facts: Sequence[RepoFacts]) -> None:
+    """Format and print table: aligned columns (TTY) or tab-separated (piped)."""
+    # Compute base_counts in parallel for all repos
+    base_counts_cache = _compute_base_counts_parallel(facts)
+    
+    rows = [_row(f, base_counts_cache, i) for i, f in enumerate(facts)]
+    
+    if sys.stdout.isatty():
+        # Aligned columns with header for terminal output
+        headers = ["name", "state", "base", "upstream", "base counts", "dirty", "operation"]
+        _print_aligned(headers, rows)
+    else:
+        # Tab-separated for piped output (machine-friendly)
+        for row in rows:
+            _line(row)
+    
+    # Print diagnostic messages
+    for plugin, diagnostic in session.diagnostics:
+        if diagnostic.level == "info":
+            term.out(f"# {plugin}: {diagnostic.text}")
 
 
-# ---------------------------------------------------------------------------
-# Command: status
-# ---------------------------------------------------------------------------
+def _compute_base_counts_parallel(facts: Sequence[RepoFacts]) -> dict[int, str]:
+    """Compute base counts for all repos in parallel using ThreadPoolExecutor."""
+    cache = {}
+    if not facts:
+        return cache
+    
+    with ThreadPoolExecutor() as executor:
+        # Map each repo to its base_counts computation
+        futures = {executor.submit(_compute_base_counts_for_fact, fact): i for i, fact in enumerate(facts)}
+        for future in futures:
+            i = futures[future]
+            cache[i] = future.result()
+    
+    return cache
 
 
-def cmd_status(config: Config, workspace: str | None = None, *, fetch: bool = False) -> None:
-    """Show branch status for the current workspace."""
-    ws_dir, ws = resolve_workspace(name=workspace)
-    report_pending_migration(config, ws, ws_dir)
-    warn_if_drifted(ws, ws_dir)
-    status = gather_workspace_status(ws, ws_dir, config, fetch=fetch)
-    max_alias_len = max((len(a) for a in ws.repos), default=0)
-    _render_status(status, max_alias_len=max_alias_len)
+def _compute_base_counts_for_fact(facts: RepoFacts) -> str:
+    """`ahead X, behind Y` of HEAD vs base; `(even)` at 0/0; `no base` when none; `(?)` on error."""
+    if facts.base is None:
+        return "no base"
+    if facts.problem:
+        return "(?)"
+
+    result = git.run(
+        [
+            "git",
+            "-C",
+            str(facts.path),
+            "rev-list",
+            "--left-right",
+            "--count",
+            f"{facts.base}...HEAD",
+        ]
+    )
+    if result.returncode != 0:
+        return "(?)"
+
+    parts = result.stdout.split()
+    try:
+        behind, ahead = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return "(?)"
+    if ahead == 0 and behind == 0:
+        return "(even)"
+    return f"ahead {ahead}, behind {behind}"
+
+
+def _print_aligned(headers: Sequence[str], rows: Sequence[str]) -> None:
+    """Print aligned columns for TTY output."""
+    if not rows:
+        return
+    
+    # Parse each row into fields
+    parsed_rows = [row.split("\t") for row in rows]
+    
+    # Calculate column widths: max of header width and data widths
+    col_widths = []
+    for i in range(len(headers)):
+        max_width = len(headers[i])
+        for parsed_row in parsed_rows:
+            if i < len(parsed_row):
+                max_width = max(max_width, len(parsed_row[i]))
+        col_widths.append(max_width)
+    
+    # Print header with padding
+    header_line = "  ".join(headers[i].ljust(col_widths[i]) for i in range(len(headers)))
+    _line(header_line)
+    
+    # Print data rows with padding
+    for parsed_row in parsed_rows:
+        padded_fields = []
+        for i, field in enumerate(parsed_row):
+            if i < len(col_widths) - 1:
+                padded_fields.append(field.ljust(col_widths[i]))
+            else:
+                # Last column needs no padding
+                padded_fields.append(field)
+        _line("  ".join(padded_fields))
+
+
+def _row(facts: RepoFacts, base_counts_cache: dict[int, str], index: int) -> str:
+    """One repo's fields, tab-separated."""
+    fields = [
+        facts.name,
+        _state(facts),
+        _base(facts),
+        _upstream(facts),
+        base_counts_cache.get(index, "(??)"),
+    ]
+    dirty = len(facts.modified) + len(facts.untracked)
+    if dirty:
+        fields.append(f"dirty {dirty}")
+    elif facts.operation:
+        # Keep the operation in the last field even when there is nothing to report.
+        fields.append("")
+    if facts.operation:
+        fields.append(f"{facts.operation} in progress")
+    return "\t".join(fields)
+
+
+def _state(facts: RepoFacts) -> str:
+    """The branch, the detached commit, or the worktree problem that stops the reads."""
+    if facts.problem:
+        return f"({facts.problem} worktree)"
+    if facts.branch:
+        return facts.branch
+    if facts.head:
+        return f"detached at {facts.head[:10]}"
+    return "detached"
+
+
+def _base(facts: RepoFacts) -> str:
+    """The base branch (origin/18.0), `(default)` when fallback, or `no base` when none."""
+    if facts.base is None:
+        return "no base"
+    if facts.explicit_base is None and facts.default_base is not None:
+        return f"{facts.base} (default)"
+    return facts.base
+
+
+def _upstream(facts: RepoFacts) -> str:
+    """The upstream with its counts; `(none)` when absent or equal to base; bare ref when no counts."""
+    upstream = facts.upstream
+    if upstream is None or upstream == facts.base:
+        return "(none)"
+    if facts.upstream_ab is None:
+        return upstream
+    ahead, behind = facts.upstream_ab
+    return f"{upstream} (ahead {ahead}, behind {behind})"
+
+
+def _line(text: str) -> None:
+    """Write one tab-separated line to stdout verbatim."""
+    sys.stdout.write(f"{text}\n")

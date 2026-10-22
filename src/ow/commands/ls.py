@@ -1,79 +1,50 @@
-"""`ow ls` — list every known workspace, its path, and its repos.
+"""`ow ls` — one line per known workspace: name, path, then each repo's branch or base.
 
-Reads the index and the workspace configs it points at. No git: that is
-what `ow status` is for, and a listing that takes ten seconds because it
-hit the network is not a listing.
+A dead index entry prints `missing`; an existing but unreadable workspace `unreadable`.
 """
 
-import tomllib
+from __future__ import annotations
+
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from rich.table import Table
-from rich.text import Text
+from ow.core import index
+from ow.core.session import open_session
 
-from ow.utils import index
-from ow.utils.config import load_workspace_config
-from ow.utils.display import console, display_path
-from ow.utils.legacy import check_legacy_layout
-
-MARKER = Path(".ow") / "config.toml"
+if TYPE_CHECKING:
+    from ow.core.plugins import Plugins
 
 
-def _repos_cell(ws_dir: Path) -> str | Text:
-    """The repo column for one workspace: 'alias:spec' pairs, or an error mark.
+def run(plugins: "Plugins") -> int:
+    """List the index's workspaces, in index order; dead entries degrade to `missing`."""
+    for path in index.read():
+        sys.stdout.write(f"{path.name}\t{_display(path)}\t{_repos(path, plugins)}\n")
+    return 0
 
-    A workspace whose config.toml fails to parse must not abort the whole
-    listing — that is precisely the moment a broken entry is most annoying
-    to have hidden. The error text is built as a Text object rather than
-    markup: `exc` is an interpolated exception message, which is data, not
-    something safe to hand to Rich's markup parser.
-    """
+
+def _repos(path: Path, plugins: "Plugins") -> str:
+    """The repos column for one workspace: `<repo>:<state>` comma-joined, `missing`, or `unreadable`."""
+    if not path.exists():
+        # A dead index entry: the path is gone.
+        return "missing"
     try:
-        ws = load_workspace_config(ws_dir / MARKER)
-    except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
-        return Text(f"(error: {exc})", style="red")
-    return ", ".join(f"{alias}:{spec.to_spec_str()}" for alias, spec in ws.repos.items())
+        session = open_session(str(path), need_workspace=False, plugins=plugins)
+    except Exception:
+        # The path is there but its config cannot be read.
+        return "unreadable"
+    if session.workspace is None:
+        return "unreadable"
+    entries = []
+    for location in session.locations:
+        state = location.branch or location.default_base or "(unset)"
+        entries.append(f"{location.name}:{state}")
+    return ", ".join(entries)
 
 
-def cmd_ls(*, archived: bool = False) -> None:
-    """List every known workspace: its name, path, and repos.
-
-    With `archived`, list the archive instead. The archive is not in the
-    index by design — that is what being archived means — so it is read
-    straight off the filesystem.
-    """
-    # A warning, not a stop: see check_legacy_layout's own docstring. ls is
-    # read-only and index-only, and it is where the other commands' error
-    # messages send a lost user.
-    check_legacy_layout(fatal=False)
-
-    if archived:
-        from ow.commands.archive import archived_workspaces
-
-        workspaces = archived_workspaces()
-        if not workspaces:
-            console.print("No archived workspaces.")
-            return
-    else:
-        workspaces = index.known_workspaces()
-        if not workspaces:
-            console.print("No known workspaces. Run `ow init` to create one.")
-            return
-
-    table = Table(box=None)
-    table.add_column("NAME")
-    # Folded, not truncated: on a narrow terminal the path is the one thing
-    # the reader came for, and "~/dev/very/long/pa…" is not it.
-    table.add_column("PATH", overflow="fold")
-    table.add_column("REPOS")
-
-    # Index order is the order workspaces happened to be first resolved,
-    # which is arbitrary to everyone but the index. Path breaks the tie so
-    # two workspaces sharing a name still come out in a stable order.
-    for ws_dir in sorted(workspaces, key=lambda p: (p.name, str(p))):
-        # NAME and PATH come straight from the filesystem: a directory named
-        # something like "ws[/bad]" is data, not Rich markup, and must not
-        # be parsed as such — Text() renders it literally.
-        table.add_row(Text(ws_dir.name), Text(display_path(ws_dir)), _repos_cell(ws_dir))
-
-    console.print(table)
+def _display(path: Path) -> str:
+    """`~/…` under `$HOME`, else absolute: a listing column, so no shell quoting."""
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)

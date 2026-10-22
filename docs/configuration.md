@@ -1,180 +1,141 @@
 # Configuration
 
-`ow`'s configuration and state live under the XDG base directories, not inside any project.
-`$XDG_CONFIG_HOME` defaults to `~/.config`, `$XDG_DATA_HOME` to `~/.local/share`, and
-`$XDG_STATE_HOME` to `~/.local/state`.
+Settings control what ow generates and how plugins behave. They are key-value pairs, read with `ow config` and stored in TOML files.
 
-## File locations
+## Layers
 
-| What | Path | Notes |
-|------|------|-------|
-| Global config | `$XDG_CONFIG_HOME/ow/config.toml` | remotes, typed defaults, `owignore`, editor, theme |
-| Local seeds | `$XDG_CONFIG_HOME/ow/local/` | files copied once into a new workspace's `.local/`, before addon discovery |
-| Services | `$XDG_CONFIG_HOME/ow/services/compose.yml` | written by a render with a supported Odoo core; see [Services](services.md) |
-| Bare repos | `$XDG_DATA_HOME/ow/repos/` | one `<alias>.git` per remote, shared by every workspace on the machine |
-| Container volumes | `$XDG_DATA_HOME/ow/volumes/` | used by the generated `compose.yml` for postgres and mailpit data |
-| Workspace archive | `$XDG_DATA_HOME/ow/archives/` | where `ow archive` parks a workspace |
-| Workspace index | `$XDG_STATE_HOME/ow/workspaces` | plain list of paths `ow ls` and name lookup read; self-healing, never the source of truth |
-| `ow rm` backups | `$XDG_STATE_HOME/ow/backups/<name>-<timestamp>.toml` | raw copies of a removed workspace's `.ow/config.toml`, mode `0600` |
-| Migration backups | `$XDG_STATE_HOME/ow/backups/migrations/<sha256-abs-path>/<sha256-bytes>.toml` | every config the schema migration replaced; see [Migrating to 3.0](migrating-to-3.0.md) |
+Three layers, later ones winning:
 
-A workspace's own config lives inside it, at `.ow/config.toml`. Its name is not stored: it is the
-workspace directory's own name, and the generated `odoorc` uses it for `db_name` and `dbfilter`.
+1. Built-in defaults, declared by each plugin.
+2. Global config: `$XDG_CONFIG_HOME/ow/config.toml`, usually `~/.config/ow/config.toml`.
+3. Workspace config: `<workspace>/.ow/config.toml`.
 
-Both config files are written atomically and privately: a same-directory temp file at mode `0600`,
-then an `os.replace`. Reading never creates anything. `ow init` and `ow render` write the
-workspace's own `.ow/config.toml`; the **global** config is written when you save one — from the
-dashboard's global-config editor, or by migrating a schema-1 file — so a machine that has never
-saved one has no `config.toml` at all and ow runs on the built-in defaults, the community remote
-included.
+## `ow config`
 
-## Schema version
+### List every setting
 
-Both files begin with `version = 2`.
+```sh
+ow config
+```
+
+One line per setting: `key = value (origin) # help`. `origin` is `default`, `global` or `workspace`. Unset values print as `(unset)`; strings are quoted, as TOML would store them.
+
+```
+odoo.http_port = 8069 (default) # HTTP port for Odoo
+odoo.db_name = "voip" (default) # Database name (defaults to workspace name)
+```
+
+Outside a workspace the same listing works, with workspace-derived defaults unset. `--global` ignores the workspace layer and fills from global and defaults only.
+
+### Get
+
+```sh
+ow config get odoo.http_port     # effective value
+ow config get --global mise.python
+```
+
+A string prints raw, so `$(ow config get odoo.db_host)` is `localhost`, not `"localhost"`. An unset key prints nothing (exit 0). An unknown key is a usage error (exit 2).
+
+### Set
+
+```sh
+ow config set odoo.http_port 9069
+ow config set --global odoo.smtp_port 1025
+```
+
+Without `--global` it writes the workspace config and refreshes the generated files. A list setting takes one item per argument; values beginning with `-` need `--` after the key:
+
+```sh
+ow config set -w voip odoo.debug_args -- --dev=all --log-level debug
+```
+
+An unknown key is refused (exit 2), with the closest known key suggested. An `int` must parse as an integer, a `bool` must be `true` or `false`.
+
+### Unset
+
+```sh
+ow config unset odoo.http_port
+```
+
+An unknown key is accepted: unsetting is how you clear the unknown-key warning. `[repos]` is not a setting; use `ow repo rm <name>`.
+
+## `[repos]`
+
+The workspace config also carries the repos of the workspace, as a name → base ref table:
 
 ```toml
-# global
-version = 2
-
-# workspace
-version = 2
-
 [repos]
-community = "master..my-feature"
+community = "origin/master"
+enterprise = "origin/18.0"
 ```
 
-A `version = 1` file is still readable and writable, but only in the way a 1.x file can be: the
-save updates the fields that existed then and preserves everything else byte for byte. For the
-global config that is `[remotes]`, `editor` and `theme`; for a workspace it is `[repos]` only.
-Typed options cannot be saved to a schema-1 file — changing one is refused with a message naming
-`ow render`, the command that converts it. Conversion is always explicit: `ow init` (repairing an
-existing workspace) or `ow render`, both of which back up every file they replace under
-`$XDG_STATE_HOME/ow/backups/migrations/` before writing. See
-[Migrating to 3.0](migrating-to-3.0.md).
+Each value is validated against the bare repo's remotes: the longest remote-name prefix wins, and a bare ref with no known remote prefix is read as `origin/<name>`. A value ow cannot parse as a base — a SHA, an empty or `refs/`-prefixed ref, an invalid branch name, a non-string — is rejected: the repo is not adopted and a warning names the value.
 
-A file with a newer version is refused with an upgrade message.
+## Settings
 
-## Remotes
+`<plugin>.enabled` exists for every plugin and defaults to `true`. The rest are declared by plugins.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `mise.enabled` | bool | `true` | Enable or disable the mise plugin |
+| `mise.python` | str | — | Python version for mise (e.g. '3.11', '3.12') |
+| `odoo.enabled` | bool | `true` | Enable or disable the odoo plugin |
+| `odoo.http_port` | int | `8069` | HTTP port for Odoo |
+| `odoo.db_name` | str | workspace name | Database name |
+| `odoo.db_host` | str | `"localhost"` | Database host |
+| `odoo.db_port` | int | `5432` | Database port |
+| `odoo.db_user` | str | `"odoo"` | Database user |
+| `odoo.db_password` | str | `"odoo"` | Database password |
+| `odoo.admin_passwd` | str | `"Password"` | Odoo admin password |
+| `odoo.smtp_server` | str | `"localhost"` | SMTP server |
+| `odoo.smtp_port` | int | `25` | SMTP port |
+| `odoo.debug_args` | list | `["--dev=all"]` | Debug arguments for Odoo |
+| `odoo.debug_test_args` | list | `["--test-tags=<workspace>"]` | Debug test arguments |
+| `vscode.enabled` | bool | `true` | Enable or disable the vscode plugin |
+| `zed.enabled` | bool | `true` | Enable or disable the zed plugin |
+| `local.enabled` | bool | `true` | Enable or disable the local plugin |
+
+`odoo.debug_args` also gets `--without-demo=all` when the Odoo core predates 19. `odoo.db_name` and `odoo.debug_test_args` are computed from the workspace, so they read as `(unset)` outside one.
+
+Disabling a plugin stops its generated files from being produced; see [Generated files](files.md). Its settings stay readable and are kept in the file.
+
+## File format
+
+The config is TOML with one table per plugin, plus `[repos]`:
 
 ```toml
-[remotes]
-community.origin.url = "git@github.com:odoo/odoo.git"
-community.dev.url = "git@github.com:odoo-dev/odoo.git"
-community.dev.pushurl = "git@github.com:odoo-dev/odoo.git"
-community.dev.fetch = "+refs/heads/*:refs/remotes/dev/*"
+[repos]
+community = "origin/master"
 
-[remotes.enterprise]
-origin.url = "git@github.com:odoo/enterprise.git"
-```
-
-Each remote supports `url`, `pushurl` (optional), and `fetch` (optional refspec).
-
-## Typed options
-
-Every option is optional, and every level is sparse: a key you do not set is inherited, not
-pinned. The precedence is **built-in default < global config < workspace config** — a workspace
-without an `[odoo]` table at all just uses the global values and the built-ins. Clearing a local
-override means deleting the key, not setting it to a default.
-
-Global config:
-
-```toml
 [odoo]
-http_port = 8069
-db_host = "localhost"
-db_port = 5432
-db_user = "odoo"
-db_password = "odoo"
-admin_passwd = "Password"
-smtp_server = "localhost"
-smtp_port = 25
-debug_args = ["--dev=all"]
-debug_test_args = ["--test-tags=my-workspace"]
+http_port = 9069
+debug_args = ["--dev=all", "--log-level", "debug"]
 
 [mise]
 python = "3.12"
 ```
 
-Workspace config (`.ow/config.toml`):
+Every write rewrites the whole file: known values grouped by plugin in declaration order, unset keys left out, `[repos]` kept. Writes are atomic (a `0600` temp file renamed into place) and serialized by an exclusive lock on a sidecar file next to the target — `<workspace>/.ow/.config.toml.lock` or `~/.config/ow/.config.toml.lock`. The config file itself is `0600`.
 
-```toml
-version = 2
+## Unknown keys and wrong types
 
-[repos]
-community = "master..my-feature"
+Both are kept in the file, and ow reports one warning per config file, naming every unknown key and every wrong-typed key:
 
-[odoo]
-http_port = 8070
-
-[mise]
-python = "3.12"
+```
+warning: unknown setting future.x in .ow/config.toml; remove it with `ow config unset future.x`; odoo.http_port in .ow/config.toml must be int; using its default; run `ow init`
 ```
 
-| Key | Type | Built-in default |
-|-----|------|------------------|
-| `odoo.http_port` | integer, 1–65535 | `8069` |
-| `odoo.db_host` | non-empty string | `localhost` |
-| `odoo.db_port` | integer, 1–65535 | `5432` |
-| `odoo.db_user` | non-empty string | `odoo` |
-| `odoo.db_password` | string (may be empty) | `odoo` |
-| `odoo.admin_passwd` | string (may be empty) | `Password` |
-| `odoo.smtp_server` | non-empty string | `localhost` |
-| `odoo.smtp_port` | integer, 1–65535 | `25` |
-| `odoo.debug_args` | array of strings | `--dev=all`, plus `--without-demo=all` when the core has no demo mode |
-| `odoo.debug_test_args` | array of strings | `--test-tags=<workspace name>` |
-| `mise.python` | `"MAJOR.MINOR"` | `3.12` (clamped into the core's supported range) |
+- An unknown key is ignored until some ow version declares it. `ow config unset` clears it.
+- A key whose TOML type does not match its declared type keeps its default. An int is not a bool.
 
-An empty string or empty array is an explicit override, not an omission — `debug_test_args = []`
-means no test tags, not "use the default". Ports are range-checked, strings are checked for
-control characters, and an unknown key is an error rather than a silent no-op.
+Because a write rewrites the whole file, any key the rewrite does not carry over is dropped, and every dropped key is printed with its old value:
 
-`smtp_port` defaults to `25`, Odoo's own default. The bundled Mailpit container listens for SMTP
-on `1025`; opting into it is `smtp_port = 1025`, not an undocumented change to the default.
-
-### Python and how it is chosen
-
-`mise.python` selects the workspace's Python. For a workspace with an Odoo core, the requested
-minor is clamped into the range the core declares (`MIN_PY_VERSION`/`MAX_PY_VERSION`), defaulting
-to `3.12` when nothing is set, and a clamp is reported as a warning. A **generic** workspace —
-one with no Odoo core — gets no Python at all unless it explicitly opts in by setting
-`mise.python` at either level. The generated mise fragment only carries a `python` tool and a
-`.venv` when there is something to put there.
-
-## Ignore list
-
-`owignore` in the global config is a list of gitignore-style patterns. A generated file matching
-one of them is never written, and `ow files` reports it as `ignored`:
-
-```toml
-owignore = [".zed/**", "!.zed/settings.json"]
+```
+warning: dropped future.x = 1
 ```
 
-The syntax is `pathspec`'s gitignore dialect: a directory pattern such as `.zed/**` covers
-everything under that directory, and a leading `!` re-includes a path. An ignored path that
-already has a lock entry
-keeps it — ignoring is not retiring, and un-ignoring restores the file to ow's ownership. See
-[Generated files](files.md).
+## See also
 
-## Editor and theme
-
-```toml
-editor = "code"
-theme = "textual-dark"
-```
-
-`editor` is the command `ow open` runs (may include flags, e.g. `"code -n"`). `theme` is
-the dashboard's Textual theme — press `Ctrl+P` in the dashboard, type "theme", and pick one
-from the palette (the choice is persisted here), or set it by hand. Any theme name Textual
-ships is accepted; an unknown name is reported and the default is used.
-
-## Branch Spec Syntax
-
-| Spec | Worktree mode |
-|------|---------------|
-| `master` | Detached HEAD at `origin/master` |
-| `origin/master` | Detached HEAD at `origin/master` |
-| `dev/master-phoenix` | Detached HEAD at `dev/master-phoenix` |
-| `master..master-feature` | Attached local branch `master-feature` tracking `origin/master` |
-| `dev/master-phoenix..fix` | Attached local branch `fix` tracking `dev/master-phoenix` |
-
-Without `..`, the worktree is detached (read-only tracking). With `..`, a local branch is created — this is what you want for feature development.
+- [Commands](commands.md) — every command with its flags and exit codes.
+- [Generated files](files.md) — what settings produce, and how ownership works.
+- [Services](services.md) — the optional postgres + pgvector + mailpit stack these ports point at.
