@@ -513,7 +513,7 @@ def test_load_plugins_wraps_hookimpl_signature_mismatch():
 
     error = exc_info.value
     assert error.plugin == "a"
-    assert error.hook == "HOOKSPECS"
+    assert error.hook == "register"
 
 
 def test_merge_mise_environment_empty():

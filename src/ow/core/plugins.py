@@ -288,12 +288,12 @@ def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = Non
                     except ValueError as e:
                         raise PluginError(name, "HOOKSPECS", str(e)) from e
                     except pluggy.PluginValidationError as e:
-                        raise PluginError(pm.get_name(e.plugin), "HOOKSPECS", str(e)) from e
+                        raise PluginError(pm.get_name(e.plugin) or name, "HOOKSPECS", str(e)) from e
 
         try:
             pm.register(module, name=name)
         except pluggy.PluginValidationError as e:
-            raise PluginError(pm.get_name(e.plugin), "HOOKSPECS", str(e)) from e
+            raise PluginError(name, "register", str(e)) from e
 
     # Hookimpls whose name matches no spec surface here
     try:
