@@ -27,10 +27,12 @@ Every ow command, its flags, its `--json` contract, and its exit codes.
 
 Create one or more workspaces in the current directory.
 
-- **PR targets** (via built-in `github` plugin): `enterprise#12345`, `odoo/iap-apps#42`, or a GitHub PR URL. Creates `<num>-<branch>/` by default, fetches `refs/pull/<num>/head`, discovers open sister PRs matching the same branch across known repos in the same org, and expands Odoo addon repos with `community` on the base branch.
-- **Composite targets**: `iap-apps#42+enterprise` combines multiple specs into a single workspace.
+- **PR targets** (via built-in `github` plugin): `enterprise#12345`, `odoo/iap-apps#42`, `odoo/odoo/pull/1234`, or a GitHub PR URL (`https://github.com/odoo/iap-apps/pull/1234`). Repo names resolve against registered bare repos (`ow repo ls`) before falling back to plugin known repos and `github.default_org`. Creates `<num>-<branch>/` by default, fetches `refs/pull/<num>/head`, discovers open sister PRs matching the same branch across known repos in the same org, and expands Odoo addon repos with `community` on the base branch.
+- **Branch targets**: `<repo>@<branch>` (or `<repo>@<remote>/<branch>`) searches configured remotes of `<repo>` in parallel (falling back to local branches), checks out `<branch>` tracking the matching remote, and infers the Odoo series base when applicable.
+- **Composite targets**: `iap-apps#42+enterprise` or `enterprise@18.0-my-fix+iap@18.0-iap-fix` combines multiple specs into a single workspace.
 - **Multi-workspace tasks (Issue #84)**: `ow add -t voip-task iap-apps#42+enterprise enterprise#15402 voip#89` creates flat sibling workspaces, auto-allocates non-colliding `odoo.http_port` and `odoo.gevent_port` values, and writes `<common-parent>/voip-task.code-workspace`.
-- **Fresh workspaces**: `ow add my-fix --base 18.0 [--branch 18.0-my-fix]` creates a workspace using `-r/--repo` (or `odoo.default_repos`, defaulting to `["community", "enterprise"]`). Refuses if the target directory already exists.
+- **Fresh workspaces**: `ow add my-fix --base 18.0 [--branch 18.0-my-fix]` creates a workspace using `-r/--repo` (or `odoo.default_repos`, defaulting to `["community", "enterprise"]`).
+- **Idempotency**: Re-running `ow add` on an existing (or interrupted) ow workspace keeps healthy worktrees intact, cleans up incomplete/broken worktrees, adds any missing repos, and refreshes generated files. Refuses if the target directory already exists and is not an ow workspace.
 
 ### `ow run [TARGET] [-w WS] [--tmp] [-- ARGS…]`
 
@@ -46,7 +48,7 @@ Run a workspace locally via its plugin runner (`odoo` launches `odoo-bin -c odoo
 ## Repos
 
 ### `ow repo add NAME [URL] [--base REF] [-w WS]`
-Register a bare repo under `$XDG_DATA_HOME/ow/repos/<name>.git` and, inside a workspace, add its worktree. Known Odoo repos (`community` with alias `odoo`, `enterprise`, `design-themes`, `iap-apps`, `upgrade`, `upgrade-util`, `voip`) need no URL.
+Register a bare repo under `$XDG_DATA_HOME/ow/repos/<name>.git` and, inside a workspace, add its worktree. Known Odoo repos (`community`, `enterprise`, `design-themes`, `iap-apps`, `upgrade`, `upgrade-util`, `voip`) need no URL.
 
 ### `ow repo ls [-w WS]`
 List registered bare repos and their `origin` URLs.
