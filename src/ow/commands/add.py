@@ -16,7 +16,6 @@ from ow.commands._shared import (
     print_dropped,
     refresh_workspace,
     remotes_of,
-    resolve_known_repo,
     run_steps,
 )
 from ow.commands._targets import expand_repos, resolve_composite_target
@@ -58,7 +57,7 @@ class AddResult:
 def _repo_url(name: str, explicit_url: str | None, catalog: dict[str, KnownRepo]) -> str | None:
     if explicit_url:
         return explicit_url
-    known = resolve_known_repo(name, catalog)
+    known = catalog.get(name)
     return known.url if known else None
 
 
@@ -68,13 +67,7 @@ def _default_fresh_repos(settings: dict[str, object], catalog: dict[str, KnownRe
         return ()
     raw = settings.get("odoo.default_repos")
     if isinstance(raw, list):
-        resolved: list[str] = []
-        for item in raw:
-            if not isinstance(item, str) or not item:
-                continue
-            known = resolve_known_repo(item, catalog)
-            resolved.append(known.name if known else item)
-        return tuple(dict.fromkeys(resolved))
+        return tuple(dict.fromkeys(item for item in raw if isinstance(item, str) and item))
     return ("community", "enterprise")
 
 
@@ -135,18 +128,17 @@ def create_workspace(
         shared_base = base or next((r.base for r in repo_specs if r.base), None)
         added_extra = False
         for extra in repos:
-            known = resolve_known_repo(extra, catalog)
-            canonical = known.name if known else extra
-            if canonical not in existing_names:
+            known = catalog.get(extra)
+            if extra not in existing_names:
                 repo_specs.append(
                     ResolvedRepo(
-                        name=canonical,
+                        name=extra,
                         url=known.url if known else None,
                         branch=branch,
                         base=shared_base,
                     )
                 )
-                existing_names.add(canonical)
+                existing_names.add(extra)
                 added_extra = True
         if added_extra:
             repo_specs = list(expand_repos(repo_specs, plugins, catalog, settings))
@@ -158,14 +150,13 @@ def create_workspace(
         repo_specs = []
         seen: set[str] = set()
         for rname in raw_repos:
-            known = resolve_known_repo(rname, catalog)
-            canonical = known.name if known else rname
-            if canonical in seen:
+            if rname in seen:
                 continue
-            seen.add(canonical)
+            seen.add(rname)
+            known = catalog.get(rname)
             repo_specs.append(
                 ResolvedRepo(
-                    name=canonical,
+                    name=rname,
                     url=known.url if known else None,
                     branch=branch,
                     base=base,

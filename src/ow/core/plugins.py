@@ -55,11 +55,10 @@ class Diagnostic:
 
 @dataclass(frozen=True)
 class KnownRepo:
-    """A repo a plugin knows about by name (and optional short aliases)."""
+    """A repo a plugin knows about by name."""
 
     name: str
     url: str
-    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

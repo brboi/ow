@@ -395,3 +395,43 @@ def test_add_rolls_back_completely_on_partial_repo_failure(lab):
     assert not (parent / "9999-18.0-missing-ref").exists()
     wt_list = lab.git(repos_dir() / "community.git", "worktree", "list", "--porcelain")
     assert "9999-18.0-missing-ref" not in wt_list
+
+
+def test_add_pr_with_local_bare_name_and_auto_community(lab):
+    """`ow add iap#1992` resolves local bare `iap.git` -> `odoo/iap-apps` and auto-adds `community`."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    _setup_pr_repo(
+        lab,
+        "iap",
+        {"iap_mod/__manifest__.py": "{}"},
+        1992,
+        "18.0-port-in",
+        {"iap_mod/port.py": "ok = True\n"},
+    )
+    lab.git(repos_dir() / "iap.git", "config", "ow.github-repo", "odoo/iap-apps")
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/iap-apps",
+                "number": 1992,
+                "title": "IAP port-in",
+                "url": "https://github.com/odoo/iap-apps/pull/1992",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0-port-in",
+                "baseRefName": "18.0",
+            }
+        ]
+    )
+
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+    res = lab.ow("add", "iap#1992", "--name", "custom-ws", cwd=parent)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    ws = parent / "custom-ws"
+    assert (ws / "community" / "odoo-bin").is_file()
+    assert (ws / "iap" / "iap_mod" / "port.py").read_text() == "ok = True\n"
+    assert not (ws / "iap-apps").exists()
+    assert (ws / "odoorc").is_file()
+

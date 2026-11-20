@@ -12,6 +12,15 @@ from tests.conftest import add_repo, init_workspace
 def test_parse_pr_target_variants():
     assert github.parse_pr_target("enterprise#12345") == (None, "enterprise", 12345)
     assert github.parse_pr_target("odoo/iap-apps#42") == ("odoo", "iap-apps", 42)
+    assert github.parse_pr_target("odoo/odoo/pull/1234") == ("odoo", "odoo", 1234)
+    assert github.parse_pr_target("odoo/odoo/pull/1234/files") == ("odoo", "odoo", 1234)
+    assert github.parse_pr_target("iap/pull/1992") == (None, "iap", 1992)
+    assert github.parse_pr_target("github.com/odoo/iap-apps/pull/1234") == ("odoo", "iap-apps", 1234)
+    assert github.parse_pr_target("https://github.com/odoo/iap-apps/pull/1234") == (
+        "odoo",
+        "iap-apps",
+        1234,
+    )
     assert github.parse_pr_target("https://github.com/odoo/enterprise/pull/12345") == (
         "odoo",
         "enterprise",
@@ -22,6 +31,7 @@ def test_parse_pr_target_variants():
         "enterprise",
         12345,
     )
+    assert github.parse_pr_target("github.com/odoo/pull/1234") is None
     assert github.parse_pr_target("18.0-my-fix") is None
 
 
@@ -51,7 +61,7 @@ def test_resolve_target_maps_alias_and_discovers_sister_pr(lab):
         ]
     )
     catalog = {
-        "community": KnownRepo("community", "git@github.com:odoo/odoo.git", aliases=("odoo",)),
+        "community": KnownRepo("community", "git@github.com:odoo/odoo.git"),
         "enterprise": KnownRepo("enterprise", "git@github.com:odoo/enterprise.git"),
     }
 
@@ -83,13 +93,18 @@ def test_resolve_target_odoo_alias_maps_to_community(lab):
         ]
     )
     catalog = {
-        "community": KnownRepo("community", "git@github.com:odoo/odoo.git", aliases=("odoo",)),
+        "community": KnownRepo("community", "git@github.com:odoo/odoo.git"),
     }
 
     resolved = github.ow_resolve_target("odoo#777", catalog, {"github.default_org": "odoo"})
     assert resolved is not None
     assert resolved.name == "777-18.0-core-fix"
     assert [r.name for r in resolved.repos] == ["community"]
+
+    by_path = github.ow_resolve_target("odoo/odoo/pull/777", catalog, {"github.default_org": "odoo"})
+    assert by_path is not None
+    assert by_path.source == "github:odoo/odoo#777"
+    assert [r.name for r in by_path.repos] == ["community"]
 
 
 def test_status_uses_ttl_cache_and_respects_offline(lab):
@@ -317,9 +332,158 @@ def test_sister_pr_filters_by_head_owner(lab):
         ]
     )
     catalog = {
-        "community": KnownRepo("community", "git@github.com:odoo/odoo.git", aliases=("odoo",)),
+        "community": KnownRepo("community", "git@github.com:odoo/odoo.git"),
         "enterprise": KnownRepo("enterprise", "git@github.com:odoo/enterprise.git"),
     }
     resolved = github.ow_resolve_target("enterprise#100", catalog, {"github.default_org": "odoo"})
     assert resolved is not None
     assert [r.name for r in resolved.repos] == ["enterprise"]
+
+
+def test_resolve_target_uses_local_bare_origin_slug_and_skips_duplicate_sister(lab):
+    """A registered local bare `iap.git` -> `odoo/iap-apps` resolves `iap#1992` without duplicating `iap-apps`."""
+    bare = repos_dir() / "iap.git"
+    bare.parent.mkdir(parents=True, exist_ok=True)
+    lab.git(bare.parent, "init", "--bare", str(bare))
+    lab.git(bare, "remote", "add", "origin", "git@github.com:odoo/iap-apps.git")
+
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/iap-apps",
+                "number": 1992,
+                "title": "IAP port-in",
+                "url": "https://github.com/odoo/iap-apps/pull/1992",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "master-port-in-numbers-basm",
+                "baseRefName": "master",
+            }
+        ]
+    )
+    catalog = {
+        "community": KnownRepo("community", "git@github.com:odoo/odoo.git"),
+        "iap-apps": KnownRepo("iap-apps", "git@github.com:odoo/iap-apps.git"),
+    }
+
+    resolved = github.ow_resolve_target("iap#1992", catalog, {"github.default_org": "odoo"})
+    assert resolved is not None
+    assert resolved.source == "github:odoo/iap-apps#1992"
+    assert [r.name for r in resolved.repos] == ["iap"]
+    assert resolved.repos[0].url == "git@github.com:odoo/iap-apps.git"
+    assert resolved.repos[0].base == "origin/master"
+
+
+def test_resolve_target_uses_local_bare_for_non_default_org(lab):
+    """`brboi-addons#42` and `brboi/odoo-addons#42` both resolve via the registered bare `brboi-addons.git`."""
+    bare = repos_dir() / "brboi-addons.git"
+    bare.parent.mkdir(parents=True, exist_ok=True)
+    lab.git(bare.parent, "init", "--bare", str(bare))
+    lab.git(bare, "remote", "add", "origin", "git@github.com:brboi/odoo-addons.git")
+
+    lab.fake_gh(
+        [
+            {
+                "repo": "brboi/odoo-addons",
+                "number": 42,
+                "title": "Custom addon fix",
+                "url": "https://github.com/brboi/odoo-addons/pull/42",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0-custom",
+                "baseRefName": "18.0",
+            }
+        ]
+    )
+
+    short = github.ow_resolve_target("brboi-addons#42", {}, {"github.default_org": "odoo"})
+    assert short is not None
+    assert short.source == "github:brboi/odoo-addons#42"
+    assert [r.name for r in short.repos] == ["brboi-addons"]
+
+    qualified = github.ow_resolve_target("brboi/odoo-addons#42", {}, {"github.default_org": "odoo"})
+    assert qualified is not None
+    assert qualified.source == "github:brboi/odoo-addons#42"
+    assert [r.name for r in qualified.repos] == ["brboi-addons"]
+
+
+def test_status_external_target_uses_local_bare_origin(lab):
+    import json
+
+    bare = repos_dir() / "iap.git"
+    bare.parent.mkdir(parents=True, exist_ok=True)
+    lab.git(bare.parent, "init", "--bare", str(bare))
+    lab.git(bare, "remote", "add", "origin", "git@github.com:odoo/iap-apps.git")
+
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/iap-apps",
+                "number": 1992,
+                "title": "IAP PR",
+                "url": "https://github.com/odoo/iap-apps/pull/1992",
+                "state": "OPEN",
+                "isDraft": False,
+                "reviewDecision": "",
+                "headRefName": "master-port-in",
+                "baseRefName": "master",
+            }
+        ]
+    )
+
+    res = lab.ow("status", "iap#1992", "--json")
+    assert res.exit_code == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["results"][0]["target"] == "odoo/iap-apps#1992"
+
+
+def test_resolve_target_and_sister_pr_reuse_existing_local_bare_for_known_slug(lab):
+    """When only `iap.git` -> `odoo/iap-apps` exists locally, `odoo/iap-apps#1992`, `iap-apps#1992`,
+    and sister-PR discovery all reuse `iap` instead of cloning a duplicate `iap-apps.git`."""
+    bare = repos_dir() / "iap.git"
+    bare.parent.mkdir(parents=True, exist_ok=True)
+    lab.git(bare.parent, "init", "--bare", str(bare))
+    lab.git(bare, "remote", "add", "origin", "git@github.com:odoo/iap-apps.git")
+
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/iap-apps",
+                "number": 1992,
+                "title": "IAP port-in",
+                "url": "https://github.com/odoo/iap-apps/pull/1992",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "master-port-in",
+                "baseRefName": "master",
+            },
+            {
+                "repo": "odoo/enterprise",
+                "number": 135585,
+                "title": "Enterprise port-in",
+                "url": "https://github.com/odoo/enterprise/pull/135585",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "master-port-in",
+                "baseRefName": "master",
+            },
+        ]
+    )
+    catalog = {
+        "enterprise": KnownRepo("enterprise", "git@github.com:odoo/enterprise.git"),
+        "iap-apps": KnownRepo("iap-apps", "git@github.com:odoo/iap-apps.git"),
+    }
+
+    by_url = github.ow_resolve_target(
+        "https://github.com/odoo/iap-apps/pull/1992", catalog, {"github.default_org": "odoo"}
+    )
+    assert by_url is not None
+    assert [r.name for r in by_url.repos] == ["iap", "enterprise"]
+
+    by_known = github.ow_resolve_target("iap-apps#1992", catalog, {"github.default_org": "odoo"})
+    assert by_known is not None
+    assert [r.name for r in by_known.repos] == ["iap", "enterprise"]
+
+    by_sister = github.ow_resolve_target("enterprise#135585", catalog, {"github.default_org": "odoo"})
+    assert by_sister is not None
+    assert [r.name for r in by_sister.repos] == ["enterprise", "iap"]

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from ow.commands._shared import resolve_known_repo
 from ow.core.paths import repos_dir
 from ow.core.plugins import KnownRepo, ResolvedRepo, ResolvedTarget
 from ow.errors import UsageError
@@ -71,10 +70,7 @@ def resolve_composite_target(
         if res is not None:
             resolved_parts.append(res)
         elif len(parts) > 1:
-            known = resolve_known_repo(part, catalog)
-            if known is not None:
-                extra_repo_names.append(known.name)
-            elif (repos_dir() / f"{part}.git").is_dir():
+            if (repos_dir() / f"{part}.git").is_dir() or part in catalog:
                 extra_repo_names.append(part)
             else:
                 unknown_parts.append(part)

@@ -23,7 +23,6 @@ __all__ = [
     "refresh_workspace",
     "remotes_of",
     "render_value",
-    "resolve_known_repo",
     "run_steps",
 ]
 
@@ -35,16 +34,6 @@ def known_repo_catalog(plugins: "Plugins") -> dict[str, "KnownRepo"]:
         for repo in answer or ():
             catalog[repo.name] = repo
     return catalog
-
-
-def resolve_known_repo(name: str, catalog: Mapping[str, "KnownRepo"]) -> "KnownRepo | None":
-    """Look up `name` by canonical name or alias in `catalog`."""
-    if name in catalog:
-        return catalog[name]
-    for repo in catalog.values():
-        if name in repo.aliases:
-            return repo
-    return None
 
 
 def render_value(value: object) -> str:
