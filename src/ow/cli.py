@@ -463,6 +463,62 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     app.add_typer(config_app, name="config")
 
+    # -- status ----------------------------------------------------------
+
+    @app.command("status")
+    def status_cmd(
+        target: str = typer.Argument(
+            None,
+            metavar="TARGET",
+            help="Optional external target (e.g. enterprise#12345 or future Runbot bundle)",
+        ),
+        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
+        task: str = typer.Option(None, "-t", "--task", **task_option),
+        only: list[str] = typer.Option(None, "--only", **only_option),
+        fetch: bool = typer.Option(
+            False, "--fetch", help="Fetch tracked refs in parallel before showing status"
+        ),
+        offline: bool = typer.Option(
+            False, "--offline", help="Skip external network lookups (GitHub/Runbot)"
+        ),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
+    ) -> None:
+        """Show workspace, task, or external target status."""
+        if target is not None and (workspace is not None or task is not None):
+            raise errors.UsageError("pass either TARGET, -w/--workspace, or -t/--task")
+        if workspace is not None and task is not None:
+            raise errors.UsageError("pass either -w/--workspace or -t/--task, not both")
+        if target is not None and (only or fetch):
+            raise errors.UsageError("--only and --fetch cannot be used with an external TARGET")
+        if task is not None and only:
+            raise errors.UsageError("--only cannot be used with -t/--task")
+
+        if target is not None or task is not None:
+            git.check_version()
+            _exit(
+                _command_module("status").run(
+                    None,
+                    plugins=plugins,
+                    target=target,
+                    task_name=task,
+                    fetch=fetch,
+                    offline=offline,
+                    json_output=json_output,
+                )
+            )
+
+        session = _checked(workspace, only)
+        _exit(
+            _command_module("status").run(
+                session,
+                plugins=plugins,
+                only=_only(only),
+                fetch=fetch,
+                offline=offline,
+                json_output=json_output,
+            )
+        )
+
     # -- refresh, files --------------------------------------------------
 
     @app.command("refresh")
@@ -488,6 +544,97 @@ def build_app(plugins: Plugins) -> typer.Typer:
         session = _open(workspace)
         _announce(session)
         _exit(_command_module("files").run(session, diff=diff, json_output=json_output))
+
+    # -- fleet: ls, cd, shell-init, rm, prune ----------------------------
+
+    @app.command("ls")
+    def ls_cmd(
+        task: str = typer.Option(None, "-t", "--task", **task_option),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
+    ) -> None:
+        """List the known workspaces and their repos."""
+        git.check_version()
+        _exit(_command_module("ls").run(plugins, task=task, json_output=json_output))
+
+    @app.command("cd")
+    def cd_cmd(
+        ws: str = typer.Argument(
+            None,
+            metavar="WS",
+            help="Workspace to print, by name or path (default: the one holding the"
+            " current directory)",
+            autocompletion=complete_workspace,
+        ),
+    ) -> None:
+        """Print a workspace's path."""
+        git.check_version()
+        _exit(_command_module("cd").run(ws))
+
+    @app.command("shell-init")
+    def shell_init_cmd(
+        shell: str = typer.Argument(..., metavar="SHELL", help="bash, zsh or fish"),
+    ) -> None:
+        """Print the shell integration for SHELL."""
+        if shell not in ("bash", "zsh", "fish"):
+            raise typer.BadParameter(
+                f"unsupported shell {shell!r}; expected bash, zsh or fish"
+            )
+        _exit(_command_module("shell_init").run(shell, app=app))
+
+    @app.command("rm")
+    def rm_cmd(
+        ws: str = typer.Argument(
+            None, metavar="WS", help="Workspace to remove", autocompletion=complete_workspace
+        ),
+        task: str = typer.Option(
+            None,
+            "-t",
+            "--task",
+            metavar="TASK",
+            help="Remove every workspace in TASK",
+            autocompletion=complete_task,
+        ),
+        dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
+        yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
+    ) -> None:
+        """Remove a workspace (or task) and its worktrees."""
+        if (ws is None) == (task is None):
+            raise errors.UsageError("pass either WS or -t/--task TASK")
+        if task is not None:
+            git.check_version()
+            _exit(
+                _command_module("rm").run_task(
+                    plugins, task, dry_run=dry_run, yes=yes, json_output=json_output
+                )
+            )
+        session = _checked(ws)
+        _exit(
+            _command_module("rm").run(
+                session, dry_run=dry_run, yes=yes, json_output=json_output
+            )
+        )
+
+    @app.command("prune")
+    def prune_cmd(
+        offline: bool = typer.Option(
+            False, "--offline", help="Skip external network lookups (e.g. GitHub merged PRs)"
+        ),
+        dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
+        yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
+    ) -> None:
+        """Clean up stale state and merged-PR workspaces."""
+        git.check_version()
+        _exit(
+            _command_module("prune").run(
+                plugins=plugins,
+                offline=offline,
+                dry_run=dry_run,
+                yes=yes,
+                json_output=json_output,
+            )
+        )
 
     # Add enabled plugin commands last, so the core surface is complete.
     plugins.add_commands(app)
