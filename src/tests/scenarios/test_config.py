@@ -27,6 +27,7 @@ BASE = "18.0"
 LISTING = [
     "mise.enabled = true (default) # Enable or disable the mise plugin",
     "mise.python = (unset) (default) # Python version for mise (e.g. '3.11', '3.12')",
+    "mise.shared_venv = true (default) # Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
     "odoo.enabled = true (default) # Enable or disable the odoo plugin",
     "odoo.http_port = 8069 (default) # HTTP port for Odoo",
     'odoo.db_name = "voip" (default) # Database name (defaults to workspace name)',
@@ -39,9 +40,14 @@ LISTING = [
     "odoo.smtp_port = 25 (default) # SMTP port",
     'odoo.debug_args = ["--dev=all"] (default) # Debug arguments for Odoo',
     'odoo.debug_test_args = ["--test-tags=voip"] (default) # Debug test arguments',
+    'odoo.default_repos = ["community", "enterprise"] (default) # Default repos added when creating a fresh workspace with `ow add`',
+    "github.enabled = true (default) # Enable or disable the github plugin",
+    'github.default_org = "odoo" (default) # Default GitHub org for short PR targets (e.g. enterprise#12345)',
+    "github.cache_ttl = 120 (default) # Cache TTL in seconds for GitHub PR status lookups",
     "vscode.enabled = true (default) # Enable or disable the vscode plugin",
     "zed.enabled = true (default) # Enable or disable the zed plugin",
     "local.enabled = true (default) # Enable or disable the local plugin",
+    "retarget.enabled = false (default) # Enable or disable the retarget plugin",
 ]
 
 # The same listing outside a workspace: no workspace, so no callable default
@@ -49,6 +55,7 @@ LISTING = [
 LISTING_OUTSIDE = [
     "mise.enabled = true (default) # Enable or disable the mise plugin",
     "mise.python = (unset) (default) # Python version for mise (e.g. '3.11', '3.12')",
+    "mise.shared_venv = true (default) # Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
     "odoo.enabled = true (default) # Enable or disable the odoo plugin",
     "odoo.http_port = 8069 (default) # HTTP port for Odoo",
     "odoo.db_name = (unset) (default) # Database name (defaults to workspace name)",
@@ -61,9 +68,14 @@ LISTING_OUTSIDE = [
     "odoo.smtp_port = 25 (default) # SMTP port",
     "odoo.debug_args = (unset) (default) # Debug arguments for Odoo",
     "odoo.debug_test_args = (unset) (default) # Debug test arguments",
+    'odoo.default_repos = ["community", "enterprise"] (default) # Default repos added when creating a fresh workspace with `ow add`',
+    "github.enabled = true (default) # Enable or disable the github plugin",
+    'github.default_org = "odoo" (default) # Default GitHub org for short PR targets (e.g. enterprise#12345)',
+    "github.cache_ttl = 120 (default) # Cache TTL in seconds for GitHub PR status lookups",
     "vscode.enabled = true (default) # Enable or disable the vscode plugin",
     "zed.enabled = true (default) # Enable or disable the zed plugin",
     "local.enabled = true (default) # Enable or disable the local plugin",
+    "retarget.enabled = false (default) # Enable or disable the retarget plugin",
 ]
 
 

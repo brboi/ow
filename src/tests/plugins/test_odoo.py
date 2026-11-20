@@ -232,7 +232,7 @@ def test_odoo_two_cores_one_warning_and_nothing_else(lab):
     assert "community" in diagnostics[0].text and "enterprise" in diagnostics[0].text
 
     assert odoo.ow_generated_files(ws, lambda hook: []) == []
-    assert odoo.mise_environment(ws) is None
+    assert odoo.python_environment(ws) is None
     assert odoo.editors_contribution(ws) is None
 
 
@@ -250,7 +250,7 @@ def test_odoo_malformed_bound_one_warning_and_nothing_else(lab):
     assert "Python version bounds" in diagnostics[0].text
 
     assert odoo.ow_generated_files(ws, lambda hook: []) == []
-    assert odoo.mise_environment(ws) is None
+    assert odoo.python_environment(ws) is None
     assert odoo.editors_contribution(ws) is None
 
 
@@ -284,7 +284,7 @@ def test_odoo_unparsable_config_warns_and_contributes_nothing(lab):
     assert "config.py" in diagnostics[0].text
 
     assert odoo.ow_generated_files(ws, lambda hook: []) == []
-    assert odoo.mise_environment(ws) is None
+    assert odoo.python_environment(ws) is None
     assert odoo.editors_contribution(ws) is None
 
 
@@ -294,7 +294,7 @@ def test_odoo_postinstall_quotes_paths_for_space(lab):
     _write(root / "community", lab.odoo_files())
     ws = resolved_workspace(root, _repos(("community", root / "community")))
 
-    answer = odoo.mise_environment(ws)
+    answer = odoo.python_environment(ws)
     assert answer is not None
     assert answer.postinstall == (
         "python -m ensurepip --default-pip && pip install -r \"{{config_root}}/community/requirements.txt\" -r \"{{config_root}}/requirements-dev.txt\"",
@@ -413,7 +413,7 @@ def test_odoo_no_core_is_silent(lab):
 
     assert odoo.ow_diagnostics(ws) == []
     assert odoo.ow_generated_files(ws, lambda hook: []) == []
-    assert odoo.mise_environment(ws) is None
+    assert odoo.python_environment(ws) is None
     assert odoo.editors_contribution(ws) is None
 
 
@@ -421,7 +421,7 @@ def test_odoo_mise_environment_answers(lab):
     """The mise answer carries the core path, range, postinstall with ensurepip, quoted paths, and quoted alias."""
     ws = _core_workspace(lab)
 
-    answer = odoo.mise_environment(ws)
+    answer = odoo.python_environment(ws)
     assert answer is not None
     assert answer.env == {"ODOO_RC": "{{config_root}}/odoorc"}
     assert answer.path == ("{{config_root}}/community",)
@@ -433,9 +433,19 @@ def test_odoo_mise_environment_answers(lab):
 
 
 def test_odoo_known_repos():
-    """The built-in known repos are community, enterprise and design-themes."""
-    names = [repo.name for repo in odoo.ow_known_repos()]
-    assert names == ["community", "enterprise", "design-themes"]
+    """The built-in known repos include community (aliased as odoo) and companion repos."""
+    repos = odoo.ow_known_repos()
+    names = [repo.name for repo in repos]
+    assert names == [
+        "community",
+        "enterprise",
+        "design-themes",
+        "iap-apps",
+        "upgrade",
+        "upgrade-util",
+        "voip",
+    ]
+    assert repos[0].aliases == ("odoo",)
 
 
 def test_odoo_debug_args_setting_default_tracks_the_core(lab):

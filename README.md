@@ -3,7 +3,8 @@
 ow keeps Odoo's repos on one machine and gives each task its own workspace of git worktrees. The
 bare repos are shared, so Odoo is cloned once and every fetch is visible to every workspace; a
 worktree is a cheap checkout, so a new branch costs seconds, not gigabytes. The core is plain git
-and knows nothing about Odoo: Odoo, mise, VSCode and Zed support are built-in plugins.
+and knows nothing about Odoo: Odoo, GitHub (`gh`), mise, VSCode, Zed, local seeding and opt-in
+`retarget` are built-in plugins.
 
 ## Install
 
@@ -12,59 +13,54 @@ pipx install odoo-workspaces   # recommended
 pip install odoo-workspaces    # or, inside a venv
 ```
 
-`ow` needs git ≥ 2.45 and an SSH key with access to the Odoo repos. Odoo's own system
-dependencies (PostgreSQL client libraries, wkhtmltopdf, …) stay yours to install: see the
-[Odoo source install docs](https://www.odoo.com/documentation/master/administration/on_premise/source.html#dependencies).
-mise (≥ 2026.8.13) is optional; with it, ow writes a mise fragment and trusts it, and mise builds
-the workspace's `.venv` and installs Odoo's requirements.
+`ow` needs git ≥ 2.45 and an SSH key with access to the Odoo repos. GitHub CLI (`gh`) is used by
+the built-in `github` plugin for PR resolution (`ow add enterprise#12345`), PR status, and
+merged-PR pruning. mise (≥ 2026.8.13) is optional; with it, ow writes a mise fragment pointing at
+a shared Python virtualenv per `(python, odoo-series)` under `~/.local/share/ow/venvs/`.
 
-## First workspace
+## Quick start
+
+### Review or run a PR in one command
 
 ```sh
-ow repo add community      # no URL needed: ow knows community, enterprise, design-themes
-ow repo add enterprise
-ow init ws/voip community enterprise --base 18.0 --branch 18.0-voip
-cd ws/voip && mise install
+ow run enterprise#12345 -- -i sale
+```
+
+`ow` asks `gh` for the PR's head and base branches, discovers any sister PR with the same branch
+on `community` (or detaches `community` on the base branch), creates `12345-<branch>/`, generates
+config/IDE files, and launches Odoo locally. Pass `--tmp` for a throwaway run cleaned up on exit.
+
+### Create a workspace or a multi-workspace task
+
+```sh
+# Fresh workspace on 18.0 (defaults to community + enterprise)
+ow add my-fix --base 18.0 --branch 18.0-my-fix
+
+# Multi-workspace task in one command (distinct HTTP ports + multi-root .code-workspace)
+ow add -t voip-task iap-apps#42+enterprise enterprise#15402 voip#89
+
+# Inspect status (includes PR state + task siblings in --json for UIs & coding harnesses)
 ow status
+ow status --json
+ow status -t voip-task
+
+# Clean up a workspace, a whole task, or merged PRs machine-wide
+ow rm 12345-18.0-fix-invoice-mic
+ow rm -t voip-task
+ow prune
 ```
 
-`ow repo add` registers a bare repo under `~/.local/share/ow/repos/<name>.git` — one clone per
-machine. `ow init` creates the workspace directory, adds one worktree per repo on the branch,
-indexes the workspace, and writes every generated file:
+### Opt-in guarded replay (`ow retarget`)
 
+```sh
+ow config set --global retarget.enabled true
+ow retarget 18.0
 ```
-ws/voip/
-├── .ow/config.toml            the repos and their bases, plus your settings
-├── community/                 worktree of the community bare, on 18.0-voip
-├── enterprise/                worktree of the enterprise bare, on 18.0-voip
-├── mise/conf.d/00-ow.toml     mise: .venv, env, Odoo's postinstall
-├── odoorc                     Odoo config, addons paths pointing at the worktrees
-├── odools.toml                Odoo LSP config
-├── pyrightconfig.json         pyright, resolving into .venv
-├── requirements-dev.txt      inotify and friends
-├── .vscode/settings.json      search excludes and language servers
-├── .vscode/launch.json        run and debug-test launches
-├── .zed/settings.json
-└── .zed/debug.json
-```
-
-`mise install` builds `.venv` and installs `community/requirements.txt` and
-`requirements-dev.txt` into it. `ow status` then prints, one line per repo:
-
-```
-community	18.0-voip	origin/18.0	(none)	(even)
-enterprise	18.0-voip	origin/18.0	(none)	(even)
-```
-
-From there: `ow switch -c <branch>` for the next task, `ow fetch` to refresh the cached refs,
-`ow rebase` to move onto a newer base, `ow rm <ws>` to clean up. Every command prints the git it
-runs.
 
 ## Documentation
 
-- [Commands](docs/commands.md) — every command, its flags, exit codes and confirmation rules
+- [Commands](docs/commands.md) — every command, its flags, `--json` contract, exit codes and confirmation rules
 - [Configuration](docs/configuration.md) — settings, precedence, and `ow config`
 - [Generated files](docs/files.md) — the fixed outputs, ownership, file states and the refresh model
 - [Services](docs/services.md) — the postgres + pgvector + mailpit compose stack
 - [Sandboxing AI Coding Assistants](docs/sandboxing.md) — bwrap recipe for AI assistants with repo access
-- [Migrating to 3.0](docs/migrating-to-3.0.md) — adoption path from 2.x, command changes, git requirements

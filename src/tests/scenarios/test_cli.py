@@ -14,10 +14,11 @@ REPO = "community"
 BASE = "18.0"
 
 COMMANDS = (
-    "init", "status", "fetch", "switch", "pull", "rebase", "reset",
+    "add", "run", "status",
     "refresh", "files", "ls", "cd", "shell-init", "rm", "prune",
     "repo", "config",
 )
+REMOVED_COMMANDS = ("init", "fetch", "switch", "pull", "rebase", "reset", "retarget")
 
 
 def test_bare_ow_prints_help_and_exits_zero(lab):
@@ -27,6 +28,8 @@ def test_bare_ow_prints_help_and_exits_zero(lab):
     assert "Ready-to-code Odoo workspaces on git worktrees" in result.stdout
     for command in COMMANDS:
         assert re.search(rf"^  {re.escape(command)}\s", result.stdout, re.M), command
+    for command in REMOVED_COMMANDS:
+        assert not re.search(rf"^  {re.escape(command)}\s", result.stdout, re.M), command
 
 
 def test_root_help_never_truncates_a_summary(lab):
@@ -43,8 +46,9 @@ def test_root_help_never_truncates_a_summary(lab):
 
 
 def test_workspace_and_only_metavars(lab):
-    assert "-w, --workspace WS" in lab.ow("status", "--help").stdout
-    assert "--only REPO" in lab.ow("fetch", "--help").stdout
+    status_help = lab.ow("status", "--help").stdout
+    assert "-w, --workspace WS" in status_help
+    assert "--only REPO" in status_help
 
 
 def test_repo_with_no_arguments_prints_help_and_exits_zero(lab):
@@ -72,7 +76,7 @@ def test_unknown_command_exits_two(lab):
 def test_only_with_an_unknown_repo_names_the_valid_ones(lab):
     root = workspace(lab)
 
-    result = lab.ow("fetch", "--only", "bogus", cwd=root)
+    result = lab.ow("status", "--only", "bogus", cwd=root)
 
     assert result.exit_code == 2
     assert result.stdout == ""
@@ -80,22 +84,13 @@ def test_only_with_an_unknown_repo_names_the_valid_ones(lab):
     assert REPO in result.stderr
 
 
-def test_status_has_no_only_option(lab):
+def test_status_supports_only_option(lab):
     root = workspace(lab)
 
     result = lab.ow("status", "--only", REPO, cwd=root)
 
-    assert result.exit_code == 2
-    assert "--only" in result.stderr
-
-
-def test_switch_base_without_create_is_a_usage_error(lab):
-    root = workspace(lab)
-
-    result = lab.ow("switch", "some-branch", "--base", "origin/18.0", cwd=root)
-
-    assert result.exit_code == 2
-    assert "--base needs -c" in result.stderr
+    assert result.exit_code == 0
+    assert REPO in result.stdout
 
 
 def test_cd_outside_a_workspace_exits_two(lab):

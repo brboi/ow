@@ -229,15 +229,19 @@ def init_workspace(
     base: str = "18.0",
     branch: str | None = None,
 ) -> Path:
-    """`ow init` a workspace of the already-registered `names`; returns its root.
+    """`ow add` a workspace of the already-registered `names`; returns its root.
 
     `root` defaults to `~/ws/<name>`.
     """
     root = lab.ws(name) if root is None else root
-    args = ["init", str(root), *names, "--base", base]
+    root.parent.mkdir(parents=True, exist_ok=True)
+    args = ["add", root.name, "--base", base]
+    for repo in names:
+        args += ["-r", repo]
     if branch is not None:
         args += ["--branch", branch]
-    assert lab.ow(*args).exit_code == 0
+    result = lab.ow(*args, cwd=root.parent)
+    assert result.exit_code == 0, result.stderr + result.stdout
     return root
 
 

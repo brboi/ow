@@ -11,8 +11,9 @@ is the user-facing command reference.
 - **Recipes** (`recipes/`): decision tables over `RepoFacts`. The `gather_*` helpers and
   `removal.py` read git; the decision functions are pure.
 - **Commands** (`commands/`): one module per command. Session → gather → plan → run → refresh.
-- **Plugins** (`plugins/`, `specs/`): mise, odoo, vscode, zed, local contribute settings,
-  generated files, diagnostics and known repos; the core writes.
+- **Plugins** (`plugins/`, `specs/`): mise, odoo, github, vscode, zed, local, and opt-in retarget
+  contribute settings, generated files, diagnostics, target resolution, runners, status, prune
+  candidates, commands and known repos; the core writes.
 - **CLI** (`cli.py`): every Typer signature, shared options and completers live here.
 
 ## Module Map
@@ -26,49 +27,47 @@ src/ow/
 ├── term.py                  # out(), warn(), error(), interactive(), confirm()
 ├── errors.py                # OwError(1), UsageError(2), Refused(1), PluginError(1)
 ├── core/
-│   ├── paths.py             # repos_dir(), index_file(), global_config(), local_seed_dir()
+│   ├── paths.py             # repos_dir(), index_file(), global_config(), local_seed_dir(),
+│   │                        #   venvs_dir(), cache_dir(), task_locks_dir()
+│   ├── cache.py             # file-backed TTL JSON cache under $XDG_CACHE_HOME/ow
+│   ├── json_schema.py       # schema_version=1 JSON envelope and serializers
 │   ├── git.py               # run/read/show, GitFailed, check_version() (≥ 2.45), remotes(), auth_hint()
 │   ├── index.py             # read(), add(path), remove(path) — the workspace index
 │   ├── bases.py             # parse_base(), infer_default_base(), is_upstream_base()
-│   ├── config.py            # Layer, read_global/read_workspace, resolve_settings, update_*, parse_cli_value
-│   ├── plugins.py           # Setting, GeneratedFile, Diagnostic, KnownRepo, CoreSpec, Plugins, load_plugins
+│   ├── config.py            # Layer, WorkspaceMeta, read_global/read_workspace_config, resolve_settings,
+│   │                        #   update_*, parse_cli_value
+│   ├── plugins.py           # Setting, GeneratedFile, Diagnostic, KnownRepo, ResolvedTarget, RunCommand,
+│   │                        #   StatusInfo, PruneCandidate, CoreSpec, Plugins, load_plugins
 │   ├── workspace.py         # Repo, RepoLocation, Workspace, derive_repos, build_workspace,
 │   │                        #   find_root, resolve_root, stray_checkouts
+│   ├── tasks.py             # Task, load_tasks, find_task, next_free_port, sync_task_files, cleanup_task_files
 │   ├── session.py           # Session, open_session()
 │   ├── facts.py             # RepoFacts, gather_facts, gather_all, operation_in_progress
 │   ├── plan.py              # GitStep, OwStep, Step, RepoPlan, Batch, Outcome, run_batch, run_fetches
 │   └── refresh.py           # FileStatus, Projection, project, refresh, report, read_lock
 ├── recipes/                 # decision tables: gather_* reads git, plan_* is pure
-│   ├── follow.py            # followed_ref(facts): the ref a repo follows
 │   ├── preflight.py         # refusal(): operations in progress, dirty state
 │   ├── fetch.py             # fetch_steps(facts, extra): one narrow step per remote
-│   ├── switch.py            # lookup(), steps(), detach_steps(), hint()
-│   ├── pull.py              # gather_pull → PullInputs, plan_pull → RepoPlan
-│   ├── reset.py             # gather_reset → ResetInputs, plan_reset(hard=…)
-│   ├── rebase.py            # gather_rebase → RebaseInputs, plan_rebase, plan_is_fast_forward
+│   ├── rebase.py            # gather_rebase → RebaseInputs, plan_rebase, plan_is_fast_forward (used by retarget)
 │   └── removal.py           # branch_is_pushed, branch_removal, orphan_commits
 ├── commands/                # CLI: session → gather → plan → run_batch → refresh
-│   ├── _shared.py           # refresh_workspace, refresh_after, known_repos, remotes_of, run_steps
-│   ├── _repos.py            # ensure_bare, repair_bare, add_worktree, base resolution (init + repo add)
+│   ├── _shared.py           # refresh_workspace, refresh_after, known_repo_catalog, remotes_of, run_steps
+│   ├── _repos.py            # ensure_bare, add_worktree (with fetch_ref), tracking_steps, base resolution
 │   ├── _sync.py             # fetch_then_gather(): facts → fetch → re-gather
-│   ├── init.py              # ow init
+│   ├── add.py               # ow add (PRs, multi-workspace tasks, composite a+b, fresh workspaces)
+│   ├── run.py               # ow run (local runner via ow_runner hook, create/reuse, --tmp)
 │   ├── repo.py              # ow repo add/ls/rm
-│   ├── config.py            # ow config [get|set|unset]
-│   ├── status.py            # ow status
-│   ├── fetch.py             # ow fetch
-│   ├── switch.py            # ow switch
-│   ├── pull.py              # ow pull
-│   ├── rebase.py            # ow rebase
-│   ├── reset.py             # ow reset
+│   ├── config.py            # ow config [get|set|unset] [--json]
+│   ├── status.py            # ow status [TARGET] [-t TASK] [--fetch] [--offline] [--json]
 │   ├── refresh.py           # ow refresh
-│   ├── files.py             # ow files
-│   ├── ls.py                # ow ls
+│   ├── files.py             # ow files [--diff] [--json]
+│   ├── ls.py                # ow ls [-t TASK] [--json]
 │   ├── cd.py                # ow cd
 │   ├── shell_init.py        # ow shell-init
-│   ├── rm.py                # ow rm
-│   └── prune.py             # ow prune
-├── specs/                   # MiseSpec/MiseEnvironment, EditorsSpec/EditorContribution, merge()
-└── plugins/                 # Built-ins, in load order: mise, odoo, vscode, zed, local
+│   ├── rm.py                # ow rm [WS] [-t TASK] [-n] [-y] [--json]
+│   └── prune.py             # ow prune [--offline] [-n] [-y] [--json]
+├── specs/                   # PythonEnvSpec/PythonEnvironment, EditorsSpec/EditorContribution, merge()
+└── plugins/                 # Built-ins: mise, odoo, github, vscode, zed, local, retarget (opt-in)
 
 src/tests/
 ├── conftest.py              # hermetic autouse fixture, lab fixture
@@ -259,31 +258,27 @@ Exit codes:
 One line per command; flags, outputs and confirmation rules live in
 [docs/commands.md](docs/commands.md), which is the single reference.
 
-- `ow init [DIR] [REPO…] [--base REF] [--branch BRANCH]` — create, adopt or repair a workspace.
+- `ow add TARGET… [--name NAME] [-t TASK] [--base REF] [--branch BRANCH] [-r REPO…] [--json]` — create one or more workspaces from PR targets, composite `a+b` specs, or a base ref.
+- `ow run [TARGET] [-w WS] [--tmp] [-- ARGS…]` — run the workspace locally (creating/reusing `TARGET` when given; `--tmp` cleans up on exit).
 - `ow repo add <NAME> [URL] [--base REF]` — register or clone a repo, add its worktree.
 - `ow repo ls` — list the known repos and their remotes.
 - `ow repo rm <NAME> [-n] [-y]` — remove a repo's worktree from this workspace.
-- `ow config` — list every setting with its value, origin and help.
-- `ow config get <KEY>` — print one setting's effective value (`--global` reads the global layer).
+- `ow config [--global] [--json]` — list every setting with its value, origin and help.
+- `ow config get <KEY> [--global] [--json]` — print one setting's effective value.
 - `ow config set <KEY> <VALUE…>` — write one setting (`--global` writes the global config).
 - `ow config unset <KEY>` — remove one setting from a layer.
-- `ow status` — show each repo's branch and state.
-- `ow fetch [--only REPO…]` — fetch every remote, then show the status.
-- `ow switch <BRANCH> | -c BRANCH [--base REF] | --detach [-n]` — switch the workspace's branch.
-- `ow pull [--only REPO…] [--no-fetch] [-n]` — fast-forward each repo to the ref it follows.
-- `ow rebase [--base REF] [--autostash] [--no-fetch] [-n] [-y]` — rebase each repo onto its base.
-- `ow reset [--hard] [--no-fetch] [-n] [-y]` — reset each repo to the ref it follows.
-- `ow refresh` — rewrite the generated files.
-- `ow files [--diff]` — show the generated files and their state.
-- `ow ls` — list the known workspaces and their repos.
+- `ow status [TARGET] [-w WS] [-t TASK] [--only REPO…] [--fetch] [--offline] [--json]` — show workspace, task, or external target status (with cached PR info by default).
+- `ow refresh` — rewrite the generated files (and task `.code-workspace` if member of a task).
+- `ow files [--diff] [--json]` — show the generated files and their state.
+- `ow ls [-t TASK] [--json]` — list the known workspaces and their repos.
 - `ow cd [WS]` — print a workspace's path.
 - `ow shell-init {bash|zsh|fish}` — print the shell integration.
-- `ow rm <WS> [-n] [-y]` — remove a workspace and its worktrees.
-- `ow prune [-n] [-y]` — clean up stale state machine-wide.
+- `ow rm [WS] [-t TASK] [-n] [-y] [--json]` — remove a workspace (or all workspaces in a task) and its worktrees.
+- `ow prune [--offline] [-n] [-y] [--json]` — clean up stale state and merged/closed-PR workspaces machine-wide.
+- `ow retarget [BASE] [--base REF] [--autostash] [--no-fetch] [--only REPO…] [-n] [-y] [--json]` — opt-in guarded replay plugin (`retarget.enabled = false` by default).
 - `ow --version` — print the version.
 
-`-w, --workspace` selects the workspace on the commands that take it; `--only` (on `fetch`,
-`switch`, `pull`, `rebase`, `reset`) limits a multi-repo command to named repos.
+`-w, --workspace` selects the workspace on the commands that take it; `-t, --task` targets a logical task group; `--json` emits versioned JSON on `stdout` and routes progress/plans to `stderr`.
 
 ## Tests
 

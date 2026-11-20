@@ -91,7 +91,7 @@ def test_status_during_a_rebase(lab):
     collaborator = lab.collaborator("dev", of=remote)
     collaborator.commit({"odoo-bin": "colleague\n"}, message="colleague edit")
     collaborator.push("18.0")
-    assert lab.ow("fetch", cwd=ws).exit_code == 0
+    assert lab.ow("status", "--fetch", cwd=ws).exit_code == 0
     assert not git_ok(worktree, "rebase", "origin/18.0")
 
     result = lab.ow("status", cwd=ws)

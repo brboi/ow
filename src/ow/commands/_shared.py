@@ -15,7 +15,7 @@ from ow.core.plan import Batch, GitStep, RepoPlan, run_batch
 from ow.core.session import Session
 
 if TYPE_CHECKING:
-    from ow.core.plugins import Plugins
+    from ow.core.plugins import KnownRepo, Plugins
 
 
 def refresh_workspace(session: Session) -> int:
@@ -31,12 +31,32 @@ def refresh_after(session: Session) -> int:
     return refresh_workspace(session.reload())
 
 
-def known_repos(plugins: "Plugins") -> dict[str, str]:
-    """Registered repo name -> URL, from every `ow_known_repos` answer."""
-    urls: dict[str, str] = {}
+def known_repo_catalog(plugins: "Plugins") -> dict[str, "KnownRepo"]:
+    """Canonical repo name -> KnownRepo from every `ow_known_repos` answer."""
+    catalog: dict[str, "KnownRepo"] = {}
     for _plugin, answer in plugins.call("ow_known_repos"):
         for repo in answer or ():
-            urls[repo.name] = repo.url
+            catalog[repo.name] = repo
+    return catalog
+
+
+def resolve_known_repo(name: str, catalog: Mapping[str, "KnownRepo"]) -> "KnownRepo | None":
+    """Look up `name` by canonical name or alias in `catalog`."""
+    if name in catalog:
+        return catalog[name]
+    for repo in catalog.values():
+        if name in repo.aliases:
+            return repo
+    return None
+
+
+def known_repos(plugins: "Plugins") -> dict[str, str]:
+    """Registered repo name (and aliases) -> URL, from every `ow_known_repos` answer."""
+    urls: dict[str, str] = {}
+    for repo in known_repo_catalog(plugins).values():
+        urls[repo.name] = repo.url
+        for alias in repo.aliases:
+            urls.setdefault(alias, repo.url)
     return urls
 
 

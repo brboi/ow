@@ -5,7 +5,6 @@ Every Typer signature lives here (a `commands/` module never imports `ow.cli`).
 from __future__ import annotations
 
 import importlib
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Sequence
 
 import click
@@ -28,9 +27,10 @@ WORKSPACE_HELP = (
     " current directory)"
 )
 ONLY_HELP = "Limit the command to this repo (repeatable; default: every repo)"
-DRY_RUN_HELP = "Print the git commands without running them"
+DRY_RUN_HELP = "Print the commands without running them"
 YES_HELP = "Skip the confirmation prompt"
-NO_FETCH_HELP = "Do not fetch first; use the cached refs"
+JSON_HELP = "Emit machine-readable JSON on stdout"
+TASK_HELP = "Task name grouping related workspaces"
 
 # Registers the vendored click's shell-completion classes, which `shell-init` reads.
 typer.completion.completion_init()
@@ -139,7 +139,6 @@ def build_app(plugins: Plugins) -> typer.Typer:
                     names.append(entry.name)
             return names
         except Exception:
-            # Completion must never crash the shell, whatever state the index is in.
             return []
 
     def _repo_names(workspace: str | None = None) -> list[str]:
@@ -157,10 +156,8 @@ def build_app(plugins: Plugins) -> typer.Typer:
                 ]
             for _plugin, known in plugins.call("ow_known_repos"):
                 names += [repo.name for repo in known]
-            # repos_dir() and ow_known_repos overlap; a shell hates duplicates.
             return list(dict.fromkeys(names))
         except Exception:
-            # Best-effort: completion must never crash the shell.
             return []
 
     def _setting_keys() -> list[str]:
@@ -182,24 +179,87 @@ def build_app(plugins: Plugins) -> typer.Typer:
     workspace_option = dict(metavar="WS", help=WORKSPACE_HELP, autocompletion=complete_workspace)
     only_option = dict(metavar="REPO", help=ONLY_HELP, autocompletion=complete_repo)
 
-    # -- init ------------------------------------------------------------
+    # -- add -------------------------------------------------------------
 
-    @app.command("init")
-    def init_cmd(
-        directory: Path = typer.Argument(Path("."), metavar="DIR",
-            help="Where the workspace lives (default: the current directory)"),
-        repos: list[str] = typer.Argument(None, metavar="REPO",
-            help="Repos to add to the workspace",
-            autocompletion=complete_repo),
-        base: str = typer.Option(None, "--base", metavar="REF",
-            help="Default base for the repos ow adds (a remote branch)"),
-        branch: str = typer.Option(None, "--branch", metavar="BRANCH",
-            help="Create and switch to this branch in every repo"),
+    @app.command("add")
+    def add_cmd(
+        targets: list[str] = typer.Argument(
+            ...,
+            metavar="TARGET",
+            help="PR target (e.g. enterprise#12345, URL, a+b) or fresh workspace name",
+        ),
+        name: str = typer.Option(
+            None, "--name", metavar="NAME", help="Override the created workspace directory name"
+        ),
+        task: str = typer.Option(None, "-t", "--task", metavar="TASK", help=TASK_HELP),
+        base: str = typer.Option(
+            None, "--base", metavar="REF", help="Base ref for added repos (a remote branch)"
+        ),
+        branch: str = typer.Option(
+            None, "--branch", metavar="BRANCH", help="Create or check out this branch in every repo"
+        ),
+        repos: list[str] = typer.Option(
+            None,
+            "-r",
+            "--repo",
+            metavar="REPO",
+            help="Repo to include (repeatable; defaults to odoo.default_repos on fresh workspaces)",
+            autocompletion=complete_repo,
+        ),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
-        """Create, adopt or repair the workspace at DIR."""
+        """Create workspaces from PR targets or a base ref."""
         git.check_version()
-        module = _command_module("init")
-        _exit(module.run(plugins, directory, _only(repos), base=base, branch=branch))
+        _exit(
+            _command_module("add").run(
+                plugins,
+                tuple(targets),
+                name=name,
+                task=task,
+                base=base,
+                branch=branch,
+                repos=_only(repos),
+                json_output=json_output,
+            )
+        )
+
+    # -- run -------------------------------------------------------------
+
+    @app.command(
+        "run",
+        context_settings={"allow_extra_args": True, "ignore_unknown_options": False},
+    )
+    def run_cmd(
+        ctx: typer.Context,
+        target: str = typer.Argument(
+            None,
+            metavar="TARGET",
+            help="Optional PR target or workspace to create/reuse before running",
+        ),
+        tmp: bool = typer.Option(
+            False,
+            "--tmp",
+            "--ephemeral",
+            help="Create a temporary workspace and remove it on exit",
+        ),
+        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
+    ) -> None:
+        """Run a workspace (or create/reuse TARGET and run it)."""
+        git.check_version()
+        extra_args = list(ctx.args)
+        effective_target = target
+        if effective_target is not None and effective_target.startswith("-"):
+            extra_args.insert(0, effective_target)
+            effective_target = None
+        _exit(
+            _command_module("run").run(
+                plugins,
+                target=effective_target,
+                workspace=workspace,
+                tmp=tmp,
+                extra_args=tuple(extra_args),
+            )
+        )
 
     # -- repo ------------------------------------------------------------
 
@@ -214,12 +274,15 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     @repo_app.command("add")
     def repo_add(
-        name: str = typer.Argument(..., metavar="NAME", help="Repo name",
-            autocompletion=complete_repo),
-        url: str = typer.Argument(None, metavar="URL",
-            help="Clone URL (default: the URL ow knows for NAME)"),
-        base: str = typer.Option(None, "--base", metavar="REF",
-            help="Default base for this repo, stored fully qualified"),
+        name: str = typer.Argument(
+            ..., metavar="NAME", help="Repo name", autocompletion=complete_repo
+        ),
+        url: str = typer.Argument(
+            None, metavar="URL", help="Clone URL (default: the URL ow knows for NAME)"
+        ),
+        base: str = typer.Option(
+            None, "--base", metavar="REF", help="Default base for this repo, stored fully qualified"
+        ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
         """Register or clone a repo and add its worktree."""
@@ -240,9 +303,12 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     @repo_app.command("rm")
     def repo_rm(
-        name: str = typer.Argument(..., metavar="NAME",
+        name: str = typer.Argument(
+            ...,
+            metavar="NAME",
             help="Repo whose worktree this workspace loses",
-            autocompletion=complete_repo),
+            autocompletion=complete_repo,
+        ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
@@ -268,171 +334,147 @@ def build_app(plugins: Plugins) -> typer.Typer:
     )
 
     def _config_context(
-        ctx: typer.Context, workspace: str | None, global_: bool
-    ) -> tuple[str | None, bool]:
-        """Merge a verb's own -w/--global with the ones given before it."""
+        ctx: typer.Context, workspace: str | None, global_: bool, json_output: bool
+    ) -> tuple[str | None, bool, bool]:
+        """Merge a verb's own -w/--global/--json with the ones given before it."""
         parent = ctx.obj if isinstance(ctx.obj, dict) else {}
         return (
             workspace or parent.get("workspace"),
             global_ or bool(parent.get("global_")),
+            json_output or bool(parent.get("json_output")),
         )
 
     @config_app.callback()
     def config_callback(
         ctx: typer.Context,
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-        global_: bool = typer.Option(False, "--global",
-            help="Read or write the global config"),
+        global_: bool = typer.Option(False, "--global", help="Read or write the global config"),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Show every setting with its effective value, its origin and its help."""
-        ctx.obj = {"workspace": workspace, "global_": global_}
+        ctx.obj = {"workspace": workspace, "global_": global_, "json_output": json_output}
         if ctx.invoked_subcommand is not None:
             return
         session = _open(workspace, need_workspace=False)
         _announce(session)
-        _exit(_command_module("config").show_all(session, global_=global_))
+        _exit(
+            _command_module("config").show_all(
+                session, global_=global_, json_output=json_output
+            )
+        )
 
     @config_app.command("get")
     def config_get(
         ctx: typer.Context,
-        key: str = typer.Argument(..., metavar="KEY", help="Setting key",
-            autocompletion=complete_setting),
+        key: str = typer.Argument(
+            ..., metavar="KEY", help="Setting key", autocompletion=complete_setting
+        ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
         global_: bool = typer.Option(False, "--global", help="Read the global layer"),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Print one setting's effective value."""
-        workspace, _global_ = _config_context(ctx, workspace, global_)
+        workspace, _global_, _json = _config_context(ctx, workspace, global_, json_output)
         session = _open(workspace, need_workspace=False)
         _announce(session)
-        _exit(_command_module("config").get(session, key, global_=_global_))
+        _exit(
+            _command_module("config").get(
+                session, key, global_=_global_, json_output=_json
+            )
+        )
 
     @config_app.command("set")
     def config_set(
         ctx: typer.Context,
-        key: str = typer.Argument(..., metavar="KEY", help="Setting key",
-            autocompletion=complete_setting),
-        values: list[str] = typer.Argument(None, metavar="VALUE",
-            help="One item per value; put `--` before a value that starts with a dash"),
+        key: str = typer.Argument(
+            ..., metavar="KEY", help="Setting key", autocompletion=complete_setting
+        ),
+        values: list[str] = typer.Argument(
+            None,
+            metavar="VALUE",
+            help="One item per value; put `--` before a value that starts with a dash",
+        ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-        global_: bool = typer.Option(False, "--global",
-            help="Write the global config instead of the workspace's"),
+        global_: bool = typer.Option(
+            False, "--global", help="Write the global config instead of the workspace's"
+        ),
     ) -> None:
         """Set a key, writing the workspace config unless --global is given."""
-        workspace, global_ = _config_context(ctx, workspace, global_)
-        # set_/unset raise their own "not inside an ow workspace" usage error.
+        workspace, global_, _json = _config_context(ctx, workspace, global_, False)
         session = _open(workspace, need_workspace=False)
         _announce(session)
-        _exit(_command_module("config").set_(
-            session, key, _only(values), global_=global_))
+        _exit(_command_module("config").set_(session, key, _only(values), global_=global_))
 
     @config_app.command("unset")
     def config_unset(
         ctx: typer.Context,
-        key: str = typer.Argument(..., metavar="KEY", help="Setting key",
-            autocompletion=complete_setting),
+        key: str = typer.Argument(
+            ..., metavar="KEY", help="Setting key", autocompletion=complete_setting
+        ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-        global_: bool = typer.Option(False, "--global",
-            help="Write the global config instead of the workspace's"),
+        global_: bool = typer.Option(
+            False, "--global", help="Write the global config instead of the workspace's"
+        ),
     ) -> None:
         """Unset a key, writing the workspace config unless --global is given."""
-        workspace, global_ = _config_context(ctx, workspace, global_)
+        workspace, global_, _json = _config_context(ctx, workspace, global_, False)
         session = _open(workspace, need_workspace=False)
         _announce(session)
         _exit(_command_module("config").unset(session, key, global_=global_))
 
     app.add_typer(config_app, name="config")
 
-    # -- status, fetch, switch, pull, rebase, reset -----------------------
+    # -- status ----------------------------------------------------------
 
     @app.command("status")
     def status_cmd(
+        target: str = typer.Argument(
+            None,
+            metavar="TARGET",
+            help="Optional external target (e.g. enterprise#12345 or future Runbot bundle)",
+        ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-    ) -> None:
-        """Show each repo's branch and state."""
-        session = _checked(workspace)
-        _exit(_command_module("status").run(session))
-
-    @app.command("fetch")
-    def fetch_cmd(
-        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
+        task: str = typer.Option(None, "-t", "--task", metavar="TASK", help=TASK_HELP),
         only: list[str] = typer.Option(None, "--only", **only_option),
+        fetch: bool = typer.Option(
+            False, "--fetch", help="Fetch tracked refs in parallel before showing status"
+        ),
+        offline: bool = typer.Option(
+            False, "--offline", help="Skip external network lookups (GitHub/Runbot)"
+        ),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
-        """Fetch every remote, then show the status."""
-        session = _checked(workspace, only)
-        _exit(_command_module("fetch").run(session, only=_only(only)))
+        """Show workspace, task, or external target status."""
+        if target is not None and (workspace is not None or task is not None):
+            raise errors.UsageError("pass either TARGET, -w/--workspace, or -t/--task")
+        if workspace is not None and task is not None:
+            raise errors.UsageError("pass either -w/--workspace or -t/--task, not both")
 
-    @app.command("switch")
-    def switch_cmd(
-        target: str = typer.Argument(None, metavar="BRANCH",
-            help="Branch every repo switches to"),
-        create: str = typer.Option(None, "-c", "--create", metavar="BRANCH",
-            help="Create this branch instead of switching to an existing one"),
-        base: str = typer.Option(None, "--base", metavar="REF",
-            help="Base for -c, stored fully qualified"),
-        detach: bool = typer.Option(False, "--detach",
-            help="Detach at each repo's default base"),
-        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-        only: list[str] = typer.Option(None, "--only", **only_option),
-        dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
-    ) -> None:
-        """Switch the workspace's branch."""
-        if base and not create:
-            raise errors.UsageError("--base needs -c")
-        chosen = [target is not None, create is not None, detach]
-        if sum(chosen) != 1:
-            raise errors.UsageError(
-                "pass exactly one of <branch>, -c <branch> or --detach"
+        if target is not None or task is not None:
+            git.check_version()
+            _exit(
+                _command_module("status").run(
+                    None,
+                    plugins=plugins,
+                    target=target,
+                    task_name=task,
+                    fetch=fetch,
+                    offline=offline,
+                    json_output=json_output,
+                )
             )
-        session = _checked(workspace, only)
-        _exit(_command_module("switch").run(
-            session, target, create=create, base=base, detach=detach,
-            only=_only(only), dry_run=dry_run))
 
-    @app.command("pull")
-    def pull_cmd(
-        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-        only: list[str] = typer.Option(None, "--only", **only_option),
-        no_fetch: bool = typer.Option(False, "--no-fetch", help=NO_FETCH_HELP),
-        dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
-    ) -> None:
-        """Fast-forward each repo to the ref it follows."""
         session = _checked(workspace, only)
-        _exit(_command_module("pull").run(
-            session, only=_only(only), no_fetch=no_fetch, dry_run=dry_run))
-
-    @app.command("rebase")
-    def rebase_cmd(
-        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-        only: list[str] = typer.Option(None, "--only", **only_option),
-        base: str = typer.Option(None, "--base", metavar="REF",
-            help="Rebase onto this ref and record it as the new ow-base"),
-        autostash: bool = typer.Option(False, "--autostash",
-            help="Stash and restore uncommitted changes around each rebase"),
-        no_fetch: bool = typer.Option(False, "--no-fetch", help=NO_FETCH_HELP),
-        dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
-        yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
-    ) -> None:
-        """Rebase each repo onto its base."""
-        session = _checked(workspace, only)
-        _exit(_command_module("rebase").run(
-            session, only=_only(only), base=base, autostash=autostash,
-            no_fetch=no_fetch, dry_run=dry_run, yes=yes))
-
-    @app.command("reset")
-    def reset_cmd(
-        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-        only: list[str] = typer.Option(None, "--only", **only_option),
-        hard: bool = typer.Option(False, "--hard",
-            help="Discard the working tree too, not just the commits"),
-        no_fetch: bool = typer.Option(False, "--no-fetch", help=NO_FETCH_HELP),
-        dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
-        yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
-    ) -> None:
-        """Reset each repo to the ref it follows."""
-        session = _checked(workspace, only)
-        _exit(_command_module("reset").run(
-            session, only=_only(only), hard=hard, no_fetch=no_fetch,
-            dry_run=dry_run, yes=yes))
+        _exit(
+            _command_module("status").run(
+                session,
+                plugins=plugins,
+                only=_only(only),
+                fetch=fetch,
+                offline=offline,
+                json_output=json_output,
+            )
+        )
 
     # -- refresh, files --------------------------------------------------
 
@@ -448,28 +490,38 @@ def build_app(plugins: Plugins) -> typer.Typer:
     @app.command("files")
     def files_cmd(
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-        diff: bool = typer.Option(False, "--diff",
-            help="Show the diff of every file that differs instead of the states"),
+        diff: bool = typer.Option(
+            False,
+            "--diff",
+            help="Show the diff of every file that differs instead of the states",
+        ),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Show the generated files and their state."""
         session = _open(workspace)
         _announce(session)
-        _exit(_command_module("files").run(session, diff=diff))
+        _exit(_command_module("files").run(session, diff=diff, json_output=json_output))
 
     # -- fleet: ls, cd, shell-init, rm, prune ----------------------------
 
     @app.command("ls")
-    def ls_cmd() -> None:
+    def ls_cmd(
+        task: str = typer.Option(None, "-t", "--task", metavar="TASK", help=TASK_HELP),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
+    ) -> None:
         """List the known workspaces and their repos."""
         git.check_version()
-        _exit(_command_module("ls").run(plugins))
+        _exit(_command_module("ls").run(plugins, task=task, json_output=json_output))
 
     @app.command("cd")
     def cd_cmd(
-        ws: str = typer.Argument(None, metavar="WS",
+        ws: str = typer.Argument(
+            None,
+            metavar="WS",
             help="Workspace to print, by name or path (default: the one holding the"
-                 " current directory)",
-            autocompletion=complete_workspace),
+            " current directory)",
+            autocompletion=complete_workspace,
+        ),
     ) -> None:
         """Print a workspace's path."""
         git.check_version()
@@ -488,25 +540,55 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     @app.command("rm")
     def rm_cmd(
-        ws: str = typer.Argument(..., metavar="WS", help="Workspace to remove",
-            autocompletion=complete_workspace),
+        ws: str = typer.Argument(
+            None, metavar="WS", help="Workspace to remove", autocompletion=complete_workspace
+        ),
+        task: str = typer.Option(
+            None, "-t", "--task", metavar="TASK", help="Remove every workspace in TASK"
+        ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
-        """Remove a workspace and its worktrees."""
+        """Remove a workspace (or task) and its worktrees."""
+        if (ws is None) == (task is None):
+            raise errors.UsageError("pass either WS or -t/--task TASK")
+        if task is not None:
+            git.check_version()
+            _exit(
+                _command_module("rm").run_task(
+                    plugins, task, dry_run=dry_run, yes=yes, json_output=json_output
+                )
+            )
         session = _checked(ws)
-        _exit(_command_module("rm").run(session, dry_run=dry_run, yes=yes))
+        _exit(
+            _command_module("rm").run(
+                session, dry_run=dry_run, yes=yes, json_output=json_output
+            )
+        )
 
     @app.command("prune")
     def prune_cmd(
+        offline: bool = typer.Option(
+            False, "--offline", help="Skip external network lookups (e.g. GitHub merged PRs)"
+        ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
+        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
-        """Clean up stale state machine-wide."""
+        """Clean up stale state and merged-PR workspaces."""
         git.check_version()
-        _exit(_command_module("prune").run(dry_run=dry_run, yes=yes))
+        _exit(
+            _command_module("prune").run(
+                plugins=plugins,
+                offline=offline,
+                dry_run=dry_run,
+                yes=yes,
+                json_output=json_output,
+            )
+        )
 
-    # Add plugin command groups last, so the core surface is complete.
+    # Add enabled plugin commands last, so the core surface is complete.
     plugins.add_commands(app)
 
     return app

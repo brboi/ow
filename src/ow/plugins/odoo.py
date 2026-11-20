@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+import shutil
 from configparser import ConfigParser
 from io import StringIO
 from pathlib import Path, PurePosixPath
@@ -15,11 +16,17 @@ from ow.core.plugins import (
     Diagnostic,
     GeneratedFile,
     KnownRepo,
+    ResolvedRepo,
+    RunCommand,
     Setting,
     hookimpl,
 )
 from ow.specs.editors import DebugLaunch, EditorContribution, json_text
-from ow.specs.mise import MiseEnvironment
+from ow.specs.python_env import (
+    PythonEnvironment,
+    resolve_venv_path,
+    select_python_version,
+)
 
 if TYPE_CHECKING:
     from ow.core.workspace import Repo, Workspace
@@ -118,6 +125,42 @@ def _read_python_bounds(core_path: Path) -> tuple[int, int] | None:
     if python_min and python_max:
         return (python_min, python_max)
     return None
+
+
+def _read_odoo_series(core_path: Path) -> str | None:
+    """Read Odoo series (e.g. '18.0', 'saas-18.3') from odoo/release.py, or None."""
+    release_path = core_path / "odoo" / "release.py"
+    if not release_path.exists():
+        return None
+    tree = _parse_module(release_path)
+    if tree is None:
+        return None
+
+    for var in ("serie", "series", "major_version"):
+        assigns = _module_assignments(tree, var)
+        if assigns and isinstance(assigns[0], ast.Constant) and isinstance(assigns[0].value, str):
+            raw = assigns[0].value.strip()
+            if raw:
+                return raw.replace("~", "-")
+
+    vi_assigns = _module_assignments(tree, "version_info")
+    if vi_assigns and isinstance(vi_assigns[0], (ast.Tuple, ast.List)) and len(vi_assigns[0].elts) >= 2:
+        first, second = vi_assigns[0].elts[0], vi_assigns[0].elts[1]
+        if isinstance(first, ast.Constant) and isinstance(second, ast.Constant):
+            if isinstance(first.value, (int, str)) and isinstance(second.value, (int, str)):
+                return f"{first.value}.{second.value}".replace("~", "-")
+
+    return None
+
+
+def _resolve_workspace_venv(ws: Workspace, core: Repo) -> Path:
+    """Compute the shared or local virtualenv path for an Odoo workspace."""
+    bounds = _read_python_bounds(core.path)
+    python_setting = ws.settings.get("mise.python")
+    shared = bool(ws.settings.get("mise.shared_venv", True))
+    python_version, _ = select_python_version(bounds, python_setting)
+    series = _read_odoo_series(core.path)
+    return resolve_venv_path(ws, python_version, series, shared=shared)
 
 
 def _read_demo_capability(core_path: Path) -> bool | None:
@@ -353,6 +396,12 @@ def ow_settings() -> list[Setting]:
             default=lambda ws: [f"--test-tags={ws.name}"],
             help="Debug test arguments",
         ),
+        Setting(
+            key="odoo.default_repos",
+            type=list,
+            default=["community", "enterprise"],
+            help="Default repos added when creating a fresh workspace with `ow add`",
+        ),
     ]
 
 
@@ -507,11 +556,15 @@ def ow_generated_files(
         )
     )
 
+    venv_path = _resolve_workspace_venv(ws, core)
+    is_local_venv = venv_path == (ws.root / ".venv")
+    python_path_str = ".venv/bin/python" if is_local_venv else str(venv_path / "bin" / "python")
+
     odools_content = tomli_w.dumps({
         "config": [
             {
                 "name": f"[Odoo Workspace] {ws.name}",
-                "python_path": ".venv/bin/python",
+                "python_path": python_path_str,
                 "odoo_path": f"./{core.name}",
                 "addons_paths": [
                     f"./{p.relative_to(ws.root).as_posix()}" for p in addon_paths
@@ -527,8 +580,8 @@ def ow_generated_files(
     )
 
     pyright_content = json_text({
-        "venvPath": ".",
-        "venv": ".venv",
+        "venvPath": "." if is_local_venv else str(venv_path.parent),
+        "venv": ".venv" if is_local_venv else venv_path.name,
     })
     files.append(
         GeneratedFile(
@@ -548,21 +601,24 @@ def ow_generated_files(
 
 
 @hookimpl
-def mise_environment(ws: Workspace) -> MiseEnvironment | None:
-    """Contribute mise environment from Odoo."""
+def python_environment(ws: Workspace) -> PythonEnvironment | None:
+    """Contribute tool-agnostic Python environment from Odoo."""
     core, core_diagnostics = _get_core(ws)
     if core_diagnostics or not core:
         return None
 
     env = {"ODOO_RC": "{{config_root}}/odoorc"}
     path = (f"{{{{config_root}}}}/{core.name}",)
-    postinstall = (f"python -m ensurepip --default-pip && pip install -r \"{{{{config_root}}}}/{core.name}/requirements.txt\" -r \"{{{{config_root}}}}/requirements-dev.txt\"",)
+    postinstall = (
+        f"python -m ensurepip --default-pip && pip install -r \"{{{{config_root}}}}/{core.name}/requirements.txt\" -r \"{{{{config_root}}}}/requirements-dev.txt\"",
+    )
     aliases = {"osh": "odoo-bin shell --no-http -c \"$ODOO_RC\""}
 
-    return MiseEnvironment(
+    return PythonEnvironment(
         env=env,
         path=path,
         python=_read_python_bounds(core.path),
+        venv_key=_read_odoo_series(core.path),
         postinstall=postinstall,
         aliases=aliases,
     )
@@ -578,6 +634,7 @@ def editors_contribution(ws: Workspace) -> EditorContribution | None:
     settings = ws.settings
     debug_args, _ = _get_setting("odoo.debug_args", settings, ws)
     debug_test_args, _ = _get_setting("odoo.debug_test_args", settings, ws)
+    venv_path = _resolve_workspace_venv(ws, core)
 
     core_path = core.path
     program = core_path / "odoo-bin"
@@ -617,14 +674,65 @@ def editors_contribution(ws: Workspace) -> EditorContribution | None:
         launches=launches,
         language_servers=language_servers,
         excludes=excludes,
+        python=venv_path / "bin" / "python",
     )
+
+
+_ODOO_ADDON_REPOS = frozenset({"enterprise", "design-themes", "iap-apps", "upgrade", "upgrade-util"})
+
+
+@hookimpl
+def ow_expand_workspace_repos(
+    repos: tuple[ResolvedRepo, ...],
+    known_repos: Mapping[str, KnownRepo],
+    settings: Mapping[str, object],
+) -> tuple[ResolvedRepo, ...] | None:
+    """Ensure any Odoo addon target gets an Odoo core (`community`) repo alongside it."""
+    names = {r.name for r in repos}
+    if "community" in names or "odoo" in names:
+        return None
+    if not (names & _ODOO_ADDON_REPOS):
+        return None
+
+    base = next((r.base for r in repos if r.base), None)
+    core_known = known_repos.get("community")
+    core_url = core_known.url if core_known is not None else "git@github.com:odoo/odoo.git"
+    core_repo = ResolvedRepo(name="community", url=core_url, branch=None, base=base)
+    return (core_repo, *repos)
+
+
+@hookimpl
+def ow_runner(ws: Workspace, args: tuple[str, ...]) -> RunCommand | None:
+    """Run Odoo locally using the workspace's resolved Python virtualenv (or `mise exec`)."""
+    core, core_diagnostics = _get_core(ws)
+    if core_diagnostics or core is None:
+        return None
+
+    venv_path = _resolve_workspace_venv(ws, core)
+    venv_python = venv_path / "bin" / "python"
+    odoorc = ws.root / "odoorc"
+    odoo_bin = core.path / "odoo-bin"
+    env = {"ODOO_RC": str(odoorc)}
+
+    if venv_python.exists():
+        argv = (str(venv_python), str(odoo_bin), "-c", str(odoorc), *args)
+    elif ws.settings.get("mise.enabled", True) and shutil.which("mise"):
+        argv = ("mise", "exec", "--", "python", str(odoo_bin), "-c", str(odoorc), *args)
+    else:
+        argv = ("python3", str(odoo_bin), "-c", str(odoorc), *args)
+
+    return RunCommand(argv=argv, cwd=ws.root, env=env)
 
 
 @hookimpl
 def ow_known_repos() -> list[KnownRepo]:
     """Provide known Odoo repositories."""
     return [
-        KnownRepo(name="community", url="git@github.com:odoo/odoo.git"),
+        KnownRepo(name="community", url="git@github.com:odoo/odoo.git", aliases=("odoo",)),
         KnownRepo(name="enterprise", url="git@github.com:odoo/enterprise.git"),
         KnownRepo(name="design-themes", url="git@github.com:odoo/design-themes.git"),
+        KnownRepo(name="iap-apps", url="git@github.com:odoo/iap-apps.git"),
+        KnownRepo(name="upgrade", url="git@github.com:odoo/upgrade.git"),
+        KnownRepo(name="upgrade-util", url="git@github.com:odoo/upgrade-util.git"),
+        KnownRepo(name="voip", url="git@github.com:odoo/voip.git"),
     ]

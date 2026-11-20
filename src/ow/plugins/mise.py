@@ -1,4 +1,4 @@
-"""Mise plugin: environment management and Python version support."""
+"""Mise plugin: environment management and shared Python virtualenv support."""
 
 from __future__ import annotations
 
@@ -15,13 +15,18 @@ from ow.core.plugins import (
     Setting,
     hookimpl,
 )
-from ow.specs.mise import MiseSpec, MiseEnvironment, merge
+from ow.specs.python_env import (
+    PythonEnvSpec,
+    merge,
+    resolve_venv_path,
+    select_python_version,
+)
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
 
-HOOKSPECS = (MiseSpec,)
+HOOKSPECS = (PythonEnvSpec,)
 
 _FRAGMENT = PurePosixPath("mise/conf.d/00-ow.toml")
 _MISE_MIN_VERSION = (2026, 8, 13)
@@ -31,13 +36,19 @@ _MISE_WARNING = "mise ≥ 2026.8.13 not found; mise/conf.d/00-ow.toml won't be l
 
 @hookimpl
 def ow_settings() -> list[Setting]:
-    """Provide mise settings: python version string."""
+    """Provide mise settings: python version override and shared virtualenv toggle."""
     return [
         Setting(
             key="mise.python",
             type=str,
             default=None,
             help="Python version for mise (e.g. '3.11', '3.12')",
+        ),
+        Setting(
+            key="mise.shared_venv",
+            type=bool,
+            default=True,
+            help="Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
         ),
     ]
 
@@ -47,54 +58,30 @@ def ow_generated_files(
     ws: Workspace, answers: Callable[[str], list]
 ) -> list[GeneratedFile | Diagnostic]:
     """Generate mise/conf.d/00-ow.toml when needed."""
-    answers_list = answers("mise_environment")
+    answers_list = answers("python_environment")
     merged = merge(answers_list)
 
     python_setting = ws.settings.get("mise.python")
+    shared_venv = bool(ws.settings.get("mise.shared_venv", True))
 
     if merged is None and not python_setting:
         return []
 
-    diagnostics: list[Diagnostic] = []
-    python_value = python_setting
-
-    if merged is not None and merged.python is not None:
-        python_min, python_max = merged.python
-
-        if python_value is None:
-            python_value = f"{python_max[0]}.{python_max[1]}"
-        else:
-            match = re.match(r"^3\.(\d+)$", python_value)
-            if match:
-                minor = int(match.group(1))
-                min_minor = python_min[1]
-                max_minor = python_max[1]
-
-                if minor < min_minor or minor > max_minor:
-                    clamped_minor = max(min_minor, min(minor, max_minor))
-                    diagnostics.append(
-                        Diagnostic(
-                            "info",
-                            f"mise.python {python_value} clamped to range {python_min[0]}.{min_minor}-{max_minor}",
-                        )
-                    )
-                    python_value = f"{python_max[0]}.{clamped_minor}"
-            else:
-                diagnostics.append(
-                    Diagnostic(
-                        "warning",
-                        f"mise.python {python_value!r} malformed (expected 3.MINOR), using range max",
-                    )
-                )
-                python_value = f"{python_max[0]}.{python_max[1]}"
+    bounds = merged.python if merged is not None else None
+    python_value, diagnostics = select_python_version(
+        bounds, python_setting, setting_name="mise.python"
+    )
 
     fragment: dict[str, object] = {}
 
     if python_value:
+        venv_key = merged.venv_key if merged is not None else None
+        venv_path = resolve_venv_path(ws, python_value, venv_key, shared=shared_venv)
+        venv_spec = ".venv" if venv_path == (ws.root / ".venv") else str(venv_path)
         fragment["tools"] = {"python": python_value}
         fragment["env"] = fragment.get("env", {})
         fragment["env"]["_"] = {
-            "python": {"venv": {"path": ".venv", "create": True}}
+            "python": {"venv": {"path": venv_spec, "create": True}}
         }
 
     if merged is not None and merged.env:

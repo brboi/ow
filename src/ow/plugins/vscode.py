@@ -64,7 +64,7 @@ def ow_generated_files(ws: Workspace, answers) -> list[GeneratedFile]:
     
     # Generate launch.json only if there are launches
     if merged.launches:
-        interpreter = str(ws.root / ".venv/bin/python")
+        interpreter = str(merged.python or (ws.root / ".venv/bin/python"))
         configurations = []
         for launch in merged.launches:
             config = {
@@ -80,17 +80,40 @@ def ow_generated_files(ws: Workspace, answers) -> list[GeneratedFile]:
                 "env": dict(launch.env),
             }
             configurations.append(config)
-        
+
         launch_data = {
             "version": "0.2.0",
             "configurations": configurations,
         }
-        
+
         files.append(
             GeneratedFile(
                 path=PurePosixPath(".vscode/launch.json"),
                 data=json_text(launch_data).encode("utf-8"),
             )
         )
-    
+
     return files
+
+
+@hookimpl
+def ow_task_files(task) -> list[GeneratedFile]:
+    """Generate `<task>.code-workspace` multi-root workspace file for tasks."""
+    if not task.workspaces:
+        return []
+
+    folders = []
+    for ws in task.workspaces:
+        if task.common_parent is not None:
+            path_str = f"./{ws.root.name}"
+        else:
+            path_str = str(ws.root)
+        folders.append({"name": ws.name, "path": path_str})
+
+    payload = {"folders": folders}
+    return [
+        GeneratedFile(
+            path=PurePosixPath(f"{task.name}.code-workspace"),
+            data=json_text(payload).encode("utf-8"),
+        )
+    ]

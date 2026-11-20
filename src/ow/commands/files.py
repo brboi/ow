@@ -10,17 +10,43 @@ import sys
 
 from ow import term
 from ow.core import refresh
+from ow.core.json_schema import envelope
 from ow.core.refresh import Projection
 from ow.core.session import Session
 from ow.errors import UsageError
 
 
-def run(session: Session, *, diff: bool) -> int:
+def run(session: Session, *, diff: bool, json_output: bool = False) -> int:
     """List the files and their states, or diff the ones that differ; 1 when blocked."""
     if session.workspace is None:
-        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
+        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow add`")
 
     projection = refresh.project(session.workspace, session.plugins)
+    if json_output:
+        term.emit_json(
+            envelope(
+                {
+                    "workspace": session.workspace.name,
+                    "blocked": projection.blocked,
+                    "files": [
+                        {
+                            "path": st.path.as_posix(),
+                            "owner": st.owner,
+                            "state": st.state,
+                            "reason": st.reason,
+                        }
+                        for st in projection.files
+                    ],
+                    "stale_lock": list(projection.stale_lock),
+                    "diagnostics": [
+                        {"plugin": p, "level": d.level, "text": d.text}
+                        for p, d in projection.diagnostics
+                    ],
+                }
+            )
+        )
+        return 1 if projection.blocked else 0
+
     if diff:
         _print_diffs(projection)
     else:

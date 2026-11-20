@@ -47,6 +47,7 @@ class Workspace:
     name: str
     repos: tuple[Repo, ...]
     settings: Mapping[str, object]  # MappingProxyType in practice
+    task: str | None = None
 
 
 def find_root(start: Path | None = None) -> Path | None:
@@ -205,6 +206,8 @@ def build_workspace(
     root: Path,
     locations: tuple[RepoLocation, ...],
     settings: dict[str, object],
+    *,
+    task: str | None = None,
 ) -> Workspace:
     """Build a Workspace from RepoLocations and settings."""
     repos = tuple(
@@ -222,6 +225,7 @@ def build_workspace(
         name=root.name,
         repos=repos,
         settings=MappingProxyType(settings),
+        task=task,
     )
 
 
@@ -238,7 +242,7 @@ def resolve_root(workspace: str | None = None, *, cwd: Path | None = None) -> Pa
         root = find_root(cwd)
         if root is None:
             raise UsageError(
-                "not inside an ow workspace; pass -w <name|path> or run `ow init`"
+                "not inside an ow workspace; pass -w <name|path> or run `ow add`"
             )
         return root
 

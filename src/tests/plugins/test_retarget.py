@@ -29,8 +29,22 @@ BRANCH = "18.0-voip-boi"
 COMMUNITY = f"{BARE}/community.git"
 
 
+def test_retarget_is_hidden_by_default_and_appears_when_enabled(lab):
+    """`retarget` is opt-in: invisible until `retarget.enabled = true` globally."""
+    help_before = lab.ow("--help")
+    assert help_before.exit_code == 0
+    assert "retarget" not in help_before.stdout
+    assert lab.ow("retarget").exit_code == 2
+
+    assert lab.ow("config", "set", "--global", "retarget.enabled", "true").exit_code == 0
+    help_after = lab.ow("--help")
+    assert help_after.exit_code == 0
+    assert "retarget" in help_after.stdout
+
+
 def _workspace(lab, branches: dict[str, dict[str, str]] | None = None):
     """A workspace on `18.0-voip-boi`, tracking the branch the collaborator publishes."""
+    assert lab.ow("config", "set", "--global", "retarget.enabled", "true").exit_code == 0
     remote = add_repo(lab, "community", branches)
     collaborator = lab.collaborator("dev", of=remote)
     collaborator.commit({"shared.py": "shared\n"}, message="shared", branch=BRANCH)
@@ -79,7 +93,7 @@ def test_colleague_pushed_lands_the_new_commits_with_a_cherry_pick(lab):
     collaborator.commit({"colleague.py": "colleague\n"}, message="colleague")
     collaborator.push(BRANCH)
 
-    result = lab.ow("rebase", "-y", cwd=ws)
+    result = lab.ow("retarget", "-y", cwd=ws)
 
     assert result.exit_code == 0
     assert _rebase_lines(result) == [
@@ -97,7 +111,7 @@ def test_colleague_pushed_lands_the_new_commits_with_a_cherry_pick(lab):
 
     # A re-run is a no-op: the patch is already in, so the plan is empty.
     head = lab.git(worktree, "rev-parse", "HEAD")
-    again = lab.ow("rebase", "-y", cwd=ws)
+    again = lab.ow("retarget", "-y", cwd=ws)
 
     assert again.exit_code == 0
     assert _rebase_lines(again) == []
@@ -117,7 +131,7 @@ def test_a_colleague_push_onto_a_branch_with_no_local_commits_lands_on_the_upstr
     # fast-forward can leave the branch on the upstream's own commit.
     monkeypatch.setenv("GIT_COMMITTER_DATE", "2024-06-01T00:00:00Z")
 
-    result = lab.ow("rebase", cwd=ws)
+    result = lab.ow("retarget", cwd=ws)
 
     assert result.exit_code == 0
     assert _rebase_lines(result) == [
@@ -134,13 +148,13 @@ def test_a_second_run_skips_the_copy_the_first_one_made(lab):
     _local_commit(lab, worktree)
     collaborator.commit({"colleague.py": "colleague\n"}, message="colleague")
     collaborator.push(BRANCH)
-    assert lab.ow("rebase", "-y", cwd=ws).exit_code == 0
+    assert lab.ow("retarget", "-y", cwd=ws).exit_code == 0
     taken = lab.sha(repos_dir() / "community.git", f"refs/remotes/origin/{BRANCH}")
 
     collaborator.commit({"later.py": "later\n"}, message="later")
     collaborator.push(BRANCH)
 
-    result = lab.ow("rebase", "-y", cwd=ws)
+    result = lab.ow("retarget", "-y", cwd=ws)
 
     assert result.exit_code == 0
     # The range starts at the commit the copy stands for, not at the stale tip.
@@ -171,7 +185,7 @@ def test_mixed_force_push_and_exhausted_reflog_falls_back_to_fork_point(lab):
     lab.git(bare, "reflog", "expire", "--expire-unreachable=now",
             f"refs/remotes/origin/{BRANCH}")
 
-    result = lab.ow("rebase", "-y", cwd=ws)
+    result = lab.ow("retarget", "-y", cwd=ws)
 
     assert result.exit_code == 0
     assert _rebase_lines(result) == [
@@ -191,7 +205,7 @@ def test_a_force_push_takes_the_rewrite_in_through_fork_point(lab):
     collaborator.commit({"rewritten.py": "rewritten\n"}, message="rewritten")
     collaborator.git("push", "--force", "origin", BRANCH)
 
-    result = lab.ow("rebase", "-y", cwd=ws)
+    result = lab.ow("retarget", "-y", cwd=ws)
 
     assert result.exit_code == 0
     # The fetch moved the ref backwards, so git reported it and ow notes it.
@@ -222,7 +236,7 @@ def test_a_merge_in_the_upstream_range_falls_back_to_fork_point(lab):
     collaborator.git("merge", "--no-edit", "origin/18.0")
     collaborator.push(BRANCH)
 
-    result = lab.ow("rebase", "-y", cwd=ws)
+    result = lab.ow("retarget", "-y", cwd=ws)
 
     assert result.exit_code == 0
     assert _rebase_lines(result) == [
@@ -242,7 +256,7 @@ def test_a_conflict_prints_the_continuation_then_the_remaining_commands(lab):
     collaborator.commit({"shared.py": "base\n"}, message="base shared")
     collaborator.push("18.0")
 
-    result = lab.ow("rebase", "-y", cwd=ws)
+    result = lab.ow("retarget", "-y", cwd=ws)
 
     assert result.exit_code == 1
     assert _rebase_lines(result)[0] == "git -C community rebase origin/18.0"
@@ -280,7 +294,7 @@ def test_a_new_base_is_fetched_and_recorded_only_after_a_successful_rebase(lab):
     _local_commit(lab, worktree)
     bare = repos_dir() / "community.git"
 
-    conflict = lab.ow("rebase", "--base", "18.0-next", "-y", cwd=ws)
+    conflict = lab.ow("retarget", "--base", "18.0-next", "-y", cwd=ws)
 
     assert conflict.exit_code == 1
     assert _rebase_lines(conflict)[:2] == [
@@ -292,7 +306,7 @@ def test_a_new_base_is_fetched_and_recorded_only_after_a_successful_rebase(lab):
 
     lab.git(worktree, "rebase", "--abort")
 
-    clean = lab.ow("rebase", "--base", "18.0-clean", "-y", cwd=ws)
+    clean = lab.ow("retarget", "--base", "18.0-clean", "-y", cwd=ws)
 
     assert clean.exit_code == 0
     assert _rebase_lines(clean) == [
@@ -315,7 +329,7 @@ def test_a_base_shorthand_is_parsed_and_fetched(lab):
     _local_commit(lab, worktree)
     bare = repos_dir() / "community.git"
 
-    result = lab.ow("rebase", "--base", "19.0", "-y", cwd=ws)
+    result = lab.ow("retarget", "--base", "19.0", "-y", cwd=ws)
 
     assert result.exit_code == 0
     assert any("refs/heads/19.0" in line for line in _fetches(result))
@@ -338,11 +352,11 @@ def test_a_base_re_run_that_head_already_contains_only_writes_the_config(lab):
     )
     _local_commit(lab, worktree)
     bare = repos_dir() / "community.git"
-    assert lab.ow("rebase", "--base", "18.0-clean", "-y", cwd=ws).exit_code == 0
+    assert lab.ow("retarget", "--base", "18.0-clean", "-y", cwd=ws).exit_code == 0
     head = lab.git(worktree, "rev-parse", "HEAD")
     lab.git(bare, "config", f"branch.{BRANCH}.ow-base", "origin/18.0")
 
-    again = lab.ow("rebase", "--base", "18.0-clean", "-y", cwd=ws)
+    again = lab.ow("retarget", "--base", "18.0-clean", "-y", cwd=ws)
 
     assert again.exit_code == 0
     assert _rebase_lines(again) == [
@@ -360,7 +374,7 @@ def test_autostash_keeps_the_stash_and_prints_the_pop_last(lab):
     collaborator.push("18.0")
     (worktree / "odoo-bin").write_text("dirty\n")
 
-    result = lab.ow("rebase", "--autostash", "-y", cwd=ws)
+    result = lab.ow("retarget", "--autostash", "-y", cwd=ws)
 
     assert result.exit_code == 1
     lines = _rebase_lines(result)
@@ -387,7 +401,7 @@ def test_dry_run_prints_the_plan_and_moves_nothing(lab):
     head = lab.git(worktree, "rev-parse", "HEAD")
     refs = worktree_refs(lab, worktree, remote_tracking=False)
 
-    result = lab.ow("rebase", "-n", cwd=ws)
+    result = lab.ow("retarget", "-n", cwd=ws)
 
     assert result.exit_code == 0
     assert _rebase_lines(result) == [
@@ -407,7 +421,7 @@ def test_a_dirty_repo_with_an_empty_plan_succeeds(lab):
     ws, worktree, collaborator = _workspace(lab)
     (worktree / "odoo-bin").write_text("dirty\n")
 
-    result = lab.ow("rebase", "-y", cwd=ws)
+    result = lab.ow("retarget", "-y", cwd=ws)
 
     assert result.exit_code == 0
     assert _rebase_lines(result) == []
@@ -430,7 +444,7 @@ def test_a_declined_prompt_changes_nothing(lab, monkeypatch):
     # `run_batch` calls it through the module, so one patch site is enough.
     monkeypatch.setattr("ow.term.interactive", lambda: True)
 
-    result = lab.ow("rebase", input="n\n", cwd=ws)
+    result = lab.ow("retarget", input="n\n", cwd=ws)
 
     assert result.exit_code == 2
     assert _rebase_lines(result)[:2] == [
@@ -461,7 +475,7 @@ def test_retargeting_backport_onto_older_ancestor_base_replays_commits(lab):
     lab.git(worktree, "commit", "-m", "feature")
     lab.git(bare, "config", f"branch.{BRANCH}.ow-base", "origin/19.0")
 
-    result = lab.ow("rebase", "--base", "18.0", "-y", cwd=ws)
+    result = lab.ow("retarget", "--base", "18.0", "-y", cwd=ws)
 
     assert result.exit_code == 0
     assert (worktree / "feature.py").exists()

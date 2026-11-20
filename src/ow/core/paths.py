@@ -47,3 +47,30 @@ def local_seed_dir() -> Path:
     """
     base = _base("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     return Path(base) / "ow" / "local"
+
+
+def venvs_dir() -> Path:
+    """Return the directory holding shared Python virtualenvs.
+
+    $XDG_DATA_HOME/ow/venvs, or ~/.local/share/ow/venvs if unset/empty.
+    """
+    base = _base("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+    return Path(base) / "ow" / "venvs"
+
+
+def cache_dir() -> Path:
+    """Return the directory holding ow's network status cache.
+
+    $XDG_CACHE_HOME/ow, or ~/.cache/ow if unset/empty.
+    """
+    base = _base("XDG_CACHE_HOME", str(Path.home() / ".cache"))
+    return Path(base) / "ow"
+
+
+def task_locks_dir() -> Path:
+    """Return the directory holding ownership locks for task-level generated files.
+
+    $XDG_STATE_HOME/ow/tasks, or ~/.local/state/ow/tasks if unset/empty.
+    """
+    base = _base("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+    return Path(base) / "ow" / "tasks"

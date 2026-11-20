@@ -26,11 +26,12 @@ class DebugLaunch:
 
 @dataclass(frozen=True)
 class EditorContribution:
-    """Editor contribution with launches, language servers, and excludes."""
+    """Editor contribution with launches, language servers, excludes, and optional Python interpreter."""
 
     launches: tuple[DebugLaunch, ...] = ()
     language_servers: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     excludes: tuple[str, ...] = ()
+    python: Path | None = None
 
 
 class EditorsSpec:
@@ -47,11 +48,13 @@ def merge(answers: Sequence[EditorContribution]) -> EditorContribution:
     - launches: concatenated
     - excludes: concatenated and deduplicated in order
     - language_servers: merged per server id and per key, later answer winning
+    - python: later non-None wins
     - Empty input returns EditorContribution()
     """
     merged_launches = []
     merged_excludes = []
     merged_language_servers = {}
+    merged_python: Path | None = None
 
     for answer in answers:
         # Concatenate launches
@@ -75,6 +78,9 @@ def merge(answers: Sequence[EditorContribution]) -> EditorContribution:
                     merged_language_servers[server_id] = {}
                 merged_language_servers[server_id].update(settings)
 
+        if answer.python is not None:
+            merged_python = answer.python
+
     # Deduplicate excludes while preserving order
     seen = set()
     deduped_excludes = []
@@ -87,6 +93,7 @@ def merge(answers: Sequence[EditorContribution]) -> EditorContribution:
         launches=tuple(merged_launches),
         language_servers=merged_language_servers,
         excludes=tuple(deduped_excludes),
+        python=merged_python,
     )
 
 

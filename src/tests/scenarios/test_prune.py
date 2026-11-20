@@ -14,7 +14,7 @@ from tests.conftest import add_repo, git, git_ok, index_lines, init_workspace
 BARE = "~/.local/share/ow/repos"
 REPO = "community"
 BASE = "18.0"
-HINT = "moved a workspace? run `ow init` there first"
+HINT = "directory gone"
 
 
 def _machine(lab):

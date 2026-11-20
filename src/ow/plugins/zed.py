@@ -67,7 +67,7 @@ def ow_generated_files(ws: Workspace, answers) -> list[GeneratedFile]:
     
     # Generate debug.json only if there are launches
     if merged.launches:
-        interpreter = str(ws.root / ".venv/bin/python")
+        interpreter = str(merged.python or (ws.root / ".venv/bin/python"))
         configurations = []
         for launch in merged.launches:
             config = {

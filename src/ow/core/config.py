@@ -26,6 +26,19 @@ class Layer:
     wrong_type: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class WorkspaceMeta:
+    """Reserved `[workspace]` metadata stored in `.ow/config.toml`."""
+    task: str | None = None
+
+
+class _KeepSentinel:
+    """Sentinel telling update_workspace/write_workspace to preserve existing task metadata."""
+
+
+_KEEP = _KeepSentinel()
+
+
 def _read_toml(path: Path) -> dict[str, Any]:
     """The TOML data of `path`, or `{}`; a UsageError when unreadable or invalid UTF-8/TOML."""
     if not path.exists():
@@ -51,23 +64,48 @@ def read_workspace(
 ) -> tuple[Layer, dict[str, str], dict[str, str]]:
     """Read the workspace config file into (layer, accepted_repos, rejected_repos), where
     an accepted repo maps to its qualified base and a rejected one keeps the raw value."""
+    layer, accepted, rejected, _meta = read_workspace_config(path, declared, remotes_of)
+    return layer, accepted, rejected
+
+
+def read_workspace_config(
+    path: Path,
+    declared: Mapping[str, Any],
+    remotes_of: Callable[[str], Collection[str]] = lambda n: ("origin",),
+) -> tuple[Layer, dict[str, str], dict[str, str], WorkspaceMeta]:
+    """Read the workspace config file into (layer, accepted_repos, rejected_repos, meta)."""
     return _layer_and_repos(_read_toml(path), declared, remotes_of)
+
+
+def _extract_meta(data: Mapping[str, Any]) -> tuple[WorkspaceMeta, dict[str, Any]]:
+    """Extract the reserved `[workspace]` table (`task`) if present."""
+    ws_table = data.get("workspace")
+    if not isinstance(ws_table, dict):
+        return WorkspaceMeta(), dict(data)
+    rest = {k: v for k, v in data.items() if k != "workspace"}
+    task_val = ws_table.get("task")
+    task = task_val.strip() if isinstance(task_val, str) and task_val.strip() else None
+    extra_keys = {k: v for k, v in ws_table.items() if k != "task"}
+    if extra_keys:
+        rest["workspace"] = extra_keys
+    return WorkspaceMeta(task=task), rest
 
 
 def _layer_and_repos(
     data: Mapping[str, Any],
     declared: Mapping[str, Any],
     remotes_of: Callable[[str], Collection[str]],
-) -> tuple[Layer, dict[str, str], dict[str, str]]:
-    """Split parsed TOML into a Layer and the accepted/rejected `[repos]` entries."""
+) -> tuple[Layer, dict[str, str], dict[str, str], WorkspaceMeta]:
+    """Split parsed TOML into a Layer, accepted/rejected `[repos]`, and WorkspaceMeta."""
     from ow.core.bases import parse_base, BaseError
 
-    repos = data.get("repos")
+    meta, without_meta = _extract_meta(data)
+    repos = without_meta.get("repos")
     if not isinstance(repos, dict):
         # A missing or non-table `repos` is not a repo set; the layer keeps it as-is.
-        return _parse_layer(dict(data), declared), {}, {}
+        return _parse_layer(dict(without_meta), declared), {}, {}, meta
 
-    layer = _parse_layer({k: v for k, v in data.items() if k != "repos"}, declared)
+    layer = _parse_layer({k: v for k, v in without_meta.items() if k != "repos"}, declared)
     accepted: dict[str, str] = {}
     rejected: dict[str, str] = {}
     for name, base_ref in repos.items():
@@ -79,7 +117,7 @@ def _layer_and_repos(
             accepted[name] = parse_base(base_ref, lambda segment: segment in remotes)
         except BaseError:
             rejected[name] = base_ref
-    return layer, accepted, rejected
+    return layer, accepted, rejected, meta
 
 
 def _parse_layer(data: dict[str, Any], declared: Mapping[str, Any]) -> Layer:
@@ -216,16 +254,22 @@ def update_workspace(
     *,
     declared: Mapping[str, Any],
     remotes_of: Callable[[str], Collection[str]] = lambda n: ("origin",),
+    task: str | None | _KeepSentinel = _KEEP,
 ) -> Mapping[str, object]:
     """Rewrite the workspace config after applying `mutate` to its known values, under an
     exclusive lock; `repos` is the `[repos]` table, and an empty table is left out."""
     def _do_write() -> Mapping[str, object]:
         raw = _read_toml(path)
-        layer, _accepted, rejected = _layer_and_repos(raw, declared, remotes_of)
+        layer, _accepted, rejected, existing_meta = _layer_and_repos(raw, declared, remotes_of)
         values = dict(mutate(dict(layer.values)))
         extra = {f"repos.{name}": value for name, value in rejected.items()}
         dropped = _dropped_keys(values, layer, raw, extra)
-        tables: dict[str, object] = {"repos": dict(repos)} if repos else {}
+        effective_task = existing_meta.task if isinstance(task, _KeepSentinel) else task
+        tables: dict[str, object] = {}
+        if effective_task:
+            tables["workspace"] = {"task": effective_task}
+        if repos:
+            tables["repos"] = dict(repos)
         tables.update(_values_by_table(values, declared))
         _atomic_write_toml(path, tables)
         return dropped
@@ -240,10 +284,16 @@ def write_workspace(
     *,
     declared: Mapping[str, Any],
     remotes_of: Callable[[str], Collection[str]] = lambda n: ("origin",),
+    task: str | None | _KeepSentinel = _KEEP,
 ) -> Mapping[str, object]:
     """Rewrite the workspace config file with exactly `values`; returns dropped keys."""
     return update_workspace(
-        path, repos, lambda _current: values, declared=declared, remotes_of=remotes_of
+        path,
+        repos,
+        lambda _current: values,
+        declared=declared,
+        remotes_of=remotes_of,
+        task=task,
     )
 
 

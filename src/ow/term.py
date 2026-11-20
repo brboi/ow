@@ -1,12 +1,47 @@
-"""Terminal output utilities for ow."""
+"""Terminal output utilities for ow.
+
+In `--json` mode, human progress and plan lines written via `out()` are routed
+to `stderr` so `stdout` carries exclusively the JSON document emitted by
+`emit_json()`.
+"""
 from __future__ import annotations
 
+import contextlib
+import json
 import sys
+from collections.abc import Iterator
+from typing import Any
+
+_JSON_MODE: bool = False
+
+
+@contextlib.contextmanager
+def json_mode(enabled: bool) -> Iterator[None]:
+    """Route `out()` to stderr and disable interactive prompts while `enabled` is True."""
+    global _JSON_MODE
+    previous = _JSON_MODE
+    _JSON_MODE = enabled
+    try:
+        yield
+    finally:
+        _JSON_MODE = previous
+
+
+def is_json_mode() -> bool:
+    """Whether `--json` output mode is active."""
+    return _JSON_MODE
+
+
+def emit_json(data: Any) -> None:
+    """Write canonical UTF-8 JSON to stdout."""
+    sys.stdout.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    sys.stdout.flush()
 
 
 def out(text: str = "") -> None:
-    """Write one plain line to stdout."""
-    print(text)
+    """Write one plain line to stdout (or stderr while in `--json` mode)."""
+    stream = sys.stderr if _JSON_MODE else sys.stdout
+    print(text, file=stream)
 
 
 def warn(text: str) -> None:
@@ -20,25 +55,28 @@ def error(text: str) -> None:
 
 
 def interactive() -> bool:
-    """Check if stdin and stdout are both TTYs."""
+    """Check if stdin and stdout are both TTYs (always False in `--json` mode)."""
+    if _JSON_MODE:
+        return False
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def confirm(question: str) -> bool:
     """Prompt for confirmation, return True if user accepts (y/yes), False on EOF."""
-    sys.stdout.write(f"{question} [y/N] ")
-    sys.stdout.flush()
+    stream = sys.stderr if _JSON_MODE else sys.stdout
+    stream.write(f"{question} [y/N] ")
+    stream.flush()
 
     try:
         raw = sys.stdin.readline()
     except EOFError:
-        sys.stdout.write("\n")
+        stream.write("\n")
         return False
     except KeyboardInterrupt:
-        sys.stdout.write("\n")
+        stream.write("\n")
         raise
 
     if raw == "":  # EOF
-        sys.stdout.write("\n")
+        stream.write("\n")
         return False
     return raw.strip().lower() in ("y", "yes")

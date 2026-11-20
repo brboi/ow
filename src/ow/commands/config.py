@@ -20,6 +20,7 @@ from ow.core.config import (
     update_global,
     update_workspace,
 )
+from ow.core.json_schema import envelope
 from ow.core.paths import global_config
 from ow.core.session import Session
 from ow.errors import UsageError
@@ -28,18 +29,35 @@ _NO_WORKSPACE = "not inside an ow workspace; pass --global or use -w"
 _REPOS_KEY = "`[repos]` is not a setting; remove a repo with `ow repo rm <name>`"
 
 
-def show_all(session: Session, *, global_: bool) -> int:
-    """Print every declared key: `<key> = <value> (<origin>) # <help>`.
+def show_all(session: Session, *, global_: bool, json_output: bool = False) -> int:
+    """Print every declared key: `<key> = <value> (<origin>) # <help>`, or `--json`.
 
     With `global_`, the workspace layer is ignored and built-in defaults fill the rest.
     """
     values, origins = _values_and_origins(session, global_=global_)
+    if json_output:
+        term.emit_json(
+            envelope(
+                {
+                    "scope": "global" if global_ else "effective",
+                    "settings": {
+                        key: {
+                            "value": values.get(key),
+                            "origin": origins[key],
+                            "help": setting.help,
+                        }
+                        for key, setting in session.declared.items()
+                    },
+                }
+            )
+        )
+        return 0
     for key, setting in session.declared.items():
         term.out(f"{key} = {_render(values.get(key))} ({origins[key]}) # {setting.help}")
     return 0
 
 
-def get(session: Session, key: str, *, global_: bool = False) -> int:
+def get(session: Session, key: str, *, global_: bool = False, json_output: bool = False) -> int:
     """Print one key's value, or nothing when unset; an unknown key is a usage error.
 
     `global_` reads the global layer alone, otherwise the effective value.
@@ -51,6 +69,9 @@ def get(session: Session, key: str, *, global_: bool = False) -> int:
         value = session.global_layer.values.get(key)
     else:
         value = _values_and_origins(session, global_=False)[0].get(key)
+    if json_output:
+        term.emit_json(envelope({"key": key, "value": value}))
+        return 0
     if value is None:
         return 0
     # A string is printed raw, so `$(ow config get key)` has no TOML quotes.

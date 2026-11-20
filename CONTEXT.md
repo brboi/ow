@@ -11,6 +11,10 @@ workspaces, with everything beyond that core (Odoo, mise, editors) contributed b
 A directory holding one worktree per repo it uses, named after the directory itself; the worktrees present are what define its repos.
 _Avoid_: project, environment
 
+**Task**:
+A logical group of flat workspaces linked via `[workspace].task` in `.ow/config.toml` (`-t/--task`), sharing auto-allocated HTTP ports, a generated `<task>.code-workspace` in their common parent directory, and structured sibling context in `ow status --json`.
+_Avoid_: super-workspace, stack (as a core noun)
+
 **Repo**:
 A named source of code, backed by one bare repo shared by every workspace on the machine.
 _Avoid_: alias (as a noun for the thing), clone

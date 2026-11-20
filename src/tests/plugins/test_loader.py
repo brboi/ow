@@ -22,7 +22,7 @@ from ow.core.plugins import (
     load_plugins,
 )
 from ow.specs.editors import DebugLaunch, EditorContribution, merge as merge_editors
-from ow.specs.mise import MiseEnvironment, MiseSpec, merge as merge_mise
+from ow.specs.python_env import PythonEnvironment as MiseEnvironment, PythonEnvSpec as MiseSpec, merge as merge_mise
 
 
 @dataclass(frozen=True)
@@ -291,18 +291,18 @@ def test_plugins_answers_returns_callable():
         return []
 
     @hookimpl
-    def mise_environment(ws):
+    def python_environment(ws):
         return MiseEnvironment(env={"FROM": "a"})
 
     plugin_a.ow_settings = ow_settings
-    plugin_a.mise_environment = mise_environment
+    plugin_a.python_environment = python_environment
     plugin_a.HOOKSPECS = (MiseSpec,)
 
     plugins = load_plugins(builtins=(("a", plugin_a),))
     fake_ws = FakeWorkspace(root=Path("/tmp"), settings={})
 
     answers_fn = plugins.answers(fake_ws)
-    results = answers_fn("mise_environment")
+    results = answers_fn("python_environment")
 
     # Should return list of MiseEnvironment results without the plugin names
     assert len(results) == 1
@@ -319,7 +319,7 @@ def test_plugins_answers_skips_disabled_plugin():
         return []
 
     @hookimpl
-    def mise_environment_a(ws):
+    def python_environment_a(ws):
         return MiseEnvironment(env={"FROM": "a"})
 
     @hookimpl
@@ -327,26 +327,26 @@ def test_plugins_answers_skips_disabled_plugin():
         return []
 
     @hookimpl
-    def mise_environment_b(ws):
+    def python_environment_b(ws):
         return MiseEnvironment(env={"FROM": "b"})
 
     # Set function names properly for hookimpl
-    mise_environment_a.__name__ = "mise_environment"
-    mise_environment_b.__name__ = "mise_environment"
+    python_environment_a.__name__ = "python_environment"
+    python_environment_b.__name__ = "python_environment"
 
     plugin_a.ow_settings = ow_settings
-    plugin_a.mise_environment = mise_environment_a
+    plugin_a.python_environment = python_environment_a
     plugin_a.HOOKSPECS = (MiseSpec,)
 
     plugin_b.ow_settings = ow_settings_b
-    plugin_b.mise_environment = mise_environment_b
+    plugin_b.python_environment = python_environment_b
     plugin_b.HOOKSPECS = (MiseSpec,)
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
     fake_ws = FakeWorkspace(root=Path("/tmp"), settings={"b.enabled": False})
 
     answers_fn = plugins.answers(fake_ws)
-    results = answers_fn("mise_environment")
+    results = answers_fn("python_environment")
 
     # Should skip disabled plugin b
     assert len(results) == 1
@@ -433,7 +433,7 @@ def test_hookspecs_declared_once():
         return []
 
     @hookimpl
-    def mise_environment(ws):
+    def python_environment(ws):
         return None
 
     @hookimpl
@@ -443,17 +443,17 @@ def test_hookspecs_declared_once():
     ow_settings_b.__name__ = "ow_settings"
 
     @hookimpl
-    def mise_environment_b(ws):
+    def python_environment_b(ws):
         return None
 
-    mise_environment_b.__name__ = "mise_environment"
+    python_environment_b.__name__ = "python_environment"
 
     plugin_a.ow_settings = ow_settings
-    plugin_a.mise_environment = mise_environment
+    plugin_a.python_environment = python_environment
     plugin_a.HOOKSPECS = (MiseSpec,)
 
     plugin_b.ow_settings = ow_settings_b
-    plugin_b.mise_environment = mise_environment_b
+    plugin_b.python_environment = python_environment_b
     plugin_b.HOOKSPECS = (MiseSpec,)  # Same spec as plugin_a
 
     # Should not raise ValueError about spec being added twice
@@ -516,13 +516,13 @@ def test_load_plugins_wraps_hookimpl_signature_mismatch():
     assert error.hook == "register"
 
 
-def test_merge_mise_environment_empty():
+def test_merge_python_environment_empty():
     """Test merge of empty mise environments."""
     result = merge_mise([])
     assert result is None
 
 
-def test_merge_mise_environment_single():
+def test_merge_python_environment_single():
     """Test merge of single mise environment."""
     env = MiseEnvironment(
         env={"KEY": "value"},
@@ -535,7 +535,7 @@ def test_merge_mise_environment_single():
     assert result == env
 
 
-def test_merge_mise_environment_concatenates_path_postinstall():
+def test_merge_python_environment_concatenates_path_postinstall():
     """Test that merge concatenates path and postinstall."""
     env1 = MiseEnvironment(path=("p1", "p2"), postinstall=("c1",))
     env2 = MiseEnvironment(path=("p3",), postinstall=("c2", "c3"))
@@ -545,7 +545,7 @@ def test_merge_mise_environment_concatenates_path_postinstall():
     assert result.postinstall == ("c1", "c2", "c3")
 
 
-def test_merge_mise_environment_later_wins_for_env():
+def test_merge_python_environment_later_wins_for_env():
     """Test that later env wins for environment variables."""
     env1 = MiseEnvironment(env={"KEY": "value1", "OTHER": "val"})
     env2 = MiseEnvironment(env={"KEY": "value2"})
@@ -555,7 +555,7 @@ def test_merge_mise_environment_later_wins_for_env():
     assert result.env["OTHER"] == "val"
 
 
-def test_merge_mise_environment_python_later_non_none_wins():
+def test_merge_python_environment_python_later_non_none_wins():
     """Test that later non-None python wins (P14)."""
     env1 = MiseEnvironment(python=((3, 9), (3, 11)))
     env2 = MiseEnvironment(python=None)

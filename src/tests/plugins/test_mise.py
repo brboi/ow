@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 import tomllib
 
 from ow.plugins import mise
-from ow.specs.mise import MiseEnvironment
+from ow.specs.python_env import PythonEnvironment as MiseEnvironment
 from tests.conftest import diagnostics_of, files_of, resolved_workspace
 
 _FRAGMENT = "mise/conf.d/00-ow.toml"
@@ -15,7 +15,7 @@ _FRAGMENT = "mise/conf.d/00-ow.toml"
 
 def _answers(*given: MiseEnvironment):
     def answers(hook: str):
-        if hook == "mise_environment":
+        if hook == "python_environment":
             return list(given)
         return []
 

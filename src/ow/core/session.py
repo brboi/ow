@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Mapping
 
 from ow.core import git
-from ow.core.config import Layer, read_global, read_workspace, resolve_settings
+from ow.core.config import Layer, read_global, read_workspace_config, resolve_settings
 from ow.core.paths import global_config, repos_dir
 from ow.core.plugins import Diagnostic, Plugins, load_plugins
 from ow.core.workspace import (
@@ -131,7 +131,7 @@ def open_session(
         remotes_cache[bare] = remotes
         return remotes
 
-    workspace_layer, accepted_bases, rejected_bases = read_workspace(
+    workspace_layer, accepted_bases, rejected_bases, meta = read_workspace_config(
         config_path, declared, remotes_of=remotes_of
     )
 
@@ -139,12 +139,12 @@ def open_session(
 
     # Callable defaults see the real repos but no settings, so resolution never
     # depends on the values it is computing.
-    defaults_workspace = build_workspace(root, locations, {})
+    defaults_workspace = build_workspace(root, locations, {}, task=meta.task)
     values, origins = resolve_settings(
         declared, global_layer, workspace_layer, ws_for_defaults=defaults_workspace
     )
 
-    workspace = build_workspace(root, locations, values)
+    workspace = build_workspace(root, locations, values, task=meta.task)
 
     warnings = _collect_warnings(global_layer, workspace_layer, declared, rejected_bases)
 
@@ -210,7 +210,7 @@ def _collect_warnings(
         for name, raw in rejected_bases.items()
     ]
     if ws_parts:
-        warnings.append("; ".join(ws_parts) + "; run `ow init`")
+        warnings.append("; ".join(ws_parts))
 
     return tuple(warnings)
 

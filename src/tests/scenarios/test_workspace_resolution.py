@@ -98,7 +98,6 @@ def test_unknown_keys_and_rejected_bases_collapse_to_one_warning(lab):
     assert "`ow config unset version`" in warnings[0]
     assert "x..y" in warnings[0]
     assert "also..bad" in warnings[0]
-    assert warnings[0].endswith("run `ow init`")
 
 
 def test_symlinked_stray_checkout_does_not_crash_open_session(lab):

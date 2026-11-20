@@ -12,7 +12,14 @@ from ow.core import bases, git
 from ow.core.paths import repos_dir
 from ow.core.plan import GitStep
 from ow.errors import UsageError
-from ow.recipes.switch import tracking_steps
+
+
+def tracking_steps(path: str, branch: str, remote: str) -> tuple[GitStep, GitStep]:
+    """The `branch.<b>.remote` and `merge` writes that make `<remote>/<b>` the upstream."""
+    return (
+        GitStep(("git", "-C", path, "config", f"branch.{branch}.remote", remote)),
+        GitStep(("git", "-C", path, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")),
+    )
 
 
 def origin_has(bare: Path, branch: str) -> bool:
@@ -216,14 +223,13 @@ def add_worktree(
     *,
     branch: str | None,
     base: str,
+    fetch_ref: str | None = None,
+    remote_hint: str | None = None,
 ) -> tuple[GitStep, ...]:
     """The steps that add `worktree` to `bare` at `base`, detached or on `branch`.
 
-    Returned, not run: the caller prints each as it runs it, so an additive command shows
-    only the commands it actually executes. A worktree directory deleted while its
-    registration stayed behind is pruned first: `worktree add` refuses that path otherwise.
-    Both fetches use an explicit refspec: a bare with no `remote.<r>.fetch` (an adopted
-    ow 2.x one) would write only FETCH_HEAD, leaving `origin/<b>` undefined.
+    When `fetch_ref` is given (e.g. `refs/pull/12345/head`), fetches that ref
+    explicitly into `refs/ow/pr/<branch>` and creates/checks out `branch` from it.
     """
     target = str(Path(worktree).resolve())
     fetch_remote, base_branch = _fetch_refspec(bare, base)
@@ -247,6 +253,26 @@ def add_worktree(
         return tuple(steps)
     if _has_ref(bare, f"refs/heads/{branch}"):
         steps.append(GitStep(("git", "-C", str(bare), "worktree", "add", target, branch), live=True))
+        steps.append(GitStep(("git", "-C", target, "config", f"branch.{branch}.ow-base", base)))
+        return tuple(steps)
+    if fetch_ref is not None:
+        pr_remote = remote_hint or "origin"
+        pr_ref = f"refs/ow/pr/{branch}"
+        steps.append(
+            GitStep(
+                ("git", "-C", str(bare), "fetch", pr_remote, f"+{fetch_ref}:{pr_ref}")
+            )
+        )
+        steps.append(
+            GitStep(
+                (
+                    "git", "-C", str(bare), "worktree", "add", "--no-track", "-b", branch, target,
+                    pr_ref,
+                ),
+                live=True,
+            )
+        )
+        steps.append(GitStep(("git", "-C", target, "config", f"branch.{branch}.ow-base", base)))
         return tuple(steps)
     remote, cached = _branch_on_one_remote(bare, branch)
     if remote is not None:

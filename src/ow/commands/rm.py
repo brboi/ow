@@ -1,52 +1,133 @@
-"""`ow rm <ws>`: remove a workspace's worktrees, its pushed branches and its directory."""
+"""`ow rm <ws>` / `ow rm -t <task>`: remove workspace(s), their worktrees, pushed branches and task files."""
 
 from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from ow import term
 from ow.commands.prune import _display
-from ow.core import git, index
+from ow.core import git, index, tasks
 from ow.core.facts import RepoFacts, gather_all
+from ow.core.json_schema import envelope
 from ow.core.plan import Batch, GitStep, OwStep, RepoPlan, Step, run_batch
-from ow.core.session import Session
+from ow.core.plugins import Plugins
+from ow.core.session import Session, open_session
 from ow.core.workspace import RepoLocation, stray_checkouts
+from ow.errors import UsageError
 from ow.recipes import preflight
 from ow.recipes.removal import branch_removal, orphan_commits
 
 DIRTY = "commit, stash or discard, then re-run"
 
 
-def run(session: Session, *, dry_run: bool, yes: bool) -> int:
-    """Remove the session's workspace; 1 when the pre-flight refused, else the batch's code."""
+def run(
+    session: Session,
+    *,
+    dry_run: bool,
+    yes: bool,
+    json_output: bool = False,
+) -> int:
+    """Remove the session's workspace; 1 when pre-flight refused, else the batch's code."""
     workspace = session.workspace
-    assert workspace is not None  # cli opens the positional <ws> with need_workspace=True
+    assert workspace is not None
+
+    with term.json_mode(json_output):
+        code, detail = _remove_one(session, dry_run=dry_run, yes=yes)
+        if json_output:
+            term.emit_json(envelope(detail))
+        return code
+
+
+def run_task(
+    plugins: Plugins,
+    task_name: str,
+    *,
+    dry_run: bool,
+    yes: bool,
+    json_output: bool = False,
+) -> int:
+    """Remove every workspace belonging to `task_name` and clean up task-level files."""
+    task = tasks.find_task(task_name, plugins)
+    if task is None:
+        raise UsageError(f"unknown task {task_name!r}")
+
+    with term.json_mode(json_output):
+        results: list[dict[str, Any]] = []
+        exit_code = 0
+        for ws in task.workspaces:
+            session = open_session(str(ws.root), need_workspace=True, plugins=plugins)
+            code, detail = _remove_one(session, dry_run=dry_run, yes=yes)
+            results.append(detail)
+            exit_code = max(exit_code, code)
+
+        if json_output:
+            term.emit_json(
+                envelope({"task": task_name, "workspaces": results, "exit_code": exit_code})
+            )
+        return exit_code
+
+
+def _remove_one(session: Session, *, dry_run: bool, yes: bool) -> tuple[int, dict[str, Any]]:
+    workspace = session.workspace
+    assert workspace is not None
     root = workspace.root
+    task_name = workspace.task
     facts = gather_all(session.locations)
 
     refusals = _refusals(facts, root, session.locations)
     if refusals:
         for name, text in refusals:
             term.out(f"# {name}: {text}")
-        return 1
+        return 1, {
+            "workspace": workspace.name,
+            "root": str(root),
+            "removed": False,
+            "dry_run": dry_run,
+            "refusals": [{"repo": n, "reason": t} for n, t in refusals],
+        }
 
     outside = _outside(root, tuple(repo_facts.path for repo_facts in facts))
     if outside:
         term.out(f"# {outside}")
 
-    after = (
+    def _finish_task() -> None:
+        if not task_name:
+            return
+        remaining = tasks.find_task(task_name, session.plugins)
+        if remaining is None:
+            tasks.cleanup_task_files(task_name)
+        else:
+            tasks.sync_task_files(remaining, session.plugins)
+
+    after_steps: list[Step] = [
         OwStep(shown=git.show(("rm", "-rf", str(root))), run=lambda: shutil.rmtree(root)),
         OwStep(shown=f"# drop {_display(root)} from the index", run=lambda: index.remove(root)),
-    )
+    ]
+    if task_name:
+        after_steps.append(
+            OwStep(shown=f"# update task {task_name!r} files", run=_finish_task)
+        )
+
     outcome = run_batch(
-        Batch(root=root, repos=tuple(_plan(repo_facts) for repo_facts in facts), after=after),
+        Batch(
+            root=root,
+            repos=tuple(_plan(repo_facts) for repo_facts in facts),
+            after=tuple(after_steps),
+        ),
         prompt=True,
         dry_run=dry_run,
         yes=yes,
     )
-    return outcome.exit_code
+    return outcome.exit_code, {
+        "workspace": workspace.name,
+        "root": str(root),
+        "task": task_name,
+        "removed": outcome.exit_code == 0 and not dry_run,
+        "dry_run": dry_run,
+        "refusals": [],
+    }
 
 
 def _refusals(

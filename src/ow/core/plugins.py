@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 import types
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Sequence
 
 import pluggy
 
@@ -13,6 +13,8 @@ from ow.core import config
 from ow.errors import PluginError
 
 if TYPE_CHECKING:
+    from ow.core.facts import RepoFacts
+    from ow.core.tasks import Task
     from ow.core.workspace import Workspace
 
 # Hook markers for the "ow" project
@@ -32,9 +34,9 @@ class Setting:
 
 @dataclass(frozen=True)
 class GeneratedFile:
-    """A file a plugin contributes to the workspace."""
+    """A file a plugin contributes to the workspace or task."""
 
-    path: PurePosixPath  # workspace-relative
+    path: PurePosixPath  # workspace-relative or task-parent-relative
     data: bytes
     mode: int = 0o644
 
@@ -53,10 +55,63 @@ class Diagnostic:
 
 @dataclass(frozen=True)
 class KnownRepo:
-    """A repo a plugin knows about by name."""
+    """A repo a plugin knows about by name (and optional short aliases)."""
 
     name: str
     url: str
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResolvedRepo:
+    """One repo resolved from a target (PR, Runbot bundle, etc.)."""
+
+    name: str
+    url: str | None = None
+    branch: str | None = None
+    base: str | None = None
+    remote: str | None = None
+    fetch_ref: str | None = None  # e.g. "refs/pull/12345/head"
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ResolvedTarget:
+    """A workspace creation plan resolved from an external target (PR, bundle, URL)."""
+
+    name: str
+    repos: tuple[ResolvedRepo, ...]
+    source: str
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RunCommand:
+    """Command a plugin provides to execute a workspace via `ow run`."""
+
+    argv: tuple[str, ...]
+    cwd: Path
+    env: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StatusInfo:
+    """External status contribution for `ow status` (e.g. GitHub PR, Runbot build)."""
+
+    plugin: str
+    scope: Literal["workspace", "repo", "external"]
+    target: str
+    summary: str
+    data: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PruneCandidate:
+    """A workspace a plugin recommends pruning (e.g. its PR was merged/closed)."""
+
+    workspace: Path
+    reason: str
+    data: Mapping[str, object] = field(default_factory=dict)
 
 
 class CoreSpec:
@@ -67,7 +122,9 @@ class CoreSpec:
         """Return this plugin's settings."""
 
     @hookspec
-    def ow_generated_files(self, ws: Workspace, answers: Callable[[str], list]) -> list[GeneratedFile | Diagnostic]:
+    def ow_generated_files(
+        self, ws: Workspace, answers: Callable[[str], list]
+    ) -> list[GeneratedFile | Diagnostic]:
         """Return generated files and optional diagnostic messages."""
 
     @hookspec
@@ -80,7 +137,7 @@ class CoreSpec:
 
     @hookspec
     def ow_commands(self, app: object) -> None:
-        """Add commands to the plugin's Typer subapp."""
+        """Add commands to the plugin's Typer subapp (or root app when TOP_LEVEL_COMMANDS=True)."""
 
     @hookspec
     def ow_workspace_created(self, ws: Workspace) -> None:
@@ -90,18 +147,71 @@ class CoreSpec:
     def ow_refreshed(self, ws: Workspace, owned: tuple[PurePosixPath, ...]) -> None:
         """Event: refresh completed. owned is every path ow wrote or up-to-date."""
 
+    @hookspec
+    def ow_resolve_target(
+        self,
+        target: str,
+        known_repos: Mapping[str, KnownRepo],
+        settings: Mapping[str, object],
+    ) -> ResolvedTarget | None:
+        """Resolve an external target string (e.g. PR or Runbot bundle) to a workspace plan."""
+
+    @hookspec
+    def ow_expand_workspace_repos(
+        self,
+        repos: tuple[ResolvedRepo, ...],
+        known_repos: Mapping[str, KnownRepo],
+        settings: Mapping[str, object],
+    ) -> tuple[ResolvedRepo, ...] | None:
+        """Optionally expand resolved repos with implicit companion repos (e.g. Odoo core)."""
+
+    @hookspec
+    def ow_runner(
+        self, ws: Workspace, args: tuple[str, ...]
+    ) -> RunCommand | None:
+        """Return the command to run this workspace via `ow run`, or None."""
+
+    @hookspec
+    def ow_status(
+        self,
+        ws: Workspace | None,
+        facts: Sequence[RepoFacts],
+        target: str | None,
+        offline: bool,
+    ) -> list[StatusInfo]:
+        """Return external status contributions for a workspace or external target."""
+
+    @hookspec
+    def ow_prune_candidates(
+        self,
+        workspaces: Sequence[Workspace],
+        offline: bool,
+    ) -> list[PruneCandidate]:
+        """Return workspaces recommended for pruning (e.g. merged/closed PRs)."""
+
+    @hookspec
+    def ow_task_files(self, task: Task) -> list[GeneratedFile]:
+        """Return generated files for a multi-workspace task (written in common parent)."""
+
 
 def _get_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
     """Get all built-in plugin modules in order."""
-    from ow.plugins import mise, odoo, vscode, zed, local
+    from ow.plugins import github, local, mise, odoo, retarget, vscode, zed
 
     return (
         ("mise", mise),
         ("odoo", odoo),
+        ("github", github),
         ("vscode", vscode),
         ("zed", zed),
         ("local", local),
+        ("retarget", retarget),
     )
+
+
+def _plugin_default_enabled(plugin: object) -> bool:
+    """Whether `plugin` is enabled by default (True unless DEFAULT_ENABLED = False)."""
+    return bool(getattr(plugin, "DEFAULT_ENABLED", True))
 
 
 class Plugins:
@@ -111,10 +221,36 @@ class Plugins:
         self.pm = pm
         self.names = names
 
+    def default_enabled(self, name: str) -> bool:
+        """Default enabled state for plugin `name`."""
+        plugin = self.pm.get_plugin(name)
+        return _plugin_default_enabled(plugin) if plugin is not None else True
+
+    def _global_enabled_flags(self) -> Mapping[str, object]:
+        """Read `<name>.enabled` overrides from global config."""
+        from ow.core.paths import global_config
+
+        declared = {
+            f"{name}.enabled": Setting(f"{name}.enabled", bool, self.default_enabled(name), "")
+            for name in self.names
+        }
+        try:
+            return config.read_global(global_config(), declared).values
+        except (OSError, config.UsageError):
+            return {}
+
+    def is_enabled(self, name: str, ws: Workspace | None = None) -> bool:
+        """Whether plugin `name` is enabled for `ws` (or globally when `ws` is None)."""
+        key = f"{name}.enabled"
+        default = self.default_enabled(name)
+        if ws is not None:
+            return bool(ws.settings.get(key, default))
+        return bool(self._global_enabled_flags().get(key, default))
+
     def settings(self) -> tuple[Setting, ...]:
         """Return all settings from all plugins, in order.
 
-        Includes a synthesized "<name>.enabled" (bool, True) for each plugin.
+        Includes a synthesized `<name>.enabled` (bool, default `DEFAULT_ENABLED`) for each plugin.
         """
         result = []
         impls = self.pm.hook.ow_settings.get_hookimpls()
@@ -125,7 +261,7 @@ class Plugins:
                 Setting(
                     key=f"{name}.enabled",
                     type=bool,
-                    default=True,
+                    default=self.default_enabled(name),
                     help=f"Enable or disable the {name} plugin",
                 )
             )
@@ -150,14 +286,17 @@ class Plugins:
         return tuple(result)
 
     def call(
-        self, hook: str, ws: Workspace | None = None, *,
-        errors: Literal["raise", "collect"] = "raise", **kwargs: Any
+        self,
+        hook: str,
+        ws: Workspace | None = None,
+        *,
+        errors: Literal["raise", "collect"] = "raise",
+        **kwargs: Any,
     ) -> list[tuple[str, object]]:
         """Call a hook on all enabled plugins.
 
         Returns (plugin_name, result) tuples in tuple order.
         Skips disabled plugins (checks workspace settings or global layer).
-
         With errors="raise" (default), raises on first PluginError.
         With errors="collect", collects (name, PluginError(...)) and continues.
         Drops None results.
@@ -169,27 +308,16 @@ class Plugins:
         impls = hook_method.get_hookimpls()
         impl_to_name = {impl.plugin: self.pm.get_name(impl.plugin) for impl in impls}
 
-        # Enabled flags default to True; without a workspace they come from the global layer.
-        enabled_flags: Mapping[str, object] = {}
-        if ws is None:
-            from ow.core.paths import global_config
-
-            declared = {
-                f"{name}.enabled": Setting(f"{name}.enabled", bool, True, "")
-                for name in self.names
-            }
-            try:
-                enabled_flags = config.read_global(global_config(), declared).values
-            except (OSError, config.UsageError):
-                enabled_flags = {}
+        enabled_flags: Mapping[str, object] = {} if ws is not None else self._global_enabled_flags()
 
         for impl in impls:
             name = impl_to_name[impl.plugin]
             enabled_key = f"{name}.enabled"
+            default = self.default_enabled(name)
             if ws is not None:
-                enabled = ws.settings.get(enabled_key, True)
+                enabled = ws.settings.get(enabled_key, default)
             else:
-                enabled = enabled_flags.get(enabled_key, True)
+                enabled = enabled_flags.get(enabled_key, default)
 
             if not enabled:
                 continue
@@ -225,6 +353,7 @@ class Plugins:
         The returned function takes a hook name and returns a list of results in tuple order.
         It skips disabled plugins and turns raises into PluginError naming the answering plugin.
         """
+
         def answer_hook(hook_name: str) -> list:
             results = []
             for _name, result in self.call(hook_name, ws=ws):
@@ -234,18 +363,31 @@ class Plugins:
         return answer_hook
 
     def add_commands(self, app: object) -> None:
-        """Register command groups for plugins that define ow_commands.
+        """Register CLI commands for enabled plugins that define `ow_commands`.
 
-        Never filtered by enabled. Each plugin gets its own typer.Typer subapp,
-        added to root app only if it registered at least one command.
+        Respects global `<name>.enabled` (falling back to `DEFAULT_ENABLED`).
+        Plugins with `TOP_LEVEL_COMMANDS = True` register directly on the root
+        Typer app; others get their own named `typer.Typer` subapp.
         """
         import typer
 
         impls = self.pm.hook.ow_commands.get_hookimpls()
         impl_to_name = {impl.plugin: self.pm.get_name(impl.plugin) for impl in impls}
+        enabled_flags = self._global_enabled_flags()
 
         for impl in impls:
             name = impl_to_name[impl.plugin]
+            enabled = enabled_flags.get(f"{name}.enabled", self.default_enabled(name))
+            if not enabled:
+                continue
+
+            if getattr(impl.plugin, "TOP_LEVEL_COMMANDS", False):
+                try:
+                    impl.function(app=app)
+                except Exception as e:
+                    raise PluginError(name, "ow_commands", e) from e
+                continue
+
             sub_app = typer.Typer(name=name, no_args_is_help=True)
 
             try:
@@ -288,7 +430,9 @@ def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = Non
                     except ValueError as e:
                         raise PluginError(name, "HOOKSPECS", str(e)) from e
                     except pluggy.PluginValidationError as e:
-                        raise PluginError(pm.get_name(e.plugin) or name, "HOOKSPECS", str(e)) from e
+                        raise PluginError(
+                            pm.get_name(e.plugin) or name, "HOOKSPECS", str(e)
+                        ) from e
 
         try:
             pm.register(module, name=name)
@@ -302,5 +446,3 @@ def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = Non
         raise PluginError(pm.get_name(e.plugin), "check_pending", str(e)) from e
 
     return Plugins(pm, tuple(names))
-
-
