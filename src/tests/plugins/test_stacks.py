@@ -126,6 +126,9 @@ def test_to_json_value_serializes_workspace_with_mapping_proxy(lab):
     assert isinstance(serialized["settings"], dict)
 
 
+GLOBAL_PORTS = {"odoo.http_port": 8069, "odoo.gevent_port": 8072}
+
+
 def test_stack_values_avoid_siblings_and_pending_stacks_without_mutating_inputs():
     from types import SimpleNamespace
 
@@ -135,7 +138,7 @@ def test_stack_values_avoid_siblings_and_pending_stacks_without_mutating_inputs(
     pending = ({"odoo.http_port": 8070, "odoo.gevent_port": 8073},)
     ws_values: dict[str, object] = {}
 
-    got = odoo.ow_stack_values(None, ws_values, [sibling], pending, {})
+    got = odoo.ow_stack_values(None, ws_values, [sibling], pending, GLOBAL_PORTS)
 
     assert got == {"odoo.http_port": 8071, "odoo.gevent_port": 8074}
     assert ws_values == {}
@@ -163,12 +166,12 @@ def test_stack_values_pin_db_name_and_current_ports_when_promoting():
         settings={"odoo.db_name": "voip_db", "odoo.http_port": 8071, "odoo.gevent_port": 8074},
     )
 
-    assert odoo.ow_stack_values(ws, {}, [], (), {}) == {
+    assert odoo.ow_stack_values(ws, {}, [], (), GLOBAL_PORTS) == {
         "odoo.db_name": "voip_db",
         "odoo.http_port": 8071,
         "odoo.gevent_port": 8074,
     }
-    assert odoo.ow_stack_values(ws, {"odoo.db_name": "mine"}, [], (), {}) == {
+    assert odoo.ow_stack_values(ws, {"odoo.db_name": "mine"}, [], (), GLOBAL_PORTS) == {
         "odoo.http_port": 8071,
         "odoo.gevent_port": 8074,
     }
