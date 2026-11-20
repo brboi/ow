@@ -1,82 +1,99 @@
 # Sandboxing AI Coding Assistants
 
-An Odoo checkout ships its own sandbox wrappers under `setup/sandboxing/` — bubblewrap scripts
-for Opencode, Claude Code and Pi, and a firejail profile for Claude Code. `ow` does not ship
-sandboxes and does not install them: when it finds those assets in the core checkout, it wires
-them into the generated mise fragment as tasks, so `mise run <task>` — or the task name directly
-in a mise-activated shell — launches the assistant behind them.
+ow's generated Odoo repository is a natural target for AI coding assistants: it's the entire codebase, and any file is editable. The risk is that an uncontrolled agent can write outside the workspace—to your home directory, SSH keys, or system files.
 
-## Prerequisites
+Bubblewrap (`bwrap`) provides lightweight process-level sandboxing using Linux namespaces. You run the agent inside a sandbox that sees only what you mount in, and any changes stay inside that namespace.
 
-The wrappers are the checkout's, so their prerequisites are too:
+## Setup
 
-- **[bubblewrap](https://github.com/containers/bubblewrap)** for the `bwrap-*` tasks:
+Install bubblewrap:
 
-  ```sh
-  sudo apt install bubblewrap   # Debian/Ubuntu
-  sudo dnf install bubblewrap   # Fedora
-  sudo pacman -S bubblewrap     # Arch
-  ```
+```sh
+# Debian / Ubuntu
+sudo apt install bubblewrap
 
-- **[firejail](https://firejail.wordpress.com/)** for the `firejail-claude` task.
+# Arch
+sudo pacman -S bubblewrap
 
-`ow` never checks for either binary, never installs one, and never runs a wrapper. It only reads
-the checkout's filesystem to see what the checkout provides.
+# Fedora
+sudo dnf install bubblewrap
 
-## The tasks
+# openSUSE
+sudo zypper install bubblewrap
+```
 
-| Task | Wired from | Runs |
-|------|-----------|------|
-| `bwrap-claude` | `setup/sandboxing/bwrap/bwrap-claude.sh` | that script, with `--add-dir` per Git metadata dir, and `ODOO_BASE={{config_root}}` |
-| `bwrap-opencode` | `setup/sandboxing/bwrap/bwrap-opencode.sh` | that script, with the same `--add-dir` arguments and `ODOO_BASE` |
-| `bwrap-pi` | `setup/sandboxing/bwrap/bwrap-pi.sh` | that script, with the same `--add-dir` arguments and `ODOO_BASE` |
-| `firejail-claude` | `setup/sandboxing/firejail/claude.profile` | `firejail --profile=<profile> --whitelist=<workspace> --whitelist=<git metadata dir>… claude` |
+The sandbox wrapper scripts (`bwrap-claude.sh`, `bwrap-opencode`) are installed on `PATH` via Odoo's install instructions in its README.
 
-A task is generated only when its asset is present *and usable*:
+## Shell Function for Claude Code
 
-- a `bwrap` script must be a regular file and executable;
-- the firejail profile must be a regular file — firejail reads it, it is never executed;
-- a path whose resolved real location leaves the checkout (a symlinked leaf, or a symlinked
-  ancestor directory) is rejected rather than followed.
+Add this function to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
 
-`ow` probes presence and executability, never content. A checkout with none of these assets gets
-no `tasks` table at all, which is also the state of an older checkout, a checkout that does not
-carry the sandboxing directory, and any non-Odoo workspace.
+```bash
+claude-sandbox() {
+  ws=$(command ow cd) || return
+  ODOO_BASE="$ws" bwrap-claude.sh --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos" "$@"
+}
+```
 
-## Why the extra directories
+Then run:
 
-A linked worktree's `.git` is a file pointing at the shared bare repo, which lives outside the
-workspace — and every worktree of a repo shares one such store. A sandbox that only sees the
-workspace therefore breaks every git command inside it. `ow` gives each task the checkout's Git
-common directories:
+```sh
+claude-sandbox claude
+```
 
-- the `bwrap` tasks get `--add-dir <git common dir>` for each distinct one, followed by whatever
-  arguments you passed;
-- `firejail-claude` gets `--whitelist=<git common dir>` for each, alongside
-  `--whitelist=<workspace>`.
+Or just:
 
-The `bwrap` tasks also export `ODOO_BASE={{config_root}}` — the workspace root — for the
-checkout's own scripts to consume. The firejail task sets no task environment: its wrapper is a
-profile, not a script ow runs.
+```sh
+claude-sandbox
+```
 
-## Security assumptions
+if `bwrap-claude.sh` starts Claude Code by default.
 
-The wrappers own their security. `ow` does not add sandbox flags, widen a profile, or audit what
-the checkout's scripts do; it reproduces the invocation they expect. If a wrapper's isolation
-changes, that is the checkout's change, not ow's.
+## Firejail Alternative
 
-Two consequences worth being plain about:
+[Firejail](https://firejail.sourceforge.io/) is a higher-level sandbox manager with profile-based rules. Install it:
 
-- The `firejail-claude` task runs Claude Code behind the checkout's profile. `ow` does not
-  configure any editor to be launched inside that sandbox, and does not install editor
-  integrations.
-- The wrappers are only as good as the checkout they come from. Running one from an untrusted
-  checkout runs that checkout's own shell script.
+```sh
+sudo apt install firejail
+```
 
-## Upgrading from an older ow
+Create `~/.config/firejail/claude.local`:
 
-Older ow rendered its own wrapper scripts into the workspace root (`bwrap-claude`,
-`bwrap-opencode`). 3.0 removes the template system, so those files are no longer generated. They
-are left on disk and reported as `not rendered` by `ow files` — ow never deletes a workspace file.
-The tasks now point at the checkout's own scripts instead, so you can delete the stale copies
-yourself.
+```
+# Allow edits only in the workspace
+whitelist ~/ws
+blacklist ~
+
+# Allow network
+netfilter yes
+```
+
+Then:
+
+```sh
+firejail --noprofile --appimage claude
+```
+
+Firejail's downside is extra setup and slower startups; its advantage is composable profiles you can share and reuse across agents.
+
+## Whole-Editor Sandboxing
+
+For IDE sandboxing, you can run a whole-editor variant like `code.local` (if installed per Odoo's setup) inside the sandbox. Keep the wrapper outside the sandbox and use the sandboxed binary only for file operations:
+
+1. The editor writes inside the sandbox.
+2. You open the result in your editor outside.
+3. You run build/tests/linters normally (unsandboxed, so they can access system tools).
+
+This hybrid approach contains the agent's writes while keeping full access to your dev tools.
+
+## Trade-offs
+
+**Protections:**
+- File writes stay within the workspace.
+- SSH keys and home directory files are inaccessible.
+- System binaries and config are read-only.
+
+**Limitation:**
+- The entire `~/.local/share/ow/repos` directory is exposed (every workspace's worktrees, not just the current one).
+
+For stronger isolation (network, resource limits), use a full container. For a quick boundary that catches accidental writes, this is it.
