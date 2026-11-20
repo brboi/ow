@@ -10,6 +10,7 @@ implemented yet".
 from __future__ import annotations
 
 import importlib
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Sequence
 
@@ -37,13 +38,21 @@ DRY_RUN_HELP = "Print the git commands without running them"
 YES_HELP = "Skip the confirmation prompt"
 NO_FETCH_HELP = "Do not fetch first; use the cached refs"
 
+# `shell-init` owns completion (add_completion=False keeps --install-completion off),
+# but the classes must still be registered for a live `ow` to answer _OW_COMPLETE.
+typer.completion.completion_init()
+
 
 class OwGroup(TyperGroup):
     """Custom Typer group that handles no_args_is_help with exit 0 and OwError exceptions."""
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        """Override to handle bare 'ow' (no args) by printing help and exiting with 0."""
-        if not args:
+        """Override to handle bare 'ow' (no args) by printing help and exiting with 0.
+
+        A completion request parses with empty args too, so the env var typer's
+        completion machinery sets (§14: `_<prog>_COMPLETE`) must fall through.
+        """
+        if not args and not os.environ.get("_OW_COMPLETE"):
             term.out(ctx.get_help())
             ctx.exit(0)
         return super().parse_args(ctx, args)
