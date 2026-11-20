@@ -29,23 +29,33 @@ jobs:
   test-alpine:
     runs-on: ubuntu-latest
     container:
-      image: alpine:3.20
+      image: alpine:3.22
     
     steps:
       # git must exist before checkout: without it, actions/checkout downloads a tarball
       # with no .git, and setuptools-scm cannot compute the version.
+      # Every supported alpine (3.21+) ships git newer than the declared floor, so the
+      # floor is built from source here instead of pinning an EOL image.
       - name: Install dependencies
         run: |
-          apk add --no-cache git=2.45.4-r0 python3 py3-pip py3-virtualenv bash
-      - name: Verify git version
-        run: |
-          git --version | grep "git version 2.45.4"
+          apk add --no-cache git python3 py3-pip py3-virtualenv bash zsh fish \
+            build-base curl curl-dev zlib-dev openssl-dev expat-dev
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       # The container runs as root over a checkout owned by the runner user.
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Build git 2.45.4 (the declared floor)
+        run: |
+          curl -fsSL https://www.kernel.org/pub/software/scm/git/git-2.45.4.tar.gz -o /tmp/git.tar.gz
+          tar -C /tmp -xzf /tmp/git.tar.gz
+          make -C /tmp/git-2.45.4 -j4 prefix=/usr/local NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 install
+      - name: Verify git 2.45.4 wins on PATH
+        run: |
+          command -v git
+          test "$(command -v git)" = "/usr/local/bin/git"
+          test "$(git --version)" = "git version 2.45.4"
       - name: Create venv and install
         run: |
           python3 -m venv venv
