@@ -107,7 +107,6 @@ class Diagnostic:
 class KnownRepo:
     name: str
     url: str
-    aliases: tuple[str, ...] = ()
 ```
 
 Additional target/runtime records in `core/plugins.py`: `ResolvedRepo`, `ResolvedTarget`,

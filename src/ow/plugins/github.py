@@ -28,7 +28,11 @@ if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
 _PR_URL_RE = re.compile(
-    r"^https?://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<num>\d+)(?:[/?#].*)?$",
+    r"^(?:https?://)?github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<num>\d+)(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
+_PR_PATH_RE = re.compile(
+    r"^(?!github\.com/)(?:(?P<owner>[A-Za-z0-9_.-]+)/)?(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<num>\d+)(?:[/?#].*)?$",
     re.IGNORECASE,
 )
 _PR_SHORT_RE = re.compile(
@@ -79,9 +83,9 @@ def _parse_gh_slug(url: str) -> tuple[str, str] | None:
 
 
 def parse_pr_target(target: str) -> tuple[str | None, str, int] | None:
-    """Parse `<repo>#<num>`, `<owner>/<repo>#<num>`, or a GitHub PR URL into `(owner, repo, number)`."""
+    """Parse `<repo>#<num>`, `<owner>/<repo>#<num>`, `<owner>/<repo>/pull/<num>`, or a GitHub PR URL."""
     text = target.strip()
-    match = _PR_URL_RE.match(text) or _PR_SHORT_RE.match(text)
+    match = _PR_URL_RE.match(text) or _PR_PATH_RE.match(text) or _PR_SHORT_RE.match(text)
     if not match:
         return None
     return match.group("owner"), match.group("repo"), int(match.group("num"))
@@ -149,6 +153,99 @@ def _run_gh(argv: Sequence[str], *, strict: bool) -> Any | None:
         return None
 
 
+def _registered_bare_repos() -> list[tuple[str, Path]]:
+    """Return sorted `(name, bare_path)` pairs for valid bare repos under `repos_dir()`."""
+    directory = repos_dir()
+    if not directory.is_dir():
+        return []
+    result: list[tuple[str, Path]] = []
+    for entry in sorted(directory.iterdir(), key=lambda p: p.name):
+        if entry.name.startswith(".") or not entry.name.endswith(".git") or not entry.is_dir():
+            continue
+        result.append((entry.stem, entry))
+    return result
+
+
+def _bare_gh_info(bare: Path) -> tuple[str, str, str] | None:
+    """Return `(gh_owner, gh_repo, clone_url)` from a local bare repo's config/remotes, or None."""
+    if not bare.is_dir():
+        return None
+    override = git.run(["git", "-C", str(bare), "config", "--get", "ow.github-repo"])
+    if override.returncode == 0:
+        raw_override = override.stdout.strip()
+        if "/" in raw_override:
+            gh_owner, gh_repo = raw_override.split("/", 1)
+            origin_url = git.read(["git", "-C", str(bare), "remote", "get-url", "origin"], check=False)
+            clone_url = origin_url or f"git@github.com:{gh_owner}/{gh_repo}.git"
+            return gh_owner, gh_repo, clone_url
+
+    seen: set[str] = set()
+    ordered = ["origin", "upstream", *git.remotes(bare)]
+    for remote in ordered:
+        if remote in seen:
+            continue
+        seen.add(remote)
+        res = git.run(["git", "-C", str(bare), "config", "--get", f"remote.{remote}.url"])
+        if res.returncode != 0:
+            continue
+        url = res.stdout.strip()
+        slug = _parse_gh_slug(url)
+        if slug is not None:
+            return slug[0], slug[1], url
+    return None
+
+
+def _find_bare_for_slug(owner_low: str, repo_low: str) -> tuple[str, str, str, str] | None:
+    """Return `(bare_name, gh_owner, gh_repo, clone_url)` for the first registered bare matching `(owner, repo)`."""
+    target_slug = f"{owner_low}/{repo_low}"
+    for bare_name, bare_path in _registered_bare_repos():
+        info = _bare_gh_info(bare_path)
+        if info is not None and (info[0].lower(), info[1].lower()) == (owner_low, repo_low):
+            return bare_name, info[0], info[1], info[2]
+        if _remote_for_slug(bare_path, target_slug) is not None:
+            clone_url = info[2] if info is not None else f"git@github.com:{owner_low}/{repo_low}.git"
+            return bare_name, owner_low, repo_low, clone_url
+    return None
+
+
+def _resolve_by_slug(
+    owner: str,
+    repo: str,
+    known_repos: Mapping[str, KnownRepo],
+) -> tuple[str, str, str, str]:
+    """Resolve `(local_name, gh_owner, gh_repo, clone_url)` from a GitHub `(owner, repo)` slug."""
+    owner_low = owner.lower()
+    repo_low = repo.lower()
+
+    # 1. Exact-named local bare repo pointing at `owner/repo`
+    exact_bare = repos_dir() / f"{repo}.git"
+    if exact_bare.is_dir() and _remote_for_slug(exact_bare, f"{owner}/{repo}") is not None:
+        info = _bare_gh_info(exact_bare)
+        clone_url = info[2] if info is not None else f"git@github.com:{owner}/{repo}.git"
+        return repo, owner, repo, clone_url
+
+    # 2. Plugin-declared known repo matching `(owner, repo)` that is already cloned locally
+    matched_known: tuple[str, str, str, str] | None = None
+    for known in known_repos.values():
+        slug = _parse_gh_slug(known.url)
+        if slug is not None and (slug[0].lower(), slug[1].lower()) == (owner_low, repo_low):
+            matched_known = (known.name, slug[0], slug[1], known.url)
+            if (repos_dir() / f"{known.name}.git").is_dir():
+                return matched_known
+            break
+
+    # 3. Any registered bare repo pointing at `(owner, repo)` (e.g. `odoo/iap-apps` -> `iap`)
+    existing = _find_bare_for_slug(owner_low, repo_low)
+    if existing is not None:
+        return existing
+
+    # 4. Uncloned plugin-declared known repo matching `(owner, repo)` (e.g. `odoo/odoo` -> `community`)
+    if matched_known is not None:
+        return matched_known
+
+    return repo, owner, repo, f"git@github.com:{owner}/{repo}.git"
+
+
 def _resolve_repo_identity(
     owner: str | None,
     repo: str,
@@ -156,19 +253,29 @@ def _resolve_repo_identity(
     default_org: str,
 ) -> tuple[str, str, str, str]:
     """Resolve `(local_name, gh_owner, gh_repo, clone_url)` from a parsed PR target."""
-    owner_low = owner.lower() if owner is not None else None
-    repo_low = repo.lower()
-    for known in known_repos.values():
-        slug = _parse_gh_slug(known.url)
-        if owner_low is not None and slug is not None and (slug[0].lower(), slug[1].lower()) == (owner_low, repo_low):
-            return known.name, slug[0], slug[1], known.url
-        if owner is None and (repo == known.name or repo in known.aliases):
-            if slug is not None:
-                return known.name, slug[0], slug[1], known.url
-            return known.name, default_org, repo, known.url
+    if owner is not None:
+        return _resolve_by_slug(owner, repo, known_repos)
 
-    gh_owner = owner or default_org
-    return repo, gh_owner, repo, f"git@github.com:{gh_owner}/{repo}.git"
+    # 1. Registered local bare repo by exact name (e.g. `iap` -> `iap.git` with origin `odoo/iap-apps`)
+    exact_bare = repos_dir() / f"{repo}.git"
+    info = _bare_gh_info(exact_bare)
+    if info is not None:
+        return repo, info[0], info[1], info[2]
+
+    # 2. Plugin-declared known repo by exact name (reusing an existing bare for the same slug if present)
+    known = known_repos.get(repo)
+    if known is not None:
+        slug = _parse_gh_slug(known.url)
+        gh_owner, gh_repo = slug if slug is not None else (default_org, repo)
+        if (repos_dir() / f"{known.name}.git").is_dir():
+            return known.name, gh_owner, gh_repo, known.url
+        existing = _find_bare_for_slug(gh_owner.lower(), gh_repo.lower())
+        if existing is not None:
+            return existing
+        return known.name, gh_owner, gh_repo, known.url
+
+    # 3. GitHub slug `<default_org>/<repo>` (matches registered bares or known repos by URL, e.g. `odoo` -> `community`)
+    return _resolve_by_slug(default_org, repo, known_repos)
 
 
 def _remote_for_slug(bare: Path, gh_slug: str) -> str | None:
@@ -255,10 +362,16 @@ def _find_sister_pr(
     base_ref = pr.get("baseRefName")
     if not isinstance(number, int) or isinstance(number, bool) or not isinstance(base_ref, str):
         return None
-    remote_hint = _remote_for_slug(repos_dir() / f"{known.name}.git", gh_slug)
+    local_name = known.name
+    clone_url = known.url
+    if not (repos_dir() / f"{local_name}.git").is_dir():
+        existing = _find_bare_for_slug(slug[0].lower(), slug[1].lower())
+        if existing is not None:
+            local_name, clone_url = existing[0], existing[3]
+    remote_hint = _remote_for_slug(repos_dir() / f"{local_name}.git", gh_slug)
     return ResolvedRepo(
-        name=known.name,
-        url=known.url,
+        name=local_name,
+        url=clone_url,
         branch=head_ref,
         base=f"{remote_hint or 'origin'}/{base_ref}",
         remote=remote_hint,
@@ -312,8 +425,21 @@ def ow_resolve_target(
         metadata={"pr": pr, "ow_pr": f"{gh_slug}#{number}"},
     )
 
-    # Discover sister PRs across other known repos in the same org in parallel
-    candidates = [k for k in known_repos.values() if k.name != local_name]
+    # Discover sister PRs across other known repos in the same org in parallel.
+    # Deduplicate by GitHub slug and exclude the primary PR's own slug so a local bare
+    # with a different name (e.g. `iap` -> `odoo/iap-apps`) never re-matches `iap-apps`.
+    seen_slugs = {gh_slug.lower()}
+    candidates: list[KnownRepo] = []
+    for k in known_repos.values():
+        if k.name == local_name:
+            continue
+        k_slug = _parse_gh_slug(k.url)
+        if k_slug is not None:
+            slug_key = f"{k_slug[0]}/{k_slug[1]}".lower()
+            if slug_key in seen_slugs:
+                continue
+            seen_slugs.add(slug_key)
+        candidates.append(k)
     sisters: list[ResolvedRepo] = []
     if candidates:
         with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
@@ -346,17 +472,8 @@ def ow_resolve_target(
 
 def _repo_gh_slug(bare: Path) -> str | None:
     """Return `owner/repo` from `ow.github-repo` config or `origin`/`upstream` remote URL."""
-    override = git.run(["git", "-C", str(bare), "config", "--get", "ow.github-repo"])
-    if override.returncode == 0 and "/" in override.stdout.strip():
-        return override.stdout.strip()
-    for remote in ("origin", "upstream"):
-        result = git.run(["git", "-C", str(bare), "config", "--get", f"remote.{remote}.url"])
-        if result.returncode != 0:
-            continue
-        slug = _parse_gh_slug(result.stdout.strip())
-        if slug is not None:
-            return f"{slug[0]}/{slug[1]}"
-    return None
+    info = _bare_gh_info(bare)
+    return f"{info[0]}/{info[1]}" if info is not None else None
 
 
 def _recorded_branch_pr(bare: Path, branch: str) -> tuple[str, int] | None:

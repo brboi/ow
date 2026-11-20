@@ -435,7 +435,7 @@ def test_odoo_mise_environment_answers(lab):
 
 
 def test_odoo_known_repos():
-    """The built-in known repos include community (aliased as odoo) and companion repos."""
+    """The built-in known repos include community and companion repos."""
     repos = odoo.ow_known_repos()
     names = [repo.name for repo in repos]
     assert names == [
@@ -447,7 +447,6 @@ def test_odoo_known_repos():
         "upgrade-util",
         "voip",
     ]
-    assert repos[0].aliases == ("odoo",)
 
 
 def test_odoo_debug_args_setting_default_tracks_the_core(lab):

@@ -120,6 +120,18 @@ def test_ls_lists_bares_and_marks_this_workspace(lab):
     assert result.stdout == f"community: {url} (in this workspace)\n"
 
 
+def test_ls_skips_hidden_dot_git_dir(lab):
+    remote = lab.remote("community", {"18.0": {"README.md": "c"}}, head="18.0")
+    url = file_url(remote)
+    assert lab.ow("repo", "add", "community", url).exit_code == 0
+    (repos_dir() / ".git").mkdir(parents=True, exist_ok=True)
+
+    result = lab.ow("repo", "ls")
+
+    assert result.exit_code == 0
+    assert result.stdout == f"community: {url}\n"
+
+
 def test_a_failed_bare_creation_leaves_nothing_behind(lab):
     bare = repos_dir() / "custom.git"
 

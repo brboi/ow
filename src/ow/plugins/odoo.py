@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Mapping
 
 import tomli_w
 
+from ow.core.paths import repos_dir
 from ow.core.plugins import (
     Diagnostic,
     GeneratedFile,
@@ -693,6 +694,31 @@ def editors_contribution(ws: Workspace) -> EditorContribution | None:
 
 
 _ODOO_ADDON_REPOS = frozenset({"enterprise", "design-themes", "iap-apps", "upgrade", "upgrade-util"})
+_ODOO_CORE_SLUGS = frozenset({"odoo/odoo"})
+_ODOO_ADDON_SLUGS = frozenset(f"odoo/{name}" for name in _ODOO_ADDON_REPOS)
+_REPO_SLUG_RE = re.compile(
+    r"(?:[:/])(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+
+
+def _repo_slug(url: str | None) -> str | None:
+    if not url:
+        return None
+    match = _REPO_SLUG_RE.search(url.strip())
+    if not match:
+        return None
+    return f"{match.group('owner')}/{match.group('repo')}".lower()
+
+
+def _repo_slugs(repo: ResolvedRepo) -> set[str]:
+    slugs: set[str] = set()
+    url_slug = _repo_slug(repo.url)
+    if url_slug is not None:
+        slugs.add(url_slug)
+    ow_pr = repo.metadata.get("ow_pr")
+    if isinstance(ow_pr, str) and "#" in ow_pr and "/" in ow_pr:
+        slugs.add(ow_pr.split("#", 1)[0].strip().lower())
+    return slugs
 
 
 @hookimpl
@@ -703,15 +729,21 @@ def ow_expand_workspace_repos(
 ) -> tuple[ResolvedRepo, ...] | None:
     """Ensure any Odoo addon target gets an Odoo core (`community`) repo alongside it."""
     names = {r.name for r in repos}
-    if "community" in names or "odoo" in names:
+    slugs: set[str] = set()
+    for r in repos:
+        slugs.update(_repo_slugs(r))
+    if "community" in names or "odoo" in names or (slugs & _ODOO_CORE_SLUGS):
         return None
-    if not (names & _ODOO_ADDON_REPOS):
+    if not (names & _ODOO_ADDON_REPOS) and not (slugs & _ODOO_ADDON_SLUGS):
         return None
 
     base = next((r.base for r in repos if r.base), None)
     core_known = known_repos.get("community")
     core_url = core_known.url if core_known is not None else "git@github.com:odoo/odoo.git"
-    core_repo = ResolvedRepo(name="community", url=core_url, branch=None, base=base)
+    core_name = "community"
+    if not (repos_dir() / "community.git").is_dir() and (repos_dir() / "odoo.git").is_dir():
+        core_name = "odoo"
+    core_repo = ResolvedRepo(name=core_name, url=core_url, branch=None, base=base)
     return (core_repo, *repos)
 
 
@@ -742,7 +774,7 @@ def ow_runner(ws: Workspace, args: tuple[str, ...]) -> RunCommand | None:
 def ow_known_repos() -> list[KnownRepo]:
     """Provide known Odoo repositories."""
     return [
-        KnownRepo(name="community", url="git@github.com:odoo/odoo.git", aliases=("odoo",)),
+        KnownRepo(name="community", url="git@github.com:odoo/odoo.git"),
         KnownRepo(name="enterprise", url="git@github.com:odoo/enterprise.git"),
         KnownRepo(name="design-themes", url="git@github.com:odoo/design-themes.git"),
         KnownRepo(name="iap-apps", url="git@github.com:odoo/iap-apps.git"),

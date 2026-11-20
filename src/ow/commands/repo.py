@@ -13,7 +13,6 @@ from ow.commands._shared import (
     refresh_after,
     refresh_workspace,
     remotes_of,
-    resolve_known_repo,
     run_steps,
 )
 from ow.core import config, git
@@ -31,10 +30,6 @@ def add(session: Session, name: str, url: str | None, *, base: str | None) -> in
 
     `--base` is parsed before any git command, so a bad base creates no bare.
     """
-    catalog = known_repo_catalog(session.plugins)
-    known = resolve_known_repo(name, catalog)
-    if known is not None and not (repos_dir() / f"{name}.git").is_dir():
-        name = known.name
     bare = repos_dir() / f"{name}.git"
     url = _url_for(session, name, url, registered=bare.is_dir())
     if base is not None:
@@ -80,7 +75,7 @@ def ls(session: Session) -> int:
         {repo.name for repo in session.workspace.repos} if session.workspace is not None else set()
     )
     for entry in sorted(directory.iterdir(), key=lambda path: path.name):
-        if not entry.is_dir():
+        if entry.name.startswith(".") or not entry.is_dir():
             continue
         name = entry.stem if entry.name.endswith(".git") else entry.name
         url = _origin_url(entry)
@@ -198,7 +193,7 @@ def _url_for(session: Session, name: str, url: str | None, *, registered: bool) 
     """The URL to register: the explicit one, else the repo's known one; a registered bare needs none."""
     if url is not None:
         return url
-    known = resolve_known_repo(name, known_repo_catalog(session.plugins))
+    known = known_repo_catalog(session.plugins).get(name)
     if known is not None:
         return known.url
     if registered:
