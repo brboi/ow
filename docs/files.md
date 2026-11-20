@@ -1,6 +1,6 @@
 # Generated files
 
-ow generates and maintains a set of workspace files: Odoo config, Python environment and IDE settings. It tracks what it wrote, never overwrites a hand edit, and never deletes.
+ow generates and maintains a set of workspace files: Odoo config, Python environment and IDE settings. It tracks what it wrote and never overwrites a hand edit. A refresh never deletes a file.
 
 ## The lock
 
@@ -14,6 +14,8 @@ odoorc = "4bbae601dedf2efc38cdd231f885c4bc3f166b21c87c763191bd1e7679ae7f1a"
 ```
 
 A flat path → hash map with a one-line header, sorted, keys quoted only when TOML needs it. ow rewrites it only when its bytes change. Do not edit it by hand. A malformed lock is reported (`malformed lock at .ow/rendered.lock.toml; files that differ from ow's are treated as yours`) and treated as empty.
+
+A multi-stack workspace root has its own lock, `<root>/.ow/rendered.lock.toml`, which follows the same rules for `<workspace>.code-workspace`.
 
 ## States
 
@@ -84,13 +86,13 @@ If any plugin reports an `error` diagnostic, the errors are printed and `ow file
 | odoo | `requirements-dev.txt` | same |
 | vscode | `.vscode/settings.json` | a plugin contributes a language server, exclude, or shared venv |
 | vscode | `.vscode/launch.json` | a plugin contributes a launch config |
-| vscode | `<task>.code-workspace` (in task's parent dir) | workspace belongs to a multi-workspace task (`-t/--task`) |
+| vscode | `<workspace>.code-workspace` (at multi-stack root) | workspace has multiple stacks |
 | zed | `.zed/settings.json` | a plugin contributes a language server or an exclude |
 | zed | `.zed/debug.json` | a plugin contributes a launch config |
 
-`odoorc` holds the `[options]` Odoo loads: `http_port`, `gevent_port`, database settings, `addons_path`, and `data_dir` pointing at `.odoo/`. When `mise.enabled` and `mise.shared_venv` are `true` (default), `mise/conf.d/00-ow.toml`, `odools.toml`, `pyrightconfig.json`, `.vscode/settings.json`, `.vscode/launch.json`, and `.zed/debug.json` all point at the shared virtualenv under `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`. Task-level files (`<task>.code-workspace`) are tracked by an ownership lock under `$XDG_STATE_HOME/ow/task-locks/` so user edits are never overwritten. A workspace with no Odoo core and no `mise.python` gets nothing.
+`odoorc` holds the `[options]` Odoo loads: `http_port`, `gevent_port`, database settings, `addons_path`, and `data_dir` pointing at `.odoo/`. When `mise.enabled` and `mise.shared_venv` are `true` (default), `mise/conf.d/00-ow.toml`, `odools.toml`, `pyrightconfig.json`, `.vscode/settings.json`, `.vscode/launch.json`, and `.zed/debug.json` all point at the shared virtualenv under `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`. A workspace with no Odoo core and no `mise.python` gets nothing.
 
-The local plugin is different: instead of generating files, it copies the regular files under `~/.config/ow/local` into `.local/` when the workspace is created, and only where nothing is there yet. Those copies are not tracked in the lock.
+The local plugin is different: instead of generating files, it copies the regular files under `~/.config/ow/local` into `.local/` when the workspace is created, and only where nothing is there yet. Those copies are not tracked in the lock. Addons under `.local/` come first in `addons_path`, so they shadow the same-named modules in the repos.
 
 ## Never overwrite
 
@@ -100,7 +102,8 @@ Other guarantees:
 
 - No `--force`. A `yours` file stays until you delete it or make the config match it.
 - Writes go through a same-directory temp file and a rename, so a destination is never truncated in place, and a symlink there is never followed.
-- ow never deletes files. When a plugin is disabled, its lock entries are dropped and the files stay. Re-enabling regenerates them.
+- ow never deletes generated files on refresh. A file that no plugin produces any more (for example when a plugin is disabled) just loses its lock entry and stays on disk; re-enabling the plugin regenerates it.
+- The only deletion is when ow removes a multi-stack workspace itself (`ow rm` or `ow prune` removing the root): the recorded root files whose bytes still match the lock are deleted, hand-edited files stay.
 
 To get ow's version of a `yours` file back:
 
@@ -114,10 +117,10 @@ A corrupted lock is recoverable the same way: delete `.ow/rendered.lock.toml` an
 
 ## When refresh runs
 
-- After `ow add`, `ow repo add` and `ow repo rm`.
+- After `ow init`, `ow add`, `ow repo add` and `ow repo rm`.
 - After `ow config set` and `ow config unset`.
-- After opt-in `ow retarget`, when a repo actually changed.
-- On explicit `ow refresh` (which also syncs `<task>.code-workspace` for task members).
+- After `ow retarget`, when a repo actually changed.
+- On explicit `ow refresh` (which also syncs `<workspace>.code-workspace` for multi-stack workspaces).
 
 A dry run or a declined prompt does not refresh.
 

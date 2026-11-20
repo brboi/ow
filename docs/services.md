@@ -83,9 +83,7 @@ COMPOSE_FILE = "/path/to/compose.yml"
 
 ## Coming from ow 2
 
-ow 2 kept its compose file at `$XDG_CONFIG_HOME/ow/services/compose.yml` and its data in `$XDG_DATA_HOME/ow/volumes/` (`postgres-data/`, `mailpit-data/`), with a database named `postgres`. ow 3 never reads, writes or deletes any of it: the file and the data are yours.
-
-The stack above uses named volumes and a database named `odoo`, so it starts with an empty database and never sees the old data. To reuse it, bind-mount the old directories instead:
+The stack above uses named volumes and a database named `odoo`, so it starts empty and never sees ow 2's data. ow 2 kept it in `$XDG_DATA_HOME/ow/volumes/` (`postgres-data/`, `mailpit-data/`) under a database named `postgres`; see [Migrating to 3.0](migrating-to-3.0.md#never-delete). To reuse it, bind-mount the old directories instead:
 
 ```yaml
     volumes:

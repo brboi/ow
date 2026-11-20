@@ -8,7 +8,7 @@ Three layers, later ones winning:
 
 1. Built-in defaults, declared by each plugin.
 2. Global config: `$XDG_CONFIG_HOME/ow/config.toml`, usually `~/.config/ow/config.toml`.
-3. Workspace config: `<workspace>/.ow/config.toml`.
+3. Workspace (or stack) config: `<workspace>/.ow/config.toml`.
 
 ## `ow config`
 
@@ -26,7 +26,7 @@ odoo.http_port = 8069 (default) # HTTP port for Odoo
 odoo.db_name = "voip" (default) # Database name (defaults to workspace name)
 ```
 
-Outside a workspace the same listing works, with workspace-derived defaults unset. `--global` ignores the workspace layer and fills from global and defaults only.
+Outside a workspace the same listing works, with workspace-derived defaults unset. `--global` skips the workspace layer: values come from the global config and defaults only.
 
 ### Get
 
@@ -63,11 +63,11 @@ An unknown key is accepted: unsetting is how you clear the unknown-key warning. 
 
 ## `[workspace]` & `[repos]`
 
-The workspace config carries optional task metadata under `[workspace]` (managed by `ow add -t <task>`) and the repos of the workspace under `[repos]`, as a name → base ref table:
+A stack inside a multi-stack workspace carries `stack = true` under `[workspace]` (written automatically by `ow init` and `ow add`), and every workspace/stack stores its repos under `[repos]` as a name → base ref table:
 
 ```toml
 [workspace]
-task = "voip-task"
+stack = true
 
 [repos]
 community = "origin/master"
@@ -78,34 +78,29 @@ Each `[repos]` value is validated against the bare repo's remotes: the longest r
 
 ## Settings
 
-`<plugin>.enabled` exists for every plugin; it defaults to `true` except for opt-in plugins (`retarget.enabled` defaults to `false`). Command registration for opt-in plugins like `retarget` reads the `--global` config (a workspace can still disable it locally with `retarget.enabled = false`).
+`ow config` prints each setting with its help text; this table lists only key, type and default. `<plugin>.enabled` (bool, default `true`) exists for every plugin; a workspace can disable a plugin locally with `<plugin>.enabled = false`.
 
-| Key | Type | Default | Meaning |
-|---|---|---|---|
-| `mise.enabled` | bool | `true` | Enable or disable the mise plugin |
-| `mise.python` | str | — | Python version for mise (e.g. '3.11', '3.12') |
-| `mise.shared_venv` | bool | `true` | Share Python virtualenvs under `$XDG_DATA_HOME/ow/venvs` |
-| `odoo.enabled` | bool | `true` | Enable or disable the odoo plugin |
-| `odoo.http_port` | int | `8069` | HTTP port for Odoo |
-| `odoo.gevent_port` | int | `8072` | Gevent/longpolling port for Odoo |
-| `odoo.db_name` | str | workspace name | Database name |
-| `odoo.db_host` | str | `"localhost"` | Database host |
-| `odoo.db_port` | int | `5432` | Database port |
-| `odoo.db_user` | str | `"odoo"` | Database user |
-| `odoo.db_password` | str | `"odoo"` | Database password |
-| `odoo.admin_passwd` | str | `"Password"` | Odoo admin password |
-| `odoo.smtp_server` | str | `"localhost"` | SMTP server |
-| `odoo.smtp_port` | int | `25` | SMTP port |
-| `odoo.debug_args` | list | `["--dev=all"]` | Debug arguments for Odoo |
-| `odoo.debug_test_args` | list | `["--test-tags=<workspace>"]` | Debug test arguments |
-| `odoo.default_repos` | list | `["community", "enterprise"]` | Default repos for fresh `ow add` workspaces |
-| `github.enabled` | bool | `true` | Enable or disable the github plugin |
-| `github.default_org` | str | `"odoo"` | Default GitHub org for short PR targets |
-| `github.cache_ttl` | int | `120` | Cache TTL in seconds for GitHub PR status lookups |
-| `vscode.enabled` | bool | `true` | Enable or disable the vscode plugin |
-| `zed.enabled` | bool | `true` | Enable or disable the zed plugin |
-| `local.enabled` | bool | `true` | Enable or disable the local plugin |
-| `retarget.enabled` | bool | `false` | Enable or disable the opt-in `ow retarget` plugin (set globally) |
+| Key | Type | Default |
+|---|---|---|
+| `mise.python` | str | — |
+| `mise.shared_venv` | bool | `true` |
+| `odoo.http_port` | int | `8069` |
+| `odoo.gevent_port` | int | `8072` |
+| `odoo.db_name` | str | workspace name |
+| `odoo.db_host` | str | `"localhost"` |
+| `odoo.db_port` | int | `5432` |
+| `odoo.db_user` | str | `"odoo"` |
+| `odoo.db_password` | str | `"odoo"` |
+| `odoo.admin_passwd` | str | `"Password"` |
+| `odoo.smtp_server` | str | `"localhost"` |
+| `odoo.smtp_port` | int | `25` |
+| `odoo.debug_args` | list | `["--dev=all"]` |
+| `odoo.debug_test_args` | list | `["--test-tags=<workspace>"]` |
+| `odoo.default_repos` | list | `["community", "enterprise"]` |
+| `github.default_org` | str | `"odoo"` |
+| `github.cache_ttl` | int | `120` |
+| `runbot.url` | str | `"https://runbot.odoo.com"` |
+| `runbot.cache_ttl` | int | `120` |
 
 `odoo.debug_args` also gets `--without-demo=all` when the Odoo core predates 19. `odoo.db_name` and `odoo.debug_test_args` are computed from the workspace, so they read as `(unset)` outside one.
 
@@ -117,7 +112,7 @@ The config is TOML with optional `[workspace]` metadata, `[repos]`, and one tabl
 
 ```toml
 [workspace]
-task = "voip-task"
+stack = true
 
 [repos]
 community = "origin/master"
