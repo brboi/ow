@@ -73,6 +73,15 @@ def operation_in_progress(path: Path) -> str | None:
     return None
 
 
+def _unquote(path: str) -> str:
+    """Undo git's C-style path quoting when porcelain emits it."""
+    if not (len(path) >= 2 and path.startswith('"') and path.endswith('"')):
+        return path
+    try:
+        return bytes(path[1:-1], "utf-8").decode("unicode_escape").encode("latin-1").decode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return path
+
 def gather_facts(location) -> RepoFacts:
     """Gather facts about a repository from git (git reads only).
 
@@ -141,55 +150,29 @@ def gather_facts(location) -> RepoFacts:
             if match:
                 upstream_ab = (int(match.group(1)), int(match.group(2)))
     
-    # Parse file entries
+    # Parse file entries. Each porcelain-v2 record is space-separated up to
+    # its path, which is the last field and may itself contain spaces.
     modified = []
     untracked = []
-    
     for line in status_output.split("\n"):
         if not line or line.startswith("#"):
             continue
-        
-        parts = line.split(None, 1)
-        if not parts:
-            continue
-        
-        entry_type = parts[0]
-        
-        if entry_type == "1" and len(parts) > 1:
-            # Ordinary changed entry: 1 <XY> ... <path>
-            # Parse XY status
-            rest = parts[1]
-            fields = rest.split()
-            if len(fields) >= 6:
-                xy = fields[0]
-                path_str = fields[6]
-                # If the entry is modified (not just in one side)
-                if xy != "..":
-                    modified.append(path_str)
-        elif entry_type == "2" and len(parts) > 1:
-            # Renamed/copied entry: 2 <XY> ... <score> <path> <origPath>
-            rest = parts[1]
-            fields = rest.split()
-            if len(fields) >= 8:
-                xy = fields[0]
-                path_str = fields[7]
-                if xy != "..":
-                    modified.append(path_str)
-        elif entry_type == "u" and len(parts) > 1:
-            # Unmerged entry
-            rest = parts[1]
-            fields = rest.split()
-            if len(fields) >= 6:
-                path_str = fields[6]
-                modified.append(path_str)
-        elif entry_type == "?":
-            # Untracked file
-            rest = parts[1]
-            fields = rest.split()
-            if fields:
-                path_str = fields[0]
-                untracked.append(path_str)
-    
+        kind = line[0]
+        if kind == "1":  # 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
+            fields = line.split(" ", 8)
+            if len(fields) == 9 and fields[1] != "..":
+                modified.append(_unquote(fields[8]))
+        elif kind == "2":  # 2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>\t<orig>
+            fields = line.split(" ", 9)
+            if len(fields) == 10 and fields[1] != "..":
+                modified.append(_unquote(fields[9].split("\t")[0]))
+        elif kind == "u":  # u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
+            fields = line.split(" ", 10)
+            if len(fields) == 11:
+                modified.append(_unquote(fields[10]))
+        elif kind == "?":  # ? <path>
+            untracked.append(_unquote(line[2:]))
+
     # Read remotes from the bare repo (the worktree itself has none)
     remotes_output = git.read(["git", "-C", str(bare), "remote"], check=True)
     remotes = tuple(remotes_output.split("\n")) if remotes_output else ()

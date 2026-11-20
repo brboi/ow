@@ -9,7 +9,8 @@ from typing import Callable, Mapping, Sequence
 
 from ow.core import git
 from ow.errors import OwError, UsageError
-from ow.term import confirm, error, interactive, out, warn
+from ow import term
+from ow.term import error, out, warn
 
 @dataclass(frozen=True)
 class GitStep:
@@ -78,6 +79,12 @@ def show(step: Step, root: Path | None = None) -> str:
         return step.shown
 
 
+def _err_lines(text: str) -> None:
+    """Report git's (possibly multi-line) stderr one prefixed line at a time."""
+    for line in text.strip().splitlines():
+        error(line)
+
+
 def run_batch(
     batch: Batch, *, prompt: bool, dry_run: bool, yes: bool
 ) -> Outcome:
@@ -133,10 +140,10 @@ def run_batch(
             refused = tuple(rp.repo for rp in batch.repos if rp.refusal)
             return Outcome(ok=(), failed=(), refused=refused, mutated=False, exit_code=1 if refused else 0)
         
-        if not yes and not interactive():
+        if not yes and not term.interactive():
             raise UsageError("no terminal to confirm; re-run with -y")
-        
-        if not yes and not confirm("Proceed?"):
+
+        if not yes and not term.confirm("Proceed?"):
             raise UsageError("aborted")
     else:
         # prompt=False
@@ -167,24 +174,21 @@ def run_batch(
         
         repo_ok = True
         for step in repo_plan.steps:
-            # Print comment if present
-            if isinstance(step, GitStep) and step.comment:
-                out(f"# {step.comment}")
-            
-            # Print step before execution
             step_shown = show(step, batch.root)
-            out(step_shown)
-            
+            # With a prompt the plan was printed whole before the prompt; an
+            # additive command prints each line just before it runs (§13).
+            if not prompt:
+                if isinstance(step, GitStep) and step.comment:
+                    out(f"# {step.comment}")
+                out(step_shown)
+
             if isinstance(step, GitStep):
                 # Run the git step
                 result = git.run(step.argv)
                 
                 if result.returncode != 0:
-                    # Print error
-                    error(f"error: {repo_plan.repo}: {step_shown}")
-                    if result.stderr:
-                        error(result.stderr)
-                    
+                    error(f"{repo_plan.repo}: {step_shown}")
+                    _err_lines(result.stderr)
                     # Detect operation in progress in the failed step's directory
                     git_dir = None
                     if len(step.argv) > 2 and step.argv[1] == "-C":
@@ -248,8 +252,8 @@ def run_batch(
                     if step.mutating:
                         mutated = True
                 except (OSError, OwError) as e:
-                    error(f"error: {repo_plan.repo}: {step_shown}")
-                    error(str(e))
+                    error(f"{repo_plan.repo}: {step_shown}")
+                    _err_lines(str(e))
                     repo_ok = False
                     break
         
@@ -261,24 +265,19 @@ def run_batch(
     # Execute after steps (only if no repo failed)
     if not failed:
         for step in batch.after:
-            # Print comment if present
-            if isinstance(step, GitStep) and step.comment:
-                out(f"# {step.comment}")
-            
-            # Print step before execution
             step_shown = show(step, batch.root)
-            out(step_shown)
-            
+            if not prompt:
+                if isinstance(step, GitStep) and step.comment:
+                    out(f"# {step.comment}")
+                out(step_shown)
+
             if isinstance(step, GitStep):
                 # Run the git step
                 result = git.run(step.argv)
                 
                 if result.returncode != 0:
-                    # Print error
-                    error(f"error: {step_shown}")
-                    if result.stderr:
-                        error(result.stderr)
-                    
+                    error(step_shown)
+                    _err_lines(result.stderr)
                     # Mark the after step as failed and stop processing
                     failed.append("<after>")
                     break
@@ -292,9 +291,8 @@ def run_batch(
                     if step.mutating:
                         mutated = True
                 except (OSError, OwError) as e:
-                    error(f"error: {step_shown}")
-                    error(str(e))
-                    
+                    error(step_shown)
+                    _err_lines(str(e))
                     # Mark the after step as failed and stop processing
                     failed.append("<after>")
                     break
@@ -342,9 +340,8 @@ def run_fetches(
         if results[repo] is not None:
             has_failures = True
             git_failed = results[repo]
-            error(f"error: {repo}: {git.show(git_failed.argv, root)}")
-            error(git_failed.stderr)
-    
+            error(f"{repo}: {git.show(git_failed.argv, root)}")
+            _err_lines(git_failed.stderr)
     # Print hint once if there were failures
     if has_failures:
         warn("pass --no-fetch to work on cached refs")
