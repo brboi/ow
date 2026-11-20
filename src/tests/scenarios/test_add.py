@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from ow.core.paths import repos_dir
-from tests.conftest import add_repo
+from tests.conftest import add_repo, file_url
 
 
 def _setup_pr_repo(lab, name: str, base_files: dict[str, str], pr_num: int, pr_branch: str, pr_files: dict[str, str]):
@@ -626,3 +626,127 @@ def test_add_refuses_existing_non_ow_directory(lab):
     assert (stray / "notes.txt").read_text() == "do not touch\n"
     assert not (stray / ".ow").exists()
 
+
+def test_add_branch_target_discovers_non_origin_remote_and_infers_odoo_base(lab):
+    """`ow add enterprise@18.0-port-in` finds the branch on `dev`, infers `origin/18.0`, and auto-adds `community`."""
+    add_repo(
+        lab,
+        "community",
+        {"master": lab.odoo_files(series="19.0"), "18.0": lab.odoo_files(series="18.0")},
+    )
+    add_repo(
+        lab,
+        "enterprise",
+        {
+            "master": {"sale_ent/__manifest__.py": "{'version': '19.0'}"},
+            "18.0": {"sale_ent/__manifest__.py": "{'version': '18.0'}"},
+        },
+    )
+    dev_remote = lab.remote(
+        "enterprise-dev",
+        {"18.0-port-in": {"sale_ent/__manifest__.py": "{}", "sale_ent/dev.py": "from_dev = True\n"}},
+        head="18.0-port-in",
+    )
+    lab.git(repos_dir() / "enterprise.git", "remote", "add", "dev", file_url(dev_remote))
+
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+    res = lab.ow("add", "enterprise@18.0-port-in", cwd=parent)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    ws = parent / "18.0-port-in"
+    assert (ws / "community" / "odoo-bin").is_file()
+    assert (ws / "enterprise" / "sale_ent" / "dev.py").read_text() == "from_dev = True\n"
+    assert lab.git(ws / "enterprise", "branch", "--show-current") == "18.0-port-in"
+    assert lab.git(ws / "enterprise", "config", "--get", "branch.18.0-port-in.remote") == "dev"
+    assert lab.git(ws / "enterprise", "config", "--get", "branch.18.0-port-in.ow-base") == "origin/18.0"
+    assert "community = \"origin/18.0\"" in (ws / ".ow" / "config.toml").read_text()
+
+
+def test_add_branch_target_ambiguous_remotes_and_explicit_remote_qualifier(lab):
+    """When two non-origin remotes share a branch, `repo@branch` errors and `repo@remote/branch` disambiguates."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(lab, "enterprise", {"18.0": {"sale_ent/__manifest__.py": "{}"}})
+    dev_remote = lab.remote(
+        "ent-dev",
+        {"18.0-shared": {"sale_ent/src.py": "remote = 'dev'\n"}},
+        head="18.0-shared",
+    )
+    fork_remote = lab.remote(
+        "ent-fork",
+        {"18.0-shared": {"sale_ent/src.py": "remote = 'fork'\n"}},
+        head="18.0-shared",
+    )
+    ent_bare = repos_dir() / "enterprise.git"
+    lab.git(ent_bare, "remote", "add", "dev", file_url(dev_remote))
+    lab.git(ent_bare, "remote", "add", "fork", file_url(fork_remote))
+
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+    ambig = lab.ow("add", "enterprise@18.0-shared", cwd=parent)
+    assert ambig.exit_code == 2
+    assert "multiple remotes" in (ambig.stderr + ambig.stdout)
+    assert not (parent / "18.0-shared").exists()
+
+    ok = lab.ow("add", "enterprise@fork/18.0-shared", cwd=parent)
+    assert ok.exit_code == 0, ok.stderr + ok.stdout
+    ws = parent / "18.0-shared"
+    assert (ws / "enterprise" / "sale_ent" / "src.py").read_text() == "remote = 'fork'\n"
+    assert lab.git(ws / "enterprise", "config", "--get", "branch.18.0-shared.remote") == "fork"
+
+
+def test_add_branch_target_missing_branch_fails_cleanly(lab):
+    add_repo(lab, "enterprise", {"18.0": {"sale_ent/__manifest__.py": "{}"}})
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+
+    res = lab.ow("add", "enterprise@18.0-does-not-exist", cwd=parent)
+    assert res.exit_code == 2
+    assert "not found on any remote" in (res.stderr + res.stdout)
+    assert not (parent / "18.0-does-not-exist").exists()
+
+
+def test_add_branch_target_composite_with_pr(lab):
+    """Composite `enterprise#135585+iap@18.0-iap-dev` combines a PR target and a remote branch target."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    _setup_pr_repo(
+        lab,
+        "enterprise",
+        {"sale_ent/__manifest__.py": "{}"},
+        135585,
+        "18.0-port-in",
+        {"sale_ent/ent.py": "ent = 1\n"},
+    )
+    add_repo(lab, "iap", {"18.0": {"iap_mod/__manifest__.py": "{}"}})
+    iap_dev = lab.remote(
+        "iap-dev",
+        {"18.0-iap-dev": {"iap_mod/__manifest__.py": "{}", "iap_mod/dev.py": "iap_dev = 1\n"}},
+        head="18.0-iap-dev",
+    )
+    lab.git(repos_dir() / "iap.git", "remote", "add", "dev", file_url(iap_dev))
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/enterprise",
+                "number": 135585,
+                "title": "Enterprise PR",
+                "url": "https://github.com/odoo/enterprise/pull/135585",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0-port-in",
+                "baseRefName": "18.0",
+            }
+        ]
+    )
+
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+    res = lab.ow("add", "enterprise#135585+iap@18.0-iap-dev", cwd=parent)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    ws = parent / "135585-18.0-port-in"
+    assert (ws / "community" / "odoo-bin").is_file()
+    assert (ws / "enterprise" / "sale_ent" / "ent.py").read_text() == "ent = 1\n"
+    assert (ws / "iap" / "iap_mod" / "dev.py").read_text() == "iap_dev = 1\n"
+    assert lab.git(ws / "iap", "branch", "--show-current") == "18.0-iap-dev"
+    assert lab.git(ws / "iap", "config", "--get", "branch.18.0-iap-dev.remote") == "dev"

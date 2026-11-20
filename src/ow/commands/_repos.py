@@ -356,14 +356,60 @@ def add_worktree(
         return tuple(steps)
 
     if detach or branch is None:
+        if branch is not None and remote_hint is not None:
+            if (remote_hint, branch) != (fetch_remote, base_branch):
+                steps.append(
+                    GitStep(
+                        (
+                            "git", "-C", str(bare), "fetch", remote_hint,
+                            f"+refs/heads/{branch}:refs/remotes/{remote_hint}/{branch}",
+                        )
+                    )
+                )
+            start_ref = f"{remote_hint}/{branch}"
+        else:
+            start_ref = base
         steps.append(
             GitStep(
-                ("git", "-C", str(bare), "worktree", "add", "--detach", target, base), live=True
+                ("git", "-C", str(bare), "worktree", "add", "--detach", target, start_ref), live=True
             )
         )
         return tuple(steps)
     if _has_ref(bare, f"refs/heads/{branch}"):
+        if remote_hint is not None and (remote_hint, branch) != (fetch_remote, base_branch):
+            steps.append(
+                GitStep(
+                    (
+                        "git", "-C", str(bare), "fetch", remote_hint,
+                        f"+refs/heads/{branch}:refs/remotes/{remote_hint}/{branch}",
+                    )
+                )
+            )
         steps.append(GitStep(("git", "-C", str(bare), "worktree", "add", target, branch), live=True))
+        if remote_hint is not None and _config(bare, f"branch.{branch}.remote") is None:
+            steps.extend(tracking_steps(target, branch, remote_hint))
+        steps.append(GitStep(("git", "-C", target, "config", f"branch.{branch}.ow-base", base)))
+        return tuple(steps)
+    if remote_hint is not None:
+        if (remote_hint, branch) != (fetch_remote, base_branch):
+            steps.append(
+                GitStep(
+                    (
+                        "git", "-C", str(bare), "fetch", remote_hint,
+                        f"+refs/heads/{branch}:refs/remotes/{remote_hint}/{branch}",
+                    )
+                )
+            )
+        steps.append(
+            GitStep(
+                (
+                    "git", "-C", str(bare), "worktree", "add", "--no-track", "-b", branch, target,
+                    f"{remote_hint}/{branch}",
+                ),
+                live=True,
+            )
+        )
+        steps.extend(tracking_steps(target, branch, remote_hint))
         steps.append(GitStep(("git", "-C", target, "config", f"branch.{branch}.ow-base", base)))
         return tuple(steps)
     remote, cached = _branch_on_one_remote(bare, branch)

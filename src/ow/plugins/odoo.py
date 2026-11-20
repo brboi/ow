@@ -6,12 +6,14 @@ import ast
 import re
 import shutil
 from configparser import ConfigParser
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Mapping
 
 import tomli_w
 
+from ow.core import git
 from ow.core.paths import repos_dir
 from ow.core.plugins import (
     Diagnostic,
@@ -696,6 +698,9 @@ def editors_contribution(ws: Workspace) -> EditorContribution | None:
 _ODOO_ADDON_REPOS = frozenset({"enterprise", "design-themes", "iap-apps", "upgrade", "upgrade-util"})
 _ODOO_CORE_SLUGS = frozenset({"odoo/odoo"})
 _ODOO_ADDON_SLUGS = frozenset(f"odoo/{name}" for name in _ODOO_ADDON_REPOS)
+_ODOO_ALL_REPOS = _ODOO_ADDON_REPOS | {"community", "odoo", "voip"}
+_ODOO_ALL_SLUGS = _ODOO_CORE_SLUGS | _ODOO_ADDON_SLUGS | {"odoo/voip"}
+_ODOO_SERIES_PREFIX_RE = re.compile(r"^(?P<series>master|saas-\d+\.\d+|\d+\.\d+)(?:-|$)")
 _REPO_SLUG_RE = re.compile(
     r"(?:[:/])(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
@@ -721,30 +726,68 @@ def _repo_slugs(repo: ResolvedRepo) -> set[str]:
     return slugs
 
 
+def _origin_has_series(repo_name: str, series: str) -> bool:
+    bare = repos_dir() / f"{repo_name}.git"
+    if not bare.is_dir():
+        return False
+    cached = git.run(["git", "-C", str(bare), "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{series}"])
+    if cached.returncode == 0:
+        return True
+    try:
+        return git.remote_has_branch(bare, "origin", series)
+    except git.GitFailed:
+        return False
+
+
+def _infer_odoo_base(repo: ResolvedRepo) -> str | None:
+    """Infer `origin/<series>` from an Odoo branch name (e.g. `18.0-fix` -> `origin/18.0`)."""
+    if repo.base is not None or not repo.branch:
+        return None
+    if repo.name not in _ODOO_ALL_REPOS and not (_repo_slugs(repo) & _ODOO_ALL_SLUGS):
+        return None
+    match = _ODOO_SERIES_PREFIX_RE.match(repo.branch)
+    if not match:
+        return None
+    series = match.group("series")
+    if _origin_has_series(repo.name, series):
+        return f"origin/{series}"
+    return None
+
+
 @hookimpl
 def ow_expand_workspace_repos(
     repos: tuple[ResolvedRepo, ...],
     known_repos: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
 ) -> tuple[ResolvedRepo, ...] | None:
-    """Ensure any Odoo addon target gets an Odoo core (`community`) repo alongside it."""
-    names = {r.name for r in repos}
-    slugs: set[str] = set()
+    """Infer Odoo series bases for branch targets and ensure addon targets get an Odoo core repo."""
+    updated: list[ResolvedRepo] = []
+    changed = False
     for r in repos:
+        inferred = _infer_odoo_base(r)
+        if inferred is not None:
+            updated.append(replace(r, base=inferred))
+            changed = True
+        else:
+            updated.append(r)
+
+    names = {r.name for r in updated}
+    slugs: set[str] = set()
+    for r in updated:
         slugs.update(_repo_slugs(r))
     if "community" in names or "odoo" in names or (slugs & _ODOO_CORE_SLUGS):
-        return None
+        return tuple(updated) if changed else None
     if not (names & _ODOO_ADDON_REPOS) and not (slugs & _ODOO_ADDON_SLUGS):
-        return None
+        return tuple(updated) if changed else None
 
-    base = next((r.base for r in repos if r.base), None)
+    base = next((r.base for r in updated if r.base), None)
     core_known = known_repos.get("community")
     core_url = core_known.url if core_known is not None else "git@github.com:odoo/odoo.git"
     core_name = "community"
     if not (repos_dir() / "community.git").is_dir() and (repos_dir() / "odoo.git").is_dir():
         core_name = "odoo"
     core_repo = ResolvedRepo(name=core_name, url=core_url, branch=None, base=base)
-    return (core_repo, *repos)
+    return (core_repo, *updated)
 
 
 @hookimpl
