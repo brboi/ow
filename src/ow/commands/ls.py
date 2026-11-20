@@ -22,26 +22,27 @@ def run(
     json_output: bool = False,
 ) -> int:
     """List the index's workspaces, in index order; dead entries degrade to `missing`."""
-    entries: list[dict[str, Any]] = []
-    for path in index.read():
-        item = _inspect(path, plugins)
-        if task is not None and item["task"] != task:
-            continue
-        entries.append(item)
+    with term.json_mode(json_output):
+        entries: list[dict[str, Any]] = []
+        for path in index.read():
+            item = _inspect(path, plugins)
+            if task is not None and item["task"] != task:
+                continue
+            entries.append(item)
 
-    if json_output:
-        term.emit_json(envelope({"workspaces": entries}))
+        if json_output:
+            term.emit_json(envelope({"workspaces": entries}))
+            return 0
+
+        for item in entries:
+            repos_col = item["status"] if item["status"] != "ok" else ", ".join(
+                f"{r['name']}:{r['state']}" for r in item["repos"]
+            )
+            line = f"{item['name']}\t{_display(Path(item['path']))}\t{repos_col}"
+            if item["task"]:
+                line += f"\ttask:{item['task']}"
+            sys.stdout.write(line + "\n")
         return 0
-
-    for item in entries:
-        repos_col = item["status"] if item["status"] != "ok" else ", ".join(
-            f"{r['name']}:{r['state']}" for r in item["repos"]
-        )
-        line = f"{item['name']}\t{_display(Path(item['path']))}\t{repos_col}"
-        if item["task"]:
-            line += f"\ttask:{item['task']}"
-        sys.stdout.write(line + "\n")
-    return 0
 
 
 def _inspect(path: Path, plugins: "Plugins") -> dict[str, Any]:

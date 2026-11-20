@@ -136,7 +136,7 @@ class CoreSpec:
         """Return known repos this plugin provides."""
 
     @hookspec
-    def ow_commands(self, app: object) -> None:
+    def ow_commands(self, app: object, plugins: Plugins) -> None:
         """Add commands to the plugin's Typer subapp (or root app when TOP_LEVEL_COMMANDS=True)."""
 
     @hookspec
@@ -178,6 +178,8 @@ class CoreSpec:
         facts: Sequence[RepoFacts],
         target: str | None,
         offline: bool,
+        known_repos: Mapping[str, KnownRepo],
+        settings: Mapping[str, object],
     ) -> list[StatusInfo]:
         """Return external status contributions for a workspace or external target."""
 
@@ -279,7 +281,15 @@ class Plugins:
                                         "ow_settings",
                                         f"setting key {setting.key!r} must start with {name!r}.",
                                     )
+                                if setting.key == f"{name}.enabled":
+                                    raise PluginError(
+                                        name,
+                                        "ow_settings",
+                                        f"setting key {setting.key!r} is reserved by core",
+                                    )
                             result.extend(plugin_settings)
+                    except PluginError:
+                        raise
                     except Exception as e:
                         raise PluginError(name, "ow_settings", e) from e
 
@@ -324,10 +334,10 @@ class Plugins:
 
             # Build kwargs for this implementation (only pass args it declares)
             impl_kwargs = {}
-            for arg in impl.argnames:
+            for arg in (*impl.argnames, *impl.kwargnames):
                 if arg in kwargs:
                     impl_kwargs[arg] = kwargs[arg]
-                elif arg == "ws" and ws is not None:
+                elif arg == "ws":
                     impl_kwargs[arg] = ws
 
             try:
@@ -383,15 +393,21 @@ class Plugins:
 
             if getattr(impl.plugin, "TOP_LEVEL_COMMANDS", False):
                 try:
-                    impl.function(app=app)
+                    cmd_kwargs: dict[str, Any] = {"app": app}
+                    if "plugins" in (*impl.argnames, *impl.kwargnames):
+                        cmd_kwargs["plugins"] = self
+                    impl.function(**cmd_kwargs)
                 except Exception as e:
                     raise PluginError(name, "ow_commands", e) from e
                 continue
 
-            sub_app = typer.Typer(name=name, no_args_is_help=True)
+            sub_app = typer.Typer(name=name, no_args_is_help=True, rich_markup_mode=None)
 
             try:
-                impl.function(app=sub_app)
+                cmd_kwargs = {"app": sub_app}
+                if "plugins" in (*impl.argnames, *impl.kwargnames):
+                    cmd_kwargs["plugins"] = self
+                impl.function(**cmd_kwargs)
             except Exception as e:
                 raise PluginError(name, "ow_commands", e) from e
 
@@ -413,8 +429,11 @@ def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = Non
     # Avoid adding the same spec class twice
     added_specs = {CoreSpec}
 
+    _RESERVED_PLUGIN_NAMES = frozenset({"repos", "workspace"})
     names = []
     for name, module in builtins:
+        if name in _RESERVED_PLUGIN_NAMES:
+            raise PluginError(name, "register", f"plugin name {name!r} is reserved")
         names.append(name)
 
         if hasattr(module, "HOOKSPECS"):

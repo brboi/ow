@@ -1,8 +1,8 @@
 # ow — Odoo Workspaces · AGENTS.md
 
 ow is a CLI that keeps several git repos side by side as worktrees of shared bare repos, grouped
-into workspaces. The core is plain git and knows nothing about Odoo: Odoo, mise and editor support
-are built-in plugins. This file maps the codebase for coding agents; [docs/commands.md](docs/commands.md)
+into workspaces. The core is plain git and knows nothing about Odoo: Odoo, mise, GitHub, editors,
+local seeds, and opt-in retarget are built-in plugins. This file maps the codebase for coding agents; [docs/commands.md](docs/commands.md)
 is the user-facing command reference.
 
 ## Architecture
@@ -105,23 +105,29 @@ class Diagnostic:
 class KnownRepo:
     name: str
     url: str
+    aliases: tuple[str, ...] = ()
 ```
+
+Additional target/runtime records in `core/plugins.py`: `ResolvedRepo`, `ResolvedTarget`,
+`RunCommand`, `StatusInfo`, and `PruneCandidate`.
 
 ### Plugin loader (`core/plugins.py`)
 
 **`CoreSpec`**: the hookspecs every plugin may implement — `ow_settings`, `ow_generated_files(ws,
-answers)`, `ow_diagnostics(ws)`, `ow_known_repos`, `ow_commands(app)`, plus the events
-`ow_workspace_created(ws)` and `ow_refreshed(ws, owned)`. No built-in plugin registers commands yet;
-`ow_commands` exists for plugins that do.
+answers)`, `ow_diagnostics(ws)`, `ow_known_repos`, `ow_commands(app, plugins)`,
+`ow_resolve_target`, `ow_expand_workspace_repos`, `ow_runner`, `ow_status`, `ow_prune_candidates`,
+`ow_task_files`, plus the events `ow_workspace_created(ws)` and `ow_refreshed(ws, owned)`.
 
 **`Plugins`**: `settings()` returns every declared setting, with a synthesized `<plugin>.enabled`
-(bool, default `True`). `call(hook, ws)` runs a hook and skips disabled plugins; `errors="collect"`
+(bool, default `DEFAULT_ENABLED`, which is `True` unless a plugin sets `DEFAULT_ENABLED = False`
+like `retarget`). `call(hook, ws)` runs a hook and skips disabled plugins; `errors="collect"`
 turns a raise into a `(name, PluginError)` entry instead of aborting. `answers(ws)` returns the
-callable plugins use to collect each other's answers. `add_commands(app)` adds one subapp per plugin
-that registers commands — never filtered by `enabled`.
+callable plugins use to collect each other's answers. `add_commands(app)` registers commands for
+globally enabled plugins — directly on the root app when `TOP_LEVEL_COMMANDS = True` (`retarget`),
+otherwise as a named subapp.
 
 **`load_plugins(builtins)`**: registers the built-in modules returned by `_get_builtins()` — the
-fixed tuple `mise, odoo, vscode, zed, local` — plus each plugin's `HOOKSPECS`.
+fixed tuple `mise, odoo, github, vscode, zed, local, retarget` — plus each plugin's `HOOKSPECS`.
 
 ### Workspace and repos (`core/workspace.py`)
 
@@ -151,6 +157,7 @@ class Workspace:
     name: str                                   # directory name
     repos: tuple[Repo, ...]
     settings: Mapping[str, object]              # MappingProxyType
+    task: str | None = None
 ```
 
 `derive_repos()` finds the direct subdirectories whose `.git` file points at
@@ -287,8 +294,8 @@ and changes into it, so tests never touch the real machine. `lab` builds real re
 top.
 
 - **`scenarios/test_<command>.py`**: CLI integration against real git, driven through `CliRunner`.
-- **`decisions/test_<recipe>.py`**: decision tables (follow, preflight, switch lookup, fetch steps,
-  rebase upstream, pushed rule, git helpers).
+- **`decisions/test_<recipe>.py`**: decision tables (preflight, fetch steps, rebase upstream,
+  pushed rule, git helpers).
 - **`plugins/test_<plugin>.py`**: settings, generated files, diagnostics.
 - **`test_shell_init.py`**: the generated snippets, run in a real bash and zsh.
 
@@ -314,6 +321,6 @@ tests, bash and zsh on `PATH`.
 
 ## Vocabulary
 
-See [CONTEXT.md](CONTEXT.md): Workspace, Repo, Bare, Remote, Known repo, Stray checkout, Adopted
-bare, Base, Default base, Branch, Upstream, Orphan commits, Plan, Plugin, Generated file, Setting,
-Refresh, Odoo core.
+See [CONTEXT.md](CONTEXT.md): Workspace, Task, Repo, Bare, Remote, Known repo, Stray checkout,
+Adopted bare, Base, Default base, Branch, Upstream, Orphan commits, Plan, Plugin, Generated file,
+Setting, Refresh, Odoo core.

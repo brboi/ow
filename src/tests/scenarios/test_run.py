@@ -133,3 +133,26 @@ def test_run_tmp_cleans_up_workspace_and_worktrees_on_exit(lab):
     assert index.read() == ()
     wt_list = lab.git(repos_dir() / "enterprise.git", "worktree", "list", "--porcelain")
     assert "888-18.0-tmp-pr" not in wt_list
+    # Ephemeral --tmp run checks out detached and leaves no local PR branch in bare
+    branches = lab.git(repos_dir() / "enterprise.git", "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+    assert "18.0-tmp-pr" not in branches.splitlines()
+
+
+def test_run_forwards_positional_subcommand_after_double_dash(lab):
+    """`ow run -- shell` and `ow run -w ws -- shell` must forward `shell`, not treat it as TARGET."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = init_workspace(lab, "community", name="my-ws")
+    log_path = lab.root / "runs.jsonl"
+    _install_fake_venv_python(venvs_dir() / "py3.12-18.0", log_path)
+
+    r1 = lab.ow("run", "--", "shell", "--no-http", cwd=ws)
+    assert r1.exit_code == 0, r1.stderr
+    assert not (ws / "shell").exists()
+
+    r2 = lab.ow("run", "-w", "my-ws", "--", "shell", cwd=lab.home)
+    assert r2.exit_code == 0, r2.stderr
+
+    runs = _read_runs(log_path)
+    assert len(runs) == 2
+    assert runs[0]["argv"][-2:] == ["shell", "--no-http"]
+    assert runs[1]["argv"][-1:] == ["shell"]

@@ -105,9 +105,9 @@ def _read_python_bounds(core_path: Path) -> tuple[int, int] | None:
             min_assigns = _module_assignments(tree, "MIN_PY_VERSION")
             max_assigns = _module_assignments(tree, "MAX_PY_VERSION")
             if min_assigns:
-                python_min = _literal_int_pair(min_assigns[0])
+                python_min = _literal_int_pair(min_assigns[-1])
             if max_assigns:
-                python_max = _literal_int_pair(max_assigns[0])
+                python_max = _literal_int_pair(max_assigns[-1])
 
     # Fall back to odoo/__init__.py if needed
     if (python_min is None or python_max is None) and init_path.exists():
@@ -116,11 +116,11 @@ def _read_python_bounds(core_path: Path) -> tuple[int, int] | None:
             if python_min is None:
                 assigns = _module_assignments(tree, "MIN_PY_VERSION")
                 if assigns:
-                    python_min = _literal_int_pair(assigns[0])
+                    python_min = _literal_int_pair(assigns[-1])
             if python_max is None:
                 assigns = _module_assignments(tree, "MAX_PY_VERSION")
                 if assigns:
-                    python_max = _literal_int_pair(assigns[0])
+                    python_max = _literal_int_pair(assigns[-1])
 
     if python_min and python_max:
         return (python_min, python_max)
@@ -138,16 +138,18 @@ def _read_odoo_series(core_path: Path) -> str | None:
 
     for var in ("serie", "series", "major_version"):
         assigns = _module_assignments(tree, var)
-        if assigns and isinstance(assigns[0], ast.Constant) and isinstance(assigns[0].value, str):
-            raw = assigns[0].value.strip()
+        if assigns and isinstance(assigns[-1], ast.Constant) and isinstance(assigns[-1].value, str):
+            raw = assigns[-1].value.strip()
             if raw:
                 return raw.replace("~", "-")
 
     vi_assigns = _module_assignments(tree, "version_info")
-    if vi_assigns and isinstance(vi_assigns[0], (ast.Tuple, ast.List)) and len(vi_assigns[0].elts) >= 2:
-        first, second = vi_assigns[0].elts[0], vi_assigns[0].elts[1]
+    if vi_assigns and isinstance(vi_assigns[-1], (ast.Tuple, ast.List)) and len(vi_assigns[-1].elts) >= 2:
+        first, second = vi_assigns[-1].elts[0], vi_assigns[-1].elts[1]
         if isinstance(first, ast.Constant) and isinstance(second, ast.Constant):
-            if isinstance(first.value, (int, str)) and isinstance(second.value, (int, str)):
+            ok_first = (type(first.value) is int) or isinstance(first.value, str)
+            ok_second = (type(second.value) is int) or isinstance(second.value, str)
+            if ok_first and ok_second:
                 return f"{first.value}.{second.value}".replace("~", "-")
 
     return None
@@ -157,7 +159,8 @@ def _resolve_workspace_venv(ws: Workspace, core: Repo) -> Path:
     """Compute the shared or local virtualenv path for an Odoo workspace."""
     bounds = _read_python_bounds(core.path)
     python_setting = ws.settings.get("mise.python")
-    shared = bool(ws.settings.get("mise.shared_venv", True))
+    mise_enabled = bool(ws.settings.get("mise.enabled", True))
+    shared = mise_enabled and bool(ws.settings.get("mise.shared_venv", True))
     python_version, _ = select_python_version(bounds, python_setting)
     series = _read_odoo_series(core.path)
     return resolve_venv_path(ws, python_version, series, shared=shared)
@@ -281,7 +284,7 @@ def _workspace_addon_paths(ws: Workspace, core: Repo) -> list[Path]:
     return result
 
 
-_PORT_KEYS = ("odoo.http_port", "odoo.db_port", "odoo.smtp_port")
+_PORT_KEYS = ("odoo.http_port", "odoo.gevent_port", "odoo.db_port", "odoo.smtp_port")
 _PLAIN_KEYS = ("odoo.db_name", "odoo.db_host", "odoo.db_user", "odoo.smtp_server")
 _PASSWORD_KEYS = ("odoo.db_password", "odoo.admin_passwd")
 _LIST_KEYS = ("odoo.debug_args", "odoo.debug_test_args")
@@ -307,9 +310,11 @@ def _get_setting(
     default = _setting_default(key, ws)
 
     if key in _PORT_KEYS:
-        if isinstance(val, int) and not 1 <= val <= 65535:
-            return default, Diagnostic("warning", f"{key} must be 1-65535, using default")
-        return (val if isinstance(val, int) else default), None
+        if isinstance(val, int) and not isinstance(val, bool):
+            if not 1 <= val <= 65535:
+                return default, Diagnostic("warning", f"{key} must be 1-65535, using default")
+            return val, None
+        return default, None
 
     if key in _LIST_KEYS:
         if val is None:
@@ -335,6 +340,12 @@ def ow_settings() -> list[Setting]:
             type=int,
             default=8069,
             help="HTTP port for Odoo",
+        ),
+        Setting(
+            key="odoo.gevent_port",
+            type=int,
+            default=8072,
+            help="Gevent/longpolling port for Odoo",
         ),
         Setting(
             key="odoo.db_name",
@@ -520,6 +531,7 @@ def ow_generated_files(
     settings = ws.settings
 
     http_port, _ = _get_setting("odoo.http_port", settings, ws)
+    gevent_port, _ = _get_setting("odoo.gevent_port", settings, ws)
     db_name, _ = _get_setting("odoo.db_name", settings, ws)
     db_host, _ = _get_setting("odoo.db_host", settings, ws)
     db_port, _ = _get_setting("odoo.db_port", settings, ws)
@@ -532,6 +544,7 @@ def ow_generated_files(
     parser = ConfigParser(interpolation=None)
     parser["options"] = {
         "http_port": str(http_port),
+        "gevent_port": str(gevent_port),
         "addons_path": ",".join(p.as_posix() for p in addon_paths),
         "data_dir": str(ws.root / ".odoo"),
         "admin_passwd": str(admin_passwd),
@@ -567,7 +580,8 @@ def ow_generated_files(
                 "python_path": python_path_str,
                 "odoo_path": f"./{core.name}",
                 "addons_paths": [
-                    f"./{p.relative_to(ws.root).as_posix()}" for p in addon_paths
+                    "." if (rel := p.relative_to(ws.root).as_posix()) == "." else f"./{rel}"
+                    for p in addon_paths
                 ],
             }
         ]

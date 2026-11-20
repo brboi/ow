@@ -1,126 +1,76 @@
 # Migrating to ow 3.0
 
-ow 3.0 is a rewrite: a plugin-based core, fixed generated files instead of templates, no TUI. It keeps 3.0.0a1's layouts, so a 2.x or 3.0.0a1 workspace is read in place. This page lists what breaks and how to adopt an existing workspace.
+ow 3.0 is a rewrite: a generic worktree core, built-in plugins (`mise`, `odoo`, `github`, `vscode`, `zed`, `local`, and opt-in `retarget`), multi-workspace tasks, shared Python virtualenvs, fixed generated files instead of templates, and no TUI.
 
-## Adopting an existing workspace
+## Creating workspaces in 3.0
+
+`ow add` replaces `ow init` (there is no in-place legacy adoption command). Existing 2.x/3.0a1 workspaces with valid `.ow/config.toml` and worktrees remain readable by `ow status`, `ow refresh`, `ow files`, `ow config`, `ow ls`, `ow cd`, `ow rm`, and `ow prune`, or you can recreate them cleanly with `ow add`:
 
 ```sh
-cd ~/workspace && ow init
+ow add enterprise#12345                                     # PR target + sister PRs + community
+ow add -t voip-task iap-apps#42+enterprise enterprise#15402 voip#89  # multi-workspace task
+ow add my-fix --base 18.0                                   # fresh workspace (odoo.default_repos)
 ```
 
-`ow init` adopts the workspace where it is:
-
-- It infers a default base for every repo whose value is missing or rejected: the agreement rule from the values that passed, else `--base`, else `origin/HEAD`. Each inferred base is printed with its source.
-- It repairs the bare repos ow 2 left behind: it sets `remote.origin.tagOpt` and `core.logAllRefUpdates` where missing, and seeds `origin/HEAD` where missing. It adds no fetch refspec and downloads nothing beyond the default branch's new commits; other branches arrive with `ow fetch` or `ow switch`. Fetches and pulls work afterwards.
-- It relinks a worktree whose directory moved (`git worktree repair`).
-- It rewrites `.ow/config.toml` whole, printing every key it drops with its value: `version`, `templates`, `[vars]`, and invalid `[repos]` bases.
-- It indexes the workspace and refreshes the generated files. Files you edited are listed with the hint "delete it and run `ow refresh`".
-
-No prompts, and no backfill: `branch.<b>.ow-base` is not added to existing branches.
-
-## Before you adopt
-
-Every command already works on a 2.x workspace. Each run warns, once per config file:
-
-```
-warning: unknown setting version in ~/.config/ow/config.toml; remove it with `ow config unset --global version`
-warning: unknown setting version in .ow/config.toml; remove it with `ow config unset version`; ignoring default base x..y for myrepo in .ow/config.toml: invalid base; run `ow init`
-```
-
-Global unknown keys warn until you unset them; the workspace warning clears at `ow init`.
-
-## What is read as is
-
-- The lock, `.ow/rendered.lock.toml`, same path and format.
-- The `[odoo]` and `[mise]` tables, as settings. Schema 1's `[vars]` is not read.
-- `[repos]` default bases, through the same reader as `--base`: `18.0`, `master` and `origin/master` pass; `x..y` and SHAs are rejected.
-- The workspace index.
+When `ow repo add` touches a bare repo left behind by ow 2.x, it repairs it in place (`remote.origin.tagOpt --no-tags`, `core.logAllRefUpdates true`, and `origin/HEAD`) without adding a wide fetch refspec.
 
 ## Global config
 
-These keys are unknown to ow 3, so every command warns about them until you remove them with `ow config unset --global <key>`:
+These 2.x keys are unknown to ow 3, so commands warn about them until you remove them with `ow config unset --global <key>`:
 
 - `version`, `theme`, `editor`, `owignore`
-- `[remotes]`: ow 2 already wrote the remotes into the bare repos, so ow 3 does not compare them.
+- `[remotes]`: ow 2 already wrote the remotes into the bare repos.
 
 ## Safe to delete
 
-Once the adopted workspace runs, these leftovers of older versions are safe to delete:
-
 - `.ow/templates.lock.toml`, `.ow/templates/`
 - a schema-1 root `mise.toml`
-- generated files no plugin produces any more
 - `$XDG_CONFIG_HOME/ow/templates/`
 - `$XDG_STATE_HOME/ow/backups/`
 - `$XDG_STATE_HOME/ow/template-base/`
 
 ### Never delete
 
-- `$XDG_CONFIG_HOME/ow/services/compose.yml` — it is yours now; ow never manages it.
-- `$XDG_DATA_HOME/ow/volumes/` — it holds your database. See [Services](services.md) before reusing the stack.
-- `$XDG_CONFIG_HOME/ow/local/` — it is the copy-once seed source for `.local/`.
+- `$XDG_CONFIG_HOME/ow/services/compose.yml` — yours to manage.
+- `$XDG_DATA_HOME/ow/volumes/` — holds your databases. See [Services](services.md).
+- `$XDG_CONFIG_HOME/ow/local/` — copy-once seed source for `.local/`.
 
 ## Commands that changed
 
 | Old | New | Notes |
 |---|---|---|
-| `ow render` | `ow refresh` | Recompute and write the generated files |
-| `ow mv` | `mv` + `ow init` | Move the directory, then `ow init` in the new location |
-| `ow open` | `ow cd` + your editor | `ow cd` prints the workspace path |
-| `ow archive` / `ow unarchive` | (removed) | — |
-| `ow remote` | `git remote` | Use plain git |
-| `ow status --fetch` | `ow fetch` | Fetches every remote, then shows the status |
-| `ow init --configuration` | (removed) | — |
-| `ow switch --all` / `--include-detached-specs` | (removed) | — |
-| `ow prune --also-backups` | (removed) | — |
-| `ow ls --archived` | (removed) | — |
-| TUI | (removed) | ow has no interactive UI |
+| `ow init` | `ow add` | Create workspaces from PR targets, composite specs, tasks, or a base ref |
+| `ow render` | `ow refresh` | Recompute and write owned generated files (and task `.code-workspace`) |
+| `ow switch` / `ow pull` / `ow reset` | plain `git` | Daily git operations stay with git |
+| `ow rebase` | `ow retarget` (opt-in) | Enable globally via `ow config set --global retarget.enabled true` |
+| `ow fetch` | `ow status --fetch` | Surgical parallel fetch of tracked refs |
+| `ow open` | `ow cd` + editor | `ow cd` prints the workspace path; tasks generate `<task>.code-workspace` |
+| `ow mv` / `ow archive` / `ow remote` / TUI | (removed) | — |
 
-## Environment variables
+## New in 3.0
 
-`OW_WORKSPACE` is gone. The workspace comes from the current directory (walking up to `.ow/config.toml`), or from `-w/--workspace <name>`.
+- **Multi-workspace tasks (`-t/--task`)**: flat sibling workspaces linked via `[workspace].task`, automatic non-colliding `odoo.http_port` and `odoo.gevent_port`, ownership-locked `<task>.code-workspace`, and sibling context in `ow status --json`.
+- **Local runner (`ow run`)**: `ow run [TARGET] [--tmp] [-- ARGS…]` launches `odoo-bin` using the workspace's resolved virtualenv.
+- **Built-in `github` plugin (`gh`)**: PR target resolution, sister-PR discovery, cached PR status (use `--offline` to skip network), and merged/closed PR cleanup in `ow prune`.
+- **Shared virtualenvs**: `mise.shared_venv = true` (default) shares venvs under `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`.
+- **Universal `--json`**: `schema_version = 1` JSON on `stdout`, progress/plans on `stderr`.
 
-## Templates
+## Environment variables & templates
 
-Implicit template handling is gone: `[templates]` and `[vars]` are not read. Plugins generate a fixed set of files from each workspace's state at every refresh. See [Generated files](files.md).
-
-## COMPOSE_FILE
-
-ow 3 never sets `COMPOSE_FILE`. Its mise fragment is `mise/conf.d/00-ow.toml` inside the workspace and carries no services. If you run the compose stack, add the tip to your global mise config at `~/.config/mise/config.toml`:
-
-```toml
-[env]
-COMPOSE_FILE = "/path/to/compose.yml"
-```
-
-See [Services](services.md) for the stack.
-
-## Sandboxing
-
-The sandbox tasks are gone. See [Sandboxing AI assistants](sandboxing.md) for the bwrap and firejail recipes that fit ow's layout.
+- `OW_WORKSPACE` is gone; ow walks up to `.ow/config.toml` or takes `-w/--workspace`.
+- Templates (`[templates]`, `[vars]`) are gone; see [Generated files](files.md).
+- `COMPOSE_FILE` is no longer set by ow; configure it in `~/.config/mise/config.toml` if needed (see [Services](services.md)).
+- Sandbox recipes live in [Sandboxing AI assistants](sandboxing.md) (mount `$XDG_DATA_HOME/ow/venvs` when `mise.shared_venv = true`).
 
 ## Requirements
 
-- **git ≥ 2.45** — `git cherry-pick --empty=drop` in rebase conflict recovery.
+- **git ≥ 2.45** (`git cherry-pick --empty=drop` for opt-in `ow retarget`).
 - **Python ≥ 3.11**.
-- Fetches are non-interactive: ow always runs git with `GIT_TERMINAL_PROMPT=0`, and with `ssh -o BatchMode=yes` unless you set `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH`. There is no askpass broker, so load your keys first:
-
-```sh
-eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_rsa
-```
-
-For HTTPS clones, configure a git credential helper.
-
-## Smoke test
-
-```sh
-ow status          # every repo, its branch and its state
-ow refresh         # rewrite the generated files
-ow status -w myfeature   # a workspace by name
-```
+- **`gh` (GitHub CLI)** for GitHub PR targets/status/pruning (or disable via `ow config set --global github.enabled false`).
+- Fetches are non-interactive (`GIT_TERMINAL_PROMPT=0`, `ssh -o BatchMode=yes`); load SSH keys with `ssh-add` or configure a git credential helper.
 
 ## See also
 
-- [Commands](commands.md) — the full 3.0 surface, with flags and exit codes.
+- [Commands](commands.md) — full 3.0 command reference.
 - [Configuration](configuration.md) — settings, layers and `ow config`.
+- [Generated files](files.md) — generated files and ownership locks.

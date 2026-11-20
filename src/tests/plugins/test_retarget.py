@@ -379,13 +379,13 @@ def test_autostash_keeps_the_stash_and_prints_the_pop_last(lab):
     assert result.exit_code == 1
     lines = _rebase_lines(result)
     assert lines[:3] == [
-        "git -C community stash push -m 'ow rebase --autostash'",
+        "git -C community stash push -m 'ow retarget --autostash'",
         "git -C community rebase origin/18.0",
         "git -C community stash pop",
     ]
     # The rebase stopped before the pop, so the stash is kept for the resume.
     assert lines[-1] == "git -C community stash pop"
-    assert "ow rebase --autostash" in lab.git(worktree, "stash", "list")
+    assert "ow retarget --autostash" in lab.git(worktree, "stash", "list")
     assert _git_path(worktree, "rebase-merge").exists()
 
 
@@ -481,3 +481,22 @@ def test_retargeting_backport_onto_older_ancestor_base_replays_commits(lab):
     assert (worktree / "feature.py").exists()
     assert not (worktree / "only_19.py").exists()
     assert lab.git(bare, "config", "--get", f"branch.{BRANCH}.ow-base") == "origin/18.0"
+
+
+def test_retarget_respects_workspace_disabled_override_and_json_output(lab):
+    import json
+
+    ws, worktree, _collab = _workspace(lab)
+
+    # JSON output emits schema_version = 1
+    res_json = lab.ow("retarget", "--no-fetch", "-y", "--json", cwd=ws)
+    assert res_json.exit_code == 0, res_json.stderr
+    data = json.loads(res_json.stdout)
+    assert data["schema_version"] == 1
+    assert data["exit_code"] == 0
+
+    # Workspace-level retarget.enabled = false must refuse running retarget in that workspace
+    assert lab.ow("config", "set", "retarget.enabled", "false", cwd=ws).exit_code == 0
+    disabled = lab.ow("retarget", "--no-fetch", "-y", cwd=ws)
+    assert disabled.exit_code == 2
+    assert "disabled" in disabled.stderr

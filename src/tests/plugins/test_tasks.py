@@ -27,9 +27,11 @@ def test_task_port_allocation_code_workspace_and_cleanup(lab):
     assert (ws1 / ".ow" / "config.toml").is_file()
     assert (ws2 / ".ow" / "config.toml").is_file()
 
-    # Distinct auto-allocated HTTP ports
+    # Distinct auto-allocated HTTP and gevent ports
     assert "http_port = 8069" in (ws1 / "odoorc").read_text()
+    assert "gevent_port = 8072" in (ws1 / "odoorc").read_text()
     assert "http_port = 8070" in (ws2 / "odoorc").read_text()
+    assert "gevent_port = 8073" in (ws2 / "odoorc").read_text()
 
     # Multi-root .code-workspace generated directly in common parent
     code_ws = parent / "voip-task.code-workspace"
@@ -91,3 +93,17 @@ def test_task_code_workspace_respects_user_edits(lab):
     assert lab.ow("rm", "-t", "custom-task", "-y").exit_code == 0
     assert code_ws.is_file()
     assert '"custom": true' in code_ws.read_text()
+
+
+def test_to_json_value_serializes_workspace_with_mapping_proxy(lab):
+    from ow.core.json_schema import to_json_value
+    from ow.core.session import open_session
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files()})
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+    assert lab.ow("add", "ws-json", "-r", "community", "--base", "18.0", cwd=parent).exit_code == 0
+    sess = open_session(str(parent / "ws-json"), need_workspace=True, plugins=load_plugins())
+    serialized = to_json_value(sess.workspace)
+    assert serialized["name"] == "ws-json"
+    assert isinstance(serialized["settings"], dict)

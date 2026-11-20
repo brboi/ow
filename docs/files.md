@@ -39,6 +39,7 @@ A `yours` file that is a directory gets a different hint: `move it away and run 
 ```sh
 ow files            # path <tab> state
 ow files --diff     # unified diff of every file that differs
+ow files --json     # machine-readable JSON on stdout
 ow files -w myws
 ```
 
@@ -76,17 +77,18 @@ If any plugin reports an `error` diagnostic, the errors are printed and `ow file
 
 | Plugin | Path | Written when |
 |---|---|---|
-| mise | `mise/conf.d/00-ow.toml` | a plugin answers `mise_environment`, or `mise.python` is set |
+| mise | `mise/conf.d/00-ow.toml` | a plugin answers `python_environment`, or `mise.python` is set |
 | odoo | `odoorc` (mode `0600`) | the workspace has exactly one readable Odoo core |
 | odoo | `odools.toml` | same |
 | odoo | `pyrightconfig.json` | same |
 | odoo | `requirements-dev.txt` | same |
-| vscode | `.vscode/settings.json` | a plugin contributes a language server or an exclude |
+| vscode | `.vscode/settings.json` | a plugin contributes a language server, exclude, or shared venv |
 | vscode | `.vscode/launch.json` | a plugin contributes a launch config |
+| vscode | `<task>.code-workspace` (in task's parent dir) | workspace belongs to a multi-workspace task (`-t/--task`) |
 | zed | `.zed/settings.json` | a plugin contributes a language server or an exclude |
 | zed | `.zed/debug.json` | a plugin contributes a launch config |
 
-`odoorc` holds the `[options]` Odoo loads: ports, database settings, `addons_path`, and `data_dir` pointing at `.odoo/`. A workspace with no Odoo core and no `mise.python` gets nothing.
+`odoorc` holds the `[options]` Odoo loads: `http_port`, `gevent_port`, database settings, `addons_path`, and `data_dir` pointing at `.odoo/`. When `mise.enabled` and `mise.shared_venv` are `true` (default), `mise/conf.d/00-ow.toml`, `odools.toml`, `pyrightconfig.json`, `.vscode/settings.json`, `.vscode/launch.json`, and `.zed/debug.json` all point at the shared virtualenv under `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`. Task-level files (`<task>.code-workspace`) are tracked by an ownership lock under `$XDG_STATE_HOME/ow/task-locks/` so user edits are never overwritten. A workspace with no Odoo core and no `mise.python` gets nothing.
 
 The local plugin is different: instead of generating files, it copies the regular files under `~/.config/ow/local` into `.local/` when the workspace is created, and only where nothing is there yet. Those copies are not tracked in the lock.
 
@@ -112,10 +114,10 @@ A corrupted lock is recoverable the same way: delete `.ow/rendered.lock.toml` an
 
 ## When refresh runs
 
-- After `ow init`, `ow repo add` and `ow repo rm`.
-- After `ow switch`, `ow pull`, `ow rebase` and `ow reset`, when a repo actually changed.
+- After `ow add`, `ow repo add` and `ow repo rm`.
 - After `ow config set` and `ow config unset`.
-- On explicit `ow refresh`.
+- After opt-in `ow retarget`, when a repo actually changed.
+- On explicit `ow refresh` (which also syncs `<task>.code-workspace` for task members).
 
 A dry run or a declined prompt does not refresh.
 

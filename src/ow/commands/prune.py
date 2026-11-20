@@ -32,7 +32,8 @@ def run(
     """Survey every bare, the index, and plugin prune candidates, then run the machine-wide batch."""
     with term.json_mode(json_output):
         plans: list[RepoPlan] = []
-        pruned_workspaces: list[dict[str, Any]] = []
+        planned_workspaces: list[dict[str, Any]] = []
+        removed_roots: set[Path] = set()
         skipped_candidates: list[dict[str, Any]] = []
         after: list[Step] = []
 
@@ -40,7 +41,11 @@ def run(
         if plugins is not None:
             live_workspaces = _load_live_workspaces(plugins)
             candidates = _collect_candidates(plugins, live_workspaces, offline=offline)
-            from ow.commands.rm import _plan as rm_repo_plan, _refusals as rm_refusals
+            from ow.commands.rm import (
+                _outside as rm_outside,
+                _plan as rm_repo_plan,
+                _refusals as rm_refusals,
+            )
 
             for candidate in candidates:
                 try:
@@ -70,14 +75,24 @@ def run(
                     continue
 
                 term.out(f"# prune workspace {ws.name}: {candidate.reason}")
+                outside = rm_outside(ws.root, tuple(rf.path for rf in facts))
+                if outside:
+                    term.out(f"# {ws.name}: {outside}")
+
+                ws_steps: list[Step] = []
+                ws_notes: list[str] = []
                 for rf in facts:
-                    plans.append(rm_repo_plan(rf))
+                    rp = rm_repo_plan(rf)
+                    ws_steps.extend(rp.steps)
+                    ws_notes.extend(rp.notes)
+
                 ws_root = ws.root
                 ws_task = ws.task
 
                 def _cleanup_ws(root: Path = ws_root, task_name: str | None = ws_task) -> None:
-                    shutil.rmtree(root, ignore_errors=True)
+                    shutil.rmtree(root)
                     index.remove(root)
+                    removed_roots.add(root)
                     if task_name and plugins is not None:
                         remaining = tasks.find_task(task_name, plugins)
                         if remaining is None:
@@ -85,14 +100,21 @@ def run(
                         else:
                             tasks.sync_task_files(remaining, plugins)
 
-                after.append(
+                ws_steps.append(
                     OwStep(
                         shown=git.show(("rm", "-rf", str(ws_root)))
                         + f"  # {candidate.reason}",
                         run=_cleanup_ws,
                     )
                 )
-                pruned_workspaces.append(
+                plans.append(
+                    RepoPlan(
+                        repo=f"workspace:{ws.name}",
+                        steps=tuple(ws_steps),
+                        notes=tuple(ws_notes),
+                    )
+                )
+                planned_workspaces.append(
                     {"workspace": ws.name, "root": str(ws_root), "reason": candidate.reason}
                 )
 
@@ -121,6 +143,10 @@ def run(
             yes=yes,
         )
 
+        pruned_workspaces = [
+            entry for entry in planned_workspaces if Path(entry["root"]) in removed_roots
+        ]
+
         if json_output:
             term.emit_json(
                 envelope(
@@ -130,6 +156,7 @@ def run(
                         "failed": list(outcome.failed),
                         "refused": list(outcome.refused),
                         "dead_index_entries": [str(p) for p in dead],
+                        "planned_workspaces": planned_workspaces,
                         "pruned_workspaces": pruned_workspaces,
                         "skipped_workspaces": skipped_candidates,
                         "exit_code": outcome.exit_code,

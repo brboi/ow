@@ -78,6 +78,7 @@ def test_odoo_odoorc_holds_the_expected_keys(lab):
     options = parser["options"]
 
     assert options["http_port"] == "8069"
+    assert options["gevent_port"] == "8072"
     assert options["addons_path"] == (
         f"{core}/addons,{core}/odoo/addons"
     )
@@ -93,6 +94,7 @@ def test_odoo_odoorc_holds_the_expected_keys(lab):
     assert options["smtp_port"] == "25"
     assert set(options) == {
         "http_port",
+        "gevent_port",
         "addons_path",
         "data_dir",
         "admin_passwd",

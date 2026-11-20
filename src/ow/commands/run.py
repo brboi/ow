@@ -23,11 +23,21 @@ if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
 
-def _find_existing_workspace(name: str) -> Path | None:
-    """Return an existing indexed workspace directory matching `name`, or None."""
-    for entry in index.read():
-        if entry.name == name and (entry / ".ow" / "config.toml").exists():
-            return entry
+def _find_existing_workspace(name: str, *, base_cwd: Path) -> Path | None:
+    """Return an existing workspace matching `name` (CWD child first, then index), or None."""
+    local = base_cwd / name
+    if (local / ".ow" / "config.toml").exists():
+        return local.resolve()
+    matches = [
+        entry.resolve()
+        for entry in index.read()
+        if entry.name == name and (entry / ".ow" / "config.toml").exists()
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        paths = ", ".join(str(p) for p in matches)
+        raise UsageError(f"workspace {name!r} is ambiguous; matches: {paths}")
     return None
 
 
@@ -37,9 +47,11 @@ def _cleanup_ephemeral(root: Path, plugins: Plugins) -> None:
         session = open_session(str(root), need_workspace=False, plugins=plugins)
         for loc in session.locations:
             git.run(["git", "-C", str(loc.bare), "worktree", "remove", "--force", str(loc.path)])
+            git.run(["git", "-C", str(loc.bare), "worktree", "prune"])
     except Exception:
         pass
-    shutil.rmtree(root, ignore_errors=True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _select_runner(ws: Workspace, plugins: Plugins, args: tuple[str, ...]) -> RunCommand:
@@ -91,17 +103,19 @@ def run(
                     parent_dir=ephemeral_parent,
                     target=target,
                     register_index=False,
+                    resolved=resolved,
+                    detach=True,
                 )
                 ephemeral_root = created.root
                 if code != 0:
                     return code
                 session = open_session(str(created.root), need_workspace=True, plugins=plugins)
+                for warning in session.warnings:
+                    term.warn(warning)
                 assert session.workspace is not None
                 ws = session.workspace
             else:
-                existing = _find_existing_workspace(canonical_name)
-                if existing is None and (base_cwd / canonical_name / ".ow" / "config.toml").exists():
-                    existing = (base_cwd / canonical_name).resolve()
+                existing = _find_existing_workspace(canonical_name, base_cwd=base_cwd)
 
                 if existing is not None:
                     session = open_session(str(existing), need_workspace=True, plugins=plugins)
@@ -115,10 +129,13 @@ def run(
                         parent_dir=base_cwd,
                         target=target,
                         register_index=True,
+                        resolved=resolved,
                     )
                     if code != 0:
                         return code
                     session = open_session(str(created.root), need_workspace=True, plugins=plugins)
+                    for warning in session.warnings:
+                        term.warn(warning)
                     assert session.workspace is not None
                     ws = session.workspace
 
@@ -127,11 +144,17 @@ def run(
         env.update(cmd.env)
         try:
             proc = subprocess.run(cmd.argv, cwd=cmd.cwd, env=env)
-            return proc.returncode
         except KeyboardInterrupt:
             return 130
+        except OSError as exc:
+            raise UsageError(f"failed to execute {cmd.argv[0]!r}: {exc}") from exc
+        if proc.returncode < 0:
+            return 128 + abs(proc.returncode)
+        return proc.returncode
     finally:
-        if ephemeral_root is not None:
-            _cleanup_ephemeral(ephemeral_root, plugins)
-        if ephemeral_parent is not None and ephemeral_parent.exists():
-            shutil.rmtree(ephemeral_parent, ignore_errors=True)
+        try:
+            if ephemeral_root is not None:
+                _cleanup_ephemeral(ephemeral_root, plugins)
+        finally:
+            if ephemeral_parent is not None and ephemeral_parent.exists():
+                shutil.rmtree(ephemeral_parent, ignore_errors=True)

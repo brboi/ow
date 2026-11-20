@@ -8,11 +8,13 @@ from pathlib import Path
 from ow import term
 from ow.commands._repos import add_worktree, base_for, ensure_bare, parse_base_for, repair_bare
 from ow.commands._shared import (
+    known_repo_catalog,
     known_repos,
     print_dropped,
     refresh_after,
     refresh_workspace,
     remotes_of,
+    resolve_known_repo,
     run_steps,
 )
 from ow.core import config, git
@@ -30,6 +32,10 @@ def add(session: Session, name: str, url: str | None, *, base: str | None) -> in
 
     `--base` is parsed before any git command, so a bad base creates no bare.
     """
+    catalog = known_repo_catalog(session.plugins)
+    known = resolve_known_repo(name, catalog)
+    if known is not None and not (repos_dir() / f"{name}.git").is_dir():
+        name = known.name
     bare = repos_dir() / f"{name}.git"
     url = _url_for(session, name, url, registered=bare.is_dir())
     if base is not None:
@@ -92,7 +98,7 @@ def rm(session: Session, name: str, *, dry_run: bool, yes: bool) -> int:
     A dirty worktree, or a detached HEAD holding commits no remote has, refuses before the prompt.
     """
     if session.workspace is None:
-        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
+        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow add`")
     location = next((entry for entry in session.locations if entry.name == name), None)
     if location is None:
         return _drop_missing(session, name, dry_run=dry_run, yes=yes)

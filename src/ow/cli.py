@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, Any, NoReturn, Sequence
 
 import click
 import typer
-from typer.core import TyperGroup
+from typer.core import TyperCommand, TyperGroup
 
 from . import __version__
 from . import errors, term
-from .core import git
+from .core import git, tasks
 from .core.index import read as read_index
 from .core.paths import repos_dir
 from .core.session import Session, open_session
@@ -34,6 +34,19 @@ TASK_HELP = "Task name grouping related workspaces"
 
 # Registers the vendored click's shell-completion classes, which `shell-init` reads.
 typer.completion.completion_init()
+
+
+class _RunCommand(TyperCommand):
+    """Capture everything after `--` as passthrough args before Click parses TARGET/options."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if "--" in args:
+            idx = args.index("--")
+            ctx.meta["ow_run_passthrough"] = tuple(args[idx + 1 :])
+            args = args[:idx]
+        else:
+            ctx.meta["ow_run_passthrough"] = ()
+        return super().parse_args(ctx, args)
 
 
 class OwGroup(TyperGroup):
@@ -141,11 +154,8 @@ def build_app(plugins: Plugins) -> typer.Typer:
         except Exception:
             return []
 
-    def _repo_names(workspace: str | None = None) -> list[str]:
+    def _all_repo_names() -> list[str]:
         try:
-            session = _open(workspace, need_workspace=False)
-            if session.workspace is not None:
-                return [location.name for location in session.locations]
             names: list[str] = []
             directory = repos_dir()
             if directory.is_dir():
@@ -157,6 +167,26 @@ def build_app(plugins: Plugins) -> typer.Typer:
             for _plugin, known in plugins.call("ow_known_repos"):
                 names += [repo.name for repo in known]
             return list(dict.fromkeys(names))
+        except Exception:
+            return []
+
+    def _repo_names(workspace: str | None = None) -> list[str]:
+        try:
+            session = _open(workspace, need_workspace=False)
+            if session.workspace is not None:
+                return [location.name for location in session.locations]
+            return _all_repo_names()
+        except Exception:
+            return []
+
+    def _task_names() -> list[str]:
+        try:
+            names: list[str] = []
+            for entry in read_index():
+                tag = tasks._read_task_tag(entry)
+                if tag and tag not in names:
+                    names.append(tag)
+            return names
         except Exception:
             return []
 
@@ -173,11 +203,18 @@ def build_app(plugins: Plugins) -> typer.Typer:
         workspace = (ctx.params or {}).get("workspace")
         return [name for name in _repo_names(workspace) if name.startswith(incomplete)]
 
+    def complete_any_repo(ctx: Any, incomplete: str) -> list[str]:
+        return [name for name in _all_repo_names() if name.startswith(incomplete)]
+
+    def complete_task(ctx: Any, incomplete: str) -> list[str]:
+        return [name for name in _task_names() if name.startswith(incomplete)]
+
     def complete_setting(ctx: Any, incomplete: str) -> list[str]:
         return [key for key in _setting_keys() if key.startswith(incomplete)]
 
     workspace_option = dict(metavar="WS", help=WORKSPACE_HELP, autocompletion=complete_workspace)
     only_option = dict(metavar="REPO", help=ONLY_HELP, autocompletion=complete_repo)
+    task_option = dict(metavar="TASK", help=TASK_HELP, autocompletion=complete_task)
 
     # -- add -------------------------------------------------------------
 
@@ -191,7 +228,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         name: str = typer.Option(
             None, "--name", metavar="NAME", help="Override the created workspace directory name"
         ),
-        task: str = typer.Option(None, "-t", "--task", metavar="TASK", help=TASK_HELP),
+        task: str = typer.Option(None, "-t", "--task", **task_option),
         base: str = typer.Option(
             None, "--base", metavar="REF", help="Base ref for added repos (a remote branch)"
         ),
@@ -204,7 +241,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
             "--repo",
             metavar="REPO",
             help="Repo to include (repeatable; defaults to odoo.default_repos on fresh workspaces)",
-            autocompletion=complete_repo,
+            autocompletion=complete_any_repo,
         ),
         json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
@@ -227,6 +264,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     @app.command(
         "run",
+        cls=_RunCommand,
         context_settings={"allow_extra_args": True, "ignore_unknown_options": False},
     )
     def run_cmd(
@@ -246,7 +284,8 @@ def build_app(plugins: Plugins) -> typer.Typer:
     ) -> None:
         """Run a workspace (or create/reuse TARGET and run it)."""
         git.check_version()
-        extra_args = list(ctx.args)
+        passthrough = tuple(ctx.meta.get("ow_run_passthrough", ()))
+        extra_args = list(ctx.args) + list(passthrough)
         effective_target = target
         if effective_target is not None and effective_target.startswith("-"):
             extra_args.insert(0, effective_target)
@@ -275,7 +314,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
     @repo_app.command("add")
     def repo_add(
         name: str = typer.Argument(
-            ..., metavar="NAME", help="Repo name", autocompletion=complete_repo
+            ..., metavar="NAME", help="Repo name", autocompletion=complete_any_repo
         ),
         url: str = typer.Argument(
             None, metavar="URL", help="Clone URL (default: the URL ow knows for NAME)"
@@ -401,6 +440,8 @@ def build_app(plugins: Plugins) -> typer.Typer:
     ) -> None:
         """Set a key, writing the workspace config unless --global is given."""
         workspace, global_, _json = _config_context(ctx, workspace, global_, False)
+        if _json:
+            raise errors.UsageError("--json is not supported on `ow config set`")
         session = _open(workspace, need_workspace=False)
         _announce(session)
         _exit(_command_module("config").set_(session, key, _only(values), global_=global_))
@@ -418,6 +459,8 @@ def build_app(plugins: Plugins) -> typer.Typer:
     ) -> None:
         """Unset a key, writing the workspace config unless --global is given."""
         workspace, global_, _json = _config_context(ctx, workspace, global_, False)
+        if _json:
+            raise errors.UsageError("--json is not supported on `ow config unset`")
         session = _open(workspace, need_workspace=False)
         _announce(session)
         _exit(_command_module("config").unset(session, key, global_=global_))
@@ -434,7 +477,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
             help="Optional external target (e.g. enterprise#12345 or future Runbot bundle)",
         ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
-        task: str = typer.Option(None, "-t", "--task", metavar="TASK", help=TASK_HELP),
+        task: str = typer.Option(None, "-t", "--task", **task_option),
         only: list[str] = typer.Option(None, "--only", **only_option),
         fetch: bool = typer.Option(
             False, "--fetch", help="Fetch tracked refs in parallel before showing status"
@@ -449,6 +492,10 @@ def build_app(plugins: Plugins) -> typer.Typer:
             raise errors.UsageError("pass either TARGET, -w/--workspace, or -t/--task")
         if workspace is not None and task is not None:
             raise errors.UsageError("pass either -w/--workspace or -t/--task, not both")
+        if target is not None and (only or fetch):
+            raise errors.UsageError("--only and --fetch cannot be used with an external TARGET")
+        if task is not None and only:
+            raise errors.UsageError("--only cannot be used with -t/--task")
 
         if target is not None or task is not None:
             git.check_version()
@@ -506,7 +553,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     @app.command("ls")
     def ls_cmd(
-        task: str = typer.Option(None, "-t", "--task", metavar="TASK", help=TASK_HELP),
+        task: str = typer.Option(None, "-t", "--task", **task_option),
         json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """List the known workspaces and their repos."""
@@ -544,7 +591,12 @@ def build_app(plugins: Plugins) -> typer.Typer:
             None, metavar="WS", help="Workspace to remove", autocompletion=complete_workspace
         ),
         task: str = typer.Option(
-            None, "-t", "--task", metavar="TASK", help="Remove every workspace in TASK"
+            None,
+            "-t",
+            "--task",
+            metavar="TASK",
+            help="Remove every workspace in TASK",
+            autocompletion=complete_task,
         ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),

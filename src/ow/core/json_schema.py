@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 from pathlib import Path, PurePath
 from typing import Any, Mapping
 
@@ -16,7 +16,7 @@ def to_json_value(obj: Any) -> Any:
     if isinstance(obj, PurePath):
         return obj.as_posix() if not isinstance(obj, Path) else str(obj)
     if is_dataclass(obj) and not isinstance(obj, type):
-        return {k: to_json_value(v) for k, v in asdict(obj).items()}
+        return {f.name: to_json_value(getattr(obj, f.name)) for f in fields(obj)}
     if isinstance(obj, Mapping):
         return {str(k): to_json_value(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set, frozenset)):

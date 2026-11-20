@@ -13,7 +13,7 @@ from ow.core import git
 from ow.core.facts import RepoFacts
 from ow.core.plan import GitStep, RepoPlan, Step
 
-AUTOSTASH_MESSAGE = "ow rebase --autostash"
+AUTOSTASH_MESSAGE = "ow retarget --autostash"
 
 
 @dataclass(frozen=True)

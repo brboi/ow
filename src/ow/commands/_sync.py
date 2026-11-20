@@ -21,6 +21,7 @@ def fetch_then_gather(
     *,
     no_fetch: bool,
     extra: Sequence[str] = (),
+    hint: str | None = "pass --no-fetch to work on cached refs",
 ) -> tuple[Path, tuple[RepoFacts, ...], Mapping[str, git.GitFailed | None]]:
     """Gather facts, fetch unless `no_fetch`, re-gather; `(root, facts, failures)`.
 
@@ -47,7 +48,7 @@ def fetch_then_gather(
             for repo_facts in before
             if (steps := fetch_steps(repo_facts, tuple(extra)))
         }
-        failures = run_fetches(steps_by_repo, root)
+        failures = run_fetches(steps_by_repo, root, hint=hint)
         facts = gather_all(locations)
 
     return root, facts, failures

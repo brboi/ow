@@ -272,7 +272,7 @@ def resolve_root(workspace: str | None = None, *, cwd: Path | None = None) -> Pa
     if known:
         raise UsageError(f"unknown workspace '{workspace}'; known: {', '.join(known)}")
     raise UsageError(
-        f"unknown workspace '{workspace}'; nothing indexed yet; run `ow init` in it"
+        f"unknown workspace '{workspace}'; nothing indexed yet; run `ow add`"
     )
 
 

@@ -222,3 +222,66 @@ def test_add_refuses_existing_directory_no_adopt(lab):
     result = lab.ow("add", "existing", "-r", "community", "--base", "18.0", cwd=parent)
     assert result.exit_code == 2
     assert "already exists" in result.stderr
+
+
+def test_add_rejects_path_traversal_workspace_and_task_names(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files()})
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+
+    bad_ws = lab.ow("add", "../escape", "-r", "community", "--base", "18.0", cwd=parent)
+    assert bad_ws.exit_code == 2
+    assert "invalid workspace name" in bad_ws.stderr
+
+    bad_task = lab.ow("add", "-t", "../escape", "ok-ws", "-r", "community", "--base", "18.0", cwd=parent)
+    assert bad_task.exit_code == 2
+    assert "invalid task name" in bad_task.stderr
+
+
+def test_add_fork_pr_with_existing_local_branch_fetches_pr_ref(lab):
+    """If a bare already has local branch `18.0`, adding a fork PR from `18.0` still fetches the PR."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    remote = _setup_pr_repo(
+        lab,
+        "enterprise",
+        {"ent/__manifest__.py": "{}"},
+        7777,
+        "fork-18.0-branch",
+        {"ent/fork_fix.py": "from_fork = True\n"},
+    )
+    # Create a pre-existing local branch `18.0` in enterprise bare pointing at old base.
+    lab.git(repos_dir() / "enterprise.git", "branch", "18.0", "origin/18.0")
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/enterprise",
+                "number": 7777,
+                "title": "Fork PR from 18.0",
+                "url": "https://github.com/odoo/enterprise/pull/7777",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0",
+                "baseRefName": "18.0",
+            }
+        ]
+    )
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+
+    res = lab.ow("add", "enterprise#7777", cwd=parent)
+    assert res.exit_code == 0, res.stderr + res.stdout
+    ws = parent / "7777-18.0"
+    assert (ws / "enterprise" / "ent" / "fork_fix.py").read_text() == "from_fork = True\n"
+    branch = lab.git(ws / "enterprise", "branch", "--show-current")
+    assert branch == "pr-7777-18.0"
+    assert lab.git(repos_dir() / "enterprise.git", "config", "--get", f"branch.{branch}.ow-pr") == "odoo/enterprise#7777"
+
+
+def test_add_fresh_workspace_name_with_plus_sign(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files()})
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+
+    res = lab.ow("add", "fix-a+b", "-r", "community", "--base", "18.0", cwd=parent)
+    assert res.exit_code == 0, res.stderr
+    assert (parent / "fix-a+b" / ".ow" / "config.toml").is_file()

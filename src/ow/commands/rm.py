@@ -54,10 +54,44 @@ def run_task(
         raise UsageError(f"unknown task {task_name!r}")
 
     with term.json_mode(json_output):
-        results: list[dict[str, Any]] = []
-        exit_code = 0
+        # Preflight every workspace in the task before mutating any of them.
+        sessions: list[Session] = []
+        preflight_refusals: list[dict[str, Any]] = []
+        any_refused = False
         for ws in task.workspaces:
             session = open_session(str(ws.root), need_workspace=True, plugins=plugins)
+            for warning in session.warnings:
+                term.warn(warning)
+            sessions.append(session)
+            facts = gather_all(session.locations)
+            refusals = _refusals(facts, ws.root, session.locations)
+            if refusals:
+                any_refused = True
+                for name, text in refusals:
+                    term.out(f"# {ws.name}/{name}: {text}")
+            preflight_refusals.append(
+                {
+                    "workspace": ws.name,
+                    "root": str(ws.root),
+                    "task": task_name,
+                    "removed": False,
+                    "dry_run": dry_run,
+                    "refusals": [{"repo": n, "reason": t} for n, t in refusals],
+                }
+            )
+
+        if any_refused:
+            if json_output:
+                term.emit_json(
+                    envelope(
+                        {"task": task_name, "workspaces": preflight_refusals, "exit_code": 1}
+                    )
+                )
+            return 1
+
+        results: list[dict[str, Any]] = []
+        exit_code = 0
+        for session in sessions:
             code, detail = _remove_one(session, dry_run=dry_run, yes=yes)
             results.append(detail)
             exit_code = max(exit_code, code)
@@ -83,6 +117,7 @@ def _remove_one(session: Session, *, dry_run: bool, yes: bool) -> tuple[int, dic
         return 1, {
             "workspace": workspace.name,
             "root": str(root),
+            "task": task_name,
             "removed": False,
             "dry_run": dry_run,
             "refusals": [{"repo": n, "reason": t} for n, t in refusals],

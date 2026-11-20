@@ -7,40 +7,39 @@ to `stderr` so `stdout` carries exclusively the JSON document emitted by
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import sys
 from collections.abc import Iterator
 from typing import Any
 
-_JSON_MODE: bool = False
+_JSON_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar("_JSON_MODE", default=False)
 
 
 @contextlib.contextmanager
 def json_mode(enabled: bool) -> Iterator[None]:
     """Route `out()` to stderr and disable interactive prompts while `enabled` is True."""
-    global _JSON_MODE
-    previous = _JSON_MODE
-    _JSON_MODE = enabled
+    token = _JSON_MODE.set(enabled)
     try:
         yield
     finally:
-        _JSON_MODE = previous
+        _JSON_MODE.reset(token)
 
 
 def is_json_mode() -> bool:
     """Whether `--json` output mode is active."""
-    return _JSON_MODE
+    return _JSON_MODE.get()
 
 
 def emit_json(data: Any) -> None:
     """Write canonical UTF-8 JSON to stdout."""
-    sys.stdout.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    sys.stdout.write(json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
     sys.stdout.flush()
 
 
 def out(text: str = "") -> None:
     """Write one plain line to stdout (or stderr while in `--json` mode)."""
-    stream = sys.stderr if _JSON_MODE else sys.stdout
+    stream = sys.stderr if _JSON_MODE.get() else sys.stdout
     print(text, file=stream)
 
 
@@ -56,14 +55,14 @@ def error(text: str) -> None:
 
 def interactive() -> bool:
     """Check if stdin and stdout are both TTYs (always False in `--json` mode)."""
-    if _JSON_MODE:
+    if _JSON_MODE.get():
         return False
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def confirm(question: str) -> bool:
     """Prompt for confirmation, return True if user accepts (y/yes), False on EOF."""
-    stream = sys.stderr if _JSON_MODE else sys.stdout
+    stream = sys.stderr if _JSON_MODE.get() else sys.stdout
     stream.write(f"{question} [y/N] ")
     stream.flush()
 

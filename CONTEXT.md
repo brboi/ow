@@ -34,7 +34,7 @@ A direct subdirectory of a workspace holding a `.git` that ow does not manage: a
 _Avoid_: extra repo, unmanaged clone
 
 **Adopted bare**:
-A bare repo ow 2.x left without reflogs, `remote.origin.tagOpt` and `origin/HEAD` that 3.0 relies on; `ow init` repairs it in place when it finds one.
+A bare repo ow 2.x left without reflogs, `remote.origin.tagOpt` and `origin/HEAD` that 3.0 relies on; `ow repo add` repairs it in place when it finds one.
 _Avoid_: legacy repo, migrated repo
 
 ### Branches

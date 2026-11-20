@@ -1,7 +1,8 @@
-"""The "make a repo usable here" flow that `ow repo add` and `ow init` both run."""
+"""The "make a repo usable here" flow that `ow repo add` and `ow add` both run."""
 
 from __future__ import annotations
 
+import re
 import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -217,6 +218,31 @@ def _stale_registration(bare: Path, target: Path) -> bool:
     return False
 
 
+_PULL_REF_RE = re.compile(r"^refs/pull/(?P<num>\d+)/head$")
+
+
+def _pr_local_ref(fetch_ref: str, branch: str | None) -> tuple[str, str | None]:
+    """Return `(refs/ow/pr/<id>, pr_number_or_None)` for `fetch_ref`."""
+    match = _PULL_REF_RE.match(fetch_ref)
+    if match:
+        num = match.group("num")
+        return f"refs/ow/pr/{num}", num
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (branch or fetch_ref)).strip("-") or "pr"
+    return f"refs/ow/pr/{slug}", None
+
+
+def _checked_out_branches(bare: Path) -> set[str]:
+    """Local branch names currently checked out in any worktree of `bare`."""
+    res = git.run(["git", "-C", str(bare), "worktree", "list", "--porcelain"])
+    if res.returncode != 0:
+        return set()
+    checked: set[str] = set()
+    for line in res.stdout.splitlines():
+        if line.startswith("branch refs/heads/"):
+            checked.add(line[len("branch refs/heads/"):])
+    return checked
+
+
 def add_worktree(
     bare: Path,
     worktree: Path,
@@ -225,11 +251,14 @@ def add_worktree(
     base: str,
     fetch_ref: str | None = None,
     remote_hint: str | None = None,
+    ow_pr: str | None = None,
+    detach: bool = False,
 ) -> tuple[GitStep, ...]:
     """The steps that add `worktree` to `bare` at `base`, detached or on `branch`.
 
-    When `fetch_ref` is given (e.g. `refs/pull/12345/head`), fetches that ref
-    explicitly into `refs/ow/pr/<branch>` and creates/checks out `branch` from it.
+    When `fetch_ref` is given (e.g. `refs/pull/12345/head`), fetches that ref first
+    into `refs/ow/pr/<num>` and creates a worktree from it (detached when `detach=True`
+    or `branch is None`, else on a non-colliding local branch with `ow-base` and `ow-pr`).
     """
     target = str(Path(worktree).resolve())
     fetch_remote, base_branch = _fetch_refspec(bare, base)
@@ -244,7 +273,89 @@ def add_worktree(
             )
         )
     )
-    if branch is None:
+    if fetch_ref is not None:
+        pr_remote = remote_hint or "origin"
+        pr_ref, pr_num = _pr_local_ref(fetch_ref, branch)
+        steps.append(
+            GitStep(
+                ("git", "-C", str(bare), "fetch", pr_remote, f"+{fetch_ref}:{pr_ref}")
+            )
+        )
+        if detach or branch is None:
+            steps.append(
+                GitStep(
+                    ("git", "-C", str(bare), "worktree", "add", "--detach", target, pr_ref),
+                    live=True,
+                )
+            )
+            return tuple(steps)
+
+        local_branch = branch
+        if _has_ref(bare, f"refs/heads/{local_branch}"):
+            # Avoid silently checking out a stale branch or colliding with another worktree
+            # (e.g. fork PRs opened from `18.0`/`master`/`patch-1`).
+            if pr_num is not None:
+                candidate = f"pr-{pr_num}-{branch}"
+                if not _has_ref(bare, f"refs/heads/{candidate}"):
+                    local_branch = candidate
+                elif candidate in _checked_out_branches(bare):
+                    raise UsageError(
+                        f"branch {candidate!r} is already checked out in another worktree of {bare.stem}"
+                    )
+                else:
+                    steps.append(
+                        GitStep(("git", "-C", str(bare), "branch", "-f", candidate, pr_ref))
+                    )
+                    steps.append(
+                        GitStep(("git", "-C", str(bare), "worktree", "add", target, candidate), live=True)
+                    )
+                    steps.append(
+                        GitStep(("git", "-C", target, "config", f"branch.{candidate}.ow-base", base))
+                    )
+                    if ow_pr:
+                        steps.append(
+                            GitStep(("git", "-C", target, "config", f"branch.{candidate}.ow-pr", ow_pr))
+                        )
+                    return tuple(steps)
+            elif local_branch in _checked_out_branches(bare):
+                raise UsageError(
+                    f"branch {local_branch!r} is already checked out in another worktree of {bare.stem}"
+                )
+            else:
+                steps.append(
+                    GitStep(("git", "-C", str(bare), "branch", "-f", local_branch, pr_ref))
+                )
+                steps.append(
+                    GitStep(("git", "-C", str(bare), "worktree", "add", target, local_branch), live=True)
+                )
+                steps.append(
+                    GitStep(("git", "-C", target, "config", f"branch.{local_branch}.ow-base", base))
+                )
+                if ow_pr:
+                    steps.append(
+                        GitStep(("git", "-C", target, "config", f"branch.{local_branch}.ow-pr", ow_pr))
+                    )
+                return tuple(steps)
+
+        steps.append(
+            GitStep(
+                (
+                    "git", "-C", str(bare), "worktree", "add", "--no-track", "-b", local_branch,
+                    target, pr_ref,
+                ),
+                live=True,
+            )
+        )
+        steps.append(
+            GitStep(("git", "-C", target, "config", f"branch.{local_branch}.ow-base", base))
+        )
+        if ow_pr:
+            steps.append(
+                GitStep(("git", "-C", target, "config", f"branch.{local_branch}.ow-pr", ow_pr))
+            )
+        return tuple(steps)
+
+    if detach or branch is None:
         steps.append(
             GitStep(
                 ("git", "-C", str(bare), "worktree", "add", "--detach", target, base), live=True
@@ -253,25 +364,6 @@ def add_worktree(
         return tuple(steps)
     if _has_ref(bare, f"refs/heads/{branch}"):
         steps.append(GitStep(("git", "-C", str(bare), "worktree", "add", target, branch), live=True))
-        steps.append(GitStep(("git", "-C", target, "config", f"branch.{branch}.ow-base", base)))
-        return tuple(steps)
-    if fetch_ref is not None:
-        pr_remote = remote_hint or "origin"
-        pr_ref = f"refs/ow/pr/{branch}"
-        steps.append(
-            GitStep(
-                ("git", "-C", str(bare), "fetch", pr_remote, f"+{fetch_ref}:{pr_ref}")
-            )
-        )
-        steps.append(
-            GitStep(
-                (
-                    "git", "-C", str(bare), "worktree", "add", "--no-track", "-b", branch, target,
-                    pr_ref,
-                ),
-                live=True,
-            )
-        )
         steps.append(GitStep(("git", "-C", target, "config", f"branch.{branch}.ow-base", base)))
         return tuple(steps)
     remote, cached = _branch_on_one_remote(bare, branch)

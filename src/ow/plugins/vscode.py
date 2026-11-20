@@ -39,13 +39,20 @@ def ow_generated_files(ws: Workspace, answers) -> list[GeneratedFile]:
     
     files = []
     
-    # Generate settings.json only if there are language servers or excludes
-    if merged.language_servers or merged.excludes:
+    # Generate settings.json if there are language servers, excludes, or a shared python interpreter
+    has_shared_python = (
+        merged.python is not None
+        and merged.python != (ws.root / ".venv/bin/python")
+    )
+    if merged.language_servers or merged.excludes or has_shared_python:
         settings = {}
         
         # Merge language servers at top level, ignoring server_id
         for _server_id, server_settings in merged.language_servers.items():
             settings.update(server_settings)
+
+        if has_shared_python:
+            settings["python.defaultInterpreterPath"] = str(merged.python)
         
         # Add search.exclude with baseline + contributions
         excludes = dict(_SEARCH_EXCLUDE_GLOBS)
@@ -102,13 +109,22 @@ def ow_task_files(task) -> list[GeneratedFile]:
     if not task.workspaces:
         return []
 
+    name_counts: dict[str, int] = {}
+    for ws in task.workspaces:
+        name_counts[ws.name] = name_counts.get(ws.name, 0) + 1
+
     folders = []
     for ws in task.workspaces:
         if task.common_parent is not None:
             path_str = f"./{ws.root.name}"
         else:
             path_str = str(ws.root)
-        folders.append({"name": ws.name, "path": path_str})
+        label = (
+            f"{ws.root.parent.name}/{ws.name}"
+            if name_counts[ws.name] > 1
+            else ws.name
+        )
+        folders.append({"name": label, "path": path_str})
 
     payload = {"folders": folders}
     return [

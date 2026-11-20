@@ -12,7 +12,12 @@ MUTATING = frozenset(("retarget", "rebase", "repo rm", "rm"))
 
 
 def refusal(
-    facts: RepoFacts, command: str, *, autostash: bool = False, root: Path | None = None
+    facts: RepoFacts,
+    command: str,
+    *,
+    autostash: bool = False,
+    root: Path | None = None,
+    has_target_base: bool = False,
 ) -> str | None:
     """Return the refusal message for command on this repository, or None."""
     if facts.problem:
@@ -28,7 +33,7 @@ def refusal(
         return "modified files; commit, stash, or pass --autostash"
 
     if command in ("retarget", "rebase"):
-        if facts.branch is None and facts.base is None:
+        if facts.branch is None and facts.base is None and not has_target_base:
             return "no default base; set one with `ow repo add <name> --base <ref>`"
 
     return None

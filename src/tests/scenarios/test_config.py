@@ -30,6 +30,7 @@ LISTING = [
     "mise.shared_venv = true (default) # Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
     "odoo.enabled = true (default) # Enable or disable the odoo plugin",
     "odoo.http_port = 8069 (default) # HTTP port for Odoo",
+    "odoo.gevent_port = 8072 (default) # Gevent/longpolling port for Odoo",
     'odoo.db_name = "voip" (default) # Database name (defaults to workspace name)',
     'odoo.db_host = "localhost" (default) # Database host',
     "odoo.db_port = 5432 (default) # Database port",
@@ -58,6 +59,7 @@ LISTING_OUTSIDE = [
     "mise.shared_venv = true (default) # Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
     "odoo.enabled = true (default) # Enable or disable the odoo plugin",
     "odoo.http_port = 8069 (default) # HTTP port for Odoo",
+    "odoo.gevent_port = 8072 (default) # Gevent/longpolling port for Odoo",
     "odoo.db_name = (unset) (default) # Database name (defaults to workspace name)",
     'odoo.db_host = "localhost" (default) # Database host',
     "odoo.db_port = 5432 (default) # Database port",
@@ -77,6 +79,18 @@ LISTING_OUTSIDE = [
     "local.enabled = true (default) # Enable or disable the local plugin",
     "retarget.enabled = false (default) # Enable or disable the retarget plugin",
 ]
+
+
+def test_config_rejects_json_on_set_unset_and_rejects_unsetting_workspace_task(lab):
+    root = workspace(lab, branches={BASE: {"README.md": "hi\n"}})
+
+    bad_set = lab.ow("config", "--json", "set", "odoo.http_port", "8070", cwd=root)
+    assert bad_set.exit_code == 2
+    assert bad_set.stdout == ""
+
+    bad_unset = lab.ow("config", "unset", "workspace.task", cwd=root)
+    assert bad_unset.exit_code == 2
+    assert "workspace" in bad_unset.stderr.lower()
 
 
 def test_config_lists_keys_inside_and_outside_a_workspace(lab):

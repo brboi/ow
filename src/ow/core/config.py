@@ -265,6 +265,8 @@ def update_workspace(
         extra = {f"repos.{name}": value for name, value in rejected.items()}
         dropped = _dropped_keys(values, layer, raw, extra)
         effective_task = existing_meta.task if isinstance(task, _KeepSentinel) else task
+        if isinstance(effective_task, str):
+            effective_task = effective_task.strip() or None
         tables: dict[str, object] = {}
         if effective_task:
             tables["workspace"] = {"task": effective_task}

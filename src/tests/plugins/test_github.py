@@ -173,3 +173,127 @@ def test_prune_candidates_detects_merged_pr_and_skips_dirty(lab):
     real_prune = lab.ow("prune", "-y")
     assert real_prune.exit_code == 0
     assert not ws.exists()
+
+
+def test_parse_pr_url_with_fragment_and_query():
+    assert github.parse_pr_target(
+        "https://github.com/odoo/enterprise/pull/12345#issuecomment-999"
+    ) == ("odoo", "enterprise", 12345)
+    assert github.parse_pr_target(
+        "https://github.com/odoo/enterprise/pull/12345?w=1"
+    ) == ("odoo", "enterprise", 12345)
+
+
+def test_status_external_target_resolves_alias_and_caches(lab):
+    import json
+
+    log_path = lab.fake_gh(
+        [
+            {
+                "repo": "odoo/odoo",
+                "number": 4242,
+                "title": "Community PR",
+                "url": "https://github.com/odoo/odoo/pull/4242",
+                "state": "OPEN",
+                "isDraft": False,
+                "reviewDecision": "APPROVED",
+                "headRefName": "18.0-comm-pr",
+                "baseRefName": "18.0",
+            }
+        ]
+    )
+
+    res = lab.ow("status", "community#4242", "--json")
+    assert res.exit_code == 0, res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["schema_version"] == 1
+    assert payload["results"][0]["target"] == "odoo/odoo#4242"
+    assert "#4242 OPEN (approved)" in payload["results"][0]["summary"]
+    assert len(log_path.read_text().splitlines()) == 1
+
+    # Offline serves stale/warm cache for the same target
+    off = lab.ow("status", "community#4242", "--offline")
+    assert off.exit_code == 0, off.stderr
+    assert "#4242 OPEN (approved)" in off.stdout
+    assert len(log_path.read_text().splitlines()) == 1
+
+
+def test_prune_does_not_delete_workspace_with_untracked_wip_repo_or_base_branch(lab):
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/enterprise",
+                "number": 555,
+                "title": "Merged fix",
+                "url": "https://github.com/odoo/enterprise/pull/555",
+                "state": "MERGED",
+                "isDraft": False,
+                "headRefName": "18.0-merged-fix",
+                "baseRefName": "18.0",
+            },
+            {
+                "repo": "odoo/odoo",
+                "number": 111,
+                "title": "Random closed PR from fork named 18.0",
+                "url": "https://github.com/odoo/odoo/pull/111",
+                "state": "CLOSED",
+                "isDraft": False,
+                "headRefName": "18.0",
+                "baseRefName": "18.0",
+            },
+        ]
+    )
+    add_repo(lab, "community", {"18.0": lab.odoo_files()})
+    add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    lab.git(repos_dir() / "community.git", "config", "ow.github-repo", "odoo/odoo")
+    lab.git(repos_dir() / "enterprise.git", "config", "ow.github-repo", "odoo/enterprise")
+
+    # Workspace 1: enterprise on merged PR, community on local WIP branch with no PR -> MUST NOT prune
+    ws_wip = init_workspace(lab, "community", "enterprise", name="mixed-wip", branch="18.0-local-wip")
+    lab.git(ws_wip / "enterprise", "switch", "-c", "18.0-merged-fix")
+
+    # Workspace 2: community on base branch 18.0 -> MUST NOT match random fork PR named 18.0
+    ws_base = init_workspace(lab, "community", name="base-ws", branch="18.0")
+
+    dry = lab.ow("prune", "-n")
+    assert dry.exit_code == 0
+    assert "mixed-wip" not in dry.stdout
+    assert "base-ws" not in dry.stdout
+
+
+def test_sister_pr_filters_by_head_owner(lab):
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/enterprise",
+                "number": 100,
+                "title": "Alice fix",
+                "url": "https://github.com/odoo/enterprise/pull/100",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "patch-1",
+                "baseRefName": "18.0",
+                "headRepositoryOwner": {"login": "alice"},
+                "author": {"login": "alice"},
+            },
+            {
+                "repo": "odoo/odoo",
+                "number": 200,
+                "title": "Bob unrelated patch-1",
+                "url": "https://github.com/odoo/odoo/pull/200",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "patch-1",
+                "baseRefName": "18.0",
+                "headRepositoryOwner": {"login": "bob"},
+                "author": {"login": "bob"},
+            },
+        ]
+    )
+    catalog = {
+        "community": KnownRepo("community", "git@github.com:odoo/odoo.git", aliases=("odoo",)),
+        "enterprise": KnownRepo("enterprise", "git@github.com:odoo/enterprise.git"),
+    }
+    resolved = github.ow_resolve_target("enterprise#100", catalog, {"github.default_org": "odoo"})
+    assert resolved is not None
+    assert [r.name for r in resolved.repos] == ["enterprise"]

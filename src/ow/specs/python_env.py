@@ -103,7 +103,7 @@ def select_python_version(
     if python_value is None:
         return f"{python_max[0]}.{python_max[1]}", diagnostics
 
-    match = re.match(r"^3\.(\d+)$", python_value)
+    match = re.fullmatch(r"(\d+)\.(\d+)", python_value)
     if not match:
         diagnostics.append(
             Diagnostic(
@@ -113,18 +113,17 @@ def select_python_version(
         )
         return f"{python_max[0]}.{python_max[1]}", diagnostics
 
-    minor = int(match.group(1))
-    min_minor = python_min[1]
-    max_minor = python_max[1]
-    if minor < min_minor or minor > max_minor:
-        clamped_minor = max(min_minor, min(minor, max_minor))
+    requested = (int(match.group(1)), int(match.group(2)))
+    if requested < python_min or requested > python_max:
+        clamped = max(python_min, min(requested, python_max))
         diagnostics.append(
             Diagnostic(
                 "info",
-                f"{setting_name} {python_value} clamped to range {python_min[0]}.{min_minor}-{max_minor}",
+                f"{setting_name} {python_value} clamped to range "
+                f"{python_min[0]}.{python_min[1]}-{python_max[1]}",
             )
         )
-        return f"{python_max[0]}.{clamped_minor}", diagnostics
+        return f"{clamped[0]}.{clamped[1]}", diagnostics
 
     return python_value, diagnostics
 
@@ -140,7 +139,11 @@ def resolve_venv_path(
     when `shared` is True and both `python_version` and `venv_key` are known, else `ws.root / ".venv"`.
     """
     if shared and python_version and venv_key:
-        safe_key = re.sub(r"[^A-Za-z0-9._-]+", "-", venv_key).strip("-")
-        if safe_key:
-            return venvs_dir() / f"py{python_version}-{safe_key}"
+        safe_ver = re.sub(r"[^A-Za-z0-9._-]+", "-", python_version).strip("-.")
+        safe_key = re.sub(r"[^A-Za-z0-9._-]+", "-", venv_key).strip("-.")
+        if safe_ver and safe_key and ".." not in safe_ver and ".." not in safe_key:
+            base = venvs_dir()
+            candidate = base / f"py{safe_ver}-{safe_key}"
+            if candidate.parent == base:
+                return candidate
     return ws.root / ".venv"

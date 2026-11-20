@@ -34,7 +34,7 @@ def _copy_once(src: Path, dst: Path) -> None:
     try:
         shutil.copy2(src, tmp_path)
         os.replace(tmp_path, dst)
-    except OSError:
+    except BaseException:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
@@ -52,7 +52,7 @@ def ow_workspace_created(ws: Workspace) -> None:
     target = ws.root / ".local"
 
     if _is_symlinked(target, ws.root):
-        term.warn(f"skipping seed copy: {target} is a symlink; make it a directory before `ow init`")
+        term.warn(f"skipping seed copy: {target} is a symlink; make it a directory before `ow add`")
         return
 
     try:
@@ -72,6 +72,7 @@ def ow_workspace_created(ws: Workspace) -> None:
 
         if _is_symlinked(target_dir, ws.root):
             term.warn(f"skipping seed directory {target_dir}: a .local ancestor is a symlink")
+            dirnames.clear()
             continue
 
         try:

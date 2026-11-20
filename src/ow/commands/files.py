@@ -21,43 +21,44 @@ def run(session: Session, *, diff: bool, json_output: bool = False) -> int:
     if session.workspace is None:
         raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow add`")
 
-    projection = refresh.project(session.workspace, session.plugins)
-    if json_output:
-        term.emit_json(
-            envelope(
-                {
-                    "workspace": session.workspace.name,
-                    "blocked": projection.blocked,
-                    "files": [
-                        {
-                            "path": st.path.as_posix(),
-                            "owner": st.owner,
-                            "state": st.state,
-                            "reason": st.reason,
-                        }
-                        for st in projection.files
-                    ],
-                    "stale_lock": list(projection.stale_lock),
-                    "diagnostics": [
-                        {"plugin": p, "level": d.level, "text": d.text}
-                        for p, d in projection.diagnostics
-                    ],
-                }
+    with term.json_mode(json_output):
+        projection = refresh.project(session.workspace, session.plugins)
+        if json_output:
+            term.emit_json(
+                envelope(
+                    {
+                        "workspace": session.workspace.name,
+                        "blocked": projection.blocked,
+                        "files": [
+                            {
+                                "path": st.path.as_posix(),
+                                "owner": st.owner,
+                                "state": st.state,
+                                "reason": st.reason,
+                            }
+                            for st in projection.files
+                        ],
+                        "stale_lock": list(projection.stale_lock),
+                        "diagnostics": [
+                            {"plugin": p, "level": d.level, "text": d.text}
+                            for p, d in projection.diagnostics
+                        ],
+                    }
+                )
             )
-        )
-        return 1 if projection.blocked else 0
+            return 1 if projection.blocked else 0
 
-    if diff:
-        _print_diffs(projection)
-    else:
-        _print_states(projection)
+        if diff:
+            _print_diffs(projection)
+        else:
+            _print_states(projection)
 
-    if projection.blocked:
-        for plugin_name, diag in projection.diagnostics:
-            if diag.level == "error":
-                term.error(f"{plugin_name}: {diag.text}")
-        return 1
-    return 0
+        if projection.blocked:
+            for plugin_name, diag in projection.diagnostics:
+                if diag.level == "error":
+                    term.error(f"{plugin_name}: {diag.text}")
+            return 1
+        return 0
 
 
 def _print_states(projection: Projection) -> None:

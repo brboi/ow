@@ -18,14 +18,14 @@ def orphan_commits(bare: Path, head: str) -> int:
 
 
 def branch_is_pushed(bare: Path, branch: str) -> bool:
-    """Whether some remote-tracking ref contains `branch`'s tip.
+    """Whether some remote-tracking ref or fetched PR ref contains `branch`'s tip.
 
     A branch that cannot be resolved answers "not pushed": the safe direction.
     """
     result = git.run(
         [
             "git", "-C", str(bare), "for-each-ref", "--count=1",
-            "--contains", f"refs/heads/{branch}", "refs/remotes",
+            "--contains", f"refs/heads/{branch}", "refs/remotes", "refs/ow/pr",
         ]
     )
     return result.returncode == 0 and bool(result.stdout.strip())
@@ -42,6 +42,8 @@ def branch_removal(bare: Path, branch: str) -> tuple[tuple[Step, ...], tuple[str
         return (), (f"kept unpushed branch {branch}; delete it with `{delete_line}`",)
 
     tip = _tip(bare, branch)
+    ow_pr_res = git.run(["git", "-C", str(bare), "config", "--get", f"branch.{branch}.ow-pr"])
+    ow_pr = ow_pr_res.stdout.strip() if ow_pr_res.returncode == 0 else ""
 
     def delete() -> None:
         if _tip(bare, branch) != tip:
@@ -50,6 +52,12 @@ def branch_removal(bare: Path, branch: str) -> tuple[tuple[Step, ...], tuple[str
         result = git.run(argv)
         if result.returncode != 0:
             raise git.GitFailed(argv, result.returncode, result.stderr, result.stdout)
+        # Clean up any PR fetch ref associated with this branch.
+        if ow_pr and "#" in ow_pr:
+            num = ow_pr.rpartition("#")[2]
+            if num.isdigit():
+                git.run(("git", "-C", str(bare), "update-ref", "-d", f"refs/ow/pr/{num}"))
+        git.run(("git", "-C", str(bare), "update-ref", "-d", f"refs/ow/pr/{branch}"))
 
     return (OwStep(shown=delete_line, run=delete),), ()
 

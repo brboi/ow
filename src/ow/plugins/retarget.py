@@ -15,10 +15,11 @@ import typer
 from ow import term
 from ow.commands._shared import refresh_after, remotes_of
 from ow.commands._sync import FETCH_FAILED, fetch_then_gather
-from ow.core import bases
+from ow.core import bases, git
 from ow.core.facts import RepoFacts
+from ow.core.json_schema import envelope
 from ow.core.plan import Batch, Outcome, RepoPlan, run_batch
-from ow.core.plugins import hookimpl
+from ow.core.plugins import Plugins, hookimpl
 from ow.core.session import Session, open_session
 from ow.errors import UsageError
 from ow.recipes.preflight import refusal
@@ -84,15 +85,16 @@ def run(
         )
         if json_output:
             term.emit_json(
-                {
-                    "schema_version": 1,
-                    "ok": list(outcome.ok),
-                    "failed": list(outcome.failed),
-                    "refused": list(outcome.refused),
-                    "mutated": outcome.mutated,
-                    "dry_run": dry_run,
-                    "exit_code": code,
-                }
+                envelope(
+                    {
+                        "ok": list(outcome.ok),
+                        "failed": list(outcome.failed),
+                        "refused": list(outcome.refused),
+                        "mutated": outcome.mutated,
+                        "dry_run": dry_run,
+                        "exit_code": code,
+                    }
+                )
             )
         return code
 
@@ -128,14 +130,20 @@ def _plan(
         new_base=new_base,
         autostash=autostash,
     )
-    refused = refusal(facts, "retarget", autostash=autostash or not plan.steps, root=root)
+    refused = refusal(
+        facts,
+        "retarget",
+        autostash=autostash or not plan.steps,
+        root=root,
+        has_target_base=new_base is not None,
+    )
     if refused is not None:
         return RepoPlan(facts.name, refusal=refused)
     return plan
 
 
 @hookimpl
-def ow_commands(app: typer.Typer) -> None:
+def ow_commands(app: typer.Typer, plugins: Plugins | None = None) -> None:
     """Register top-level `ow retarget` command when this plugin is enabled."""
 
     @app.command("retarget")
@@ -177,9 +185,12 @@ def ow_commands(app: typer.Typer) -> None:
             raise UsageError("pass either positional BASE or --base, not both")
         effective_base = target_base if target_base is not None else base
 
-        session = open_session(workspace, need_workspace=True)
+        git.check_version()
+        session = open_session(workspace, need_workspace=True, plugins=plugins)
         for warning in session.warnings:
             term.warn(warning)
+        if not session.plugins.is_enabled("retarget", session.workspace):
+            raise UsageError("retarget plugin is disabled for this workspace")
         if only:
             names = [loc.name for loc in session.locations]
             for repo in only:

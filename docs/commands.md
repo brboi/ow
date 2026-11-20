@@ -29,16 +29,17 @@ Create one or more workspaces in the current directory.
 
 - **PR targets** (via built-in `github` plugin): `enterprise#12345`, `odoo/iap-apps#42`, or a GitHub PR URL. Creates `<num>-<branch>/` by default, fetches `refs/pull/<num>/head`, discovers open sister PRs matching the same branch across known repos in the same org, and expands Odoo addon repos with `community` on the base branch.
 - **Composite targets**: `iap-apps#42+enterprise` combines multiple specs into a single workspace.
-- **Multi-workspace tasks (Issue #84)**: `ow add -t voip-task iap-apps#42+enterprise enterprise#15402 voip#89` creates flat sibling workspaces, auto-allocates non-colliding `odoo.http_port` values, and writes `<common-parent>/voip-task.code-workspace`.
+- **Multi-workspace tasks (Issue #84)**: `ow add -t voip-task iap-apps#42+enterprise enterprise#15402 voip#89` creates flat sibling workspaces, auto-allocates non-colliding `odoo.http_port` and `odoo.gevent_port` values, and writes `<common-parent>/voip-task.code-workspace`.
 - **Fresh workspaces**: `ow add my-fix --base 18.0 [--branch 18.0-my-fix]` creates a workspace using `-r/--repo` (or `odoo.default_repos`, defaulting to `["community", "enterprise"]`). Refuses if the target directory already exists.
 
 ### `ow run [TARGET] [-w WS] [--tmp] [-- ARGS…]`
 
-Run a workspace locally via its plugin runner (`odoo` launches `odoo-bin -c odoorc` using the shared virtualenv `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`).
+Run a workspace locally via its plugin runner (`odoo` launches `odoo-bin -c odoorc`, preferring the resolved virtualenv `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`, falling back to `mise exec` then `python3`).
 
-- Without `TARGET`: runs the current workspace (or `-w WS`).
-- With `TARGET` (e.g. `ow run enterprise#12345 -- -i sale`): reuses an existing indexed workspace of that name or creates it in `cwd`, then runs it.
-- With `--tmp` / `--ephemeral`: creates a temporary workspace outside `cwd`, runs it, and removes its worktrees and directory on exit.
+- `TARGET` and `-w WS` are mutually exclusive; `--tmp` requires `TARGET`.
+- Without `TARGET`: runs the current workspace (or `-w WS`). Everything after `--` (flags or subcommands like `ow run -- shell`) is forwarded verbatim to the runner.
+- With `TARGET` (e.g. `ow run enterprise#12345 -- -i sale`): reuses an existing workspace of that name or creates it in `cwd`, then runs it.
+- With `--tmp` / `--ephemeral`: creates a detached temporary workspace outside `cwd`, runs it, and removes its worktrees and directory on exit.
 
 ---
 
@@ -58,7 +59,7 @@ Remove a repo's worktree from the workspace (refuses dirty worktrees or orphan c
 ## Status, files & configuration
 
 ### `ow status [TARGET] [-w WS] [-t TASK] [--only REPO…] [--fetch] [--offline] [--json]`
-Show each repo's branch, base, upstream, ahead/behind counts, dirty state, and external plugin status (GitHub PR state cached for `github.cache_ttl` seconds by default; pass `--offline` to skip network).
+Show each repo's branch, base, upstream, ahead/behind counts, dirty state, and external plugin status (GitHub PR state cached for `github.cache_ttl` seconds by default; pass `--offline` to skip network). `TARGET`, `-w`, and `-t` are mutually exclusive; `--only` applies to single-workspace status only, and `--fetch` cannot be combined with `TARGET`.
 
 - `--fetch`: runs parallel surgical fetches of tracked refs before printing status.
 - `-t TASK`: inspects every workspace in `TASK`.
@@ -90,19 +91,28 @@ Print a workspace's path (used by `ow shell-init`).
 ### `ow shell-init {bash|zsh|fish}`
 Print the shell wrapper for `ow cd` and completion script.
 
-### `ow rm [WS] [-t TASK] [-n] [-y] [--json]`
-Remove a workspace (or every workspace in `-t TASK`), its worktrees, and pushed branches. Refuses dirty worktrees, orphan commits, or stray checkouts. Updates or removes `<task>.code-workspace`.
+### `ow rm {WS | -t TASK} [-n] [-y] [--json]`
+Remove a workspace (or every workspace in `-t TASK`; pass exactly one of `WS` or `-t TASK`), its worktrees, and pushed branches. Refuses dirty worktrees, orphan commits, or stray checkouts (preflights all members before deleting any workspace in a task). Updates or removes `<task>.code-workspace`.
 
 ### `ow prune [--offline] [-n] [-y] [--json]`
-Clean up prunable worktree registrations, pushed orphan branches, dead index entries, and (unless `--offline`) clean workspaces whose tracked GitHub PRs are `MERGED` or `CLOSED`.
+Clean up prunable worktree registrations, pushed orphan branches, dead index entries, and (unless `--offline`) clean workspaces whose checked-out branches all belong to `MERGED` or `CLOSED` GitHub PRs.
 
 ---
 
 ## Opt-in plugins
 
 ### `ow retarget [BASE] [--base REF] [--autostash] [--no-fetch] [--only REPO…] [-n] [-y] [--json] [-w WS]`
-Guarded multi-repo replay (`cherry-pick --ff`, `last_taken`, `--fork-point` fallback). Hidden by default (`retarget.enabled = false`); enable globally with:
+Guarded multi-repo replay (`cherry-pick --ff`, `last_taken`, `--fork-point` fallback). `BASE` and `--base` are mutually exclusive. Hidden by default (`retarget.enabled = false`); enable globally with:
 
 ```sh
 ow config set --global retarget.enabled true
 ```
+
+A workspace can still opt out locally with `ow config set retarget.enabled false`.
+
+---
+
+## Confirmation rules & `--json` contract
+
+- **Prompts**: Only mutating/destructive commands prompt (`repo rm`, `rm`, `prune`, and non-fast-forward `retarget`). Pass `-y` to confirm non-interactively or `-n` for a dry run.
+- **`--json` envelope**: Supported on `add`, `status`, `ls`, `rm`, `prune`, `files`, `config`, `config get`, and `retarget`. Every JSON response is a UTF-8 JSON object on `stdout` carrying `"schema_version": 1`; all progress lines, plans, and warnings go to `stderr`, and interactive prompts are disabled (pass `-y` for prompting commands).

@@ -2,7 +2,7 @@
 
 ow ships no sandbox of its own. Odoo's checkout carries the wrappers, under `setup/sandboxing/`: bubblewrap scripts for Opencode, Claude Code and Pi, and a firejail profile for Claude Code. They run an assistant with filesystem isolation, so it sees only the directories you mount in.
 
-An ow workspace needs two paths visible: the workspace itself, which holds the worktrees, and the bare repos at `$XDG_DATA_HOME/ow/repos` (usually `~/.local/share/ow/repos`). A worktree's `.git` is a file pointing into its bare repo, so git inside the sandbox cannot work without that second path.
+An ow workspace needs up to three paths visible: the workspace itself (which holds the worktrees), the bare repos at `$XDG_DATA_HOME/ow/repos` (usually `~/.local/share/ow/repos`), and — when `mise.shared_venv = true` (the default) — the shared virtualenvs at `$XDG_DATA_HOME/ow/venvs`. A worktree's `.git` points into its bare repo, and `odools.toml` / `ow run` point at the shared venv, so git and Python inside the sandbox need those paths mounted (or set `mise.shared_venv = false` for local `.venv/`).
 
 ## Bubblewrap
 
@@ -31,7 +31,9 @@ Add to `~/.bashrc`, `~/.zshrc` or equivalent:
 ```bash
 claude-sandbox() {
   ws=$(command ow cd) || return
-  ODOO_BASE="$ws" bwrap-claude.sh --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos" "$@"
+  ODOO_BASE="$ws" bwrap-claude.sh \
+    --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos" \
+    --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/venvs" "$@"
 }
 ```
 
@@ -41,13 +43,17 @@ Then, in a workspace:
 claude-sandbox
 ```
 
-Claude starts on the workspace, with the bare repos mounted so git works. `command ow cd` bypasses the `ow cd` shell function installed by `ow shell-init`.
+Claude starts on the workspace, with the bare repos and shared virtualenvs mounted so git and Python work. `command ow cd` bypasses the `ow cd` shell function installed by `ow shell-init`.
 
 ### Opencode and Pi
 
 ```sh
-ODOO_BASE=$(command ow cd) bwrap-opencode.sh --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos"
-ODOO_BASE=$(command ow cd) bwrap-pi.sh --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos"
+ODOO_BASE=$(command ow cd) bwrap-opencode.sh \
+  --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos" \
+  --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/venvs"
+ODOO_BASE=$(command ow cd) bwrap-pi.sh \
+  --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos" \
+  --add-dir "${XDG_DATA_HOME:-$HOME/.local/share}/ow/venvs"
 ```
 
 ## Firejail
@@ -66,7 +72,9 @@ From a workspace:
 
 ```sh
 firejail --profile=~/.config/firejail/claude.profile \
-  --whitelist=$PWD --whitelist="${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos" claude
+  --whitelist=$PWD \
+  --whitelist="${XDG_DATA_HOME:-$HOME/.local/share}/ow/repos" \
+  --whitelist="${XDG_DATA_HOME:-$HOME/.local/share}/ow/venvs" claude
 ```
 
 Firejail always creates a PID namespace, so `claude /ide` cannot attach to your editor; use `bwrap-claude.sh` when you need that.

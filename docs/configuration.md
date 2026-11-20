@@ -16,6 +16,7 @@ Three layers, later ones winning:
 
 ```sh
 ow config
+ow config --json
 ```
 
 One line per setting: `key = value (origin) # help`. `origin` is `default`, `global` or `workspace`. Unset values print as `(unset)`; strings are quoted, as TOML would store them.
@@ -32,6 +33,7 @@ Outside a workspace the same listing works, with workspace-derived defaults unse
 ```sh
 ow config get odoo.http_port     # effective value
 ow config get --global mise.python
+ow config get odoo.http_port --json
 ```
 
 A string prints raw, so `$(ow config get odoo.db_host)` is `localhost`, not `"localhost"`. An unset key prints nothing (exit 0). An unknown key is a usage error (exit 2).
@@ -57,30 +59,35 @@ An unknown key is refused (exit 2), with the closest known key suggested. An `in
 ow config unset odoo.http_port
 ```
 
-An unknown key is accepted: unsetting is how you clear the unknown-key warning. `[repos]` is not a setting; use `ow repo rm <name>`.
+An unknown key is accepted: unsetting is how you clear the unknown-key warning. `[repos]` and `[workspace]` are not plugin settings; use `ow repo rm <name>` to remove a repo.
 
-## `[repos]`
+## `[workspace]` & `[repos]`
 
-The workspace config also carries the repos of the workspace, as a name → base ref table:
+The workspace config carries optional task metadata under `[workspace]` (managed by `ow add -t <task>`) and the repos of the workspace under `[repos]`, as a name → base ref table:
 
 ```toml
+[workspace]
+task = "voip-task"
+
 [repos]
 community = "origin/master"
 enterprise = "origin/18.0"
 ```
 
-Each value is validated against the bare repo's remotes: the longest remote-name prefix wins, and a bare ref with no known remote prefix is read as `origin/<name>`. A value ow cannot parse as a base — a SHA, an empty or `refs/`-prefixed ref, an invalid branch name, a non-string — is rejected: the repo is not adopted and a warning names the value.
+Each `[repos]` value is validated against the bare repo's remotes: the longest remote-name prefix wins, and a bare ref with no known remote prefix is read as `origin/<name>`. A value ow cannot parse as a base — a SHA, an empty or `refs/`-prefixed ref, an invalid branch name, a non-string — is rejected and a warning names the value.
 
 ## Settings
 
-`<plugin>.enabled` exists for every plugin and defaults to `true`. The rest are declared by plugins.
+`<plugin>.enabled` exists for every plugin; it defaults to `true` except for opt-in plugins (`retarget.enabled` defaults to `false`). Command registration for opt-in plugins like `retarget` reads the `--global` config (a workspace can still disable it locally with `retarget.enabled = false`).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `mise.enabled` | bool | `true` | Enable or disable the mise plugin |
 | `mise.python` | str | — | Python version for mise (e.g. '3.11', '3.12') |
+| `mise.shared_venv` | bool | `true` | Share Python virtualenvs under `$XDG_DATA_HOME/ow/venvs` |
 | `odoo.enabled` | bool | `true` | Enable or disable the odoo plugin |
 | `odoo.http_port` | int | `8069` | HTTP port for Odoo |
+| `odoo.gevent_port` | int | `8072` | Gevent/longpolling port for Odoo |
 | `odoo.db_name` | str | workspace name | Database name |
 | `odoo.db_host` | str | `"localhost"` | Database host |
 | `odoo.db_port` | int | `5432` | Database port |
@@ -91,9 +98,14 @@ Each value is validated against the bare repo's remotes: the longest remote-name
 | `odoo.smtp_port` | int | `25` | SMTP port |
 | `odoo.debug_args` | list | `["--dev=all"]` | Debug arguments for Odoo |
 | `odoo.debug_test_args` | list | `["--test-tags=<workspace>"]` | Debug test arguments |
+| `odoo.default_repos` | list | `["community", "enterprise"]` | Default repos for fresh `ow add` workspaces |
+| `github.enabled` | bool | `true` | Enable or disable the github plugin |
+| `github.default_org` | str | `"odoo"` | Default GitHub org for short PR targets |
+| `github.cache_ttl` | int | `120` | Cache TTL in seconds for GitHub PR status lookups |
 | `vscode.enabled` | bool | `true` | Enable or disable the vscode plugin |
 | `zed.enabled` | bool | `true` | Enable or disable the zed plugin |
 | `local.enabled` | bool | `true` | Enable or disable the local plugin |
+| `retarget.enabled` | bool | `false` | Enable or disable the opt-in `ow retarget` plugin (set globally) |
 
 `odoo.debug_args` also gets `--without-demo=all` when the Odoo core predates 19. `odoo.db_name` and `odoo.debug_test_args` are computed from the workspace, so they read as `(unset)` outside one.
 
@@ -101,9 +113,12 @@ Disabling a plugin stops its generated files from being produced; see [Generated
 
 ## File format
 
-The config is TOML with one table per plugin, plus `[repos]`:
+The config is TOML with optional `[workspace]` metadata, `[repos]`, and one table per plugin:
 
 ```toml
+[workspace]
+task = "voip-task"
+
 [repos]
 community = "origin/master"
 
@@ -115,14 +130,14 @@ debug_args = ["--dev=all", "--log-level", "debug"]
 python = "3.12"
 ```
 
-Every write rewrites the whole file: known values grouped by plugin in declaration order, unset keys left out, `[repos]` kept. Writes are atomic (a `0600` temp file renamed into place) and serialized by an exclusive lock on a sidecar file next to the target — `<workspace>/.ow/.config.toml.lock` or `~/.config/ow/.config.toml.lock`. The config file itself is `0600`.
+Every write rewrites the whole file: `[workspace]` and `[repos]` kept, known values grouped by plugin in declaration order, unset keys left out. Writes are atomic (a `0600` temp file renamed into place) and serialized by an exclusive lock on a sidecar file next to the target — `<workspace>/.ow/.config.toml.lock` or `~/.config/ow/.config.toml.lock`. The config file itself is `0600`.
 
 ## Unknown keys and wrong types
 
 Both are kept in the file, and ow reports one warning per config file, naming every unknown key and every wrong-typed key:
 
 ```
-warning: unknown setting future.x in .ow/config.toml; remove it with `ow config unset future.x`; odoo.http_port in .ow/config.toml must be int; using its default; run `ow init`
+warning: unknown setting future.x in .ow/config.toml; remove it with `ow config unset future.x`; odoo.http_port in .ow/config.toml must be int; using its default
 ```
 
 - An unknown key is ignored until some ow version declares it. `ow config unset` clears it.

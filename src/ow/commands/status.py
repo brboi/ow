@@ -14,6 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from ow import term
+from ow.commands import add as add_cmd
+from ow.commands._shared import known_repo_catalog
 from ow.commands._sync import fetch_then_gather
 from ow.core import git, tasks
 from ow.core.facts import RepoFacts, gather_all
@@ -57,9 +59,11 @@ def run(
             raise UsageError("not inside an ow workspace; pass -w <name|path>, -t <task>, or run `ow add`")
 
         exit_code = 0
+        fetch_failures: list[str] = []
         if fetch:
-            _root, facts, failures = fetch_then_gather(session, only, no_fetch=False)
-            if any(err is not None for err in failures.values()):
+            _root, facts, failures = fetch_then_gather(session, only, no_fetch=False, hint=None)
+            fetch_failures = [name for name, err in failures.items() if err is not None]
+            if fetch_failures:
                 exit_code = 1
         else:
             locations = tuple(
@@ -72,7 +76,9 @@ def run(
         )
 
         if json_output:
-            payload = _workspace_json(session, facts, infos, active_plugins)
+            payload = _workspace_json(
+                session, facts, infos, active_plugins, fetch_failures=fetch_failures
+            )
             term.emit_json(envelope(payload))
         else:
             print_table(session, facts, infos)
@@ -128,18 +134,22 @@ def _run_task(
     ws_payloads: list[dict[str, Any]] = []
     for ws in task.workspaces:
         sess = open_session(str(ws.root), need_workspace=True, plugins=plugins)
+        for warning in sess.warnings:
+            term.warn(warning)
+        fetch_failures: list[str] = []
         if fetch:
-            _root, facts, failures = fetch_then_gather(sess, (), no_fetch=False)
-            if any(err is not None for err in failures.values()):
+            _root, facts, failures = fetch_then_gather(sess, (), no_fetch=False, hint=None)
+            fetch_failures = [name for name, err in failures.items() if err is not None]
+            if fetch_failures:
                 exit_code = 1
         else:
             facts = gather_all(sess.locations)
         infos = _collect_plugin_status(plugins, ws=sess.workspace, facts=facts, target=None, offline=offline)
         if json_output:
-            ws_payloads.append(_workspace_entry_json(sess, facts, infos))
+            ws_payloads.append(_workspace_entry_json(sess, facts, infos, fetch_failures=fetch_failures))
         else:
             port = ws.settings.get("odoo.http_port")
-            header = f"== {ws.name} ({ws.root})" + (f" [port {port}]" if isinstance(port, int) else "") + " =="
+            header = f"== {ws.name} ({ws.root})" + (f" [port {port}]" if isinstance(port, int) and not isinstance(port, bool) else "") + " =="
             term.out(header)
             print_table(sess, facts, infos)
 
@@ -168,6 +178,8 @@ def _collect_plugin_status(
     target: str | None,
     offline: bool,
 ) -> list[StatusInfo]:
+    catalog = known_repo_catalog(plugins) if target is not None else {}
+    settings = add_cmd._global_settings(plugins) if target is not None else (ws.settings if ws is not None else {})
     infos: list[StatusInfo] = []
     for plugin_name, answer in plugins.call(
         "ow_status",
@@ -175,6 +187,8 @@ def _collect_plugin_status(
         facts=facts,
         target=target,
         offline=offline,
+        known_repos=catalog,
+        settings=settings,
         errors="collect",
     ):
         if isinstance(answer, Exception):
@@ -186,7 +200,11 @@ def _collect_plugin_status(
 
 
 def _workspace_entry_json(
-    session: Session, facts: Sequence[RepoFacts], infos: Sequence[StatusInfo]
+    session: Session,
+    facts: Sequence[RepoFacts],
+    infos: Sequence[StatusInfo],
+    *,
+    fetch_failures: Sequence[str] = (),
 ) -> dict[str, Any]:
     assert session.workspace is not None
     ws = session.workspace
@@ -230,13 +248,22 @@ def _workspace_entry_json(
         "name": ws.name,
         "root": str(ws.root),
         "task": ws.task,
-        "http_port": ws.settings.get("odoo.http_port") if isinstance(ws.settings.get("odoo.http_port"), int) else None,
+        "http_port": ws.settings.get("odoo.http_port")
+        if isinstance(ws.settings.get("odoo.http_port"), int)
+        and not isinstance(ws.settings.get("odoo.http_port"), bool)
+        else None,
+        "gevent_port": ws.settings.get("odoo.gevent_port")
+        if isinstance(ws.settings.get("odoo.gevent_port"), int)
+        and not isinstance(ws.settings.get("odoo.gevent_port"), bool)
+        else None,
         "repos": repos_data,
         "diagnostics": [
             {"plugin": p, "level": d.level, "text": d.text}
             for p, d in session.diagnostics
         ],
     }
+    if fetch_failures:
+        out["fetch_failures"] = list(fetch_failures)
     if ws_plugins:
         out["plugins"] = ws_plugins
     return out
@@ -247,10 +274,14 @@ def _workspace_json(
     facts: Sequence[RepoFacts],
     infos: Sequence[StatusInfo],
     plugins: Plugins,
+    *,
+    fetch_failures: Sequence[str] = (),
 ) -> dict[str, Any]:
     assert session.workspace is not None
     ws = session.workspace
-    payload: dict[str, Any] = {"workspace": _workspace_entry_json(session, facts, infos)}
+    payload: dict[str, Any] = {
+        "workspace": _workspace_entry_json(session, facts, infos, fetch_failures=fetch_failures)
+    }
     if ws.task:
         task = tasks.find_task(ws.task, plugins)
         if task is not None:
