@@ -21,8 +21,11 @@ COMPLETE_VAR = "_OW_COMPLETE"
 # completion env var of the real `ow` is `_OW_COMPLETE`, which is what typer reads.
 _POSIX_WRAPPER = """\
 ow() {
-  if [ "$1" = "cd" ]; then
+  if [ "${1-}" = "cd" ]; then
     shift
+    case " $* " in
+      *" -h "*|*" --help "*) command ow cd "$@"; return ;;
+    esac
     local target
     target=$(command ow cd "$@") || return
     cd "$target"
@@ -33,7 +36,11 @@ ow() {
 
 _FISH_WRAPPER = """\
 function ow
-    if test "$argv[1]" = cd
+    if test (count $argv) -gt 0; and test "$argv[1]" = cd
+        if contains -- -h $argv[2..-1]; or contains -- --help $argv[2..-1]
+            command ow cd $argv[2..-1]
+            return
+        end
         set -l target (command ow cd $argv[2..-1])
         or return
         cd $target

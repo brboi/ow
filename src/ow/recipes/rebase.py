@@ -87,7 +87,15 @@ def gather_rebase(facts: RepoFacts, *, new_base: str | None = None) -> RebaseInp
         and _is_ancestor(path, facts.base, upstream)
     )
 
-    new_base_is_ancestor = new_base is not None and _is_ancestor(path, new_base, "HEAD")
+    new_base_is_ancestor = (
+        new_base is not None
+        and _is_ancestor(path, new_base, "HEAD")
+        and (
+            facts.base is None
+            or not base_is_ancestor
+            or _is_ancestor(path, facts.base, new_base)
+        )
+    )
 
     return RebaseInputs(
         upstream_in_branch_past=upstream_in_branch_past,
@@ -208,10 +216,13 @@ def plan_is_fast_forward(facts: RepoFacts, plan: RepoPlan) -> bool:
 
     A plain `rebase` replays local commits, so the prompt still guards it.
     """
+    current = "HEAD"
     for step in plan.steps:
         destination = _destination(step)
-        if destination is not None and not _is_ancestor(facts.path, "HEAD", destination):
-            return False
+        if destination is not None:
+            if not _is_ancestor(facts.path, current, destination):
+                return False
+            current = destination
     return True
 
 

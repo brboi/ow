@@ -29,7 +29,9 @@ def parse_base(ref: str, remotes: Callable[[str], bool] | None = None) -> str:
     if not ref:
         raise BaseError("base cannot be empty")
 
+    explicit_remotes = False
     if ref.startswith("refs/remotes/"):
+        explicit_remotes = True
         ref = ref[len("refs/remotes/"):]
         if "/" not in ref:
             raise BaseError(f"base must name a branch after refs/remotes/: {ref}")
@@ -49,11 +51,17 @@ def parse_base(ref: str, remotes: Callable[[str], bool] | None = None) -> str:
     if prefix_len:
         branch = "/".join(parts[prefix_len:])
         qualified = ref
+    elif explicit_remotes:
+        raise BaseError(f"unknown remote in base: refs/remotes/{ref}")
     else:
         branch = ref
         qualified = f"origin/{ref}"
 
-    if git_run(["git", "check-ref-format", "--branch", branch]).returncode != 0:
+    if (
+        branch.startswith("-")
+        or "@{" in branch
+        or git_run(["git", "check-ref-format", f"refs/heads/{branch}"]).returncode != 0
+    ):
         raise BaseError(f"invalid branch name: {branch}")
 
     return qualified

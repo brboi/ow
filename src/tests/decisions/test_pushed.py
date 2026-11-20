@@ -92,3 +92,27 @@ def test_branch_removal_refuses_when_the_tip_moved_after_planning(tmp_path):
 
     # The new tip is still there: nothing was deleted.
     assert git(bare, "rev-parse", "refs/heads/pushed") == moved
+
+
+def test_branch_removal_raises_on_git_delete_failure_and_run_batch_reports_it(tmp_path):
+    from ow.core.git import GitFailed
+    from ow.core.plan import Batch, RepoPlan, run_batch
+
+    bare = _bare(tmp_path)
+    wt = tmp_path / "wt"
+    git(bare, "worktree", "add", "-b", "checked-out", str(wt), "origin/master")
+
+    steps, _ = branch_removal(bare, "checked-out")
+    assert len(steps) == 1
+    with pytest.raises(GitFailed):
+        steps[0].run()
+
+    # Running the failing OwStep through run_batch reports cleanly (no TypeError).
+    outcome = run_batch(
+        Batch(root=None, repos=(RepoPlan(repo="bare", steps=steps),)),
+        prompt=False,
+        dry_run=False,
+        yes=True,
+    )
+    assert outcome.failed == ("bare",)
+    assert outcome.exit_code == 1

@@ -18,7 +18,7 @@ from ow.commands._shared import (
 from ow.core import config, git
 from ow.core.facts import RepoFacts, gather_facts
 from ow.core.paths import repos_dir
-from ow.core.plan import Batch, GitStep, RepoPlan, Step, run_batch
+from ow.core.plan import Batch, GitStep, OwStep, RepoPlan, Step, run_batch
 from ow.core.session import Session
 from ow.errors import UsageError
 from ow.recipes import preflight
@@ -95,7 +95,7 @@ def rm(session: Session, name: str, *, dry_run: bool, yes: bool) -> int:
         raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
     location = next((entry for entry in session.locations if entry.name == name), None)
     if location is None:
-        return _drop_missing(session, name)
+        return _drop_missing(session, name, dry_run=dry_run, yes=yes)
 
     facts = gather_facts(location)
     problems = _refusals(facts, session.workspace.root)
@@ -151,14 +151,28 @@ def _plan(facts: RepoFacts) -> tuple[tuple[Step, ...], tuple[str, ...]]:
     return steps + tuple(branch_steps), notes
 
 
-def _drop_missing(session: Session, name: str) -> int:
+def _drop_missing(session: Session, name: str, *, dry_run: bool, yes: bool) -> int:
     """Drop a `[repos]` entry whose worktree is already gone."""
     if name not in session.accepted_bases:
         valid = ", ".join(entry.name for entry in session.locations) or "(none)"
         raise UsageError(f"unknown repo {name!r}; this workspace has: {valid}")
-    term.out(f"# {name}: worktree already gone")
-    _drop_entry(session, name)
-    return refresh_after(session)
+    assert session.workspace is not None
+    step = OwStep(
+        shown=f"# drop {name} from .ow/config.toml",
+        run=lambda: _drop_entry(session, name),
+    )
+    outcome = run_batch(
+        Batch(
+            root=session.workspace.root,
+            repos=(RepoPlan(repo=name, steps=(step,), notes=("worktree already gone",)),),
+        ),
+        prompt=True,
+        dry_run=dry_run,
+        yes=yes,
+    )
+    if not outcome.mutated:
+        return outcome.exit_code
+    return max(outcome.exit_code, refresh_after(session))
 
 
 def _drop_entry(session: Session, name: str) -> None:

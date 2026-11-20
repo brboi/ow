@@ -30,11 +30,15 @@ def confirm(question: str) -> bool:
     sys.stdout.flush()
 
     try:
-        response = sys.stdin.readline().strip().lower()
-        if not response:  # EOF returns empty string
-            sys.stdout.write("\n")
-            return False
-        return response in ("y", "yes")
-    except (EOFError, KeyboardInterrupt):
+        raw = sys.stdin.readline()
+    except EOFError:
         sys.stdout.write("\n")
         return False
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        raise
+
+    if raw == "":  # EOF
+        sys.stdout.write("\n")
+        return False
+    return raw.strip().lower() in ("y", "yes")

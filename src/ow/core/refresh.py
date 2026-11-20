@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import os
 import re
@@ -167,6 +168,12 @@ def _write_lock_file(root: Path, lock: dict[str, str]) -> None:
         raise OwError(f"rendered lock: {ancestry_problem}")
 
     lock_path = root / RENDERED_LOCK
+    st = _destination_stat(lock_path)
+    if st is not None:
+        problem = _unsafe_destination(RENDERED_LOCK.as_posix(), st)
+        if problem:
+            raise OwError(f"rendered lock: {problem}")
+
     body = dumps_lock(lock)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=lock_path.parent, prefix=".rendered.lock.", suffix=".tmp")
@@ -353,6 +360,23 @@ def project(ws: "Workspace", plugins: Plugins) -> Projection:
     )
 
 
+@contextlib.contextmanager
+def _refresh_lock(root: Path):
+    """Hold an exclusive sidecar lock while refreshing generated files and the lock file."""
+    lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
+    if _ancestry_problem(root, lock_rel):
+        yield
+        return
+    sidecar = root / ".ow" / ".rendered.lock.toml.lock"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    with open(sidecar, "a") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePosixPath, ...]]:
     """Write the generated files a projection says are missing or stale.
 
@@ -362,52 +386,58 @@ def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePo
     if projection.blocked:
         return projection, ()
 
-    lock, _ = _read_lock_or_warn(ws.root)
+    with _refresh_lock(ws.root):
+        lock, _ = _read_lock_or_warn(ws.root)
 
-    written: list[PurePosixPath] = []
-    owned: list[PurePosixPath] = []
-    new_lock = dict(lock)  # old entries survive until their path is reclassified
-    failure: OwError | None = None
+        written: list[PurePosixPath] = []
+        owned: list[PurePosixPath] = []
+        new_lock = dict(lock)  # old entries survive until their path is reclassified
+        failure: OwError | None = None
 
-    for status in projection.files:
-        path_key = status.path.as_posix()
-        if status.state in ("absent", "outdated"):
-            dest = ws.root / status.path
-            # Re-read right before writing: bytes that changed since projection are
-            # a hand edit, which wins. Leave it alone and keep the old lock entry,
-            # so the next projection reads it as "yours".
-            if _destination_stat(dest) is not None:
+        for status in projection.files:
+            path_key = status.path.as_posix()
+            if status.state in ("absent", "outdated"):
+                dest = ws.root / status.path
+                if _ancestry_problem(ws.root, status.path):
+                    continue
+                # Re-read right before writing: bytes that changed since projection are
+                # a hand edit, which wins. Leave it alone and keep the old lock entry,
+                # so the next projection reads it as "yours".
+                st = _destination_stat(dest)
+                if st is not None:
+                    if _unsafe_destination(path_key, st):
+                        continue
+                    try:
+                        current = dest.read_bytes()
+                    except OSError:
+                        continue
+                    if current != status.current:
+                        continue
                 try:
-                    current = dest.read_bytes()
-                except OSError:
-                    continue
-                if current != status.current:
-                    continue
-            try:
-                _atomic_write(dest, status.proposal, status.mode)
-            except OSError as exc:
-                msg = f"cannot write {path_key}: {exc}"
-                if written:
-                    written_paths = ", ".join(p.as_posix() for p in written)
-                    msg = f"{msg} (already wrote {written_paths})"
-                failure = OwError(msg)
-                break
-            new_lock[path_key] = _sha256_bytes(status.proposal)
-            written.append(status.path)
-            owned.append(status.path)
-        elif status.state == "up to date":
-            new_lock[path_key] = _sha256_bytes(status.proposal)
-            owned.append(status.path)
-        # yours / skipped: keep the old entry already in new_lock, if any.
+                    _atomic_write(dest, status.proposal, status.mode)
+                except OSError as exc:
+                    msg = f"cannot write {path_key}: {exc}"
+                    if written:
+                        written_paths = ", ".join(p.as_posix() for p in written)
+                        msg = f"{msg} (already wrote {written_paths})"
+                    failure = OwError(msg)
+                    break
+                new_lock[path_key] = _sha256_bytes(status.proposal)
+                written.append(status.path)
+                owned.append(status.path)
+            elif status.state == "up to date":
+                new_lock[path_key] = _sha256_bytes(status.proposal)
+                owned.append(status.path)
+            # yours / skipped: keep the old entry already in new_lock, if any.
 
-    if failure is None:
-        # Completed: drop the entries no plugin produces any more.
-        for path_key in projection.stale_lock:
-            new_lock.pop(path_key, None)
+        if failure is None:
+            # Completed: drop the entries no plugin produces any more.
+            for path_key in projection.stale_lock:
+                new_lock.pop(path_key, None)
 
-    _write_lock_if_changed(ws.root, new_lock)
-    if failure is not None:
-        raise failure
+        _write_lock_if_changed(ws.root, new_lock)
+        if failure is not None:
+            raise failure
 
     plugins.call("ow_refreshed", ws, owned=tuple(owned))
     return projection, tuple(written)

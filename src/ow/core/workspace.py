@@ -8,7 +8,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, Mapping, Sequence
 
-from ow.core.git import read as git_read
+from ow.core.git import GitFailed, read as git_read
 from ow.core.index import read as read_index
 from ow.core.paths import repos_dir
 from ow.errors import UsageError
@@ -138,7 +138,9 @@ def derive_repos(
             else:
                 worktree_gitdir = worktree_dir / "gitdir"
                 try:
-                    if worktree_gitdir.exists():
+                    if not worktree_gitdir.exists():
+                        problem = "prunable"
+                    else:
                         with open(worktree_gitdir, "r") as f:
                             stored_gitdir = f.read().strip()
                         if (worktree_dir / stored_gitdir).resolve() != git_file.resolve():
@@ -169,7 +171,7 @@ def derive_repos(
                     )
                     if not explicit_base:
                         explicit_base = None
-                except Exception:
+                except (GitFailed, OSError):
                     explicit_base = None
 
             locations.append(
@@ -244,7 +246,7 @@ def resolve_root(workspace: str | None = None, *, cwd: Path | None = None) -> Pa
     if not candidate.is_absolute():
         candidate = cwd / candidate
 
-    if "/" in workspace or workspace in (".", "..") or candidate.is_dir():
+    if "/" in workspace or workspace in (".", "..") or (candidate / ".ow" / "config.toml").exists():
         candidate = candidate.resolve()
         if not (candidate / ".ow" / "config.toml").exists():
             raise UsageError(f"not an ow workspace; no .ow/config.toml in {candidate}")
@@ -253,7 +255,7 @@ def resolve_root(workspace: str | None = None, *, cwd: Path | None = None) -> Pa
     entries = [e for e in read_index() if e.name == workspace]
     alive = [e for e in entries if (e / ".ow" / "config.toml").exists()]
     if len(alive) == 1:
-        return alive[0]
+        return alive[0].resolve()
     if len(alive) > 1:
         paths = ", ".join(str(e) for e in alive)
         raise UsageError(f"workspace '{workspace}' is ambiguous; matches: {paths}")
@@ -289,7 +291,7 @@ def stray_checkouts(root: Path, locations: Sequence[RepoLocation]) -> tuple[Path
             continue
         try:
             if (subdir / ".git").exists():
-                strays.append(resolved)
+                strays.append(subdir)
         except OSError:
             pass
 

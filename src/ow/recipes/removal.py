@@ -46,7 +46,10 @@ def branch_removal(bare: Path, branch: str) -> tuple[tuple[Step, ...], tuple[str
     def delete() -> None:
         if _tip(bare, branch) != tip:
             raise Refused(f"branch {branch} moved since planning; re-run to delete it")
-        git.run(("git", "-C", str(bare), "branch", "-D", branch))
+        argv = ("git", "-C", str(bare), "branch", "-D", branch)
+        result = git.run(argv)
+        if result.returncode != 0:
+            raise git.GitFailed(argv, result.returncode, result.stderr, result.stdout)
 
     return (OwStep(shown=delete_line, run=delete),), ()
 

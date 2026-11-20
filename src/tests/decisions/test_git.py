@@ -88,6 +88,8 @@ class TestRunEnv:
 
         assert seen[0]["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
         assert seen[0]["GIT_TERMINAL_PROMPT"] == "0"
+        assert seen[0]["LC_MESSAGES"] == "C"
+        assert seen[0]["LANGUAGE"] == "C"
 
     def test_user_ssh_command_is_kept(self, monkeypatch) -> None:
         monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /tmp/key")
@@ -156,3 +158,17 @@ class TestAuthHint:
 
     def test_unrelated(self) -> None:
         assert auth_hint("fatal: not a git repository") is None
+
+
+class TestParseBaseEdgeCases:
+    def test_unknown_remote_with_refs_remotes_prefix_raises(self) -> None:
+        from ow.core.bases import BaseError, parse_base
+
+        with pytest.raises(BaseError):
+            parse_base("refs/remotes/unknown/18.0", lambda r: r == "origin")
+
+    def test_checkout_shortcut_rejected(self) -> None:
+        from ow.core.bases import BaseError, parse_base
+
+        with pytest.raises(BaseError):
+            parse_base("@{-1}", lambda r: r == "origin")

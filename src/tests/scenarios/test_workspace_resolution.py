@@ -99,3 +99,26 @@ def test_unknown_keys_and_rejected_bases_collapse_to_one_warning(lab):
     assert "x..y" in warnings[0]
     assert "also..bad" in warnings[0]
     assert warnings[0].endswith("run `ow init`")
+
+
+def test_symlinked_stray_checkout_does_not_crash_open_session(lab):
+    ws = _init_workspace(lab)
+    outside = lab.home / "outside-repo"
+    outside.mkdir()
+    lab.git(outside, "init")
+    (ws / "linked-repo").symlink_to(outside)
+
+    warnings = _session(ws).warnings
+
+    assert any("stray" in w and "linked-repo" in w for w in warnings)
+
+
+def test_plain_subdir_matching_indexed_workspace_name_falls_through_to_index(lab):
+    ws = _init_workspace(lab)
+    caller = lab.home / "caller"
+    (caller / "ws").mkdir(parents=True)
+
+    result = lab.ow("cd", "ws", cwd=caller)
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == str(ws.resolve())

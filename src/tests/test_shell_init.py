@@ -75,3 +75,27 @@ def test_an_unknown_shell_is_a_usage_error(lab):
     result = lab.ow("shell-init", "powershell")
 
     assert result.exit_code == 2
+
+
+def test_bash_snippet_handles_nounset_and_cd_help(lab, tmp_path):
+    result = lab.ow("shell-init", "bash")
+    assert result.exit_code == 0
+
+    stub = Path(os.environ["PATH"]) / "ow"
+    stub.write_text(
+        '#!/bin/sh\nif [ "$1" = cd ] && [ "$2" = --help ]; then printf "Usage: ow cd\\n"; exit 0; fi\n'
+        'if [ "$#" -eq 0 ]; then printf "Usage: ow\\n"; exit 0; fi\nexit 1\n'
+    )
+    stub.chmod(0o755)
+
+    script = tmp_path / "ow-nounset.sh"
+    script.write_text(
+        "set -eu\n"
+        + result.stdout
+        + "\now\now cd --help\n"
+    )
+    proc = subprocess.run(["bash", "--norc", str(script)], capture_output=True, text=True)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "Usage: ow" in proc.stdout
+    assert "Usage: ow cd" in proc.stdout

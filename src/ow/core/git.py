@@ -40,10 +40,10 @@ class GitFailed(OwError):
 
 @functools.cache
 def _user_ssh_configured() -> bool:
-    """Whether git config core.sshCommand is set."""
+    """Whether global git config core.sshCommand is set."""
     try:
         result = subprocess.run(
-            ["git", "config", "core.sshCommand"],
+            ["git", "config", "--global", "core.sshCommand"],
             capture_output=True,
             text=True,
             errors="replace",
@@ -61,6 +61,8 @@ def run(argv: Sequence[str], *, live: bool = False) -> subprocess.CompletedProce
     """
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["LC_MESSAGES"] = "C"
+    env["LANGUAGE"] = "C"
     if (
         not env.get("GIT_SSH_COMMAND")
         and not env.get("GIT_SSH")

@@ -144,6 +144,13 @@ def test_a_repos_entry_with_a_missing_worktree_can_be_removed(lab):
     root = _workspace(lab, branch="18.0-voip")
     shutil.rmtree(root / REPO)
 
+    dry = lab.ow("repo", "rm", REPO, "-n", cwd=root)
+    assert dry.exit_code == 0
+    assert f"# {REPO}: worktree already gone" in dry.stdout.splitlines()
+    assert tomllib.loads((root / ".ow" / "config.toml").read_text())["repos"] == {
+        REPO: f"origin/{BASE}"
+    }
+
     result = lab.ow("repo", "rm", REPO, "-y", cwd=root)
 
     assert result.exit_code == 0

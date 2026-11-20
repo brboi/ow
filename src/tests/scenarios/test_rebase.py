@@ -442,3 +442,28 @@ def test_a_declined_prompt_changes_nothing(lab, monkeypatch):
     assert index_bytes() == index
     assert lab.git(worktree, "rev-parse", "HEAD") == head
     assert worktree_refs(lab, worktree, remote_tracking=False) == refs
+
+
+def test_retargeting_backport_onto_older_ancestor_base_replays_commits(lab):
+    """Backporting from 19.0 onto ancestor 18.0 must run `--onto`, not skip rebase."""
+    ws, worktree, collaborator = _workspace(lab)
+    bare = repos_dir() / "community.git"
+    # Create 19.0 ahead of 18.0 on the remote.
+    collaborator.git("checkout", "-b", "19.0", "18.0")
+    collaborator.commit({"only_19.py": "19\n"}, message="19.0 commit")
+    collaborator.push("19.0")
+
+    # Move our feature branch onto 19.0 + a local commit, with ow-base = origin/19.0.
+    lab.git(bare, "fetch", "origin", "+refs/heads/19.0:refs/remotes/origin/19.0")
+    lab.git(worktree, "reset", "--hard", "origin/19.0")
+    (worktree / "feature.py").write_text("feat\n")
+    lab.git(worktree, "add", "feature.py")
+    lab.git(worktree, "commit", "-m", "feature")
+    lab.git(bare, "config", f"branch.{BRANCH}.ow-base", "origin/19.0")
+
+    result = lab.ow("rebase", "--base", "18.0", "-y", cwd=ws)
+
+    assert result.exit_code == 0
+    assert (worktree / "feature.py").exists()
+    assert not (worktree / "only_19.py").exists()
+    assert lab.git(bare, "config", "--get", f"branch.{BRANCH}.ow-base") == "origin/18.0"

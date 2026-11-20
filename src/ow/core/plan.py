@@ -92,7 +92,7 @@ def _err_lines(stderr: str, stdout: str = "") -> None:
         error(line)
 
 
-def _report_failure(repo: str | None, step_shown: str, stderr: str, stdout: str) -> None:
+def _report_failure(repo: str | None, step_shown: str, stderr: str, stdout: str = "") -> None:
     """Print a failed step's command line, git output and auth hint."""
     if repo is None:
         error(step_shown)
@@ -197,7 +197,7 @@ def run_batch(batch: Batch, *, prompt: bool, dry_run: bool, yes: bool) -> Outcom
         (ok if repo_ok else failed).append(repo_plan.repo)
 
     after_failed = False
-    if failed:
+    if failed or refused:
         if batch.after:
             out("# not run:")
             _print_steps(batch.after, batch.root)
