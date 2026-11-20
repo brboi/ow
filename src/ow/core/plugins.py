@@ -198,10 +198,11 @@ class CoreSpec:
 
 def _get_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
     """Get all built-in plugin modules in order."""
-    from ow.plugins import local, mise, vscode, zed
+    from ow.plugins import local, mise, odoo, vscode, zed
 
     return (
         ("mise", mise),
+        ("odoo", odoo),
         ("vscode", vscode),
         ("zed", zed),
         ("local", local),
