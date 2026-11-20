@@ -290,20 +290,6 @@ def test_odoo_unparsable_config_warns_and_contributes_nothing(lab):
     assert odoo.editors_contribution(ws) is None
 
 
-def test_odoo_postinstall_quotes_paths_for_space(lab):
-    """Postinstall command quotes paths so spaces work."""
-    root = lab.ws("my workspace")
-    _write(root / "community", lab.odoo_files())
-    ws = resolved_workspace(root, _repos(("community", root / "community")))
-
-    answer = odoo.python_environment(ws)
-    assert answer is not None
-    assert answer.postinstall == (
-        "python -m ensurepip --default-pip && pip install -r \"{{config_root}}/community/requirements.txt\" -r \"{{config_root}}/requirements-dev.txt\"",
-    )
-    assert answer.aliases == {"osh": "odoo-bin shell --no-http -c \"$ODOO_RC\""}
-
-
 def test_odoo_password_with_newline_rejected(lab):
     """A password with newline in db_password or admin_passwd is rejected."""
     root = lab.ws("badpass")
@@ -420,17 +406,16 @@ def test_odoo_no_core_is_silent(lab):
 
 
 def test_odoo_mise_environment_answers(lab):
-    """The mise answer carries the core path, range, postinstall with ensurepip, quoted paths, and quoted alias."""
+    """The environment answer carries workspace-relative paths, the Python range, requirements and the alias."""
     ws = _core_workspace(lab)
 
     answer = odoo.python_environment(ws)
     assert answer is not None
-    assert answer.env == {"ODOO_RC": "{{config_root}}/odoorc"}
-    assert answer.path == ("{{config_root}}/community",)
+    assert answer.env == {}
+    assert answer.env_paths == {"ODOO_RC": "odoorc"}
+    assert answer.path == ("community",)
     assert answer.python == ((3, 10), (3, 12))
-    assert answer.postinstall == (
-        "python -m ensurepip --default-pip && pip install -r \"{{config_root}}/community/requirements.txt\" -r \"{{config_root}}/requirements-dev.txt\"",
-    )
+    assert answer.requirements == ("community/requirements.txt", "requirements-dev.txt")
     assert answer.aliases == {"osh": "odoo-bin shell --no-http -c \"$ODOO_RC\""}
 
 
@@ -447,6 +432,18 @@ def test_odoo_known_repos():
         "upgrade-util",
         "voip",
     ]
+
+
+def test_odoo_repo_identity_table_drives_known_urls_and_runbot_names():
+    from ow.plugins._odoo_repos import ODOO_REPOS, runbot_repo_name
+
+    urls = {repo.name: repo.clone_url for repo in ODOO_REPOS}
+    assert urls["community"] == "git@github.com:odoo/odoo.git"
+    assert urls["iap-apps"] == "git@github.com:odoo/iap-apps.git"
+    assert {repo.name: repo.url for repo in odoo.ow_known_repos()} == urls
+    assert runbot_repo_name("community") == "odoo"
+    assert runbot_repo_name("iap-apps") == "iap-apps"
+    assert runbot_repo_name("Brboi-Addons") == "brboi-addons"
 
 
 def test_odoo_debug_args_setting_default_tracks_the_core(lab):

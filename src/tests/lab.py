@@ -246,6 +246,71 @@ class Lab:
         shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         return log_path
 
+    def fake_runbot(
+        self,
+        *,
+        bundles: list[dict[str, Any]] = (),
+        batches: list[dict[str, Any]] = (),
+    ) -> list[str]:
+        """Stub `ow.plugins.runbot._urlopen` against in-memory Runbot 19.0 API records.
+
+        Each bundle dict may include a test-only `prs: list[str]` (e.g. `["enterprise:12345"]`)
+        so `/runbot/api/bundle?pr=...` matches cleanly. Returns the recorded request URL list.
+        """
+        import io
+        import urllib.error
+        import urllib.parse
+        from ow.plugins import runbot as runbot_plugin
+
+        calls: list[str] = []
+
+        class _FakeResponse(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.close()
+                return False
+
+        def _handler(req, timeout=8):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            calls.append(url)
+            parsed = urllib.parse.urlparse(url)
+            path = parsed.path
+            qs = urllib.parse.parse_qs(parsed.query)
+
+            if path == "/runbot/api/bundle" or path.startswith("/runbot/api/bundle/"):
+                if "pr" in qs:
+                    wanted = {item.strip().lower() for val in qs["pr"] for item in val.split(",") if item.strip()}
+                    matched = []
+                    for b in bundles:
+                        b_prs = {str(p).lower() for p in b.get("prs", ())}
+                        if b_prs & wanted:
+                            matched.append({k: v for k, v in b.items() if k != "prs"})
+                    return _FakeResponse(json.dumps(matched).encode("utf-8"))
+                ident = urllib.parse.unquote(path[len("/runbot/api/bundle/"):])
+                tokens = [t.strip() for t in ident.split(",") if t.strip()]
+                matched = []
+                for b in bundles:
+                    bid = str(b.get("id", ""))
+                    bname = str(b.get("name", ""))
+                    for tok in tokens:
+                        if tok == bid or tok == bname or tok.endswith(f"-{bid}"):
+                            matched.append({k: v for k, v in b.items() if k != "prs"})
+                            break
+                return _FakeResponse(json.dumps(matched).encode("utf-8"))
+
+            if path.startswith("/runbot/api/batch/"):
+                ident = path[len("/runbot/api/batch/"):]
+                ids = {int(x) for x in ident.split(",") if x.isdigit()}
+                matched = [b for b in batches if b.get("id") in ids]
+                return _FakeResponse(json.dumps(matched).encode("utf-8"))
+
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        self._monkeypatch.setattr(runbot_plugin, "_urlopen", _handler)
+        return calls
+
     def collaborator(self, name: str, of: Path) -> Collaborator:
         """Create a working clone of a remote repository."""
         collab_dir = self.root / "collab" / name

@@ -39,16 +39,18 @@ LISTING = [
     'odoo.admin_passwd = "Password" (default) # Odoo admin password',
     'odoo.smtp_server = "localhost" (default) # SMTP server',
     "odoo.smtp_port = 25 (default) # SMTP port",
-    'odoo.debug_args = ["--dev=all"] (default) # Debug arguments for Odoo',
-    'odoo.debug_test_args = ["--test-tags=voip"] (default) # Debug test arguments',
-    'odoo.default_repos = ["community", "enterprise"] (default) # Default repos added when creating a fresh workspace with `ow add`',
+    'odoo.debug_args = ["--dev=all"] (default) # Arguments of the editor "Run Instance With Debug" launch',
+    'odoo.debug_test_args = ["--test-tags=voip"] (default) # Arguments of the editor "Debug Tests" launch',
+    'odoo.default_repos = ["community", "enterprise"] (default) # Default repos expanded by `@<base>` targets in `ow init` / `ow add` / `ow run --tmp`',
     "github.enabled = true (default) # Enable or disable the github plugin",
     'github.default_org = "odoo" (default) # Default GitHub org for short PR targets (e.g. enterprise#12345)',
     "github.cache_ttl = 120 (default) # Cache TTL in seconds for GitHub PR status lookups",
+    "runbot.enabled = true (default) # Enable or disable the runbot plugin",
+    'runbot.url = "https://runbot.odoo.com" (default) # Base URL of the Odoo Runbot instance',
+    "runbot.cache_ttl = 120 (default) # Cache TTL in seconds for Runbot API lookups",
     "vscode.enabled = true (default) # Enable or disable the vscode plugin",
     "zed.enabled = true (default) # Enable or disable the zed plugin",
     "local.enabled = true (default) # Enable or disable the local plugin",
-    "retarget.enabled = false (default) # Enable or disable the retarget plugin",
 ]
 
 # The same listing outside a workspace: no workspace, so no callable default
@@ -68,16 +70,18 @@ LISTING_OUTSIDE = [
     'odoo.admin_passwd = "Password" (default) # Odoo admin password',
     'odoo.smtp_server = "localhost" (default) # SMTP server',
     "odoo.smtp_port = 25 (default) # SMTP port",
-    "odoo.debug_args = (unset) (default) # Debug arguments for Odoo",
-    "odoo.debug_test_args = (unset) (default) # Debug test arguments",
-    'odoo.default_repos = ["community", "enterprise"] (default) # Default repos added when creating a fresh workspace with `ow add`',
+    'odoo.debug_args = (unset) (default) # Arguments of the editor "Run Instance With Debug" launch',
+    'odoo.debug_test_args = (unset) (default) # Arguments of the editor "Debug Tests" launch',
+    'odoo.default_repos = ["community", "enterprise"] (default) # Default repos expanded by `@<base>` targets in `ow init` / `ow add` / `ow run --tmp`',
     "github.enabled = true (default) # Enable or disable the github plugin",
     'github.default_org = "odoo" (default) # Default GitHub org for short PR targets (e.g. enterprise#12345)',
     "github.cache_ttl = 120 (default) # Cache TTL in seconds for GitHub PR status lookups",
+    "runbot.enabled = true (default) # Enable or disable the runbot plugin",
+    'runbot.url = "https://runbot.odoo.com" (default) # Base URL of the Odoo Runbot instance',
+    "runbot.cache_ttl = 120 (default) # Cache TTL in seconds for Runbot API lookups",
     "vscode.enabled = true (default) # Enable or disable the vscode plugin",
     "zed.enabled = true (default) # Enable or disable the zed plugin",
     "local.enabled = true (default) # Enable or disable the local plugin",
-    "retarget.enabled = false (default) # Enable or disable the retarget plugin",
 ]
 
 
@@ -149,7 +153,7 @@ def test_config_set_workspace_key_refreshes(lab):
     # The listing now names the workspace layer as the value's origin.
     listing = lab.ow("config", cwd=root)
     assert (
-        'odoo.debug_args = ["--dev=all"] (workspace) # Debug arguments for Odoo'
+        'odoo.debug_args = ["--dev=all"] (workspace) # Arguments of the editor "Run Instance With Debug" launch'
         in listing.stdout.splitlines()
     )
 

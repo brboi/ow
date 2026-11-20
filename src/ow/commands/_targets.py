@@ -1,31 +1,119 @@
-"""Target resolution and repo expansion shared by `ow add` and `ow run`."""
+"""Unified target DSL parsing, resolution, and repo expansion shared by `ow init`, `ow add`, and `ow run`."""
 
 from __future__ import annotations
 
+import re
+import shlex
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import TYPE_CHECKING
 
-from ow.core import git
+from ow.commands._repos import origin_has, origin_head
+from ow.core import bases, git, stacks
 from ow.core.paths import repos_dir
 from ow.core.plugins import KnownRepo, ResolvedRepo, ResolvedTarget
 from ow.errors import UsageError
 
 if TYPE_CHECKING:
     from ow.core.plugins import Plugins
+    from ow.core.workspace import Workspace
+
+TARGET_USAGE_HINT = (
+    "pass a PR (enterprise#12345), base (@18.0), repo@branch, known repo (voip), "
+    "Runbot URL, or register with `ow repo add <name> <url>`"
+)
 
 _BRANCH_TARGET_RE = re.compile(r"^(?P<repo>[A-Za-z0-9_.-]+)@(?P<ref>.+)$")
+_NAME_PREFIX_RE = re.compile(r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)=(?P<spec>.+)$")
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_SSH_SCP_RE = re.compile(r"^git@[A-Za-z0-9._-]+:")
+_HOST_PORT_BEFORE_RE = re.compile(r"(?:^|://|[=,]|\s)([A-Za-z0-9._-]+)$")
+_HOST_PORT_AFTER_RE = re.compile(r"^\d+/")
 
 
-def _sanitize_branch(branch: str, fallback: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", branch).strip("-")
-    return cleaned or fallback
+@dataclass(frozen=True)
+class UnitSpec:
+    """A parsed CLI target token: `[<name>=]<spec>[:<args>]`."""
+
+    name: str | None
+    spec: str
+    raw: str
+    extra_args: tuple[str, ...] = ()
 
 
-def _has_ref(bare: Path, ref: str) -> bool:
-    return git.run(["git", "-C", str(bare), "rev-parse", "--verify", "--quiet", ref]).returncode == 0
+def split_name_prefix(raw: str) -> tuple[str | None, str]:
+    """Split an optional `<name>=<spec>` prefix without breaking URL query strings."""
+    text = raw.strip()
+    if not text or _URL_SCHEME_RE.match(text):
+        return None, text
+    match = _NAME_PREFIX_RE.match(text)
+    if not match:
+        return None, text
+    name = stacks.validate_name(match.group("name"), kind="stack")
+    spec = match.group("spec").strip()
+    if not spec:
+        raise UsageError(f"missing target after '{name}=' in {raw!r}")
+    return name, spec
+
+
+def split_run_args(raw: str) -> tuple[str, tuple[str, ...]]:
+    """Split `SPEC:"ARGS"` on the first `:` outside URL schemes, SCP SSH prefixes, and `host:port/`."""
+    text = raw.strip()
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == ":":
+            if text[i : i + 3] == "://":
+                i += 3
+                continue
+            # Skip `git@host:` in SSH repo URLs
+            if _SSH_SCP_RE.match(text[: i + 1]):
+                i += 1
+                continue
+            # Skip `host:port/...` (with or without URL scheme)
+            if _HOST_PORT_BEFORE_RE.search(text[:i]) and _HOST_PORT_AFTER_RE.match(text[i + 1 :]):
+                i += 1
+                continue
+            target_part = text[:i].strip()
+            args_part = text[i + 1 :].strip()
+            if not target_part:
+                raise UsageError(f"missing target before ':' in {raw!r}")
+            if not args_part:
+                return target_part, ()
+            try:
+                parsed_args = tuple(shlex.split(args_part))
+            except ValueError as exc:
+                raise UsageError(f"invalid arguments in {raw!r}: {exc}") from exc
+            return target_part, parsed_args
+        i += 1
+    return text, ()
+
+
+def parse_unit_spec(raw: str, *, allow_run_args: bool = False) -> UnitSpec:
+    """Parse a raw CLI spec token into a `UnitSpec`."""
+    if allow_run_args:
+        target_part, extra_args = split_run_args(raw)
+    else:
+        target_part, extra_args = raw.strip(), ()
+    name, spec = split_name_prefix(target_part)
+    return UnitSpec(name=name, spec=spec, raw=raw, extra_args=extra_args)
+
+
+def deduplicate_name(candidate: str, taken: set[str]) -> str:
+    """Return `candidate` if unused in `taken`, else `candidate-2`, `candidate-3`, ..."""
+    cleaned = stacks.validate_name(candidate, kind="stack")
+    if cleaned not in taken:
+        taken.add(cleaned)
+        return cleaned
+    idx = 2
+    while f"{cleaned}-{idx}" in taken:
+        idx += 1
+    unique = f"{cleaned}-{idx}"
+    taken.add(unique)
+    return unique
 
 
 def _split_remote_prefix(ref: str, remotes: Sequence[str]) -> tuple[str | None, str]:
@@ -39,18 +127,40 @@ def _split_remote_prefix(ref: str, remotes: Sequence[str]) -> tuple[str | None, 
     return None, ref
 
 
-def _remote_has_branch_or_cached(bare: Path, remote: str, branch: str) -> bool:
-    try:
-        return git.remote_has_branch(bare, remote, branch)
-    except git.GitFailed:
-        return _has_ref(bare, f"refs/remotes/{remote}/{branch}")
+def _is_upstream_base_branch(
+    bare: Path,
+    repo: str,
+    remote: str | None,
+    branch: str,
+    plugins: Plugins,
+    ws: Workspace | None,
+) -> bool:
+    """Whether `<remote>/<branch>` is an upstream base/series branch (checked out detached)."""
+    if remote not in ("origin", None):
+        return False
+    if bases.is_base_branch_name(branch):
+        return True
+    if plugins.first("ow_is_base_branch", ws=ws, repo=repo, branch=branch) is True:
+        return True
+    if bare.is_dir():
+        head = origin_head(bare)
+        if head and branch == head:
+            return True
+    return False
 
 
 def _resolve_branch_target(
     part: str,
     catalog: Mapping[str, KnownRepo],
+    plugins: Plugins,
+    ws: Workspace | None,
 ) -> ResolvedTarget | None:
-    """Resolve `<repo>@<branch>` (or `<repo>@<remote>/<branch>`) across configured remotes."""
+    """Resolve `<repo>@<ref>` (or `<repo>@<remote>/<ref>`) across configured remotes.
+
+    Upstream base/series branches (`master`, `main`, plugin base series, `origin/HEAD`)
+    resolve detached (`branch=None, base=origin/<ref>`) to prevent cross-worktree branch
+    collisions; feature branches resolve as local tracking branches.
+    """
     match = _BRANCH_TARGET_RE.match(part.strip())
     if not match:
         return None
@@ -69,10 +179,9 @@ def _resolve_branch_target(
 
     if bare.is_dir():
         configured = git.remotes(bare)
-        explicit_remote, branch = _split_remote_prefix(raw_ref, configured)
     else:
         configured = ("origin",)
-        explicit_remote, branch = _split_remote_prefix(raw_ref, configured)
+    explicit_remote, branch = _split_remote_prefix(raw_ref, configured)
 
     if (
         not branch
@@ -91,7 +200,7 @@ def _resolve_branch_target(
         url = origin_url or (known.url if known is not None else None)
 
         if explicit_remote is not None:
-            if not _remote_has_branch_or_cached(bare, explicit_remote, branch):
+            if not git.remote_has_branch_or_cached(bare, explicit_remote, branch):
                 raise UsageError(
                     f"branch {branch!r} not found on remote {explicit_remote!r} of {repo}"
                 )
@@ -99,13 +208,13 @@ def _resolve_branch_target(
         else:
             matches: list[str] = []
             if len(configured) == 1:
-                if _remote_has_branch_or_cached(bare, configured[0], branch):
+                if git.remote_has_branch_or_cached(bare, configured[0], branch):
                     matches.append(configured[0])
             elif configured:
                 with ThreadPoolExecutor(max_workers=min(4, len(configured))) as pool:
                     results = list(
                         pool.map(
-                            lambda r: (r, _remote_has_branch_or_cached(bare, r, branch)),
+                            lambda r: (r, git.remote_has_branch_or_cached(bare, r, branch)),
                             configured,
                         )
                     )
@@ -121,7 +230,7 @@ def _resolve_branch_target(
                         f"branch {branch!r} exists on multiple remotes of {repo} "
                         f"({', '.join(matches)}); specify {repo}@<remote>/{branch}"
                     )
-            elif _has_ref(bare, f"refs/heads/{branch}"):
+            elif git.has_ref(bare, f"refs/heads/{branch}"):
                 chosen_remote = None
             else:
                 checked = ", ".join(configured) or "(none)"
@@ -129,18 +238,31 @@ def _resolve_branch_target(
                     f"branch {branch!r} not found on any remote of {repo} (checked: {checked})"
                 )
 
+    is_base = _is_upstream_base_branch(bare, repo, chosen_remote, branch, plugins, ws)
     source = f"git:{repo}@{chosen_remote}/{branch}" if chosen_remote else f"git:{repo}@{branch}"
+    if is_base:
+        qualified_base = f"{chosen_remote or 'origin'}/{branch}"
+        resolved_repo = ResolvedRepo(
+            name=repo,
+            url=url,
+            branch=None,
+            base=qualified_base,
+            remote=None,
+            explicit=True,
+        )
+    else:
+        resolved_repo = ResolvedRepo(
+            name=repo,
+            url=url,
+            branch=branch,
+            base=None,
+            remote=chosen_remote,
+            explicit=True,
+        )
+
     return ResolvedTarget(
-        name=_sanitize_branch(branch, repo),
-        repos=(
-            ResolvedRepo(
-                name=repo,
-                url=url,
-                branch=branch,
-                base=None,
-                remote=chosen_remote,
-            ),
-        ),
+        name=stacks.sanitize_slug(branch, repo),
+        repos=(resolved_repo,),
         source=source,
     )
 
@@ -150,17 +272,26 @@ def _resolve_single_part(
     plugins: Plugins,
     catalog: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
+    ws: Workspace | None,
 ) -> ResolvedTarget | None:
-    """Ask plugins to resolve `part`, then fall back to `<repo>@<branch>` git targets."""
-    for _plugin, answer in plugins.call(
+    """Ask plugins to resolve `part` (PRs, Runbot URLs, `@<base>`), then handle `<repo>@<ref>`."""
+    answer = plugins.first(
         "ow_resolve_target",
+        ws=ws,
         target=part,
         known_repos=catalog,
         settings=settings,
-    ):
-        if isinstance(answer, ResolvedTarget):
-            return answer
-    return _resolve_branch_target(part, catalog)
+    )
+    if isinstance(answer, ResolvedTarget):
+        return answer
+    text = part.strip()
+    if text.startswith("@"):
+        raw_base = text[1:].strip() or "<base>"
+        raise UsageError(
+            f"cannot expand {text!r}: no enabled plugin handles @<base> targets "
+            f"(enable odoo plugin or specify <repo>@{raw_base})"
+        )
+    return _resolve_branch_target(part, catalog, plugins, ws)
 
 
 def expand_repos(
@@ -168,18 +299,35 @@ def expand_repos(
     plugins: Plugins,
     catalog: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
+    ws: Workspace | None = None,
 ) -> tuple[ResolvedRepo, ...]:
-    """Run every enabled `ow_expand_workspace_repos` hook over `repos`."""
-    repos_tuple = tuple(repos)
-    for _plugin, expanded in plugins.call(
+    """Pipe `repos` sequentially through every `ow_expand_workspace_repos` hook enabled for `ws`."""
+    result = plugins.pipe(
         "ow_expand_workspace_repos",
-        repos=repos_tuple,
+        "repos",
+        tuple(repos),
+        ws=ws,
         known_repos=catalog,
         settings=settings,
-    ):
-        if expanded is not None:
-            repos_tuple = tuple(expanded)
-    return repos_tuple
+    )
+    return tuple(result)
+
+
+def _is_known_or_registered_repo(name: str, catalog: Mapping[str, KnownRepo]) -> bool:
+    return (repos_dir() / f"{name}.git").is_dir() or name in catalog
+
+
+def _shared_base_applies(repo_name: str, shared_base: str | None) -> str | None:
+    """Use `shared_base` for a bare repo only when its `origin` actually has that branch."""
+    if shared_base is None:
+        return None
+    bare = repos_dir() / f"{repo_name}.git"
+    if not bare.is_dir():
+        return shared_base
+    branch = shared_base.split("/", 1)[-1]
+    if origin_has(bare, branch):
+        return shared_base
+    return None
 
 
 def resolve_composite_target(
@@ -187,54 +335,61 @@ def resolve_composite_target(
     plugins: Plugins,
     catalog: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
+    ws: Workspace | None = None,
 ) -> ResolvedTarget | None:
-    """Resolve a target or `+`-joined composite target (e.g. `iap-apps#42+enterprise`)."""
-    parts = [p.strip() for p in spec.split("+") if p.strip()]
-    if not parts:
-        return None
+    """Resolve a target or `,`-joined composite target.
+
+    Supports:
+    - PRs (`enterprise#12345`, `odoo/iap-apps#42`, `enterprise/pull/12345`, PR URL)
+    - Runbot URLs (`https://runbot.odoo.com/runbot/bundle/12345`, `.../batch/98765`)
+    - Base shorthand (`@18.0`, `@master`)
+    - Repo + ref (`iap@18.0`, `enterprise@18.0-my-fix`, `voip@dev/my-branch`)
+    - Bare repo (`voip`, `upgrade`)
+    """
+    raw_parts = [p.strip() for p in spec.split(",")]
+    if any(not p for p in raw_parts):
+        if len(raw_parts) == 1:
+            return None
+        raise UsageError(f"empty item in composite target {spec!r}")
+    parts = raw_parts
 
     resolved_parts: list[ResolvedTarget] = []
     extra_repo_names: list[str] = []
     unknown_parts: list[str] = []
 
     for part in parts:
-        res = _resolve_single_part(part, plugins, catalog, settings)
+        res = _resolve_single_part(part, plugins, catalog, settings, ws)
         if res is not None:
             resolved_parts.append(res)
-        elif len(parts) > 1:
-            if (repos_dir() / f"{part}.git").is_dir() or part in catalog:
-                extra_repo_names.append(part)
-            else:
-                unknown_parts.append(part)
+        elif _is_known_or_registered_repo(part, catalog):
+            extra_repo_names.append(part)
         else:
-            return None
-
-    if not resolved_parts:
-        # If every `+`-separated piece was a known repo (e.g. `community+enterprise`),
-        # warn clearly instead of creating a workspace literally named `community+enterprise`.
-        if len(parts) > 1 and not unknown_parts and extra_repo_names:
-            raise UsageError(
-                f"composite target {spec!r} needs at least one PR/target (e.g. enterprise#12345+community); "
-                "for fresh workspaces pass -r <repo>"
-            )
-        # Otherwise treat as a normal fresh workspace name containing `+` (e.g. `fix-a+b`).
-        return None
+            unknown_parts.append(part)
 
     if unknown_parts:
+        if len(parts) == 1:
+            return None
         raise UsageError(f"unknown target or repo {unknown_parts[0]!r} in {spec!r}")
 
-    # Merge repos giving explicit primary targets precedence over auto-discovered sister PRs,
-    # while rejecting two explicit primary targets that point at the same repository.
+    if not resolved_parts and not extra_repo_names:
+        return None
+
+    # Merge repos: explicit targets (`repo.explicit=True`) override auto-discovered companions/sisters
+    # (`repo.explicit=False`); reject two explicit targets pointing at the same repo.
     merged_repos: dict[str, ResolvedRepo] = {}
     primary_repos: set[str] = set()
     sources: list[str] = []
+
     for res in resolved_parts:
         sources.append(res.source)
-        for repo in res.repos[1:]:
-            merged_repos.setdefault(repo.name, repo)
+        for repo in res.repos:
+            if not repo.explicit:
+                merged_repos.setdefault(repo.name, repo)
+
     for res in resolved_parts:
-        if res.repos:
-            primary = res.repos[0]
+        for primary in res.repos:
+            if not primary.explicit:
+                continue
             if primary.name in primary_repos:
                 raise UsageError(
                     f"composite target {spec!r} specifies repo {primary.name!r} more than once"
@@ -244,20 +399,31 @@ def resolve_composite_target(
 
     shared_base = next((r.base for r in merged_repos.values() if r.base), None)
     for name in extra_repo_names:
+        if name in primary_repos:
+            raise UsageError(
+                f"composite target {spec!r} specifies repo {name!r} more than once"
+            )
         if name not in merged_repos:
             known = catalog.get(name)
+            bare_base = _shared_base_applies(name, shared_base)
             merged_repos[name] = ResolvedRepo(
                 name=name,
                 url=known.url if known else None,
                 branch=None,
-                base=shared_base,
+                base=bare_base,
+                explicit=True,
             )
+            sources.append(f"repo:{name}")
 
-    repos_tuple = expand_repos(tuple(merged_repos.values()), plugins, catalog, settings)
+    repos_tuple = expand_repos(tuple(merged_repos.values()), plugins, catalog, settings, ws)
+
+    if resolved_parts:
+        default_name = resolved_parts[0].name
+    else:
+        default_name = extra_repo_names[0]
 
     return ResolvedTarget(
-        name=resolved_parts[0].name,
+        name=default_name,
         repos=repos_tuple,
-        source="+".join(sources),
-        metadata=dict(resolved_parts[0].metadata),
+        source=",".join(sources),
     )

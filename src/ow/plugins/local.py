@@ -52,7 +52,7 @@ def ow_workspace_created(ws: Workspace) -> None:
     target = ws.root / ".local"
 
     if _is_symlinked(target, ws.root):
-        term.warn(f"skipping seed copy: {target} is a symlink; make it a directory before `ow add`")
+        term.warn(f"skipping seed copy: {target} is a symlink; copy {seed} into the workspace's .local/ by hand")
         return
 
     try:

@@ -1,8 +1,8 @@
-"""`ow status` — workspace, task, or external target status (plain table or `--json`).
+"""`ow status` — workspace, multi-stack workspace, or external target status (plain table or `--json`).
 
 One tab-separated line per repo when piped; when stdout is a TTY, aligned columns with header.
-When enabled plugins (e.g. `github`, future `runbot`) contribute external status, those are shown
-inline (or in structured form under `--json`), with `--offline` to skip network calls and `--fetch`
+When enabled plugins (`github`, `runbot`) contribute external status, those are shown inline
+(or in structured form under `--json`), with `--offline` to skip network calls and `--fetch`
 to run a parallel surgical fetch first.
 """
 
@@ -11,11 +11,13 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from ow import term
 from ow.commands._shared import known_repo_catalog
-from ow.core import git, tasks
+from ow.commands._workspace import stack_info
+from ow.core import git, refresh, stacks
 from ow.core.facts import RepoFacts, gather_all
 from ow.core.json_schema import envelope
 from ow.core.plugins import Plugins, StatusInfo
@@ -29,13 +31,13 @@ def run(
     *,
     plugins: Plugins | None = None,
     target: str | None = None,
-    task_name: str | None = None,
+    multi_root: Path | None = None,
     only: Sequence[str] = (),
     fetch: bool = False,
     offline: bool = False,
     json_output: bool = False,
 ) -> int:
-    """Inspect workspace, task, or external target; returns 0 on success or 1 on fetch failure."""
+    """Inspect mono-stack workspace, multi-stack workspace, or external target."""
     active_plugins = plugins or (session.plugins if session is not None else None)
     assert active_plugins is not None
 
@@ -45,17 +47,17 @@ def run(
                 active_plugins, target=target, offline=offline, json_output=json_output
             )
 
-        if task_name is not None:
-            return _run_task(
+        if multi_root is not None:
+            return _run_multi(
                 active_plugins,
-                task_name=task_name,
+                multi_root=multi_root,
                 fetch=fetch,
                 offline=offline,
                 json_output=json_output,
             )
 
         if session is None or session.workspace is None:
-            raise UsageError("not inside an ow workspace; pass -w <name|path>, -t <task>, or run `ow add`")
+            raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
 
         exit_code = 0
         fetch_failures: list[str] = []
@@ -117,33 +119,32 @@ def _run_external_target(
     return 0
 
 
-def _task_code_workspace(task: tasks.Task) -> str | None:
-    """Locate an existing `.code-workspace` file owned by `task` (or in `task.files_dir`)."""
-    for path in tasks.task_owned_files(task.name):
+def _code_workspace_path(multi: stacks.MultiWorkspace) -> str | None:
+    """Locate an existing `.code-workspace` file owned by `multi` (or in `multi.root`)."""
+    for path in refresh.owned_files(multi.root):
         if path.suffix == ".code-workspace":
             return str(path)
-    if task.files_dir is not None:
-        fallback = task.files_dir / f"{task.name}.code-workspace"
-        if fallback.exists():
-            return str(fallback)
+    fallback = multi.root / f"{multi.name}.code-workspace"
+    if fallback.exists():
+        return str(fallback)
     return None
 
 
-def _run_task(
+def _run_multi(
     plugins: Plugins,
     *,
-    task_name: str,
+    multi_root: Path,
     fetch: bool,
     offline: bool,
     json_output: bool,
 ) -> int:
-    loaded = tasks.load_task_sessions(task_name, plugins)
+    loaded = stacks.load_multi_workspace(multi_root, plugins)
     if loaded is None:
-        raise UsageError(f"unknown task {task_name!r}")
-    task, sessions = loaded
+        raise UsageError(f"no valid stacks found in {multi_root}")
+    multi, sessions = loaded
 
     exit_code = 0
-    ws_payloads: list[dict[str, Any]] = []
+    stack_payloads: list[dict[str, Any]] = []
     for sess in sessions:
         assert sess.workspace is not None
         ws = sess.workspace
@@ -159,22 +160,23 @@ def _run_task(
             facts = gather_all(sess.locations)
         infos = _collect_plugin_status(plugins, ws=ws, facts=facts, target=None, offline=offline)
         if json_output:
-            ws_payloads.append(_workspace_entry_json(sess, facts, infos, fetch_failures=fetch_failures))
+            stack_payloads.append(_workspace_entry_json(sess, facts, infos, fetch_failures=fetch_failures))
         else:
-            port = ws.settings.get("odoo.http_port")
-            header = f"== {ws.name} ({ws.root})" + (f" [port {port}]" if isinstance(port, int) and not isinstance(port, bool) else "") + " =="
-            term.out(header)
+            note = stack_info(ws, plugins).note
+            port_str = f" [{note}]" if note else ""
+            term.out(f"== {ws.name} ({ws.root}){port_str} ==")
             print_table(sess, facts, infos)
 
     if json_output:
         term.emit_json(
             envelope(
                 {
-                    "task": {
-                        "name": task.name,
-                        "common_parent": str(task.common_parent) if task.common_parent else None,
-                        "code_workspace": _task_code_workspace(task),
-                        "workspaces": ws_payloads,
+                    "workspace": {
+                        "name": multi.name,
+                        "root": str(multi.root),
+                        "multi_stack": True,
+                        "code_workspace": _code_workspace_path(multi),
+                        "stacks": stack_payloads,
                     }
                 }
             )
@@ -259,15 +261,8 @@ def _workspace_entry_json(
     out: dict[str, Any] = {
         "name": ws.name,
         "root": str(ws.root),
-        "task": ws.task,
-        "http_port": ws.settings.get("odoo.http_port")
-        if isinstance(ws.settings.get("odoo.http_port"), int)
-        and not isinstance(ws.settings.get("odoo.http_port"), bool)
-        else None,
-        "gevent_port": ws.settings.get("odoo.gevent_port")
-        if isinstance(ws.settings.get("odoo.gevent_port"), int)
-        and not isinstance(ws.settings.get("odoo.gevent_port"), bool)
-        else None,
+        "is_stack": ws.is_stack,
+        "ports": dict(stack_info(ws, session.plugins).ports),
         "repos": repos_data,
         "diagnostics": [
             {"plugin": p, "level": d.level, "text": d.text}
@@ -294,30 +289,30 @@ def _workspace_json(
     payload: dict[str, Any] = {
         "workspace": _workspace_entry_json(session, facts, infos, fetch_failures=fetch_failures)
     }
-    if ws.task:
-        task = tasks.find_task(ws.task, plugins)
-        if task is not None:
-            payload["task"] = {
-                "name": task.name,
-                "common_parent": str(task.common_parent) if task.common_parent else None,
-                "code_workspace": _task_code_workspace(task),
-                "siblings": [
-                    {
-                        "name": sibling.name,
-                        "root": str(sibling.root),
-                        "http_port": sibling.settings.get("odoo.http_port")
-                        if isinstance(sibling.settings.get("odoo.http_port"), int)
-                        and not isinstance(sibling.settings.get("odoo.http_port"), bool)
-                        else None,
-                        "repos": [
-                            {"name": r.name, "branch": r.branch, "base": r.base}
-                            for r in sibling.repos
-                        ],
-                    }
-                    for sibling in task.workspaces
-                    if sibling.root != ws.root
-                ],
-            }
+    if ws.is_stack:
+        parent_root = stacks.parent_multi_workspace(ws.root)
+        if parent_root is not None:
+            loaded = stacks.load_multi_workspace(parent_root, plugins)
+            if loaded is not None:
+                multi = loaded[0]
+                payload["parent_workspace"] = {
+                    "name": multi.name,
+                    "root": str(multi.root),
+                    "code_workspace": _code_workspace_path(multi),
+                    "siblings": [
+                        {
+                            "name": sibling.name,
+                            "root": str(sibling.root),
+                            "ports": dict(stack_info(sibling, plugins).ports),
+                            "repos": [
+                                {"name": r.name, "branch": r.branch, "base": r.base}
+                                for r in sibling.repos
+                            ],
+                        }
+                        for sibling in multi.stacks
+                        if sibling.root != ws.root
+                    ],
+                }
     return payload
 
 

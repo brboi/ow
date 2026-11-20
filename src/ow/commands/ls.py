@@ -1,4 +1,4 @@
-"""`ow ls` — list known workspaces (plain tab-separated or `--json`, filterable by `--task`)."""
+"""`ow ls` — list indexed workspaces (mono-stack and multi-stack, plain tab-separated or `--json`)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ow import term
-from ow.core import index
+from ow.commands._workspace import stack_info
+from ow.core import index, stacks
 from ow.core.json_schema import envelope
 from ow.core.session import open_session
 
@@ -18,43 +19,32 @@ if TYPE_CHECKING:
 def run(
     plugins: "Plugins",
     *,
-    task: str | None = None,
     json_output: bool = False,
 ) -> int:
     """List the index's workspaces, in index order; dead entries degrade to `missing`."""
     with term.json_mode(json_output):
         entries: list[dict[str, Any]] = []
         for path in index.read():
-            item = _inspect(path, plugins)
-            if task is not None and item["task"] != task:
-                continue
-            entries.append(item)
+            entries.append(_inspect(path, plugins))
 
         if json_output:
             term.emit_json(envelope({"workspaces": entries}))
             return 0
 
         for item in entries:
-            repos_col = item["status"] if item["status"] != "ok" else ", ".join(
-                f"{r['name']}:{r['state']}" for r in item["repos"]
-            )
-            line = f"{item['name']}\t{_display(Path(item['path']))}\t{repos_col}"
-            if item["task"]:
-                line += f"\ttask:{item['task']}"
+            if item["status"] != "ok":
+                detail_col = item["status"]
+            elif item.get("multi_stack"):
+                stack_labels = ", ".join(s["name"] for s in item.get("stacks", []))
+                detail_col = f"stacks: {stack_labels}"
+            else:
+                detail_col = ", ".join(f"{r['name']}:{r['state']}" for r in item["repos"])
+            line = f"{item['name']}\t{_display(Path(item['path']))}\t{detail_col}"
             sys.stdout.write(line + "\n")
         return 0
 
 
-def _inspect(path: Path, plugins: "Plugins") -> dict[str, Any]:
-    if not path.exists():
-        return {
-            "name": path.name,
-            "path": str(path),
-            "status": "missing",
-            "task": None,
-            "http_port": None,
-            "repos": [],
-        }
+def _inspect_single(path: Path, plugins: "Plugins") -> dict[str, Any]:
     try:
         session = open_session(str(path), need_workspace=False, plugins=plugins)
     except Exception:
@@ -62,8 +52,8 @@ def _inspect(path: Path, plugins: "Plugins") -> dict[str, Any]:
             "name": path.name,
             "path": str(path),
             "status": "unreadable",
-            "task": None,
-            "http_port": None,
+            "multi_stack": False,
+            "ports": {},
             "repos": [],
         }
     if session.workspace is None:
@@ -71,12 +61,11 @@ def _inspect(path: Path, plugins: "Plugins") -> dict[str, Any]:
             "name": path.name,
             "path": str(path),
             "status": "unreadable",
-            "task": None,
-            "http_port": None,
+            "multi_stack": False,
+            "ports": {},
             "repos": [],
         }
     ws = session.workspace
-    port = ws.settings.get("odoo.http_port")
     repos = [
         {
             "name": loc.name,
@@ -90,9 +79,44 @@ def _inspect(path: Path, plugins: "Plugins") -> dict[str, Any]:
         "name": ws.name,
         "path": str(path),
         "status": "ok",
-        "task": ws.task,
-        "http_port": port if isinstance(port, int) and not isinstance(port, bool) else None,
+        "multi_stack": False,
+        "ports": dict(stack_info(ws, plugins).ports),
         "repos": repos,
+    }
+
+
+def _inspect(path: Path, plugins: "Plugins") -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "name": path.name,
+            "path": str(path),
+            "status": "missing",
+            "multi_stack": False,
+            "ports": {},
+            "repos": [],
+        }
+    if (path / ".ow" / "config.toml").exists():
+        return _inspect_single(path, plugins)
+
+    stack_paths = stacks.detect_multi_workspace(path)
+    if stack_paths:
+        stack_items = [_inspect_single(sp, plugins) for sp in stack_paths]
+        return {
+            "name": path.name,
+            "path": str(path),
+            "status": "ok",
+            "multi_stack": True,
+            "stacks": stack_items,
+            "repos": [],
+        }
+
+    return {
+        "name": path.name,
+        "path": str(path),
+        "status": "unreadable",
+        "multi_stack": False,
+        "ports": {},
+        "repos": [],
     }
 
 

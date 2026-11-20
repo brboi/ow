@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Sequence
 import pluggy
 
 from ow.core import config
-from ow.errors import PluginError
+from ow.errors import PluginError, UsageError
 
 if TYPE_CHECKING:
     from ow.core.facts import RepoFacts
-    from ow.core.tasks import Task
+    from ow.core.stacks import MultiWorkspace
     from ow.core.workspace import Workspace
 
 # Hook markers for the "ow" project
@@ -34,9 +34,9 @@ class Setting:
 
 @dataclass(frozen=True)
 class GeneratedFile:
-    """A file a plugin contributes to the workspace or task."""
+    """A file a plugin contributes to the workspace or stack."""
 
-    path: PurePosixPath  # workspace-relative or task-parent-relative
+    path: PurePosixPath  # workspace-relative or multi-stack-root-relative
     data: bytes
     mode: int = 0o644
 
@@ -71,7 +71,9 @@ class ResolvedRepo:
     base: str | None = None
     remote: str | None = None
     fetch_ref: str | None = None  # e.g. "refs/pull/12345/head"
-    metadata: Mapping[str, object] = field(default_factory=dict)
+    commit: str | None = None  # optional exact SHA for detached checkout (e.g. Runbot base_match)
+    explicit: bool = True  # False for auto-discovered companions/sisters that explicit targets override
+    pr: str | None = None  # opaque PR identity, recorded in `branch.<b>.ow-pr` and compared as-is
 
 
 @dataclass(frozen=True)
@@ -81,7 +83,14 @@ class ResolvedTarget:
     name: str
     repos: tuple[ResolvedRepo, ...]
     source: str
-    metadata: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StackInfo:
+    """What a plugin tells users about a stack: coordinated ports and a one-line display note."""
+
+    ports: Mapping[str, int] = field(default_factory=dict)
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,10 +142,6 @@ class CoreSpec:
     @hookspec
     def ow_known_repos(self) -> list[KnownRepo]:
         """Return known repos this plugin provides."""
-
-    @hookspec
-    def ow_commands(self, app: object, plugins: Plugins) -> None:
-        """Add commands to the plugin's Typer subapp (or root app when TOP_LEVEL_COMMANDS=True)."""
 
     @hookspec
     def ow_workspace_created(self, ws: Workspace) -> None:
@@ -191,28 +196,54 @@ class CoreSpec:
         """Return workspaces recommended for pruning (e.g. merged/closed PRs)."""
 
     @hookspec
-    def ow_task_files(self, task: Task) -> list[GeneratedFile]:
-        """Return generated files for a multi-workspace task (written in common parent)."""
+    def ow_multi_workspace_files(self, multi: MultiWorkspace) -> list[GeneratedFile]:
+        """Return generated files for a multi-stack workspace (written in `multi.root`)."""
+
+    @hookspec
+    def ow_stack_values(
+        self,
+        ws: Workspace | None,
+        ws_values: Mapping[str, object],
+        siblings: Sequence[Workspace],
+        pending: Sequence[Mapping[str, object]],
+        global_settings: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        """Return the settings to pin explicitly for a stack (e.g. database name, coordinated ports).
+
+        `ws` is the existing workspace being promoted to a stack (None for a new stack),
+        `ws_values` the stack's own explicit settings (which must not be overridden),
+        `siblings` the stacks already on disk next to it, and `pending` the settings of stacks
+        planned earlier in the same command, which may not exist on disk yet.
+        """
+
+    @hookspec
+    def ow_stack_name(self, ws: Workspace) -> str | None:
+        """Suggest a stack directory name for `ws` during promotion to multi-stack."""
+
+    @hookspec
+    def ow_stack_info(self, ws: Workspace) -> StackInfo | None:
+        """Return the ports and display note users see for `ws` (`ow ls`, `ow status`, `ow run`)."""
+
+    @hookspec
+    def ow_is_base_branch(self, repo: str, branch: str) -> bool | None:
+        """Return True if `branch` on `repo` is an upstream base series (checked out detached)."""
 
 
 def _get_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
     """Get all built-in plugin modules in order."""
-    from ow.plugins import github, local, mise, odoo, retarget, vscode, zed
+    from ow.plugins import github, local, mise, odoo, runbot, vscode, zed
 
+    # Order matters: `Plugins.pipe` threads values in this order (odoo expands companion
+    # repos before runbot pins them).
     return (
         ("mise", mise),
         ("odoo", odoo),
         ("github", github),
+        ("runbot", runbot),
         ("vscode", vscode),
         ("zed", zed),
         ("local", local),
-        ("retarget", retarget),
     )
-
-
-def _plugin_default_enabled(plugin: object) -> bool:
-    """Whether `plugin` is enabled by default (True unless DEFAULT_ENABLED = False)."""
-    return bool(getattr(plugin, "DEFAULT_ENABLED", True))
 
 
 class Plugins:
@@ -222,18 +253,12 @@ class Plugins:
         self.pm = pm
         self.names = names
 
-    def default_enabled(self, name: str) -> bool:
-        """Default enabled state for plugin `name`."""
-        plugin = self.pm.get_plugin(name)
-        return _plugin_default_enabled(plugin) if plugin is not None else True
-
     def _global_enabled_flags(self) -> Mapping[str, object]:
         """Read `<name>.enabled` overrides from global config."""
         from ow.core.paths import global_config
 
         declared = {
-            f"{name}.enabled": Setting(f"{name}.enabled", bool, self.default_enabled(name), "")
-            for name in self.names
+            f"{name}.enabled": Setting(f"{name}.enabled", bool, True, "") for name in self.names
         }
         try:
             return config.read_global(global_config(), declared).values
@@ -243,15 +268,14 @@ class Plugins:
     def is_enabled(self, name: str, ws: Workspace | None = None) -> bool:
         """Whether plugin `name` is enabled for `ws` (or globally when `ws` is None)."""
         key = f"{name}.enabled"
-        default = self.default_enabled(name)
         if ws is not None:
-            return bool(ws.settings.get(key, default))
-        return bool(self._global_enabled_flags().get(key, default))
+            return bool(ws.settings.get(key, True))
+        return bool(self._global_enabled_flags().get(key, True))
 
     def settings(self) -> tuple[Setting, ...]:
         """Return all settings from all plugins, in order.
 
-        Includes a synthesized `<name>.enabled` (bool, default `DEFAULT_ENABLED`) for each plugin.
+        Includes a synthesized `<name>.enabled` (bool, default True) for each plugin.
         """
         result = []
         impls = self.pm.hook.ow_settings.get_hookimpls()
@@ -262,37 +286,73 @@ class Plugins:
                 Setting(
                     key=f"{name}.enabled",
                     type=bool,
-                    default=self.default_enabled(name),
+                    default=True,
                     help=f"Enable or disable the {name} plugin",
                 )
             )
 
             for impl in impls:
-                plugin_name = impl_to_name[impl.plugin]
-                if plugin_name == name:
-                    try:
-                        plugin_settings = impl.function()
-                        if plugin_settings:
-                            for setting in plugin_settings:
-                                if not setting.key.startswith(f"{name}."):
-                                    raise PluginError(
-                                        name,
-                                        "ow_settings",
-                                        f"setting key {setting.key!r} must start with {name!r}.",
-                                    )
-                                if setting.key == f"{name}.enabled":
-                                    raise PluginError(
-                                        name,
-                                        "ow_settings",
-                                        f"setting key {setting.key!r} is reserved by core",
-                                    )
-                            result.extend(plugin_settings)
-                    except PluginError:
-                        raise
-                    except Exception as e:
-                        raise PluginError(name, "ow_settings", e) from e
+                if impl_to_name[impl.plugin] != name:
+                    continue
+                try:
+                    plugin_settings = impl.function()
+                except PluginError:
+                    raise
+                except Exception as e:
+                    raise PluginError(name, "ow_settings", e) from e
+                if plugin_settings:
+                    result.extend(plugin_settings)
 
         return tuple(result)
+
+    def _ordered_impls(self, hook: str) -> list[tuple[str, Any]]:
+        """Return `(plugin_name, hookimpl)` pairs ordered by `self.names`."""
+        hook_method = getattr(self.pm.hook, hook, None)
+        if hook_method is None:
+            return []
+        order = {name: idx for idx, name in enumerate(self.names)}
+        pairs: list[tuple[str, Any]] = []
+        for impl in hook_method.get_hookimpls():
+            name = self.pm.get_name(impl.plugin)
+            if name is not None:
+                pairs.append((name, impl))
+        pairs.sort(key=lambda item: order.get(item[0], len(order)))
+        return pairs
+
+    def _enabled_predicate(self, ws: Workspace | None) -> Callable[[str], bool]:
+        """Return a predicate checking whether a plugin name is enabled for `ws` (or globally)."""
+        if ws is not None:
+            return lambda name: bool(ws.settings.get(f"{name}.enabled", True))
+        enabled_flags = self._global_enabled_flags()
+        return lambda name: bool(enabled_flags.get(f"{name}.enabled", True))
+
+    @staticmethod
+    def _bind_kwargs(
+        impl: Any,
+        ws: Workspace | None,
+        kwargs: Mapping[str, Any],
+        *,
+        extra: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        impl_kwargs: dict[str, Any] = {}
+        for arg in (*impl.argnames, *impl.kwargnames):
+            if extra and arg in extra:
+                impl_kwargs[arg] = extra[arg]
+            elif arg in kwargs:
+                impl_kwargs[arg] = kwargs[arg]
+            elif arg == "ws":
+                impl_kwargs[arg] = ws
+        return impl_kwargs
+
+    @staticmethod
+    def _invoke(name: str, impl: Any, hook: str, impl_kwargs: Mapping[str, Any]) -> object:
+        """Run one implementation; a plain exception becomes a `PluginError` naming `name`."""
+        try:
+            return impl.function(**impl_kwargs)
+        except (PluginError, UsageError):
+            raise
+        except Exception as e:
+            raise PluginError(name, hook, e) from e
 
     def call(
         self,
@@ -306,55 +366,69 @@ class Plugins:
 
         Returns (plugin_name, result) tuples in tuple order.
         Skips disabled plugins (checks workspace settings or global layer).
-        With errors="raise" (default), raises on first PluginError.
+        With errors="raise" (default), raises on first PluginError (and propagates UsageError).
         With errors="collect", collects (name, PluginError(...)) and continues.
         Drops None results.
         """
-        result = []
-        hook_method = getattr(self.pm.hook, hook, None)
-        if hook_method is None:
-            return []
-        impls = hook_method.get_hookimpls()
-        impl_to_name = {impl.plugin: self.pm.get_name(impl.plugin) for impl in impls}
+        result: list[tuple[str, object]] = []
+        is_enabled = self._enabled_predicate(ws)
 
-        enabled_flags: Mapping[str, object] = {} if ws is not None else self._global_enabled_flags()
-
-        for impl in impls:
-            name = impl_to_name[impl.plugin]
-            enabled_key = f"{name}.enabled"
-            default = self.default_enabled(name)
-            if ws is not None:
-                enabled = ws.settings.get(enabled_key, default)
-            else:
-                enabled = enabled_flags.get(enabled_key, default)
-
-            if not enabled:
+        for name, impl in self._ordered_impls(hook):
+            if not is_enabled(name):
                 continue
-
-            # Build kwargs for this implementation (only pass args it declares)
-            impl_kwargs = {}
-            for arg in (*impl.argnames, *impl.kwargnames):
-                if arg in kwargs:
-                    impl_kwargs[arg] = kwargs[arg]
-                elif arg == "ws":
-                    impl_kwargs[arg] = ws
-
             try:
-                ret = impl.function(**impl_kwargs)
-                if ret is not None:
-                    result.append((name, ret))
-            except PluginError as e:
-                # Keep an existing PluginError unchanged (original plugin name and cause)
+                ret = self._invoke(name, impl, hook, self._bind_kwargs(impl, ws, kwargs))
+            except (PluginError, UsageError) as e:
                 if errors == "raise":
                     raise
-                result.append((name, e))
-            except Exception as e:
-                error = PluginError(name, hook, e)
-                if errors == "raise":
-                    raise error from e
-                result.append((name, error))
+                # Keep an existing PluginError unchanged (original plugin name and cause)
+                result.append((name, e if isinstance(e, PluginError) else PluginError(name, hook, e)))
+                continue
+            if ret is not None:
+                result.append((name, ret))
 
         return result
+
+    def first(self, hook: str, ws: Workspace | None = None, **kwargs: Any) -> object | None:
+        """Return the first non-None answer of `hook` among enabled plugins, in plugin order.
+
+        Stops at that answer: later implementations do not run. Enablement and error
+        semantics are those of `call` with errors="raise".
+        """
+        is_enabled = self._enabled_predicate(ws)
+
+        for name, impl in self._ordered_impls(hook):
+            if not is_enabled(name):
+                continue
+            ret = self._invoke(name, impl, hook, self._bind_kwargs(impl, ws, kwargs))
+            if ret is not None:
+                return ret
+        return None
+
+    def pipe(
+        self,
+        hook: str,
+        arg_name: str,
+        value: Any,
+        ws: Workspace | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Pass `value` sequentially through enabled implementations of `hook` in plugin order.
+
+        Each non-None return value replaces `value` for the next implementation.
+        """
+        is_enabled = self._enabled_predicate(ws)
+        current = value
+
+        for name, impl in self._ordered_impls(hook):
+            if not is_enabled(name):
+                continue
+            impl_kwargs = self._bind_kwargs(impl, ws, kwargs, extra={arg_name: current})
+            ret = self._invoke(name, impl, hook, impl_kwargs)
+            if ret is not None:
+                current = ret
+
+        return current
 
     def answers(self, ws: Workspace) -> Callable[[str], list]:
         """Return a function that collects answers to a hook, skipping disabled plugins.
@@ -371,87 +445,25 @@ class Plugins:
 
         return answer_hook
 
-    def add_commands(self, app: object) -> None:
-        """Register CLI commands for enabled plugins that define `ow_commands`.
-
-        Respects global `<name>.enabled` (falling back to `DEFAULT_ENABLED`).
-        Plugins with `TOP_LEVEL_COMMANDS = True` register directly on the root
-        Typer app; others get their own named `typer.Typer` subapp.
-        """
-        import typer
-
-        impls = self.pm.hook.ow_commands.get_hookimpls()
-        impl_to_name = {impl.plugin: self.pm.get_name(impl.plugin) for impl in impls}
-        enabled_flags = self._global_enabled_flags()
-
-        for impl in impls:
-            name = impl_to_name[impl.plugin]
-            enabled = enabled_flags.get(f"{name}.enabled", self.default_enabled(name))
-            if not enabled:
-                continue
-
-            if getattr(impl.plugin, "TOP_LEVEL_COMMANDS", False):
-                try:
-                    cmd_kwargs: dict[str, Any] = {"app": app}
-                    if "plugins" in (*impl.argnames, *impl.kwargnames):
-                        cmd_kwargs["plugins"] = self
-                    impl.function(**cmd_kwargs)
-                except Exception as e:
-                    raise PluginError(name, "ow_commands", e) from e
-                continue
-
-            sub_app = typer.Typer(name=name, no_args_is_help=True, rich_markup_mode=None)
-
-            try:
-                cmd_kwargs = {"app": sub_app}
-                if "plugins" in (*impl.argnames, *impl.kwargnames):
-                    cmd_kwargs["plugins"] = self
-                impl.function(**cmd_kwargs)
-            except Exception as e:
-                raise PluginError(name, "ow_commands", e) from e
-
-            if sub_app.registered_commands or sub_app.registered_groups:
-                app.add_typer(sub_app, name=name)
-
 
 def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = None) -> Plugins:
-    """Load and register all built-in plugins.
+    """Load and register the built-in plugins and the shared specs.
 
-    Raises PluginError when a plugin's HOOKSPECS or hook implementations are invalid.
+    Raises PluginError when a plugin's hook implementations are invalid.
     """
+    from ow.specs.editors import EditorsSpec
+    from ow.specs.python_env import PythonEnvSpec
+
     if builtins is None:
         builtins = _get_builtins()
 
     pm = pluggy.PluginManager("ow")
-    pm.add_hookspecs(CoreSpec)
+    for spec in (CoreSpec, PythonEnvSpec, EditorsSpec):
+        pm.add_hookspecs(spec)
 
-    # Avoid adding the same spec class twice
-    added_specs = {CoreSpec}
-
-    _RESERVED_PLUGIN_NAMES = frozenset({"repos", "workspace"})
     names = []
     for name, module in builtins:
-        if name in _RESERVED_PLUGIN_NAMES:
-            raise PluginError(name, "register", f"plugin name {name!r} is reserved")
         names.append(name)
-
-        if hasattr(module, "HOOKSPECS"):
-            hookspecs = module.HOOKSPECS
-            if not isinstance(hookspecs, tuple):
-                raise PluginError(name, "HOOKSPECS", "HOOKSPECS must be a tuple")
-
-            for spec_class in hookspecs:
-                if spec_class not in added_specs:
-                    try:
-                        pm.add_hookspecs(spec_class)
-                        added_specs.add(spec_class)
-                    except ValueError as e:
-                        raise PluginError(name, "HOOKSPECS", str(e)) from e
-                    except pluggy.PluginValidationError as e:
-                        raise PluginError(
-                            pm.get_name(e.plugin) or name, "HOOKSPECS", str(e)
-                        ) from e
-
         try:
             pm.register(module, name=name)
         except pluggy.PluginValidationError as e:

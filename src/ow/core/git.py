@@ -112,6 +112,11 @@ def check_version() -> None:
         raise UsageError(f"git {major}.{minor} is too old; need 2.45 or later")
 
 
+def has_ref(bare: Path, ref: str) -> bool:
+    """Whether `ref` exists in `bare`."""
+    return run(["git", "-C", str(bare), "rev-parse", "--verify", "--quiet", ref]).returncode == 0
+
+
 def remote_has_branch(bare: Path, remote: str, branch: str) -> bool:
     """Whether the remote has exactly this branch, per ls-remote.
 
@@ -122,6 +127,33 @@ def remote_has_branch(bare: Path, remote: str, branch: str) -> bool:
     if result.returncode != 0:
         raise GitFailed(argv, result.returncode, result.stderr, result.stdout)
     return bool(result.stdout.strip())
+
+
+def remote_has_branch_or_cached(
+    bare: Path,
+    remote: str,
+    branch: str,
+    *,
+    prefer_cache: bool = False,
+) -> bool:
+    """Whether `remote` has `branch`, consulting remote or cached `refs/remotes/<remote>/<branch>`.
+
+    When `prefer_cache` is True, returns True immediately if the tracking ref is already cached,
+    otherwise queries `ls-remote` (returning False if offline/failed). When False, queries
+    `ls-remote` first and falls back to the cached ref on `GitFailed`.
+    """
+    cached_ref = f"refs/remotes/{remote}/{branch}"
+    if prefer_cache:
+        if has_ref(bare, cached_ref):
+            return True
+        try:
+            return remote_has_branch(bare, remote, branch)
+        except GitFailed:
+            return False
+    try:
+        return remote_has_branch(bare, remote, branch)
+    except GitFailed:
+        return has_ref(bare, cached_ref)
 
 
 def remotes(bare: Path) -> tuple[str, ...]:

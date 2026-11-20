@@ -1,4 +1,4 @@
-"""`ow rm <ws>` / `ow rm -t <task>`: remove workspace(s), their worktrees, pushed branches and task files."""
+"""`ow rm <ws|stack>`: remove a mono-stack workspace, a multi-stack workspace, or one stack."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ow import term
-from ow.core import git, index, tasks
+from ow.core import git, index, refresh, stacks
 from ow.core.facts import RepoFacts, gather_all
 from ow.core.json_schema import envelope
 from ow.core.plan import Batch, OwStep, RepoPlan, Step, run_batch
@@ -24,7 +24,7 @@ def run(
     yes: bool,
     json_output: bool = False,
 ) -> int:
-    """Remove the session's workspace; 1 when pre-flight refused, else the batch's code."""
+    """Remove a mono-stack workspace or a single stack; 1 when pre-flight refused."""
     workspace = session.workspace
     assert workspace is not None
 
@@ -35,22 +35,21 @@ def run(
         return code
 
 
-def run_task(
+def run_multi(
     plugins: Plugins,
-    task_name: str,
+    multi_root: Path,
     *,
     dry_run: bool,
     yes: bool,
     json_output: bool = False,
 ) -> int:
-    """Remove every workspace belonging to `task_name` in one batch and clean up task files."""
-    loaded = tasks.load_task_sessions(task_name, plugins)
+    """Remove every stack of multi-stack workspace `multi_root` in one batch and clean up."""
+    loaded = stacks.load_multi_workspace(multi_root, plugins)
     if loaded is None:
-        raise UsageError(f"unknown task {task_name!r}")
-    _task, sessions = loaded
+        raise UsageError(f"no valid stacks found in {multi_root}")
+    multi, sessions = loaded
 
     with term.json_mode(json_output):
-        # Preflight every workspace once before building a single batch and prompting once.
         gathered: list[tuple[Session, tuple[RepoFacts, ...]]] = []
         preflight_refusals: list[dict[str, Any]] = []
         any_refused = False
@@ -67,9 +66,8 @@ def run_task(
                     term.out(f"# {ws.name}/{name}: {text}")
             preflight_refusals.append(
                 {
-                    "workspace": ws.name,
+                    "stack": ws.name,
                     "root": str(ws.root),
-                    "task": task_name,
                     "removed": False,
                     "dry_run": dry_run,
                     "refusals": [{"repo": n, "reason": t} for n, t in refusals],
@@ -81,7 +79,13 @@ def run_task(
             if json_output:
                 term.emit_json(
                     envelope(
-                        {"task": task_name, "workspaces": preflight_refusals, "exit_code": 1}
+                        {
+                            "workspace": multi.name,
+                            "root": str(multi.root),
+                            "multi_stack": True,
+                            "stacks": preflight_refusals,
+                            "exit_code": 1,
+                        }
                     )
                 )
             return 1
@@ -102,35 +106,44 @@ def run_task(
                 ws_notes.extend(rp.notes)
             ws_root = ws.root
 
-            def _drop_ws(root: Path = ws_root) -> None:
+            def _drop_stack(root: Path = ws_root) -> None:
                 shutil.rmtree(root)
-                index.remove(root)
                 removed_roots.add(root)
 
             ws_steps.append(
-                OwStep(shown=git.show(("rm", "-rf", str(ws_root))), run=_drop_ws)
+                OwStep(shown=git.show(("rm", "-rf", str(ws_root))), run=_drop_stack)
             )
             plans.append(
                 RepoPlan(
-                    repo=f"workspace:{ws.name}",
+                    repo=f"stack:{ws.name}",
                     steps=tuple(ws_steps),
                     notes=tuple(ws_notes),
                 )
             )
 
-        def _finish_task() -> None:
-            remaining = tasks.find_task(task_name, plugins)
+        def _finish_multi() -> None:
+            remaining = stacks.load_multi_workspace(multi.root, plugins)
             if remaining is None:
-                tasks.cleanup_task_files(task_name)
+                refresh.remove_owned_files(multi.root)
+                index.remove(multi.root)
+                if multi.root.exists():
+                    try:
+                        if not any(multi.root.iterdir()):
+                            multi.root.rmdir()
+                    except OSError:
+                        pass
             else:
-                tasks.sync_task_files(remaining, plugins)
+                stacks.sync_multi_workspace_files(remaining[0], plugins)
 
         outcome = run_batch(
             Batch(
                 root=None,
                 repos=tuple(plans),
                 after=(
-                    OwStep(shown=f"# update task {task_name!r} files", run=_finish_task),
+                    OwStep(
+                        shown=f"# clean up {git.display_path(multi.root)} and drop from index",
+                        run=_finish_multi,
+                    ),
                 ),
             ),
             prompt=True,
@@ -138,15 +151,13 @@ def run_task(
             yes=yes,
         )
 
-        # If some workspaces were deleted before a failure prevented `after`, still sync task files.
         if removed_roots and outcome.exit_code != 0 and not dry_run:
-            _finish_task()
+            _finish_multi()
 
         results = [
             {
-                "workspace": session.workspace.name,
+                "stack": session.workspace.name,
                 "root": str(session.workspace.root),
-                "task": task_name,
                 "removed": session.workspace.root in removed_roots and not dry_run,
                 "dry_run": dry_run,
                 "refusals": [],
@@ -157,7 +168,13 @@ def run_task(
         if json_output:
             term.emit_json(
                 envelope(
-                    {"task": task_name, "workspaces": results, "exit_code": outcome.exit_code}
+                    {
+                        "workspace": multi.name,
+                        "root": str(multi.root),
+                        "multi_stack": True,
+                        "stacks": results,
+                        "exit_code": outcome.exit_code,
+                    }
                 )
             )
         return outcome.exit_code
@@ -167,7 +184,8 @@ def _remove_one(session: Session, *, dry_run: bool, yes: bool) -> tuple[int, dic
     workspace = session.workspace
     assert workspace is not None
     root = workspace.root
-    task_name = workspace.task
+    is_stack = workspace.is_stack
+    parent_multi = stacks.parent_multi_workspace(root) if is_stack else None
     facts = gather_all(session.locations)
 
     refusals = workspace_refusals(facts, root, session.locations)
@@ -177,7 +195,7 @@ def _remove_one(session: Session, *, dry_run: bool, yes: bool) -> tuple[int, dic
         return 1, {
             "workspace": workspace.name,
             "root": str(root),
-            "task": task_name,
+            "is_stack": is_stack,
             "removed": False,
             "dry_run": dry_run,
             "refusals": [{"repo": n, "reason": t} for n, t in refusals],
@@ -187,25 +205,32 @@ def _remove_one(session: Session, *, dry_run: bool, yes: bool) -> tuple[int, dic
     if outside:
         term.out(f"# {outside}")
 
-    def _finish_task() -> None:
-        if not task_name:
+    def _finish_parent() -> None:
+        if parent_multi is None:
             return
-        remaining = tasks.find_task(task_name, session.plugins)
+        remaining = stacks.load_multi_workspace(parent_multi, session.plugins)
         if remaining is None:
-            tasks.cleanup_task_files(task_name)
+            refresh.remove_owned_files(parent_multi)
+            index.remove(parent_multi)
         else:
-            tasks.sync_task_files(remaining, session.plugins)
+            stacks.sync_multi_workspace_files(remaining[0], session.plugins)
 
     after_steps: list[Step] = [
         OwStep(shown=git.show(("rm", "-rf", str(root))), run=lambda: shutil.rmtree(root)),
-        OwStep(
-            shown=f"# drop {git.display_path(root)} from the index",
-            run=lambda: index.remove(root),
-        ),
     ]
-    if task_name:
+    if is_stack and parent_multi is not None:
         after_steps.append(
-            OwStep(shown=f"# update task {task_name!r} files", run=_finish_task)
+            OwStep(
+                shown=f"# update {parent_multi.name} workspace files",
+                run=_finish_parent,
+            )
+        )
+    else:
+        after_steps.append(
+            OwStep(
+                shown=f"# drop {git.display_path(root)} from the index",
+                run=lambda: index.remove(root),
+            )
         )
 
     outcome = run_batch(
@@ -221,7 +246,7 @@ def _remove_one(session: Session, *, dry_run: bool, yes: bool) -> tuple[int, dic
     return outcome.exit_code, {
         "workspace": workspace.name,
         "root": str(root),
-        "task": task_name,
+        "is_stack": is_stack,
         "removed": outcome.exit_code == 0 and not dry_run,
         "dry_run": dry_run,
         "refusals": [],

@@ -1,8 +1,8 @@
-"""`ow rebase` scenarios: the shared-branch guard, `--base`, `--autostash`, purity.
+"""`ow retarget` scenarios: the shared-branch guard, `--base`, `--autostash`, purity.
 
 The workspace's branch tracks the branch the collaborator publishes, so a
 colleague's push shows up as new upstream commits the guard must take in
-without rewriting them. `ow rebase -n` fetches (remote-tracking refs are the
+without rewriting them. `ow retarget -n` fetches (remote-tracking refs are the
 one thing a dry run may move), then prints the plan and writes nothing else;
 an `n` answer leaves the workspace byte-identical and exits 2.
 """
@@ -29,22 +29,8 @@ BRANCH = "18.0-voip-boi"
 COMMUNITY = f"{BARE}/community.git"
 
 
-def test_retarget_is_hidden_by_default_and_appears_when_enabled(lab):
-    """`retarget` is opt-in: invisible until `retarget.enabled = true` globally."""
-    help_before = lab.ow("--help")
-    assert help_before.exit_code == 0
-    assert "retarget" not in help_before.stdout
-    assert lab.ow("retarget").exit_code == 2
-
-    assert lab.ow("config", "set", "--global", "retarget.enabled", "true").exit_code == 0
-    help_after = lab.ow("--help")
-    assert help_after.exit_code == 0
-    assert "retarget" in help_after.stdout
-
-
 def _workspace(lab, branches: dict[str, dict[str, str]] | None = None):
     """A workspace on `18.0-voip-boi`, tracking the branch the collaborator publishes."""
-    assert lab.ow("config", "set", "--global", "retarget.enabled", "true").exit_code == 0
     remote = add_repo(lab, "community", branches)
     collaborator = lab.collaborator("dev", of=remote)
     collaborator.commit({"shared.py": "shared\n"}, message="shared", branch=BRANCH)
@@ -483,20 +469,102 @@ def test_retargeting_backport_onto_older_ancestor_base_replays_commits(lab):
     assert lab.git(bare, "config", "--get", f"branch.{BRANCH}.ow-base") == "origin/18.0"
 
 
-def test_retarget_respects_workspace_disabled_override_and_json_output(lab):
+def test_a_positional_base_and_base_option_together_are_a_usage_error(lab):
+    ws, _worktree, _collab = _workspace(lab)
+
+    result = lab.ow("retarget", "18.0", "--base", "18.0", cwd=ws)
+
+    assert result.exit_code == 2
+    assert "either positional BASE or --base" in result.stderr
+
+
+def test_an_unknown_only_repo_is_a_usage_error(lab):
+    ws, _worktree, _collab = _workspace(lab)
+
+    result = lab.ow("retarget", "--only", "nope", cwd=ws)
+
+    assert result.exit_code == 2
+    assert "unknown repo 'nope' in --only" in result.stderr
+
+
+def test_retarget_json_output_emits_the_schema_envelope(lab):
     import json
 
     ws, worktree, _collab = _workspace(lab)
 
-    # JSON output emits schema_version = 1
     res_json = lab.ow("retarget", "--no-fetch", "-y", "--json", cwd=ws)
     assert res_json.exit_code == 0, res_json.stderr
     data = json.loads(res_json.stdout)
     assert data["schema_version"] == 1
     assert data["exit_code"] == 0
 
-    # Workspace-level retarget.enabled = false must refuse running retarget in that workspace
-    assert lab.ow("config", "set", "retarget.enabled", "false", cwd=ws).exit_code == 0
-    disabled = lab.ow("retarget", "--no-fetch", "-y", cwd=ws)
-    assert disabled.exit_code == 2
-    assert "disabled" in disabled.stderr
+
+def test_retarget_switches_detached_core_updates_config_skips_missing_series_and_refreshes(lab):
+    """Retargeting master -> 19.0 switches detached `community`, updates `[repos]`, skips `upgrade`, and refreshes venv/odoorc."""
+    import tomllib
+
+    add_repo(
+        lab,
+        "community",
+        {
+            "master": lab.odoo_files(series="master", python=((3, 12), (3, 13))),
+            "19.0": lab.odoo_files(series="19.0", python=((3, 11), (3, 12))),
+        },
+        base="master",
+    )
+    add_repo(
+        lab,
+        "enterprise",
+        {
+            "master": {"ent/__manifest__.py": "{'version': 'master'}"},
+            "19.0": {"ent/__manifest__.py": "{'version': '19.0'}"},
+        },
+        base="master",
+    )
+    # `upgrade` only has `master`, NOT `19.0`
+    add_repo(
+        lab,
+        "upgrade",
+        {"master": {"migrations/script.py": "upgrade = True\n"}},
+        base="master",
+    )
+
+    ws = lab.home / "retarget-multi"
+    ws.mkdir(parents=True)
+    init_res = lab.ow("init", "odoo=@master,upgrade", "other=community@master", cwd=ws)
+    assert init_res.exit_code == 0, init_res.stderr + init_res.stdout
+
+    # Add a local feature branch with a commit in `odoo/enterprise`
+    ent_wt = ws / "odoo" / "enterprise"
+    lab.git(ent_wt, "switch", "--no-track", "-c", "master-feat", "origin/master")
+    lab.git(ent_wt, "config", "branch.master-feat.ow-base", "origin/master")
+    (ent_wt / "feat.py").write_text("feat = 1\n")
+    lab.git(ent_wt, "add", "feat.py")
+    lab.git(ent_wt, "commit", "-m", "my feature")
+
+    # Retargeting from multi-stack root without -w asks which stack
+    no_w = lab.ow("retarget", "19.0", "-y", cwd=ws)
+    assert no_w.exit_code == 2
+    assert "multi-stack workspace" in no_w.stderr
+
+    # Retarget stack `odoo` from root via `-w odoo`
+    res = lab.ow("retarget", "19.0", "-w", "odoo", "-y", cwd=ws)
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "upgrade: remote origin has no branch 19.0; skipping" in res.stdout
+
+    # 1. Detached `community` moved cleanly to origin/19.0
+    comm_wt = ws / "odoo" / "community"
+    assert lab.git(comm_wt, "rev-parse", "HEAD") == lab.sha(
+        repos_dir() / "community.git", "refs/remotes/origin/19.0"
+    )
+    # 2. Branched `enterprise` replayed feature commit onto origin/19.0 and updated ow-base
+    assert (ent_wt / "feat.py").is_file()
+    assert lab.git(ent_wt, "config", "--get", "branch.master-feat.ow-base") == "origin/19.0"
+    # 3. `[repos]` default bases updated in `.ow/config.toml` for community & enterprise, NOT upgrade
+    cfg = tomllib.loads((ws / "odoo" / ".ow" / "config.toml").read_text())
+    assert cfg["repos"]["community"] == "origin/19.0"
+    assert cfg["repos"]["enterprise"] == "origin/19.0"
+    assert cfg["repos"]["upgrade"] == "origin/master"
+    # 4. Generated files refreshed to 19.0 series venv
+    odools = tomllib.loads((ws / "odoo" / "odools.toml").read_text())
+    assert "19.0" in odools["config"][0]["python_path"]

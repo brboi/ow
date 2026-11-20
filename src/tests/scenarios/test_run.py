@@ -1,4 +1,4 @@
-"""`ow run` scenarios: local Odoo execution, target creation/reuse, and `--tmp` cleanup."""
+"""`ow run` scenarios: single TTY execution, multi-process runner, SPEC:"ARGS", and `--tmp`."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ def _install_fake_venv_python(venv_dir: Path, log_path: Path) -> Path:
     py.write_text(
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
+        "print('hello from fake odoo', os.environ.get('ODOO_RC'), flush=True)\n"
         f"with open({str(log_path)!r}, 'a', encoding='utf-8') as f:\n"
         "    f.write(json.dumps({'odoo_rc': os.environ.get('ODOO_RC'), 'argv': sys.argv[1:]}) + '\\n')\n",
         encoding="utf-8",
@@ -52,90 +53,127 @@ def test_run_inside_workspace_passes_args_and_odoorc(lab):
     ]
 
 
-def test_run_target_creates_and_reuses_persistent_workspace(lab):
+def test_run_external_pr_without_tmp_refuses_and_guides_user(lab):
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
-    remote = add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
-    collab = lab.collaborator("mic", of=remote)
-    collab.commit({"ent/fix.py": "ok = 1\n"}, message="fix", branch="18.0-mic-fix")
-    collab.push("18.0-mic-fix")
-    lab.publish_pr(remote, 12345, "18.0-mic-fix")
-    lab.fake_gh(
-        [
-            {
-                "repo": "odoo/enterprise",
-                "number": 12345,
-                "title": "Mic fix",
-                "url": "https://github.com/odoo/enterprise/pull/12345",
-                "state": "OPEN",
-                "isDraft": False,
-                "headRefName": "18.0-mic-fix",
-                "baseRefName": "18.0",
-            }
-        ]
-    )
+    res = lab.ow("run", "enterprise#12345", cwd=lab.home)
+    assert res.exit_code == 2
+    assert "--tmp" in res.stderr
+    assert "ow init" in res.stderr
+
+
+def test_run_multi_stack_root_launches_all_runnable_stacks_and_skips_voip(lab):
+    """`ow run` at a multi-stack workspace root runs all Odoo stacks in parallel and skips `voip`."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(lab, "voip", {"master": {"README.md": "voip\n"}}, base="master")
+
+    ws = lab.home / "review-stack"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "odoo=community@18.0", "iap=community@18.0", "voip=voip", cwd=ws).exit_code == 0
+
     log_path = lab.root / "runs.jsonl"
     _install_fake_venv_python(venvs_dir() / "py3.12-18.0", log_path)
 
-    parent = lab.home / "odoo"
-    parent.mkdir(parents=True)
-
-    first = lab.ow("run", "enterprise#12345", "--", "-i", "account", cwd=parent)
-    assert first.exit_code == 0, first.stderr
-    ws = parent / "12345-18.0-mic-fix"
-    assert ws.is_dir()
-
-    # Second run reuses the existing workspace without failing on "already exists"
-    second = lab.ow("run", "enterprise#12345", "--", "--dev=all", cwd=parent)
-    assert second.exit_code == 0, second.stderr
+    res = lab.ow("run", cwd=ws)
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "voip: no runner available, skipping" in res.stdout
+    assert "[odoo] hello from fake odoo" in res.stdout
+    assert "[iap] hello from fake odoo" in res.stdout
 
     runs = _read_runs(log_path)
     assert len(runs) == 2
-    assert runs[0]["odoo_rc"] == str(ws / "odoorc")
-    assert runs[0]["argv"][-2:] == ["-i", "account"]
-    assert runs[1]["odoo_rc"] == str(ws / "odoorc")
-    assert runs[1]["argv"][-1:] == ["--dev=all"]
+    rcs = {r["odoo_rc"] for r in runs}
+    assert rcs == {str(ws / "odoo" / "odoorc"), str(ws / "iap" / "odoorc")}
 
 
-def test_run_tmp_cleans_up_workspace_and_worktrees_on_exit(lab):
+def test_run_multi_stack_per_stack_colon_args(lab):
+    """`ow run odoo:\"-d plop -i voip_hr\" iap:\"-i phone_service\"` forwards distinct args to each stack."""
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
-    remote = add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
-    collab = lab.collaborator("mic", of=remote)
-    collab.commit({"ent/tmp.py": "ok = 1\n"}, message="tmp", branch="18.0-tmp-pr")
-    collab.push("18.0-tmp-pr")
-    lab.publish_pr(remote, 888, "18.0-tmp-pr")
+    ws = lab.home / "per-args"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "odoo=community@18.0", "iap=community@18.0", cwd=ws).exit_code == 0
+
+    log_path = lab.root / "runs.jsonl"
+    _install_fake_venv_python(venvs_dir() / "py3.12-18.0", log_path)
+
+    res = lab.ow("run", 'odoo:-d plop -i voip_hr', 'iap:-i phone_service', cwd=ws)
+    assert res.exit_code == 0, res.stderr + res.stdout
+
+    runs = _read_runs(log_path)
+    by_rc = {r["odoo_rc"]: r["argv"] for r in runs}
+    assert by_rc[str(ws / "odoo" / "odoorc")][-4:] == ["-d", "plop", "-i", "voip_hr"]
+    assert by_rc[str(ws / "iap" / "odoorc")][-2:] == ["-i", "phone_service"]
+
+
+def test_run_tmp_multi_pr_with_optional_names_colon_args_distinct_ports_and_cleanup(lab):
+    """`ow run --tmp` runs multiple PR specs with per-target args, auto names, distinct ports, and cleans up."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ent_remote = add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    ent_collab = lab.collaborator("mic", of=ent_remote)
+    ent_collab.commit({"ent/tmp.py": "ok = 1\n"}, message="tmp", branch="18.0-voip-tmp")
+    ent_collab.push("18.0-voip-tmp")
+    lab.publish_pr(ent_remote, 888, "18.0-voip-tmp")
+
+    iap_remote = add_repo(lab, "iap", {"18.0": {"iap_mod/__manifest__.py": "{}"}})
+    iap_collab = lab.collaborator("bob", of=iap_remote)
+    iap_collab.commit({"iap_mod/tmp.py": "ok = 1\n"}, message="iap tmp", branch="18.0-iap-tmp")
+    iap_collab.push("18.0-iap-tmp")
+    lab.publish_pr(iap_remote, 333, "18.0-iap-tmp")
+    lab.git(repos_dir() / "iap.git", "config", "ow.github-repo", "odoo/iap-apps")
+
     lab.fake_gh(
         [
             {
                 "repo": "odoo/enterprise",
                 "number": 888,
-                "title": "Temp PR",
+                "title": "Temp Ent PR",
                 "url": "https://github.com/odoo/enterprise/pull/888",
                 "state": "OPEN",
                 "isDraft": False,
-                "headRefName": "18.0-tmp-pr",
+                "headRefName": "18.0-voip-tmp",
                 "baseRefName": "18.0",
-            }
+            },
+            {
+                "repo": "odoo/iap-apps",
+                "number": 333,
+                "title": "Temp IAP PR",
+                "url": "https://github.com/odoo/iap-apps/pull/333",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0-iap-tmp",
+                "baseRefName": "18.0",
+            },
         ]
     )
     log_path = lab.root / "runs.jsonl"
     _install_fake_venv_python(venvs_dir() / "py3.12-18.0", log_path)
 
-    parent = lab.home / "odoo"
+    parent = lab.home / "scratch"
     parent.mkdir(parents=True)
 
-    result = lab.ow("run", "enterprise#888", "--tmp", "--", "--stop-after-init", cwd=parent)
-    assert result.exit_code == 0, result.stderr
+    result = lab.ow(
+        "run",
+        "--tmp",
+        'https://github.com/odoo/enterprise/pull/888:-d plop -i voip_hr',
+        'iap#333:-i phone_service',
+        cwd=parent,
+    )
+    assert result.exit_code == 0, result.stderr + result.stdout
+    assert "[18.0-voip-tmp]" in result.stdout
+    assert "[18.0-iap-tmp]" in result.stdout
+
     runs = _read_runs(log_path)
-    assert len(runs) == 1
-    assert runs[0]["argv"][-1] == "--stop-after-init"
-    # Nothing left in cwd, index, or bare worktree registrations
+    assert len(runs) == 2
+    argvs = [r["argv"] for r in runs]
+    assert any(a[-4:] == ["-d", "plop", "-i", "voip_hr"] for a in argvs)
+    assert any(a[-2:] == ["-i", "phone_service"] for a in argvs)
+
+    # Nothing left in cwd, index, bare worktrees, local PR branches, or ephemeral PR refs
     assert list(parent.iterdir()) == []
     assert index.read() == ()
     wt_list = lab.git(repos_dir() / "enterprise.git", "worktree", "list", "--porcelain")
-    assert "888-18.0-tmp-pr" not in wt_list
-    # Ephemeral --tmp run checks out detached and leaves no local PR branch or PR ref in bare
+    assert "18.0-voip-tmp" not in wt_list
     branches = lab.git(repos_dir() / "enterprise.git", "for-each-ref", "--format=%(refname:short)", "refs/heads/")
-    assert "18.0-tmp-pr" not in branches.splitlines()
+    assert "18.0-voip-tmp" not in branches.splitlines()
     pr_refs = lab.git(repos_dir() / "enterprise.git", "for-each-ref", "--format=%(refname)", "refs/ow/pr/")
     assert "refs/ow/pr/888" not in pr_refs.splitlines()
 
@@ -149,12 +187,82 @@ def test_run_forwards_positional_subcommand_after_double_dash(lab):
 
     r1 = lab.ow("run", "--", "shell", "--no-http", cwd=ws)
     assert r1.exit_code == 0, r1.stderr
-    assert not (ws / "shell").exists()
 
-    r2 = lab.ow("run", "-w", "my-ws", "--", "shell", cwd=lab.home)
+    r2 = lab.ow("run", "-w", "my-ws", "--", "shell", "--no-http", cwd=lab.home)
     assert r2.exit_code == 0, r2.stderr
 
     runs = _read_runs(log_path)
     assert len(runs) == 2
     assert runs[0]["argv"][-2:] == ["shell", "--no-http"]
-    assert runs[1]["argv"][-1:] == ["shell"]
+    assert runs[1]["argv"][-2:] == ["shell", "--no-http"]
+
+
+def test_split_run_args_handles_host_port_urls():
+    from ow.commands._targets import split_run_args
+
+    assert split_run_args("https://my.runbot:8069/runbot/bundle/1") == (
+        "https://my.runbot:8069/runbot/bundle/1",
+        (),
+    )
+    assert split_run_args("my.runbot:8069/runbot/bundle/1") == (
+        "my.runbot:8069/runbot/bundle/1",
+        (),
+    )
+    assert split_run_args("rb=my.runbot:8069/runbot/bundle/1:-i sale") == (
+        "rb=my.runbot:8069/runbot/bundle/1",
+        ("-i", "sale"),
+    )
+    assert split_run_args("https://my.runbot:8069/runbot/bundle/1:-d test") == (
+        "https://my.runbot:8069/runbot/bundle/1",
+        ("-d", "test"),
+    )
+
+
+def test_run_multi_fail_fast_terminates_siblings_and_prints_summary(lab):
+    import time
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = lab.home / "ff-ws"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "fast=community@18.0", "slow=community@18.0", cwd=ws).exit_code == 0
+
+    venv_py = venvs_dir() / "py3.12-18.0" / "bin" / "python"
+    venv_py.parent.mkdir(parents=True, exist_ok=True)
+    venv_py.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, time\n"
+        "if '--fail' in sys.argv:\n"
+        "    print('failing fast', flush=True)\n"
+        "    sys.exit(1)\n"
+        "print('sleeping', flush=True)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    venv_py.chmod(venv_py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    t0 = time.monotonic()
+    res = lab.ow("run", "--fail-fast", "fast:--fail", "slow:--sleep", cwd=ws)
+    elapsed = time.monotonic() - t0
+
+    assert res.exit_code == 1
+    assert elapsed < 10.0
+    assert "# summary:" in res.stdout
+    assert "fast: exit 1" in res.stdout
+
+
+def test_run_ephemeral_pr_ref_cleanup_matches_full_slug(lab):
+    from ow.commands.run import _branch_uses_pr_ref
+
+    add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    bare = repos_dir() / "enterprise.git"
+    lab.git(bare, "branch", "feat", "origin/18.0")
+    lab.git(bare, "config", "branch.feat.ow-pr", "other/enterprise#888")
+
+    assert _branch_uses_pr_ref(bare, "refs/ow/pr/888", pr="odoo/enterprise#888") is False
+    assert _branch_uses_pr_ref(bare, "refs/ow/pr/888", pr="other/enterprise#888") is True
+
+
+def test_run_named_spec_without_tmp_suggests_tmp_command(lab):
+    res = lab.ow("run", "iap=iap#1", cwd=lab.home)
+    assert res.exit_code == 2
+    assert "ow run --tmp iap=iap#1" in res.stderr

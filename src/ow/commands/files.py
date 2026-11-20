@@ -7,58 +7,101 @@ from __future__ import annotations
 
 import difflib
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from ow import term
-from ow.core import refresh
+from ow.core import refresh, stacks
 from ow.core.json_schema import envelope
 from ow.core.refresh import Projection
 from ow.core.session import Session
 from ow.errors import UsageError
 
+if TYPE_CHECKING:
+    from ow.core.plugins import Plugins
+
+
+def _emit_projection(
+    *,
+    name: str,
+    projection: Projection,
+    diff: bool,
+    json_output: bool,
+    multi_stack: bool = False,
+) -> int:
+    if json_output:
+        payload: dict[str, Any] = {
+            "workspace": name,
+            "blocked": projection.blocked,
+            "files": [
+                {
+                    "path": st.path.as_posix(),
+                    "owner": st.owner,
+                    "state": st.state,
+                    "reason": st.reason,
+                }
+                for st in projection.files
+            ],
+            "stale_lock": list(projection.stale_lock),
+            "diagnostics": [
+                {"plugin": p, "level": d.level, "text": d.text}
+                for p, d in projection.diagnostics
+            ],
+        }
+        if multi_stack:
+            payload["multi_stack"] = True
+        term.emit_json(envelope(payload))
+        return 1 if projection.blocked else 0
+
+    if diff:
+        _print_diffs(projection)
+    else:
+        _print_states(projection)
+
+    if projection.blocked:
+        for plugin_name, diag in projection.diagnostics:
+            if diag.level == "error":
+                term.error(f"{plugin_name}: {diag.text}")
+        return 1
+    return 0
+
 
 def run(session: Session, *, diff: bool, json_output: bool = False) -> int:
     """List the files and their states, or diff the ones that differ; 1 when blocked."""
     if session.workspace is None:
-        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow add`")
+        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
 
     with term.json_mode(json_output):
         projection = refresh.project(session.workspace, session.plugins)
-        if json_output:
-            term.emit_json(
-                envelope(
-                    {
-                        "workspace": session.workspace.name,
-                        "blocked": projection.blocked,
-                        "files": [
-                            {
-                                "path": st.path.as_posix(),
-                                "owner": st.owner,
-                                "state": st.state,
-                                "reason": st.reason,
-                            }
-                            for st in projection.files
-                        ],
-                        "stale_lock": list(projection.stale_lock),
-                        "diagnostics": [
-                            {"plugin": p, "level": d.level, "text": d.text}
-                            for p, d in projection.diagnostics
-                        ],
-                    }
-                )
-            )
-            return 1 if projection.blocked else 0
+        return _emit_projection(
+            name=session.workspace.name,
+            projection=projection,
+            diff=diff,
+            json_output=json_output,
+        )
 
-        if diff:
-            _print_diffs(projection)
-        else:
-            _print_states(projection)
 
-        if projection.blocked:
-            for plugin_name, diag in projection.diagnostics:
-                if diag.level == "error":
-                    term.error(f"{plugin_name}: {diag.text}")
-            return 1
-        return 0
+def run_multi(
+    multi_root: Path,
+    plugins: Plugins,
+    *,
+    diff: bool,
+    json_output: bool = False,
+) -> int:
+    """Inspect multi-stack workspace-level generated files (e.g. `<ws>.code-workspace`)."""
+    loaded = stacks.load_multi_workspace(multi_root, plugins)
+    if loaded is None:
+        raise UsageError(f"no valid stacks found in {multi_root}")
+    multi, _sessions = loaded
+    with term.json_mode(json_output):
+        projection = stacks.project_multi_workspace_files(multi, plugins)
+        return _emit_projection(
+            name=multi.name,
+            projection=projection,
+            diff=diff,
+            json_output=json_output,
+            multi_stack=True,
+        )
 
 
 def _print_states(projection: Projection) -> None:

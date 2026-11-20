@@ -5,31 +5,44 @@ from __future__ import annotations
 import ast
 import re
 import shutil
+from collections.abc import Callable, Mapping, Sequence
 from configparser import ConfigParser
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, cast
 
 import tomli_w
 
-from ow.core import git
+from ow.core import bases, config, git, stacks
+from ow.core.fs import json_text
 from ow.core.paths import repos_dir
 from ow.core.plugins import (
     Diagnostic,
     GeneratedFile,
     KnownRepo,
     ResolvedRepo,
+    ResolvedTarget,
     RunCommand,
     Setting,
+    StackInfo,
     hookimpl,
 )
-from ow.specs.editors import DebugLaunch, EditorContribution, json_text
-from ow.specs.python_env import (
-    PythonEnvironment,
-    resolve_venv_path,
-    select_python_version,
+from ow.errors import UsageError
+from ow.plugins._github import bare_gh_info, parse_git_slug, parse_pr_identity
+from ow.plugins._odoo_repos import (
+    ODOO_ADDON_NAMES,
+    ODOO_ADDON_SLUGS,
+    ODOO_CORE,
+    ODOO_CORE_NAMES,
+    ODOO_CORE_SLUGS,
+    ODOO_NAMES,
+    ODOO_REPOS,
+    ODOO_SLUGS,
+    is_odoo_series,
 )
+from ow.specs.editors import DebugLaunch, EditorContribution
+from ow.specs.python_env import PythonEnvironment, WorkspaceVenv, workspace_venv
 
 if TYPE_CHECKING:
     from ow.core.workspace import Repo, Workspace
@@ -94,7 +107,7 @@ def _literal_int_pair(node: ast.expr) -> tuple[int, int] | None:
     return (values[0], values[1])
 
 
-def _read_python_bounds(core_path: Path) -> tuple[int, int] | None:
+def _read_python_bounds(core_path: Path) -> tuple[tuple[int, int], tuple[int, int]] | None:
     """Read MIN_PY_VERSION and MAX_PY_VERSION from release.py or odoo/__init__.py."""
     release_path = core_path / "odoo" / "release.py"
     init_path = core_path / "odoo" / "__init__.py"
@@ -158,15 +171,21 @@ def _read_odoo_series(core_path: Path) -> str | None:
     return None
 
 
-def _resolve_workspace_venv(ws: Workspace, core: Repo) -> Path:
-    """Compute the shared or local virtualenv path for an Odoo workspace."""
-    bounds = _read_python_bounds(core.path)
-    python_setting = ws.settings.get("mise.python")
-    mise_enabled = bool(ws.settings.get("mise.enabled", True))
-    shared = mise_enabled and bool(ws.settings.get("mise.shared_venv", True))
-    python_version, _ = select_python_version(bounds, python_setting)
-    series = _read_odoo_series(core.path)
-    return resolve_venv_path(ws, python_version, series, shared=shared)
+def _python_environment(core: Repo) -> PythonEnvironment:
+    """The Python environment the Odoo checkout `core` requires."""
+    return PythonEnvironment(
+        env_paths={"ODOO_RC": "odoorc"},
+        path=(core.name,),
+        python=_read_python_bounds(core.path),
+        venv_key=_read_odoo_series(core.path),
+        requirements=(f"{core.name}/requirements.txt", "requirements-dev.txt"),
+        aliases={"osh": "odoo-bin shell --no-http -c \"$ODOO_RC\""},
+    )
+
+
+def _workspace_venv(ws: Workspace, core: Repo) -> WorkspaceVenv:
+    """Virtualenv of an Odoo workspace."""
+    return workspace_venv(ws, _python_environment(core))
 
 
 def _read_demo_capability(core_path: Path) -> bool | None:
@@ -313,10 +332,11 @@ def _get_setting(
     default = _setting_default(key, ws)
 
     if key in _PORT_KEYS:
-        if isinstance(val, int) and not isinstance(val, bool):
-            if not 1 <= val <= 65535:
+        port = config.as_int(val)
+        if port is not None:
+            if not 1 <= port <= 65535:
                 return default, Diagnostic("warning", f"{key} must be 1-65535, using default")
-            return val, None
+            return port, None
         return default, None
 
     if key in _LIST_KEYS:
@@ -402,19 +422,19 @@ def ow_settings() -> list[Setting]:
             key="odoo.debug_args",
             type=list,
             default=_default_debug_args,
-            help="Debug arguments for Odoo",
+            help='Arguments of the editor "Run Instance With Debug" launch',
         ),
         Setting(
             key="odoo.debug_test_args",
             type=list,
             default=lambda ws: [f"--test-tags={ws.name}"],
-            help="Debug test arguments",
+            help='Arguments of the editor "Debug Tests" launch',
         ),
         Setting(
             key="odoo.default_repos",
             type=list,
             default=["community", "enterprise"],
-            help="Default repos added when creating a fresh workspace with `ow add`",
+            help="Default repos expanded by `@<base>` targets in `ow init` / `ow add` / `ow run --tmp`",
         ),
     ]
 
@@ -508,7 +528,7 @@ def ow_diagnostics(ws: Workspace) -> list[Diagnostic]:
 
 @hookimpl
 def ow_generated_files(
-    ws: Workspace, answers: callable
+    ws: Workspace, answers: Callable[[str], list]
 ) -> list[GeneratedFile | Diagnostic]:
     """Generate Odoo configuration files."""
     # `ow_diagnostics` already reported a broken core; contribute nothing.
@@ -572,9 +592,9 @@ def ow_generated_files(
         )
     )
 
-    venv_path = _resolve_workspace_venv(ws, core)
-    is_local_venv = venv_path == (ws.root / ".venv")
-    python_path_str = ".venv/bin/python" if is_local_venv else str(venv_path / "bin" / "python")
+    venv = _workspace_venv(ws, core)
+    is_local_venv = venv.is_local(ws)
+    python_path_str = ".venv/bin/python" if is_local_venv else str(venv.path / "bin" / "python")
 
     odools_content = tomli_w.dumps({
         "config": [
@@ -597,8 +617,8 @@ def ow_generated_files(
     )
 
     pyright_content = json_text({
-        "venvPath": "." if is_local_venv else str(venv_path.parent),
-        "venv": ".venv" if is_local_venv else venv_path.name,
+        "venvPath": "." if is_local_venv else str(venv.path.parent),
+        "venv": ".venv" if is_local_venv else venv.path.name,
     })
     files.append(
         GeneratedFile(
@@ -624,21 +644,7 @@ def python_environment(ws: Workspace) -> PythonEnvironment | None:
     if core_diagnostics or not core:
         return None
 
-    env = {"ODOO_RC": "{{config_root}}/odoorc"}
-    path = (f"{{{{config_root}}}}/{core.name}",)
-    postinstall = (
-        f"python -m ensurepip --default-pip && pip install -r \"{{{{config_root}}}}/{core.name}/requirements.txt\" -r \"{{{{config_root}}}}/requirements-dev.txt\"",
-    )
-    aliases = {"osh": "odoo-bin shell --no-http -c \"$ODOO_RC\""}
-
-    return PythonEnvironment(
-        env=env,
-        path=path,
-        python=_read_python_bounds(core.path),
-        venv_key=_read_odoo_series(core.path),
-        postinstall=postinstall,
-        aliases=aliases,
-    )
+    return _python_environment(core)
 
 
 @hookimpl
@@ -651,7 +657,7 @@ def editors_contribution(ws: Workspace) -> EditorContribution | None:
     settings = ws.settings
     debug_args, _ = _get_setting("odoo.debug_args", settings, ws)
     debug_test_args, _ = _get_setting("odoo.debug_test_args", settings, ws)
-    venv_path = _resolve_workspace_venv(ws, core)
+    venv = _workspace_venv(ws, core)
 
     core_path = core.path
     program = core_path / "odoo-bin"
@@ -691,67 +697,161 @@ def editors_contribution(ws: Workspace) -> EditorContribution | None:
         launches=launches,
         language_servers=language_servers,
         excludes=excludes,
-        python=venv_path / "bin" / "python",
+        python=venv.path / "bin" / "python",
     )
 
 
-_ODOO_ADDON_REPOS = frozenset({"enterprise", "design-themes", "iap-apps", "upgrade", "upgrade-util"})
-_ODOO_CORE_SLUGS = frozenset({"odoo/odoo"})
-_ODOO_ADDON_SLUGS = frozenset(f"odoo/{name}" for name in _ODOO_ADDON_REPOS)
-_ODOO_ALL_REPOS = _ODOO_ADDON_REPOS | {"community", "odoo", "voip"}
-_ODOO_ALL_SLUGS = _ODOO_CORE_SLUGS | _ODOO_ADDON_SLUGS | {"odoo/voip"}
-_ODOO_SERIES_PREFIX_RE = re.compile(r"^(?P<series>master|saas-\d+\.\d+|\d+\.\d+)(?:-|$)")
-_REPO_SLUG_RE = re.compile(
-    r"(?:[:/])(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
-)
-
-
-def _repo_slug(url: str | None) -> str | None:
-    if not url:
-        return None
-    match = _REPO_SLUG_RE.search(url.strip())
-    if not match:
-        return None
-    return f"{match.group('owner')}/{match.group('repo')}".lower()
+ODOO_SERIES_PREFIX_RE = re.compile(r"^(?P<series>master|saas-\d+\.\d+|\d+\.\d+)(?:-|$)")
 
 
 def _repo_slugs(repo: ResolvedRepo) -> set[str]:
     slugs: set[str] = set()
-    url_slug = _repo_slug(repo.url)
-    if url_slug is not None:
-        slugs.add(url_slug)
-    ow_pr = repo.metadata.get("ow_pr")
-    if isinstance(ow_pr, str) and "#" in ow_pr and "/" in ow_pr:
-        slugs.add(ow_pr.split("#", 1)[0].strip().lower())
+    parsed = parse_git_slug(repo.url)
+    if parsed is not None:
+        slugs.add(f"{parsed[0]}/{parsed[1]}")
+    if repo.pr is not None and (parsed_pr := parse_pr_identity(repo.pr)) is not None:
+        slugs.add(parsed_pr[0].lower())
+    info = bare_gh_info(repos_dir() / f"{repo.name}.git")
+    if info is not None and info.gh_slug:
+        slugs.add(info.gh_slug.lower())
     return slugs
-
-
-def _origin_has_series(repo_name: str, series: str) -> bool:
-    bare = repos_dir() / f"{repo_name}.git"
-    if not bare.is_dir():
-        return False
-    cached = git.run(["git", "-C", str(bare), "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{series}"])
-    if cached.returncode == 0:
-        return True
-    try:
-        return git.remote_has_branch(bare, "origin", series)
-    except git.GitFailed:
-        return False
 
 
 def _infer_odoo_base(repo: ResolvedRepo) -> str | None:
     """Infer `origin/<series>` from an Odoo branch name (e.g. `18.0-fix` -> `origin/18.0`)."""
     if repo.base is not None or not repo.branch:
         return None
-    if repo.name not in _ODOO_ALL_REPOS and not (_repo_slugs(repo) & _ODOO_ALL_SLUGS):
+    if repo.name not in ODOO_NAMES and not (_repo_slugs(repo) & ODOO_SLUGS):
         return None
-    match = _ODOO_SERIES_PREFIX_RE.match(repo.branch)
+    match = ODOO_SERIES_PREFIX_RE.match(repo.branch)
     if not match:
         return None
     series = match.group("series")
-    if _origin_has_series(repo.name, series):
+    bare = repos_dir() / f"{repo.name}.git"
+    if bare.is_dir() and git.remote_has_branch_or_cached(bare, "origin", series, prefer_cache=True):
         return f"origin/{series}"
     return None
+
+
+@hookimpl
+def ow_resolve_target(
+    target: str,
+    known_repos: Mapping[str, KnownRepo],
+    settings: Mapping[str, object],
+) -> ResolvedTarget | None:
+    """Resolve `@<base>` into `odoo.default_repos` detached on `<base>`."""
+    part = target.strip()
+    if not part.startswith("@"):
+        return None
+    raw_base = part[1:].strip()
+    if not raw_base:
+        raise UsageError(f"base ref cannot be empty in {part!r}")
+    default_repos = tuple(dict.fromkeys(cast(list[str], settings["odoo.default_repos"])))
+    if not default_repos:
+        raise UsageError(
+            f"cannot expand {part!r}: no default repos configured (set odoo.default_repos or specify <repo>@{raw_base})"
+        )
+    resolved_repos: list[ResolvedRepo] = []
+    for rname in default_repos:
+        known = known_repos.get(rname)
+        bare = repos_dir() / f"{rname}.git"
+        if not bare.is_dir() and known is None:
+            raise UsageError(
+                f"unknown default repo {rname!r}; register it with `ow repo add {rname} <url>`"
+            )
+        qualified_base = bases.parse_base_for(raw_base, rname)
+        resolved_repos.append(
+            ResolvedRepo(
+                name=rname,
+                url=known.url if known else None,
+                branch=None,
+                base=qualified_base,
+                explicit=True,
+            )
+        )
+    short_name = raw_base.split("/", 1)[-1]
+    return ResolvedTarget(
+        name=stacks.sanitize_slug(short_name, "workspace"),
+        repos=tuple(resolved_repos),
+        source=f"base:{raw_base}",
+    )
+
+
+@hookimpl
+def ow_is_base_branch(repo: str, branch: str) -> bool | None:
+    """Recognize Odoo release/series branches (`18.0`, `saas-18.3`, `master`, `main`)."""
+    if is_odoo_series(branch):
+        return True
+    return None
+
+
+_STACK_PORT_DEFAULTS = (("odoo.http_port", 8069), ("odoo.gevent_port", 8072))
+
+
+@hookimpl
+def ow_stack_values(
+    ws: Workspace | None,
+    ws_values: Mapping[str, object],
+    siblings: Sequence[Workspace],
+    pending: Sequence[Mapping[str, object]],
+    global_settings: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Pin `odoo.http_port` and `odoo.gevent_port` (non-colliding), and `odoo.db_name` on promotion.
+
+    A promoted workspace (`ws`) keeps its current database name and ports; a new stack gets the
+    next free ports not used by `siblings`, `pending` stacks or its own explicit values.
+    """
+    if ws_values.get("odoo.enabled") is False:
+        return None
+
+    pinned: dict[str, object] = {}
+    if ws is not None and "odoo.db_name" not in ws_values:
+        effective_db = ws.settings.get("odoo.db_name")
+        pinned["odoo.db_name"] = (
+            effective_db if isinstance(effective_db, str) and effective_db else ws.name
+        )
+
+    used_ports: set[int] = set()
+    for settings in (*(s.settings for s in siblings), *pending, ws_values):
+        for key, _fallback in _STACK_PORT_DEFAULTS:
+            if (port := config.as_int(settings.get(key))) is not None:
+                used_ports.add(port)
+
+    for key, fallback in _STACK_PORT_DEFAULTS:
+        if key in ws_values:
+            continue
+        current = config.as_int(ws.settings.get(key)) if ws is not None else None
+        if current is not None:
+            port = current
+        else:
+            base_port = config.as_int(global_settings.get(key))
+            port = stacks.next_free_port(
+                used_ports, base_port=base_port if base_port is not None else fallback
+            )
+        pinned[key] = port
+        used_ports.add(port)
+    return pinned or None
+
+
+@hookimpl
+def ow_stack_name(ws: Workspace) -> str | None:
+    """Suggest `odoo` when promoting a workspace containing an Odoo core checkout."""
+    if any(_is_odoo_core(repo.path) for repo in ws.repos):
+        return "odoo"
+    return None
+
+
+@hookimpl
+def ow_stack_info(ws: Workspace) -> StackInfo | None:
+    """Expose the HTTP and gevent ports."""
+    ports = {
+        label: port
+        for label, key in (("http", "odoo.http_port"), ("gevent", "odoo.gevent_port"))
+        if (port := config.as_int(ws.settings.get(key))) is not None
+    }
+    if not ports:
+        return None
+    return StackInfo(ports=ports, note=f"port {ports['http']}" if "http" in ports else None)
 
 
 @hookimpl
@@ -775,18 +875,18 @@ def ow_expand_workspace_repos(
     slugs: set[str] = set()
     for r in updated:
         slugs.update(_repo_slugs(r))
-    if "community" in names or "odoo" in names or (slugs & _ODOO_CORE_SLUGS):
+    if names & ODOO_CORE_NAMES or slugs & ODOO_CORE_SLUGS:
         return tuple(updated) if changed else None
-    if not (names & _ODOO_ADDON_REPOS) and not (slugs & _ODOO_ADDON_SLUGS):
+    if not (names & ODOO_ADDON_NAMES) and not (slugs & ODOO_ADDON_SLUGS):
         return tuple(updated) if changed else None
 
     base = next((r.base for r in updated if r.base), None)
-    core_known = known_repos.get("community")
-    core_url = core_known.url if core_known is not None else "git@github.com:odoo/odoo.git"
-    core_name = "community"
-    if not (repos_dir() / "community.git").is_dir() and (repos_dir() / "odoo.git").is_dir():
-        core_name = "odoo"
-    core_repo = ResolvedRepo(name=core_name, url=core_url, branch=None, base=base)
+    core_known = known_repos.get(ODOO_CORE.name)
+    core_url = core_known.url if core_known is not None else ODOO_CORE.clone_url
+    core_name = ODOO_CORE.name
+    if not (repos_dir() / f"{ODOO_CORE.name}.git").is_dir() and (repos_dir() / f"{ODOO_CORE.repo}.git").is_dir():
+        core_name = ODOO_CORE.repo
+    core_repo = ResolvedRepo(name=core_name, url=core_url, branch=None, base=base, explicit=False)
     return (core_repo, *updated)
 
 
@@ -797,8 +897,7 @@ def ow_runner(ws: Workspace, args: tuple[str, ...]) -> RunCommand | None:
     if core_diagnostics or core is None:
         return None
 
-    venv_path = _resolve_workspace_venv(ws, core)
-    venv_python = venv_path / "bin" / "python"
+    venv_python = _workspace_venv(ws, core).path / "bin" / "python"
     odoorc = ws.root / "odoorc"
     odoo_bin = core.path / "odoo-bin"
     env = {"ODOO_RC": str(odoorc)}
@@ -816,12 +915,4 @@ def ow_runner(ws: Workspace, args: tuple[str, ...]) -> RunCommand | None:
 @hookimpl
 def ow_known_repos() -> list[KnownRepo]:
     """Provide known Odoo repositories."""
-    return [
-        KnownRepo(name="community", url="git@github.com:odoo/odoo.git"),
-        KnownRepo(name="enterprise", url="git@github.com:odoo/enterprise.git"),
-        KnownRepo(name="design-themes", url="git@github.com:odoo/design-themes.git"),
-        KnownRepo(name="iap-apps", url="git@github.com:odoo/iap-apps.git"),
-        KnownRepo(name="upgrade", url="git@github.com:odoo/upgrade.git"),
-        KnownRepo(name="upgrade-util", url="git@github.com:odoo/upgrade-util.git"),
-        KnownRepo(name="voip", url="git@github.com:odoo/voip.git"),
-    ]
+    return [KnownRepo(name=repo.name, url=repo.clone_url) for repo in ODOO_REPOS]

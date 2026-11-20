@@ -14,11 +14,11 @@ REPO = "community"
 BASE = "18.0"
 
 COMMANDS = (
-    "add", "run", "status",
+    "init", "add", "run", "status",
     "refresh", "files", "ls", "cd", "shell-init", "rm", "prune",
-    "repo", "config",
+    "repo", "config", "retarget",
 )
-REMOVED_COMMANDS = ("init", "fetch", "switch", "pull", "rebase", "reset", "retarget")
+REMOVED_COMMANDS = ("fetch", "switch", "pull", "rebase", "reset")
 
 
 def test_bare_ow_prints_help_and_exits_zero(lab):
@@ -126,6 +126,27 @@ def test_repo_names_complete_for_repo_add(lab):
     runner = CliRunner()
     app = build_app(load_plugins())
     env = {"_OW_COMPLETE": "complete_bash", "COMP_WORDS": "ow repo add ", "COMP_CWORD": "3"}
+
+    result = runner.invoke(app, [], env=env, prog_name="ow")
+
+    assert result.exit_code == 0
+    assert REPO in result.stdout.split()
+
+
+def test_repo_names_complete_for_retarget_only(lab):
+    from typer.testing import CliRunner
+
+    from ow.cli import build_app
+    from ow.core.plugins import load_plugins
+
+    workspace(lab)
+    runner = CliRunner()
+    app = build_app(load_plugins())
+    env = {
+        "_OW_COMPLETE": "complete_bash",
+        "COMP_WORDS": "ow retarget --only ",
+        "COMP_CWORD": "3",
+    }
 
     result = runner.invoke(app, [], env=env, prog_name="ow")
 

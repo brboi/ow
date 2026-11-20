@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import stat
 import tempfile
@@ -110,3 +111,8 @@ def unsafe_relative(
     if rel in reserved:
         return "may not target the workspace config or the rendered lock"
     return None
+
+
+def json_text(data: object) -> str:
+    """Serialize to JSON with two-space indentation and a trailing newline."""
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"

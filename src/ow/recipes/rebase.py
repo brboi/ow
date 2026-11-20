@@ -36,6 +36,10 @@ class RebaseInputs:
     has_merge_in_range: bool = False
     # HEAD already contains the `--base` replacement, so only the config write is left.
     new_base_is_ancestor: bool = False
+    # Detached HEAD with no commits above `facts.base` (e.g. Runbot-pinned or clean detached).
+    detached_clean_base: bool = False
+    # Detached HEAD already sits on `new_base`'s exact commit.
+    head_equals_new_base: bool = False
 
 
 def gather_rebase(facts: RepoFacts, *, new_base: str | None = None) -> RebaseInputs:
@@ -97,6 +101,19 @@ def gather_rebase(facts: RepoFacts, *, new_base: str | None = None) -> RebaseInp
         )
     )
 
+    detached_clean_base = False
+    head_equals_new_base = False
+    if facts.branch is None and new_base is not None:
+        if facts.base is not None:
+            detached_clean_base = _is_ancestor(path, "HEAD", facts.base)
+        elif facts.head is not None:
+            from ow.recipes.removal import orphan_commits
+
+            detached_clean_base = orphan_commits(facts.bare, facts.head) == 0
+        head_sha = git.read(["git", "-C", str(path), "rev-parse", "--verify", "HEAD"], check=False)
+        target_sha = git.read(["git", "-C", str(path), "rev-parse", "--verify", new_base], check=False)
+        head_equals_new_base = bool(head_sha and target_sha and head_sha == target_sha)
+
     return RebaseInputs(
         upstream_in_branch_past=upstream_in_branch_past,
         last_taken=last_taken,
@@ -106,6 +123,8 @@ def gather_rebase(facts: RepoFacts, *, new_base: str | None = None) -> RebaseInp
         base_in_upstream=base_in_upstream,
         has_merge_in_range=has_merge_in_range,
         new_base_is_ancestor=new_base_is_ancestor,
+        detached_clean_base=detached_clean_base,
+        head_equals_new_base=head_equals_new_base,
     )
 
 
@@ -168,7 +187,10 @@ def plan_rebase(
 
     changing_base = new_base is not None and new_base != facts.base
     if changing_base:
-        if not inputs.new_base_is_ancestor:
+        if facts.branch is None and inputs.detached_clean_base:
+            if not inputs.head_equals_new_base:
+                steps.append(GitStep(("git", "-C", path, "switch", "--detach", new_base)))
+        elif not inputs.new_base_is_ancestor:
             if facts.base is None:
                 # Nothing recorded to bound the replay: the native rebase picks
                 # the merge-base with the new base.
@@ -238,6 +260,8 @@ def _destination(step: Step) -> str | None:
     if argv[3] == "rebase":
         if "--onto" in argv:
             return argv[argv.index("--onto") + 1]
+        return argv[-1]
+    if argv[3] == "switch":
         return argv[-1]
     return None
 

@@ -152,12 +152,12 @@ def open_session(
 
     # Callable defaults see the real repos but no settings, so resolution never
     # depends on the values it is computing.
-    defaults_workspace = build_workspace(root, locations, {}, task=meta.task)
+    defaults_workspace = build_workspace(root, locations, {}, is_stack=meta.stack)
     values, origins = resolve_settings(
         declared, global_layer, workspace_layer, ws_for_defaults=defaults_workspace
     )
 
-    workspace = build_workspace(root, locations, values, task=meta.task)
+    workspace = build_workspace(root, locations, values, is_stack=meta.stack)
 
     warnings = _collect_warnings(global_layer, workspace_layer, declared, rejected_bases)
 

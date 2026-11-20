@@ -27,11 +27,11 @@ class Layer:
 @dataclass(frozen=True)
 class WorkspaceMeta:
     """Reserved `[workspace]` metadata stored in `.ow/config.toml`."""
-    task: str | None = None
+    stack: bool = False
 
 
 class _KeepSentinel:
-    """Sentinel telling update_workspace/write_workspace to preserve existing task metadata."""
+    """Sentinel telling update_workspace/write_workspace to preserve existing workspace metadata."""
 
 
 _KEEP = _KeepSentinel()
@@ -65,17 +65,21 @@ def read_workspace_config(
 
 
 def _extract_meta(data: Mapping[str, Any]) -> tuple[WorkspaceMeta, dict[str, Any]]:
-    """Extract the reserved `[workspace]` table (`task`) if present."""
+    """Extract the reserved `[workspace]` table (`stack`) if present."""
     ws_table = data.get("workspace")
     if not isinstance(ws_table, dict):
         return WorkspaceMeta(), dict(data)
     rest = {k: v for k, v in data.items() if k != "workspace"}
-    task_val = ws_table.get("task")
-    task = task_val.strip() if isinstance(task_val, str) and task_val.strip() else None
-    extra_keys = {k: v for k, v in ws_table.items() if k != "task"}
+    stack_val = ws_table.get("stack")
+    stack = stack_val is True
+    extra_keys = {
+        k: v
+        for k, v in ws_table.items()
+        if not (k == "stack" and isinstance(v, bool))
+    }
     if extra_keys:
         rest["workspace"] = extra_keys
-    return WorkspaceMeta(task=task), rest
+    return WorkspaceMeta(stack=stack), rest
 
 
 def _layer_and_repos(
@@ -129,12 +133,17 @@ def _parse_layer(data: dict[str, Any], declared: Mapping[str, Any]) -> Layer:
     return Layer(values=values, unknown=unknown, wrong_type=tuple(wrong_type))
 
 
+def as_int(value: object) -> int | None:
+    """Return `value` when it is an `int` (excluding `bool`), else None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _check_type(value: Any, expected_type: type) -> bool:
     """Whether `value` matches `expected_type`; an int is not a bool, a list means str items."""
     if expected_type is str:
         return isinstance(value, str)
     if expected_type is int:
-        return isinstance(value, int) and not isinstance(value, bool)
+        return as_int(value) is not None
     if expected_type is bool:
         return isinstance(value, bool)
     if expected_type is list:
@@ -235,7 +244,7 @@ def update_workspace(
     *,
     declared: Mapping[str, Any],
     remotes_of: Callable[[str], Collection[str]] = lambda n: ("origin",),
-    task: str | None | _KeepSentinel = _KEEP,
+    stack: bool | _KeepSentinel = _KEEP,
 ) -> Mapping[str, object]:
     """Rewrite the workspace config after applying `mutate` to its known values, under an
     exclusive lock; `repos` is the `[repos]` table, and an empty table is left out."""
@@ -245,12 +254,10 @@ def update_workspace(
         values = dict(mutate(dict(layer.values)))
         extra = {f"repos.{name}": value for name, value in rejected.items()}
         dropped = _dropped_keys(values, layer, raw, extra)
-        effective_task = existing_meta.task if isinstance(task, _KeepSentinel) else task
-        if isinstance(effective_task, str):
-            effective_task = effective_task.strip() or None
+        effective_stack = existing_meta.stack if isinstance(stack, _KeepSentinel) else bool(stack)
         tables: dict[str, object] = {}
-        if effective_task:
-            tables["workspace"] = {"task": effective_task}
+        if effective_stack:
+            tables["workspace"] = {"stack": True}
         if repos:
             tables["repos"] = dict(repos)
         tables.update(_values_by_table(values, declared))
@@ -267,7 +274,7 @@ def write_workspace(
     *,
     declared: Mapping[str, Any],
     remotes_of: Callable[[str], Collection[str]] = lambda n: ("origin",),
-    task: str | None | _KeepSentinel = _KEEP,
+    stack: bool | _KeepSentinel = _KEEP,
 ) -> Mapping[str, object]:
     """Rewrite the workspace config file with exactly `values`; returns dropped keys."""
     return update_workspace(
@@ -276,7 +283,7 @@ def write_workspace(
         lambda _current: values,
         declared=declared,
         remotes_of=remotes_of,
-        task=task,
+        stack=stack,
     )
 
 

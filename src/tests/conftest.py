@@ -92,6 +92,15 @@ def hermetic(tmp_path: Path, monkeypatch: MonkeyPatch) -> Iterator[None]:
 
     monkeypatch.chdir(home)
 
+    # Keep Runbot completely offline/hermetic unless a test calls `lab.fake_runbot(...)`.
+    import urllib.error
+    from ow.plugins import runbot as runbot_plugin
+
+    def _blocked_urlopen(req, timeout=8):
+        raise urllib.error.URLError("network disabled in hermetic tests")
+
+    monkeypatch.setattr(runbot_plugin, "_urlopen", _blocked_urlopen)
+
     yield
 
 
@@ -229,18 +238,38 @@ def init_workspace(
     base: str = "18.0",
     branch: str | None = None,
 ) -> Path:
-    """`ow add` a workspace of the already-registered `names`; returns its root.
+    """`ow init` a workspace of the already-registered `names`; returns its root.
 
     `root` defaults to `~/ws/<name>`.
     """
     root = lab.ws(name) if root is None else root
-    root.parent.mkdir(parents=True, exist_ok=True)
-    args = ["add", root.name, "--base", base]
-    for repo in names:
-        args += ["-r", repo]
+    root.mkdir(parents=True, exist_ok=True)
+    addon_repos = {"enterprise", "design-themes", "iap-apps", "upgrade", "upgrade-util"}
+    needs_no_expand = (
+        bool(names)
+        and any(r in addon_repos for r in names)
+        and "community" not in names
+        and not (repos_dir() / "community.git").is_dir()
+    )
+    if needs_no_expand:
+        res = lab.ow("init", cwd=root)
+        assert res.exit_code == 0, res.stderr + res.stdout
+        for repo in names:
+            add_res = lab.ow("repo", "add", repo, "--base", base, cwd=root)
+            assert add_res.exit_code == 0, add_res.stderr + add_res.stdout
+            if branch is not None:
+                lab.git(root / repo, "switch", "--no-track", "-c", branch, f"origin/{base}")
+                lab.git(root / repo, "config", f"branch.{branch}.ow-base", f"origin/{base}")
+        return root
+
+    if names:
+        spec = ",".join(f"{repo}@{base}" for repo in names)
+        args = ["init", spec]
+    else:
+        args = ["init", f"@{base}"]
     if branch is not None:
         args += ["--branch", branch]
-    result = lab.ow(*args, cwd=root.parent)
+    result = lab.ow(*args, cwd=root)
     assert result.exit_code == 0, result.stderr + result.stdout
     return root
 

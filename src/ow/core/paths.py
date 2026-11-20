@@ -65,12 +65,3 @@ def cache_dir() -> Path:
     """
     base = _base("XDG_CACHE_HOME", str(Path.home() / ".cache"))
     return Path(base) / "ow"
-
-
-def task_locks_dir() -> Path:
-    """Return the directory holding ownership locks for task-level generated files.
-
-    $XDG_STATE_HOME/ow/tasks, or ~/.local/state/ow/tasks if unset/empty.
-    """
-    base = _base("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
-    return Path(base) / "ow" / "tasks"

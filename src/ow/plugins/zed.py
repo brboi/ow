@@ -2,52 +2,40 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
+from ow.core.fs import json_text
 from ow.core.plugins import GeneratedFile, hookimpl
-from ow.specs.editors import EditorsSpec, json_text, merge as merge_editors
+from ow.specs.editors import BASE_EXCLUDES, debugpy_fields, default_python, merge as merge_editors
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
-HOOKSPECS = (EditorsSpec,)
-
-# Zed baseline excludes: defaults + venv and node_modules
-_ZED_FILE_SCAN_EXCLUSIONS: tuple[str, ...] = (
-    "**/.git",
-    "**/.svn",
-    "**/.hg",
-    "**/.jj",
-    "**/CVS",
-    "**/.DS_Store",
-    "**/Thumbs.db",
-    "**/.classpath",
-    "**/.settings",
-    "**/.venv",
-    "**/node_modules",
-)
+# Baseline file scan exclusions
+_ZED_FILE_SCAN_EXCLUSIONS: tuple[str, ...] = (*BASE_EXCLUDES, "**/node_modules")
 
 
 @hookimpl
-def ow_generated_files(ws: Workspace, answers) -> list[GeneratedFile]:
+def ow_generated_files(ws: Workspace, answers: Callable[[str], list]) -> list[GeneratedFile]:
     """Generate Zed settings and debug files from editor contributions."""
     contributions = answers("editors_contribution")
     merged = merge_editors(contributions)
-    
+
     files = []
-    
+
     # Generate settings.json only if there are language servers or excludes
     if merged.language_servers or merged.excludes:
         settings = {}
-        
+
         # Add language servers under lsp.<server_id>.settings
         if merged.language_servers:
             lsp = {}
             for server_id, server_settings in merged.language_servers.items():
                 lsp[server_id] = {"settings": server_settings}
             settings["lsp"] = lsp
-        
+
         # Add file_scan_exclusions with baseline + contributions, deduplicated
         excludes = list(_ZED_FILE_SCAN_EXCLUSIONS)
         seen = set(excludes)
@@ -55,19 +43,19 @@ def ow_generated_files(ws: Workspace, answers) -> list[GeneratedFile]:
             if exclude not in seen:
                 excludes.append(exclude)
                 seen.add(exclude)
-        
+
         settings["file_scan_exclusions"] = excludes
-        
+
         files.append(
             GeneratedFile(
                 path=PurePosixPath(".zed/settings.json"),
                 data=json_text(settings).encode("utf-8"),
             )
         )
-    
+
     # Generate debug.json only if there are launches
     if merged.launches:
-        interpreter = str(merged.python or (ws.root / ".venv/bin/python"))
+        interpreter = str(merged.python or default_python(ws))
         configurations = []
         for launch in merged.launches:
             config = {
@@ -75,21 +63,16 @@ def ow_generated_files(ws: Workspace, answers) -> list[GeneratedFile]:
                 "label": launch.name,
                 "request": "launch",
                 "console": "integratedTerminal",
-                "program": str(launch.program),
-                "args": list(launch.args),
-                "cwd": str(launch.cwd),
-                "justMyCode": False,
-                "pythonArgs": ["-Xfrozen_modules=off"],
-                "env": dict(launch.env),
+                **debugpy_fields(launch),
                 "python": interpreter,
             }
             configurations.append(config)
-        
+
         files.append(
             GeneratedFile(
                 path=PurePosixPath(".zed/debug.json"),
                 data=json_text(configurations).encode("utf-8"),
             )
         )
-    
+
     return files

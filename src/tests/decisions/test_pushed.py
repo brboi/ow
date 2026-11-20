@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ow.errors import Refused
-from ow.recipes.removal import branch_is_pushed, branch_removal
+from ow.recipes.removal import branch_is_pushed, branch_removal, pr_ref_of
 from tests.conftest import git, git_ok
 
 
@@ -116,3 +116,21 @@ def test_branch_removal_raises_on_git_delete_failure_and_run_batch_reports_it(tm
     )
     assert outcome.failed == ("bare",)
     assert outcome.exit_code == 1
+
+
+def test_branch_removal_deletes_the_pr_ref_recorded_by_its_identity(tmp_path):
+    bare = _bare(tmp_path)
+    git(bare, "branch", "pr-branch", "origin/master")
+    git(bare, "update-ref", "refs/ow/pr/42", "origin/master")
+    git(bare, "config", "branch.pr-branch.ow-pr", "odoo/enterprise#42")
+
+    steps, _ = branch_removal(bare, "pr-branch")
+    steps[0].run()
+
+    assert not git_ok(bare, "rev-parse", "--verify", "--quiet", "refs/ow/pr/42")
+
+
+def test_pr_ref_of_reads_the_number_of_a_recorded_identity():
+    assert pr_ref_of("odoo/enterprise#42") == "refs/ow/pr/42"
+    assert pr_ref_of("odoo/enterprise") is None
+    assert pr_ref_of("odoo/enterprise#abc") is None
