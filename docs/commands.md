@@ -1,6 +1,6 @@
 # Commands
 
-Every ow command, its flags, its `--json` contract, and its exit codes.
+Every ow command, its specs, flags, `--json` contract, and exit codes.
 
 ## Exit codes
 
@@ -11,47 +11,91 @@ Every ow command, its flags, its `--json` contract, and its exit codes.
 
 ## Shared options
 
-- **`-w, --workspace WS`** — workspace to act on, by name or path (default: current directory's workspace).
-- **`-t, --task TASK`** — logical task group linking flat workspaces (`add`, `status`, `ls`, `rm`).
-- **`--only REPO`** — repeatable; limits `status` and opt-in `retarget` to named repos.
-- **`-n, --dry-run`** — print the plan without running it (`repo rm`, `rm`, `prune`, `retarget`).
-- **`-y, --yes`** — skip confirmation prompts (`repo rm`, `rm`, `prune`, `retarget`).
-- **`--json`** — emit canonical `schema_version: 1` JSON on `stdout` and route all progress/plans to `stderr` (`add`, `status`, `ls`, `rm`, `prune`, `files`, `config`, `retarget`). Implies non-interactive mode.
+- **`-w, --workspace WS`** — workspace or stack to act on, by name or path (default: current directory). Inside a multi-stack workspace root, a bare stack name resolves to `./<stack>` first; from anywhere, use `<workspace>/<stack>` (e.g. `review/iap`).
+- **`--only REPO`** — repeatable; limits `status` (single workspace/stack) and `retarget` to named repos.
+- **`-n, --dry-run`** — print the plan without running it (`init`, `add`, `repo rm`, `rm`, `prune`, `retarget`).
+- **`-y, --yes`** — skip confirmation prompts (`init`/`add` promotion, `repo rm`, `rm`, `prune`, `retarget`).
+- **`--json`** — emit canonical `schema_version: 1` JSON on `stdout` and route all progress/plans to `stderr` (`init`, `add`, `status`, `ls`, `rm`, `prune`, `files`, `config`, `retarget`). Implies non-interactive mode.
 - **`--offline`** — skip external network lookups (`status`, `prune`).
 
 ---
 
-## Workspace creation & execution
+## Specs
 
-### `ow add TARGET… [--name NAME] [-t TASK] [--base REF] [--branch BRANCH] [-r REPO…] [--json]`
+`ow init`, `ow add` (`SPEC`) and `ow run --tmp` (`TARGET`) share one grammar:
 
-Create one or more workspaces in the current directory.
+```
+[<name>=]<item>[,<item>...]
+```
 
-- **PR targets** (via built-in `github` plugin): `enterprise#12345`, `odoo/iap-apps#42`, `odoo/odoo/pull/1234`, or a GitHub PR URL (`https://github.com/odoo/iap-apps/pull/1234`). Repo names resolve against registered bare repos (`ow repo ls`) before falling back to plugin known repos and `github.default_org`. Creates `<num>-<branch>/` by default, fetches `refs/pull/<num>/head`, discovers open sister PRs matching the same branch across known repos in the same org, and expands Odoo addon repos with `community` on the base branch.
-- **Branch targets**: `<repo>@<branch>` (or `<repo>@<remote>/<branch>`) searches configured remotes of `<repo>` in parallel (falling back to local branches), checks out `<branch>` tracking the matching remote, and infers the Odoo series base when applicable.
-- **Composite targets**: `iap-apps#42+enterprise` or `enterprise@18.0-my-fix+iap@18.0-iap-fix` combines multiple specs into a single workspace.
-- **Multi-workspace tasks (Issue #84)**: `ow add -t voip-task iap-apps#42+enterprise enterprise#15402 voip#89` creates flat sibling workspaces, auto-allocates non-colliding `odoo.http_port` and `odoo.gevent_port` values, and writes `<common-parent>/voip-task.code-workspace`.
-- **Fresh workspaces**: `ow add my-fix --base 18.0 [--branch 18.0-my-fix]` creates a workspace using `-r/--repo` (or `odoo.default_repos`, defaulting to `["community", "enterprise"]`).
-- **Idempotency**: Re-running `ow add` on an existing (or interrupted) ow workspace keeps healthy worktrees intact, cleans up incomplete/broken worktrees, adds any missing repos, and refreshes generated files. Refuses if the target directory already exists and is not an ow workspace.
+Items within a stack are joined with a comma `,`. Each `<item>` takes one of five forms:
 
-### `ow run [TARGET] [-w WS] [--tmp] [-- ARGS…]`
+1. GitHub PR (`github` plugin): `enterprise#12345`, `odoo/iap-apps#42`, `enterprise/pull/12345`, or a PR URL.
+   - Fetches `refs/pull/<num>/head`.
+   - Discovers open sister PRs on the same branch across known repos in the same org.
+   - Expands Odoo addon repos with `community`, detached on the base series.
+   - Pins companion detached repos to Runbot's exact `base_match` SHA when available, and prints the pinned SHA, or a fallback note if Runbot is unreachable.
+   - Pinned repos can later be moved onto a series tip with `ow retarget`.
+2. Runbot bundle or batch URL (`runbot` plugin): `https://runbot.odoo.com/runbot/bundle/<id_or_name>` or `.../batch/<id>`. Checks out exact batch commits (detached), filtered to `(registered local bare repos ∪ odoo.default_repos)` so unregistered repos are never cloned implicitly.
+3. `<repo>@<ref>` (or `<repo>@<remote>/<ref>`): resolves `<ref>` across configured remotes (preferring `origin` on tie, falling back to local branches). Upstream base/series refs (`master`, `main`, `18.0`, `saas-*`, `origin/HEAD`) check out detached to avoid cross-worktree branch collisions; feature branches check out as local tracking branches and infer their Odoo series base when applicable.
+4. `@<base>`: expands `odoo.default_repos` (default `["community", "enterprise"]`) detached on `<base>`.
+5. `<repo>`: a registered or known repo (e.g. `voip`, `upgrade`) detached on the stack's shared base if `origin` has it, otherwise `origin/HEAD`.
 
-Run a workspace locally via its plugin runner (`odoo` launches `odoo-bin -c odoorc`, preferring the resolved virtualenv `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`, falling back to `mise exec` then `python3`).
+When `<name>=` is omitted in a multi-stack context, `ow` derives the stack name from the spec (PR branch name, repo name, or base name) and deduplicates collisions (`-2`, `-3`).
 
-- `TARGET` and `-w WS` are mutually exclusive; `--tmp` requires `TARGET`.
-- Without `TARGET`: runs the current workspace (or `-w WS`). Everything after `--` (flags or subcommands like `ow run -- shell`) is forwarded verbatim to the runner.
-- With `TARGET` (e.g. `ow run enterprise#12345 -- -i sale`): reuses an existing workspace of that name or creates it in `cwd`, then runs it.
-- With `--tmp` / `--ephemeral`: creates a detached temporary workspace outside `cwd`, runs it, and removes its worktrees and directory on exit.
+---
+
+## Workspace initialization, evolution & execution
+
+### `ow init [SPEC…] [--branch BRANCH] [--as NAME] [-n] [-y] [--json]`
+
+Initialize, compose, adopt, or repair the current directory (`.`) in place.
+
+- 0 specs in an empty directory: creates an empty `.ow/config.toml` and registers `.` in the workspace index.
+- `--branch BRANCH`: creates or checks out `BRANCH` in every added repo.
+- 1 unnamed spec (e.g. `ow init enterprise#12345`, `ow init @18.0 --branch 18.0-fix`): initializes a mono-stack workspace directly in `.`.
+- 1+ named specs or 2+ specs (e.g. `ow init odoo=community#56789,enterprise#12345 iap=iap#4321 voip=voip`): initializes a multi-stack workspace where each stack is a direct subdirectory marked `[workspace] stack = true`, with auto-allocated non-colliding `odoo.http_port` / `odoo.gevent_port` and a root `<workspace>.code-workspace`.
+- Re-running `ow init` inside an existing or moved workspace repairs worktrees (`git worktree repair`), updates the workspace index, refreshes generated files (and `<workspace>.code-workspace`), and applies any additional `SPEC` arguments.
+- Refuses to initialize a parent directory that already contains standalone (non-stack) ow workspaces.
+
+### `ow add SPEC… [--branch BRANCH] [--as NAME] [-n] [-y] [--json]`
+
+Evolve an already-initialized workspace (refuses outside a workspace with a hint to use `ow init` or `ow run --tmp`).
+
+- Inside a mono-stack workspace (or a stack):
+  - Unnamed specs add missing repos or attach a PR / feature branch onto an existing clean/detached worktree (refusing dirty worktrees, orphan commits, or unpushed work).
+  - Named specs (`<name>=<spec>`) inside a mono-stack workspace promote it to multi-stack after confirmation (pass `-y` to skip prompt, `-n` to preview): moves existing worktrees and `.ow/` into `<existing-name>/` via staging, repairs git worktrees, preserves `odoo.db_name` and ports, creates the new stack(s), and writes `<workspace>.code-workspace`. Use `--as NAME` to pick the existing stack's name explicitly.
+- At a multi-stack workspace root:
+  - `<existing-stack>=<spec>` adds repos or attaches PRs into that existing stack.
+  - `<new-stack>=<spec>` or an unnamed `<spec>` creates a new stack with coordinated ports and updates `<workspace>.code-workspace`.
+
+### `ow run [TARGET…] [-w WS] [--tmp] [--fail-fast] [-- ARGS…]`
+
+Run one or more stacks locally via their plugin runner (`odoo` launches `odoo-bin -c odoorc`, preferring `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`, falling back to `mise exec` then `python3`).
+
+- Single stack / mono-stack workspace: inherits the terminal TTY directly so interactive tools (`pdb`, `ow run -- shell`) work natively.
+- Multi-stack root (`ow run` with no target, or multiple targets): runs all runnable stacks in parallel with `[stack]`-prefixed stdout/stderr (skipping non-runnable stacks such as `voip` with a note) and terminates process groups cleanly on `Ctrl+C`. Prints a `# summary:` line if any stack exits non-zero; pass `--fail-fast` to stop remaining stacks as soon as one exits non-zero.
+- Per-stack arguments: pass `TARGET:"ARGS"` (parsed with `shlex.split`, splitting on the first `:` outside `://` and `git@host:`), e.g.:
+  ```sh
+  ow run odoo:"-i voip --dev=all" iap:"--log-level=debug"
+  ```
+  Shared `-- ARGS…` are appended to every launched stack.
+- No silent creation: without `--tmp`, `TARGET` resolves only existing workspaces/stacks.
+- Ephemeral runs (`--tmp` / `--ephemeral`): creates temporary mono-stack or multi-stack checkouts in a temp directory with non-colliding ports, runs them, and cleans up worktrees and temp directories on exit:
+  ```sh
+  ow run --tmp enterprise#12345 -- -i sale
+  ow run --tmp odoo=enterprise#12345:"-i voip" iap=iap#4321
+  ```
 
 ---
 
 ## Repos
 
 ### `ow repo add NAME [URL] [--base REF] [-w WS]`
-Register a bare repo under `$XDG_DATA_HOME/ow/repos/<name>.git` and, inside a workspace, add its worktree. Known Odoo repos (`community`, `enterprise`, `design-themes`, `iap-apps`, `upgrade`, `upgrade-util`, `voip`) need no URL.
+Register a bare repo under `$XDG_DATA_HOME/ow/repos/<name>.git` and, inside a workspace, add its worktree. Repos the `odoo` plugin knows (`community`, `enterprise`, …) need no URL.
 
 ### `ow repo ls [-w WS]`
-List registered bare repos and their `origin` URLs.
+List registered bare repos and their `origin` URLs, marking the ones this workspace uses.
 
 ### `ow repo rm NAME [-n] [-y] [-w WS]`
 Remove a repo's worktree from the workspace (refuses dirty worktrees or orphan commits; keeps unpushed local branches).
@@ -60,19 +104,18 @@ Remove a repo's worktree from the workspace (refuses dirty worktrees or orphan c
 
 ## Status, files & configuration
 
-### `ow status [TARGET] [-w WS] [-t TASK] [--only REPO…] [--fetch] [--offline] [--json]`
-Show each repo's branch, base, upstream, ahead/behind counts, dirty state, and external plugin status (GitHub PR state cached for `github.cache_ttl` seconds by default; pass `--offline` to skip network). `TARGET`, `-w`, and `-t` are mutually exclusive; `--only` applies to single-workspace status only, and `--fetch` cannot be combined with `TARGET`.
+### `ow status [TARGET] [-w WS] [--only REPO…] [--fetch] [--offline] [--json]`
+Show each repo's branch, base, upstream, ahead/behind counts, dirty state, and external plugin status (GitHub PR state + Runbot build state, TTL-cached; pass `--offline` to skip network).
 
+- At a multi-stack root (or with `-w <multi-ws>`), inspects every stack and includes sibling stack paths, ports, and `.code-workspace` in `--json`.
 - `--fetch`: runs parallel surgical fetches of tracked refs before printing status.
-- `-t TASK`: inspects every workspace in `TASK`.
-- `--json`: includes sibling task workspaces, paths, ports, `.code-workspace` path, and PR metadata for external UIs and coding harnesses.
-- `TARGET`: queries external status plugins directly (e.g. `ow status enterprise#12345`, or a Runbot bundle with a future `runbot` plugin).
+- `TARGET`: queries external status plugins directly (e.g. `ow status enterprise#12345` or `ow status https://runbot.odoo.com/runbot/bundle/12345`). Mutually exclusive with `-w`, `--only`, and `--fetch`.
 
 ### `ow refresh [-w WS]`
-Recompute and write owned generated files (and sync `<task>.code-workspace` when in a task).
+Recompute and write owned generated files (and sync `<workspace>.code-workspace` for multi-stack workspaces).
 
 ### `ow files [--diff] [--json] [-w WS]`
-Show generated files and their ownership state (`absent`, `up to date`, `outdated`, `yours`, `skipped`), or unified diffs with `--diff`.
+Show generated files and their ownership state (`absent`, `up to date`, `outdated`, `yours`, `skipped`), or unified diffs with `--diff`. Works at mono-stack workspaces, individual stacks, and multi-stack workspace roots (inspecting `<workspace>.code-workspace`).
 
 ### `ow config [--global] [--json] [-w WS]`
 ### `ow config get KEY [--global] [--json] [-w WS]`
@@ -84,37 +127,36 @@ Read and write typed plugin settings across default, global (`$XDG_CONFIG_HOME/o
 
 ## Fleet management
 
-### `ow ls [-t TASK] [--json]`
-List indexed workspaces, their paths, repos, and task membership.
+### `ow ls [--json]`
+List indexed workspaces, their paths, and their repos (mono-stack) or stacks (multi-stack).
 
 ### `ow cd [WS]`
-Print a workspace's path (used by `ow shell-init`).
+Print a workspace or stack path (`my-ws`, `review`, `review/iap`, or local `iap` inside `review/`). Used by `ow shell-init`.
 
 ### `ow shell-init {bash|zsh|fish}`
 Print the shell wrapper for `ow cd` and completion script.
 
-### `ow rm {WS | -t TASK} [-n] [-y] [--json]`
-Remove a workspace (or every workspace in `-t TASK`; pass exactly one of `WS` or `-t TASK`), its worktrees, and pushed branches. Refuses dirty worktrees, orphan commits, or stray checkouts (preflights all members before deleting any workspace in a task). Updates or removes `<task>.code-workspace`.
+### `ow rm WS [-n] [-y] [--json]`
+Remove a mono-stack workspace, a whole multi-stack workspace (`ow rm review`), or a single stack (`ow rm review/iap` or `ow rm iap` inside `review/`), along with its worktrees and pushed branches. Refuses dirty worktrees, orphan commits, or stray checkouts (preflighting every stack before deleting anything in a multi-stack workspace). While stacks remain, `<workspace>.code-workspace` is refreshed. Removing the last stack removes the multi-stack workspace: its recorded root files that still match the lock are deleted, hand-edited files stay. This is the only case where ow deletes generated files; `ow prune` follows the same rule.
 
 ### `ow prune [--offline] [-n] [-y] [--json]`
-Clean up prunable worktree registrations, pushed orphan branches, dead index entries, and (unless `--offline`) clean workspaces whose checked-out branches all belong to `MERGED` or `CLOSED` GitHub PRs.
+Clean up prunable worktree registrations, pushed orphan branches, dead index entries, and (unless `--offline`) clean workspaces or stacks whose checked-out branches all belong to `MERGED` or `CLOSED` GitHub PRs.
 
 ---
 
-## Opt-in plugins
+## Retargeting
 
 ### `ow retarget [BASE] [--base REF] [--autostash] [--no-fetch] [--only REPO…] [-n] [-y] [--json] [-w WS]`
-Guarded multi-repo replay (`cherry-pick --ff`, `last_taken`, `--fork-point` fallback). `BASE` and `--base` are mutually exclusive. Hidden by default (`retarget.enabled = false`); enable globally with:
+Guarded multi-repo replay (`cherry-pick --ff`, `last_taken`, `--fork-point` fallback).
 
-```sh
-ow config set --global retarget.enabled true
-```
-
-A workspace can still opt out locally with `ow config set retarget.enabled false`.
+- `BASE` and `--base` are mutually exclusive.
+- Updates `[repos]` in `.ow/config.toml` as well as `branch.<b>.ow-base`, switches clean detached repos directly onto the new base via `git switch --detach`, and skips repos whose remote does not have the target series (e.g. `upgrade` when retargeting to `19.0`) with a clear note.
+- Refreshes generated files (`mise`, shared venv, `odoorc`, editor configs) after mutation.
+- Works on a stack from a multi-stack root via `-w <stack>`.
 
 ---
 
 ## Confirmation rules & `--json` contract
 
-- **Prompts**: Only mutating/destructive commands prompt (`repo rm`, `rm`, `prune`, and non-fast-forward `retarget`). Pass `-y` to confirm non-interactively or `-n` for a dry run.
-- **`--json` envelope**: Supported on `add`, `status`, `ls`, `rm`, `prune`, `files`, `config`, `config get`, and `retarget`. Every JSON response is a UTF-8 JSON object on `stdout` carrying `"schema_version": 1`; all progress lines, plans, and warnings go to `stderr`, and interactive prompts are disabled (pass `-y` for prompting commands).
+- Prompts: mutating/destructive commands prompt (`init`/`add` promotion to multi-stack, `repo rm`, `rm`, `prune`, and non-fast-forward `retarget`). Pass `-y` to confirm non-interactively or `-n` for a dry run.
+- `--json` envelope: supported on `init`, `add`, `status`, `ls`, `rm`, `prune`, `files`, `config`, `config get`, and `retarget`. Every JSON response is a UTF-8 JSON object on `stdout` carrying `"schema_version": 1`; all progress lines, plans, and warnings go to `stderr`, and interactive prompts are disabled (pass `-y` for prompting commands).
