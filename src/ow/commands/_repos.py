@@ -222,6 +222,17 @@ def pr_local_ref(fetch_ref: str, branch: str | None) -> tuple[str, str | None]:
     return f"refs/ow/pr/{slug}", None
 
 
+def _same_sha(bare: Path, ref_a: str, ref_b: str) -> bool:
+    """Whether `ref_a` and `ref_b` both exist in `bare` and resolve to the same commit."""
+    res_a = git.run(["git", "-C", str(bare), "rev-parse", "--verify", "--quiet", ref_a])
+    if res_a.returncode != 0:
+        return False
+    res_b = git.run(["git", "-C", str(bare), "rev-parse", "--verify", "--quiet", ref_b])
+    if res_b.returncode != 0:
+        return False
+    return res_a.stdout.strip() == res_b.stdout.strip()
+
+
 def _checked_out_branches(bare: Path) -> set[str]:
     """Local branch names currently checked out in any worktree of `bare`."""
     res = git.run(["git", "-C", str(bare), "worktree", "list", "--porcelain"])
@@ -284,21 +295,41 @@ def add_worktree(
         local_branch = branch
         reset_existing = False
         if _has_ref(bare, f"refs/heads/{local_branch}"):
-            # Avoid silently checking out a stale branch or colliding with another worktree
-            # (e.g. fork PRs opened from `18.0`/`master`/`patch-1`).
-            if pr_num is not None:
-                local_branch = f"pr-{pr_num}-{branch}"
-            if _has_ref(bare, f"refs/heads/{local_branch}"):
-                if local_branch in _checked_out_branches(bare):
-                    raise UsageError(
-                        f"branch {local_branch!r} is already checked out in another worktree of {bare.stem}"
-                    )
-                if not branch_is_pushed(bare, local_branch):
+            checked_out = _checked_out_branches(bare)
+            same_pr = (
+                local_branch not in checked_out
+                and (
+                    (ow_pr is not None and _config(bare, f"branch.{local_branch}.ow-pr") == ow_pr)
+                    or _same_sha(bare, f"refs/heads/{local_branch}", pr_ref)
+                )
+            )
+            if same_pr:
+                if not _same_sha(bare, f"refs/heads/{local_branch}", pr_ref) and not branch_is_pushed(
+                    bare, local_branch
+                ):
                     raise UsageError(
                         f"local branch {local_branch!r} in {bare.stem} has unpushed commits; "
                         "push, rename, or delete it before re-adding this PR"
                     )
                 reset_existing = True
+            else:
+                # Avoid silently checking out a stale branch or colliding with another worktree
+                # (e.g. fork PRs opened from `18.0`/`master`/`patch-1`).
+                if pr_num is not None:
+                    local_branch = f"pr-{pr_num}-{branch}"
+                if _has_ref(bare, f"refs/heads/{local_branch}"):
+                    if local_branch in checked_out:
+                        raise UsageError(
+                            f"branch {local_branch!r} is already checked out in another worktree of {bare.stem}"
+                        )
+                    if not _same_sha(bare, f"refs/heads/{local_branch}", pr_ref) and not branch_is_pushed(
+                        bare, local_branch
+                    ):
+                        raise UsageError(
+                            f"local branch {local_branch!r} in {bare.stem} has unpushed commits; "
+                            "push, rename, or delete it before re-adding this PR"
+                        )
+                    reset_existing = True
 
         if reset_existing:
             steps.append(GitStep(("git", "-C", str(bare), "branch", "-f", local_branch, pr_ref)))

@@ -435,3 +435,194 @@ def test_add_pr_with_local_bare_name_and_auto_community(lab):
     assert not (ws / "iap-apps").exists()
     assert (ws / "odoorc").is_file()
 
+
+def test_add_is_idempotent_on_existing_workspace_and_preserves_changes(lab):
+    """Re-running `ow add` on an existing workspace succeeds and keeps existing worktrees intact."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    _setup_pr_repo(
+        lab,
+        "enterprise",
+        {"sale_ent/__manifest__.py": "{}"},
+        12345,
+        "18.0-fix-invoice",
+        {"sale_ent/fix.py": "fixed = True\n"},
+    )
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/enterprise",
+                "number": 12345,
+                "title": "Fix invoice",
+                "url": "https://github.com/odoo/enterprise/pull/12345",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0-fix-invoice",
+                "baseRefName": "18.0",
+            }
+        ]
+    )
+
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+    first = lab.ow("add", "enterprise#12345", cwd=parent)
+    assert first.exit_code == 0, first.stderr + first.stdout
+    ws = parent / "12345-18.0-fix-invoice"
+    (ws / "enterprise" / "wip.txt").write_text("keep me\n")
+
+    second = lab.ow("add", "enterprise#12345", cwd=parent)
+    assert second.exit_code == 0, second.stderr + second.stdout
+    assert (ws / "enterprise" / "wip.txt").read_text() == "keep me\n"
+    assert (ws / "odoorc").is_file()
+
+
+def test_add_resumes_interrupted_workspace_with_broken_worktree_and_leftover_branch(lab):
+    """Re-running `ow add` recovers a partial workspace (no config.toml, locked initializing worktree, leftover branch)."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    _setup_pr_repo(
+        lab,
+        "enterprise",
+        {"sale_ent/__manifest__.py": "{}"},
+        135585,
+        "18.0-port-in-numbers",
+        {"sale_ent/port.py": "port = True\n"},
+    )
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/enterprise",
+                "number": 135585,
+                "title": "Port in numbers",
+                "url": "https://github.com/odoo/enterprise/pull/135585",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0-port-in-numbers",
+                "baseRefName": "18.0",
+            }
+        ]
+    )
+
+    parent = lab.home / "odoo"
+    ws = parent / "135585-18.0-port-in-numbers"
+    ws.mkdir(parents=True)
+    # Simulate an interrupted `ow add`: community succeeded, enterprise got stuck initializing,
+    # and `.ow/config.toml` was never written.
+    comm_bare = repos_dir() / "community.git"
+    ent_bare = repos_dir() / "enterprise.git"
+    lab.git(comm_bare, "worktree", "add", "--detach", str(ws / "community"), "origin/18.0")
+    lab.git(ent_bare, "fetch", "origin", "+refs/pull/135585/head:refs/ow/pr/135585")
+    lab.git(
+        ent_bare,
+        "worktree",
+        "add",
+        "--no-track",
+        "-b",
+        "18.0-port-in-numbers",
+        str(ws / "enterprise"),
+        "refs/ow/pr/135585",
+    )
+    ent_admin = next((ent_bare / "worktrees").iterdir())
+    (ent_admin / "locked").write_text("initializing\n")
+
+    res = lab.ow("add", "enterprise#135585", cwd=parent)
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert (ws / ".ow" / "config.toml").is_file()
+    assert (ws / "community" / "odoo-bin").is_file()
+    assert (ws / "enterprise" / "sale_ent" / "port.py").read_text() == "port = True\n"
+    # Reused the exact PR branch name instead of creating `pr-135585-...`
+    assert lab.git(ws / "enterprise", "branch", "--show-current") == "18.0-port-in-numbers"
+    assert (ws / "odoorc").is_file()
+
+    # `ow refresh` works inside the recovered workspace.
+    ref = lab.ow("refresh", cwd=ws)
+    assert ref.exit_code == 0, ref.stderr + ref.stdout
+
+
+def test_add_into_existing_workspace_with_name_adds_extra_pr_repo(lab):
+    """Running `ow add iap#1992 --name <existing-ws>` adds `iap` alongside existing repos."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    _setup_pr_repo(
+        lab,
+        "enterprise",
+        {"sale_ent/__manifest__.py": "{}"},
+        135585,
+        "18.0-port-in",
+        {"sale_ent/ent.py": "ent = 1\n"},
+    )
+    _setup_pr_repo(
+        lab,
+        "iap",
+        {"iap_mod/__manifest__.py": "{}"},
+        1992,
+        "18.0-port-in-iap",
+        {"iap_mod/iap.py": "iap = 1\n"},
+    )
+    lab.git(repos_dir() / "iap.git", "config", "ow.github-repo", "odoo/iap-apps")
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/enterprise",
+                "number": 135585,
+                "title": "Enterprise PR",
+                "url": "https://github.com/odoo/enterprise/pull/135585",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0-port-in",
+                "baseRefName": "18.0",
+            },
+            {
+                "repo": "odoo/iap-apps",
+                "number": 1992,
+                "title": "IAP PR",
+                "url": "https://github.com/odoo/iap-apps/pull/1992",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0-port-in-iap",
+                "baseRefName": "18.0",
+            },
+        ]
+    )
+
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+    r1 = lab.ow("add", "enterprise#135585", cwd=parent)
+    assert r1.exit_code == 0, r1.stderr + r1.stdout
+
+    r2 = lab.ow("add", "iap#1992", "--name", "135585-18.0-port-in", cwd=parent)
+    assert r2.exit_code == 0, r2.stderr + r2.stdout
+
+    ws = parent / "135585-18.0-port-in"
+    assert (ws / "community" / "odoo-bin").is_file()
+    assert (ws / "enterprise" / "sale_ent" / "ent.py").is_file()
+    assert (ws / "iap" / "iap_mod" / "iap.py").is_file()
+    odoorc = (ws / "odoorc").read_text()
+    assert str(ws / "iap") in odoorc
+    assert str(ws / "enterprise") in odoorc
+
+
+def test_add_idempotent_task_preserves_allocated_ports(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    parent = lab.home / "odoo"
+    parent.mkdir(parents=True)
+
+    r1 = lab.ow("add", "-t", "port-task", "ws-a", "-r", "community", "--base", "18.0", cwd=parent)
+    assert r1.exit_code == 0, r1.stderr + r1.stdout
+    assert "http_port = 8069" in (parent / "ws-a" / "odoorc").read_text()
+
+    r2 = lab.ow("add", "-t", "port-task", "ws-a", "-r", "community", "--base", "18.0", cwd=parent)
+    assert r2.exit_code == 0, r2.stderr + r2.stdout
+    assert "http_port = 8069" in (parent / "ws-a" / "odoorc").read_text()
+
+
+def test_add_refuses_existing_non_ow_directory(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    parent = lab.home / "odoo"
+    stray = parent / "plain-dir"
+    stray.mkdir(parents=True)
+    (stray / "notes.txt").write_text("do not touch\n")
+
+    res = lab.ow("add", "plain-dir", "-r", "community", "--base", "18.0", cwd=parent)
+    assert res.exit_code == 2
+    assert "directory already exists" in (res.stderr + res.stdout)
+    assert (stray / "notes.txt").read_text() == "do not touch\n"
+    assert not (stray / ".ow").exists()
+
