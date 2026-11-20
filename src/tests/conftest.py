@@ -42,7 +42,7 @@ def hermetic(tmp_path: Path, monkeypatch) -> Generator[None, None, None]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     
-    for cmd in ("git", "sh", "bash"):
+    for cmd in ("git", "sh", "bash", "true"):
         real_path = shutil.which(cmd)
         if real_path:
             link_path = bin_dir / cmd
@@ -63,6 +63,9 @@ def hermetic(tmp_path: Path, monkeypatch) -> Generator[None, None, None]:
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
     monkeypatch.setenv("GIT_COMMITTER_DATE", "2024-01-01T00:00:00Z")
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    # `git rebase --continue` and friends must never open an editor in tests.
+    monkeypatch.setenv("GIT_EDITOR", "true")
+    monkeypatch.setenv("EDITOR", "true")
     monkeypatch.setenv("PATH", str(bin_dir))
     
     # Unset inherited git/mise variables
