@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import tomli_w
 
@@ -21,13 +21,12 @@ if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
 
-# Hook spec declaration for mise
 HOOKSPECS = (MiseSpec,)
 
 _FRAGMENT = PurePosixPath("mise/conf.d/00-ow.toml")
 _MISE_MIN_VERSION = (2026, 8, 13)
 _MISE_VERSION_RE = re.compile(r"\b(\d+)\.(\d+)\.(\d+)\b")
-_MISE_WARNING = "mise ≥ 2026.8.13 not found; mise/conf.d/00-ow.toml won't be loaded"
+_MISE_WARNING = "mise ≥ 2026.8.13 not found; mise/conf.d/00-ow.toml won't be loaded; disable with `ow config set --global mise.enabled false`"
 
 
 @hookimpl
@@ -45,41 +44,33 @@ def ow_settings() -> list[Setting]:
 
 @hookimpl
 def ow_generated_files(
-    ws: Workspace, answers: callable
+    ws: Workspace, answers: Callable[[str], list]
 ) -> list[GeneratedFile | Diagnostic]:
     """Generate mise/conf.d/00-ow.toml when needed."""
-    # Get answers from mise_environment hookspec
     answers_list = answers("mise_environment")
     merged = merge(answers_list)
-    
-    # Get the mise.python setting
+
     python_setting = ws.settings.get("mise.python")
-    
-    # No answer and no python setting means no file
+
     if merged is None and not python_setting:
         return []
-    
+
     diagnostics: list[Diagnostic] = []
     python_value = python_setting
-    
-    # Handle Python version with range
+
     if merged is not None and merged.python is not None:
         python_min, python_max = merged.python
-        
+
         if python_value is None:
-            # No explicit value: use range max
             python_value = f"{python_max[0]}.{python_max[1]}"
         else:
-            # Validate explicit value against range
-            # Parse "3.MINOR" format
             match = re.match(r"^3\.(\d+)$", python_value)
             if match:
                 minor = int(match.group(1))
                 min_minor = python_min[1]
                 max_minor = python_max[1]
-                
+
                 if minor < min_minor or minor > max_minor:
-                    # Clamp and add info diagnostic
                     clamped_minor = max(min_minor, min(minor, max_minor))
                     diagnostics.append(
                         Diagnostic(
@@ -89,7 +80,6 @@ def ow_generated_files(
                     )
                     python_value = f"{python_max[0]}.{clamped_minor}"
             else:
-                # Malformed: not "3.MINOR" format
                 diagnostics.append(
                     Diagnostic(
                         "warning",
@@ -97,53 +87,44 @@ def ow_generated_files(
                     )
                 )
                 python_value = f"{python_max[0]}.{python_max[1]}"
-    
-    # Build the fragment
+
     fragment: dict[str, object] = {}
-    
-    # Add tools section with python if set
+
     if python_value:
         fragment["tools"] = {"python": python_value}
-        # Add venv setup
         fragment["env"] = fragment.get("env", {})
         fragment["env"]["_"] = {
             "python": {"venv": {"path": ".venv", "create": True}}
         }
-    
-    # Add environment variables
+
     if merged is not None and merged.env:
         if "env" not in fragment:
             fragment["env"] = {}
         fragment["env"].update(merged.env)
-    
-    # Add PATH entries
+
     if merged is not None and merged.path:
         if "env" not in fragment:
             fragment["env"] = {}
         if "_" not in fragment["env"]:
             fragment["env"]["_"] = {}
         fragment["env"]["_"]["path"] = list(merged.path)
-    
-    # Add postinstall hook
+
     if merged is not None and merged.postinstall:
         fragment["hooks"] = {
             "postinstall": " && ".join(merged.postinstall)
         }
-    
-    # Add aliases (shell_alias in mise)
+
     if merged is not None and merged.aliases:
         fragment["shell_alias"] = merged.aliases
-    # Add tasks
+
     if merged is not None and merged.tasks:
         fragment["tasks"] = merged.tasks
-    
-    # If nothing to contribute, return early
+
     if not fragment:
         return diagnostics
-    
-    # Serialize as TOML
+
     content = tomli_w.dumps(fragment)
-    
+
     return [
         GeneratedFile(
             path=_FRAGMENT,
@@ -175,7 +156,7 @@ def ow_refreshed(ws: Workspace, owned: tuple[PurePosixPath, ...]) -> None:
 
     try:
         version = _mise_version()
-    except (FileNotFoundError, OSError):
+    except OSError:
         term.warn(_MISE_WARNING)
         return
 
@@ -184,10 +165,15 @@ def ow_refreshed(ws: Workspace, owned: tuple[PurePosixPath, ...]) -> None:
         return
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["mise", "trust", str(ws.root / "mise" / "conf.d" / "00-ow.toml")],
             capture_output=True,
+            text=True,
             check=False,
         )
-    except (FileNotFoundError, OSError):
+        if result.returncode != 0:
+            lines = result.stderr.strip().splitlines()
+            detail = lines[0] if lines else f"exit {result.returncode}"
+            term.warn(f"mise trust failed: {detail}")
+    except OSError:
         pass

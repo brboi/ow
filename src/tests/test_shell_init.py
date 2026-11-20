@@ -1,12 +1,18 @@
-"""`ow shell-init` scenarios (§16): the snippet runs in a real bash — the one test layer
-allowed a subprocess.
-"""
+"""`ow shell-init`: the snippet runs in a real bash and a real zsh."""
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
+
+ZSH = shutil.which("zsh") or next(
+    (p for p in ("/usr/bin/zsh", "/bin/zsh", "/usr/local/bin/zsh") if Path(p).exists()),
+    None,
+)
 
 
 def test_bash_snippet_cds_and_completes(lab, tmp_path):
@@ -40,13 +46,23 @@ def test_bash_snippet_cds_and_completes(lab, tmp_path):
     assert proc.stdout == f"{ws}\ncomplete-ok"
 
 
-def test_zsh_and_fish_snippets_print_their_shells(lab):
-    zsh = lab.ow("shell-init", "zsh")
+@pytest.mark.skipif(ZSH is None, reason="zsh not installed")
+def test_zsh_snippet_runs_without_compinit(lab, tmp_path):
+    result = lab.ow("shell-init", "zsh")
 
-    assert zsh.exit_code == 0
-    assert "command ow" in zsh.stdout
-    assert "compdef _ow_completion ow" in zsh.stdout
+    assert result.exit_code == 0
+    assert "command ow cd" in result.stdout
+    assert "compdef _ow_completion ow" in result.stdout
 
+    # The snippet must survive an `eval` that runs before `compinit`: no `compdef` yet.
+    script = tmp_path / "ow-shell-init.zsh"
+    script.write_text(result.stdout)
+    proc = subprocess.run([ZSH, "-f", str(script)], capture_output=True, text=True)
+
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_fish_snippet_defines_the_wrapper_and_completion(lab):
     fish = lab.ow("shell-init", "fish")
 
     assert fish.exit_code == 0

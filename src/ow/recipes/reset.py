@@ -1,10 +1,4 @@
-"""The reset recipe: the followed ref, what the reset drops, and the dirty files (§7).
-
-`ow reset [--hard]` is `git reset [--hard] <followed ref>`, mixed by default. The plan
-carries the commits it will drop and that are on no remote, and — under `--hard` — the
-modified paths the reset restores. HEAD already at the followed ref is a no-op, except
-under `--hard` with a dirty tree, where the step still runs to restore the files.
-"""
+"""The reset recipe: drops commits to the followed ref, with untracked-collision warnings."""
 
 from __future__ import annotations
 
@@ -47,8 +41,6 @@ def gather_reset(facts: RepoFacts) -> ResetInputs:
 
 def plan_reset(facts: RepoFacts, inputs: ResetInputs, *, hard: bool) -> RepoPlan:
     """The reset step with its notes, or the no-op (pure)."""
-    if inputs.followed is None:
-        return RepoPlan(facts.name, refusal="no default base; run `ow init`")
     if not inputs.resolves:
         return RepoPlan(
             facts.name,
@@ -58,23 +50,50 @@ def plan_reset(facts: RepoFacts, inputs: ResetInputs, *, hard: bool) -> RepoPlan
     notes: list[str] = []
     if inputs.dropped:
         notes.append(f"drops {inputs.dropped} commit(s) on no remote")
-    if hard:
-        # The tracked paths git would restore; `--hard` moves nothing else.
-        notes.extend(f"modified: {path}" for path in facts.modified)
 
-    if inputs.at_followed and not (hard and _dirty(facts)):
+    untracked_collisions: list[str] = []
+    if hard:
+        # List modified tracked paths and untracked paths that will be overwritten.
+        notes.extend(f"modified: {path}" for path in facts.modified)
+        untracked_collisions = _untracked_in_ref_tree(
+            facts.path, inputs.followed, facts.untracked
+        )
+        notes.extend(f"untracked, overwritten: {path}" for path in untracked_collisions)
+
+    # No step needed if already at the followed ref, unless --hard with dirty tree.
+    if inputs.at_followed and not (hard and (_dirty(facts) or untracked_collisions)):
         return RepoPlan(facts.name, notes=tuple(notes))
 
     argv = ["git", "-C", str(facts.path), "reset"]
     if hard:
         argv.append("--hard")
+    elif not inputs.dropped:
+        # When moving forward (nothing dropped), preserve local changes.
+        argv.append("--keep")
     argv.append(inputs.followed)
     return RepoPlan(facts.name, steps=(GitStep(tuple(argv)),), notes=tuple(notes))
 
 
 def _dirty(facts: RepoFacts) -> bool:
-    """Whether the worktree has anything to restore — tracked changes or untracked files."""
-    return bool(facts.modified or facts.untracked)
+    """Whether the worktree has modified tracked files to restore."""
+    return bool(facts.modified)
+
+
+def _untracked_in_ref_tree(
+    path: Path, ref: str | None, untracked: tuple[str, ...]
+) -> list[str]:
+    """Untracked paths the ref also tracks — `--hard` overwrites them."""
+    if ref is None or not untracked:
+        return []
+
+    result = git.run(
+        ["git", "-C", str(path), "ls-tree", "-r", "-z", "--name-only", ref]
+    )
+    if result.returncode != 0:
+        return []
+
+    tracked = set(result.stdout.split("\0"))
+    return [u for u in untracked if u in tracked]
 
 
 def _rev_parse(path: Path, ref: str) -> str | None:

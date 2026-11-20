@@ -3,21 +3,20 @@ from __future__ import annotations
 
 import sys
 
-from ow.cli import build_app
+from ow.cli import build_app, fail
 from ow.core.plugins import load_plugins
 from ow.errors import OwError
-from ow.term import error
 
 
 def main() -> None:
-    """Main entry point for the ow CLI."""
     try:
-        plugins = load_plugins()
-        app = build_app(plugins)
+        app = build_app(load_plugins())
         app(prog_name="ow")
-    except OwError as e:
-        error(str(e))
-        sys.exit(e.exit_code)
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        sys.exit(130)
+    except OwError as exc:
+        sys.exit(fail(exc))
 
 
 if __name__ == "__main__":

@@ -1,11 +1,4 @@
-"""The pull recipe: the ref a repo follows, and how far HEAD is from it (§7).
-
-`ow pull` may only fast-forward, so the step is planned exactly when the followed ref
-is strictly ahead of HEAD — `merge --ff-only` is a no-op otherwise. A HEAD with commits
-of its own is never merged: ow says the repo diverged and names the rebase instead,
-because only `ow rebase` may rewrite a branch. A detached HEAD works too: the followed
-ref is then the repo's default base.
-"""
+"""The pull recipe: only fast-forward when the ref is strictly ahead."""
 
 from __future__ import annotations
 
@@ -58,9 +51,7 @@ def gather_pull(facts: RepoFacts) -> PullInputs:
 
 
 def plan_pull(facts: RepoFacts, inputs: PullInputs) -> RepoPlan:
-    """The fast-forward step, the divergence note, or nothing at all (pure)."""
-    if inputs.followed is None:
-        return RepoPlan(facts.name, refusal="no default base; run `ow init`")
+    """The fast-forward step, a divergence refusal, or nothing at all (pure)."""
     if not inputs.resolves:
         return RepoPlan(
             facts.name,
@@ -69,7 +60,7 @@ def plan_pull(facts: RepoFacts, inputs: PullInputs) -> RepoPlan:
     if inputs.ahead and inputs.behind:
         return RepoPlan(
             facts.name,
-            notes=(f"diverged from {inputs.followed} — run `ow rebase`",),
+            refusal=f"diverged from {inputs.followed}; run `ow rebase`",
         )
     if inputs.ahead:
         # HEAD already contains the ref: an ff-only merge would do nothing.

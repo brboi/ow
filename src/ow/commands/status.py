@@ -1,75 +1,137 @@
-"""`ow status` — the workspace table, from git reads only (§7).
+"""Print each repo's table in columns (TTY) or tab-separated (piped).
 
-It never touches the network, never refreshes and never scans files. The facts come
-from `ow.core.facts` (the branch, `@{u}`, ahead/behind `@{u}`, the dirty entries and
-any operation in progress), plus one `rev-list --left-right --count <base>...HEAD` per
-repo for the counts against the base. `ow_diagnostics` already ran when the session
-opened; its `info` texts are printed after the table, and a plugin that raised is a
-session warning, never a traceback (P13).
-
-One tab-separated line per repo, in workspace order. The lines go to stdout with
-`sys.stdout.write`, because Rich expands every tab to the next tab stop.
-
-The fields, in order:
-
-    <name>       the repo name
-    <state>      the branch (`18.0-voip`), `detached at <sha10>` (or plain `detached`
-                 when git reports no commit yet), or `(<problem> worktree)` for a
-                 worktree ow cannot read (`run ow init`)
-    <base>       the branch's base: `origin/18.0`, `origin/18.0 (default)` when it fell
-                 back to the repo's default base because no `branch.<b>.ow-base` exists,
-                 or `(unset)` when the repo has neither
-    <upstream>   `dev/18.0-voip (ahead 1, behind 2)`, the bare ref when git reports no
-                 counts for it, or `(none)` when the branch has no upstream — an
-                 upstream equal to the base counts as none (§5)
-    <base ab>    `ahead 1, behind 0` against the base, `(even)` at 0/0, `(unset)` when
-                 there is no base, `(?)` when the count cannot be read
-    <dirty>      `dirty 3`: the changed and untracked entries; the field is omitted
-                 when the tree is clean
-    <operation>  `<operation> in progress`, with git's own name — rebase, cherry-pick,
-                 merge, revert or bisect; the field is omitted when none is in progress.
-                 When the tree is clean and one is, the dirty field is written empty so
-                 the operation always lands in the last field.
+One tab-separated line per repo when piped; when stdout is a TTY, aligned columns with header.
+The fields are: name, state, base, upstream, base counts, dirty, operation.
 """
 
 from __future__ import annotations
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Sequence
 
 from ow import term
 from ow.core import git
 from ow.core.facts import RepoFacts, gather_all
 from ow.core.session import Session
-from ow.errors import UsageError
 
 
 def run(session: Session) -> int:
-    """Print every repo's table line; always 0 — status refuses nothing."""
-    if session.workspace is None:
-        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
-
+    """Print every repo's table line; always 0."""
     print_table(session, gather_all(session.locations))
     return 0
 
 
 def print_table(session: Session, facts: Sequence[RepoFacts]) -> None:
-    """One table line per fact, then one `# <plugin>: <text>` line per info diagnostic."""
-    for repo_facts in facts:
-        _line(_row(repo_facts))
+    """Format and print table: aligned columns (TTY) or tab-separated (piped)."""
+    # Compute base_counts in parallel for all repos
+    base_counts_cache = _compute_base_counts_parallel(facts)
+    
+    rows = [_row(f, base_counts_cache, i) for i, f in enumerate(facts)]
+    
+    if sys.stdout.isatty():
+        # Aligned columns with header for terminal output
+        headers = ["name", "state", "base", "upstream", "base counts", "dirty", "operation"]
+        _print_aligned(headers, rows)
+    else:
+        # Tab-separated for piped output (machine-friendly)
+        for row in rows:
+            _line(row)
+    
+    # Print diagnostic messages
     for plugin, diagnostic in session.diagnostics:
         if diagnostic.level == "info":
             term.out(f"# {plugin}: {diagnostic.text}")
 
 
-def _row(facts: RepoFacts) -> str:
+def _compute_base_counts_parallel(facts: Sequence[RepoFacts]) -> dict[int, str]:
+    """Compute base counts for all repos in parallel using ThreadPoolExecutor."""
+    cache = {}
+    if not facts:
+        return cache
+    
+    with ThreadPoolExecutor() as executor:
+        # Map each repo to its base_counts computation
+        futures = {executor.submit(_compute_base_counts_for_fact, fact): i for i, fact in enumerate(facts)}
+        for future in futures:
+            i = futures[future]
+            cache[i] = future.result()
+    
+    return cache
+
+
+def _compute_base_counts_for_fact(facts: RepoFacts) -> str:
+    """`ahead X, behind Y` of HEAD vs base; `(even)` at 0/0; `no base` when none; `(?)` on error."""
+    if facts.base is None:
+        return "no base"
+    if facts.problem:
+        return "(?)"
+
+    result = git.run(
+        [
+            "git",
+            "-C",
+            str(facts.path),
+            "rev-list",
+            "--left-right",
+            "--count",
+            f"{facts.base}...HEAD",
+        ]
+    )
+    if result.returncode != 0:
+        return "(?)"
+
+    parts = result.stdout.split()
+    try:
+        behind, ahead = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return "(?)"
+    if ahead == 0 and behind == 0:
+        return "(even)"
+    return f"ahead {ahead}, behind {behind}"
+
+
+def _print_aligned(headers: Sequence[str], rows: Sequence[str]) -> None:
+    """Print aligned columns for TTY output."""
+    if not rows:
+        return
+    
+    # Parse each row into fields
+    parsed_rows = [row.split("\t") for row in rows]
+    
+    # Calculate column widths: max of header width and data widths
+    col_widths = []
+    for i in range(len(headers)):
+        max_width = len(headers[i])
+        for parsed_row in parsed_rows:
+            if i < len(parsed_row):
+                max_width = max(max_width, len(parsed_row[i]))
+        col_widths.append(max_width)
+    
+    # Print header with padding
+    header_line = "  ".join(headers[i].ljust(col_widths[i]) for i in range(len(headers)))
+    _line(header_line)
+    
+    # Print data rows with padding
+    for parsed_row in parsed_rows:
+        padded_fields = []
+        for i, field in enumerate(parsed_row):
+            if i < len(col_widths) - 1:
+                padded_fields.append(field.ljust(col_widths[i]))
+            else:
+                # Last column needs no padding
+                padded_fields.append(field)
+        _line("  ".join(padded_fields))
+
+
+def _row(facts: RepoFacts, base_counts_cache: dict[int, str], index: int) -> str:
     """One repo's fields, tab-separated."""
     fields = [
         facts.name,
         _state(facts),
         _base(facts),
         _upstream(facts),
-        _base_counts(facts),
+        base_counts_cache.get(index, "(??)"),
     ]
     dirty = len(facts.modified) + len(facts.untracked)
     if dirty:
@@ -94,16 +156,16 @@ def _state(facts: RepoFacts) -> str:
 
 
 def _base(facts: RepoFacts) -> str:
-    """The base, marked `(default)` when it is the repo's default rather than `ow-base`."""
+    """The base branch (origin/18.0), `(default)` when fallback, or `no base` when none."""
     if facts.base is None:
-        return "(unset)"
+        return "no base"
     if facts.explicit_base is None and facts.default_base is not None:
         return f"{facts.base} (default)"
     return facts.base
 
 
 def _upstream(facts: RepoFacts) -> str:
-    """The upstream with its counts; `(none)` when there is none, or it is the base."""
+    """The upstream with its counts; `(none)` when absent or equal to base; bare ref when no counts."""
     upstream = facts.upstream
     if upstream is None or upstream == facts.base:
         return "(none)"
@@ -111,39 +173,6 @@ def _upstream(facts: RepoFacts) -> str:
         return upstream
     ahead, behind = facts.upstream_ab
     return f"{upstream} (ahead {ahead}, behind {behind})"
-
-
-def _base_counts(facts: RepoFacts) -> str:
-    """`ahead X, behind Y` of HEAD against the base, read from `rev-list --left-right`."""
-    if facts.base is None:
-        return "(unset)"
-    if facts.problem:
-        # A broken worktree has no HEAD to count; do not spawn git at a path that is gone.
-        return "(?)"
-
-    result = git.run(
-        [
-            "git",
-            "-C",
-            str(facts.path),
-            "rev-list",
-            "--left-right",
-            "--count",
-            f"{facts.base}...HEAD",
-        ]
-    )
-    if result.returncode != 0:
-        return "(?)"
-
-    parts = result.stdout.split()
-    try:
-        # `--left-right` prints the left side (base-only) first: behind, then ahead.
-        behind, ahead = int(parts[0]), int(parts[1])
-    except (IndexError, ValueError):
-        return "(?)"
-    if ahead == 0 and behind == 0:
-        return "(even)"
-    return f"ahead {ahead}, behind {behind}"
 
 
 def _line(text: str) -> None:

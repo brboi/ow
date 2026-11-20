@@ -2,117 +2,81 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from ow.core.paths import index_file
 
 
 def read() -> tuple[Path, ...]:
-    """Read the workspace index file.
-    
-    Returns a tuple of absolute paths, in order, with duplicates and blank lines ignored.
-    Returns an empty tuple if the file doesn't exist.
-    """
+    """Read the index, returning absolute paths in order with duplicates removed."""
     index_path = index_file()
-    
     if not index_path.exists():
         return ()
-    
-    seen = set()
-    result = []
-    
-    with open(index_path, "r") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            # Skip blank lines
-            if not line or not line.strip():
-                continue
-            
-            path = Path(line)
-            abs_path = Path(os.path.abspath(path))
-            
-            # Skip duplicates, keeping first occurrence
-            abs_str = str(abs_path)
-            if abs_str not in seen:
-                seen.add(abs_str)
-                result.append(abs_path)
-    
+
+    seen: set[str] = set()
+    result: list[Path] = []
+    for line in index_path.read_text().split("\n"):
+        if not line.strip():
+            continue
+        path = Path(os.path.abspath(line))
+        if str(path) not in seen:
+            seen.add(str(path))
+            result.append(path)
     return tuple(result)
 
 
-def add(path: Path) -> None:
-    """Add a workspace path to the index.
-    
-    Idempotent: does nothing if the path is already in the index.
-    Atomic: uses a temp file + os.replace in the same directory.
-    Creates parent directories as needed.
-    """
-    abs_path = Path(os.path.abspath(path))
+@contextmanager
+def _locked() -> Iterator[None]:
+    """Hold an exclusive lock on the index's sidecar lock file."""
     index_path = index_file()
-    
-    # Create parent directories
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Read current entries
-    current = read()
-    
-    # Check if already present
-    if abs_path in current:
-        return
-    
-    # Add to list
-    new_entries = list(current) + [abs_path]
-    
-    # Write atomically using a temp file
+    with open(index_path.with_name(index_path.name + ".lock"), "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _write(entries: list[Path]) -> None:
+    """Replace the index atomically with `entries`."""
+    index_path = index_file()
     temp_fd, temp_path = tempfile.mkstemp(
-        dir=index_path.parent,
-        prefix=".tmp-",
-        suffix=".workspaces",
+        dir=index_path.parent, prefix=".tmp-", suffix=".workspaces"
     )
     try:
         with os.fdopen(temp_fd, "w") as f:
-            for entry in new_entries:
-                f.write(str(entry) + "\n")
+            for entry in entries:
+                f.write(f"{entry}\n")
         os.replace(temp_path, index_path)
-    except Exception:
-        os.unlink(temp_path)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
         raise
+
+
+def add(path: Path) -> None:
+    """Add a workspace path; no-op when already present."""
+    abs_path = Path(os.path.abspath(path))
+    with _locked():
+        current = read()
+        if abs_path in current:
+            return
+        _write([*current, abs_path])
 
 
 def remove(path: Path) -> None:
-    """Remove a workspace path from the index.
-    
-    No-op if the path is not in the index.
-    """
+    """Remove a workspace path; no-op when absent."""
     abs_path = Path(os.path.abspath(path))
-    index_path = index_file()
-    
-    if not index_path.exists():
-        return
-    
-    # Read current entries
-    current = read()
-    
-    # Check if present
-    if abs_path not in current:
-        return
-    
-    # Remove from list
-    new_entries = [p for p in current if p != abs_path]
-    
-    # Write atomically using a temp file
-    temp_fd, temp_path = tempfile.mkstemp(
-        dir=index_path.parent,
-        prefix=".tmp-",
-        suffix=".workspaces",
-    )
-    try:
-        with os.fdopen(temp_fd, "w") as f:
-            for entry in new_entries:
-                f.write(str(entry) + "\n")
-        os.replace(temp_path, index_path)
-    except Exception:
-        os.unlink(temp_path)
-        raise
+    with _locked():
+        current = read()
+        if abs_path not in current:
+            return
+        _write([entry for entry in current if entry != abs_path])

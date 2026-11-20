@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Sequence
-import sys
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 import types
 
 import pluggy
 
+from ow.core import config
 from ow.errors import PluginError
 
 if TYPE_CHECKING:
@@ -39,7 +39,6 @@ class GeneratedFile:
     mode: int = 0o644
 
     def __post_init__(self) -> None:
-        # Convert str to PurePosixPath if needed
         if isinstance(self.path, str):
             object.__setattr__(self, "path", PurePosixPath(self.path))
 
@@ -68,8 +67,8 @@ class CoreSpec:
         """Return this plugin's settings."""
 
     @hookspec
-    def ow_generated_files(self, ws: Workspace, answers: Callable[[str], list]) -> list[GeneratedFile]:
-        """Return generated files (P1: answers helper lets owners collect dependencies)."""
+    def ow_generated_files(self, ws: Workspace, answers: Callable[[str], list]) -> list[GeneratedFile | Diagnostic]:
+        """Return generated files and optional diagnostic messages."""
 
     @hookspec
     def ow_diagnostics(self, ws: Workspace) -> list[Diagnostic]:
@@ -89,31 +88,20 @@ class CoreSpec:
 
     @hookspec
     def ow_refreshed(self, ws: Workspace, owned: tuple[PurePosixPath, ...]) -> None:
-        """Event: refresh completed. owned is every path ow wrote or up-to-date (P2)."""
+        """Event: refresh completed. owned is every path ow wrote or up-to-date."""
 
 
-def _make_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
-    """Lazy loader for built-in plugins."""
+def _get_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
+    """Get all built-in plugin modules in order."""
+    from ow.plugins import mise, odoo, vscode, zed, local
 
-    def __getattr__(name: str) -> tuple[tuple[str, types.ModuleType], ...]:
-        if name == "BUILTINS":
-            # Import all five plugin modules in order
-            from ow.plugins import mise, odoo, vscode, zed, local
-
-            return (
-                ("mise", mise),
-                ("odoo", odoo),
-                ("vscode", vscode),
-                ("zed", zed),
-                ("local", local),
-            )
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-    return __getattr__("BUILTINS")
-
-
-# Lazy access via module __getattr__ (set below)
-BUILTINS: tuple[tuple[str, types.ModuleType], ...] | None = None
+    return (
+        ("mise", mise),
+        ("odoo", odoo),
+        ("vscode", vscode),
+        ("zed", zed),
+        ("local", local),
+    )
 
 
 class Plugins:
@@ -129,18 +117,10 @@ class Plugins:
         Includes a synthesized "<name>.enabled" (bool, True) for each plugin.
         """
         result = []
-        
-        # Get all impls once to iterate them
-        try:
-            impls = self.pm.hook.ow_settings.get_hookimpls()
-        except AttributeError:
-            impls = []
-        
-        # Build a map of plugin name from impls
+        impls = self.pm.hook.ow_settings.get_hookimpls()
         impl_to_name = {impl.plugin: self.pm.get_name(impl.plugin) for impl in impls}
-        
+
         for name in self.names:
-            # Add the synthesized enabled setting
             result.append(
                 Setting(
                     key=f"{name}.enabled",
@@ -149,8 +129,7 @@ class Plugins:
                     help=f"Enable or disable the {name} plugin",
                 )
             )
-            
-            # Add plugin's own settings
+
             for impl in impls:
                 plugin_name = impl_to_name[impl.plugin]
                 if plugin_name == name:
@@ -158,7 +137,6 @@ class Plugins:
                         plugin_settings = impl.function()
                         if plugin_settings:
                             for setting in plugin_settings:
-                                # Validate that key starts with "<plugin>."
                                 if not setting.key.startswith(f"{name}."):
                                     raise PluginError(
                                         name,
@@ -166,8 +144,6 @@ class Plugins:
                                         f"setting key {setting.key!r} must start with {name!r}.",
                                     )
                             result.extend(plugin_settings)
-                    except PluginError:
-                        raise
                     except Exception as e:
                         raise PluginError(name, "ow_settings", e) from e
 
@@ -180,10 +156,10 @@ class Plugins:
         """Call a hook on all enabled plugins.
 
         Returns (plugin_name, result) tuples in tuple order.
-        Skips disabled plugins when ws is given.
-        
+        Skips disabled plugins (checks workspace settings or global layer).
+
         With errors="raise" (default), raises on first PluginError.
-        With errors="collect", yields (name, PluginError(...)) and continues.
+        With errors="collect", collects (name, PluginError(...)) and continues.
         Drops None results.
         """
         result = []
@@ -191,18 +167,32 @@ class Plugins:
         if hook_method is None:
             return []
         impls = hook_method.get_hookimpls()
-
-        # Build a map of impl.plugin to plugin name
         impl_to_name = {impl.plugin: self.pm.get_name(impl.plugin) for impl in impls}
+
+        # Enabled flags default to True; without a workspace they come from the global layer.
+        enabled_flags: Mapping[str, object] = {}
+        if ws is None:
+            from ow.core.paths import global_config
+
+            declared = {
+                f"{name}.enabled": Setting(f"{name}.enabled", bool, True, "")
+                for name in self.names
+            }
+            try:
+                enabled_flags = config.read_global(global_config(), declared).values
+            except (OSError, config.UsageError):
+                enabled_flags = {}
 
         for impl in impls:
             name = impl_to_name[impl.plugin]
-
-            # Skip disabled plugins when ws is given
+            enabled_key = f"{name}.enabled"
             if ws is not None:
-                enabled = ws.settings.get(f"{name}.enabled", True)
-                if not enabled:
-                    continue
+                enabled = ws.settings.get(enabled_key, True)
+            else:
+                enabled = enabled_flags.get(enabled_key, True)
+
+            if not enabled:
+                continue
 
             # Build kwargs for this implementation (only pass args it declares)
             impl_kwargs = {}
@@ -251,27 +241,18 @@ class Plugins:
         """
         import typer
 
-        # Get all impls once
-        try:
-            impls = self.pm.hook.ow_commands.get_hookimpls()
-        except AttributeError:
-            impls = []
-        
+        impls = self.pm.hook.ow_commands.get_hookimpls()
         impl_to_name = {impl.plugin: self.pm.get_name(impl.plugin) for impl in impls}
 
         for impl in impls:
             name = impl_to_name[impl.plugin]
-
-            # Create a sub-app for this plugin
             sub_app = typer.Typer(name=name, no_args_is_help=True)
 
-            # Call the plugin's ow_commands to register commands
             try:
                 impl.function(app=sub_app)
             except Exception as e:
                 raise PluginError(name, "ow_commands", e) from e
 
-            # Only add the sub-app if it has commands/groups
             if sub_app.registered_commands or sub_app.registered_groups:
                 app.add_typer(sub_app, name=name)
 
@@ -279,31 +260,25 @@ class Plugins:
 def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = None) -> Plugins:
     """Load and register all built-in plugins.
 
-    If builtins is None, uses the lazily-loaded BUILTINS tuple.
-    Raises PluginError if HOOKSPECS is missing or if check_pending fails.
+    Raises PluginError when a plugin's HOOKSPECS or hook implementations are invalid.
     """
     if builtins is None:
-        builtins = _make_builtins()
+        builtins = _get_builtins()
 
-    # Create plugin manager
     pm = pluggy.PluginManager("ow")
-
-    # Add core spec
     pm.add_hookspecs(CoreSpec)
 
-    # Track which specs we've already added (avoid adding the same spec twice)
+    # Avoid adding the same spec class twice
     added_specs = {CoreSpec}
 
-    # Register plugins and add their specs
     names = []
     for name, module in builtins:
         names.append(name)
 
-        # Add specs declared by this plugin's HOOKSPECS
         if hasattr(module, "HOOKSPECS"):
             hookspecs = module.HOOKSPECS
             if not isinstance(hookspecs, tuple):
-                raise PluginError(name, "check_pending", "HOOKSPECS must be a tuple")
+                raise PluginError(name, "HOOKSPECS", "HOOKSPECS must be a tuple")
 
             for spec_class in hookspecs:
                 if spec_class not in added_specs:
@@ -311,24 +286,21 @@ def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = Non
                         pm.add_hookspecs(spec_class)
                         added_specs.add(spec_class)
                     except ValueError as e:
-                        raise PluginError(name, "check_pending", e) from e
+                        raise PluginError(name, "HOOKSPECS", str(e)) from e
+                    except pluggy.PluginValidationError as e:
+                        raise PluginError(pm.get_name(e.plugin), "HOOKSPECS", str(e)) from e
 
-        # Register the plugin module
-        pm.register(module, name=name)
+        try:
+            pm.register(module, name=name)
+        except pluggy.PluginValidationError as e:
+            raise PluginError(pm.get_name(e.plugin), "HOOKSPECS", str(e)) from e
 
-    # Check for pending hookimpls (misspelled implementations)
+    # Hookimpls whose name matches no spec surface here
     try:
         pm.check_pending()
     except pluggy.PluginValidationError as e:
-        # Extract plugin name from the exception
-        plugin_name = pm.get_name(e.plugin)
-        raise PluginError(plugin_name, "check_pending", str(e)) from e
+        raise PluginError(pm.get_name(e.plugin), "check_pending", str(e)) from e
 
     return Plugins(pm, tuple(names))
 
 
-# Set up module-level __getattr__ for lazy BUILTINS access
-def __getattr__(name: str) -> Any:
-    if name == "BUILTINS":
-        return _make_builtins()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

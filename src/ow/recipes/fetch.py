@@ -2,90 +2,83 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 from ow.core.facts import RepoFacts
 from ow.core.plan import GitStep
 
 
-def fetch_steps(facts: RepoFacts) -> tuple[GitStep, ...]:
-    """Compute fetch steps for a repository.
-    
-    Fetches the base branch and, when there is an upstream, the upstream's branch.
-    One git fetch per remote in first-seen order, branches deduplicated per remote.
-    
-    Args:
-        facts: RepoFacts for the repository.
-    
-    Returns:
-        Tuple of fetch steps, or empty tuple if no base or on a problem repo.
+def fetch_steps(facts: RepoFacts, extra: Sequence[str] = ()) -> tuple[GitStep, ...]:
+    """Compute the fetch steps for one repository.
+
+    The base is fetched in its own step first (extras on its remote ride
+    along); the upstream, when different, gets a separate step so a deleted
+    upstream branch cannot block the base fetch. Every argv uses an explicit
+    refspec so it works on bares with no remote.<r>.fetch config and never
+    resolves a tag.
     """
     if facts.problem:
         return ()
-    
-    # If no base and no upstream, no fetch needed
-    if facts.base is None and facts.upstream is None:
+
+    base_remote, base_branch = _split(facts.base, facts.remotes) if facts.base else (None, None)
+
+    upstream = facts.upstream if facts.upstream and facts.upstream != facts.base else None
+    up_remote, up_branch = _split(upstream, facts.remotes) if upstream else (None, None)
+
+    extras: dict[str, set[str]] = {}
+    for ref in extra:
+        remote, branch = _split(ref, facts.remotes)
+        if remote:
+            extras.setdefault(remote, set()).add(branch)
+
+    if base_remote is None and up_remote is None and not extras:
         return ()
-    
-    # Collect branches to fetch per remote
-    branches_by_remote: dict[str, set[str]] = {}
-    
-    # Add base branch
-    if facts.base:
-        # Split <remote>/<branch> by the longest matching name in remotes
-        base_remote, base_branch = _split_remote_branch(facts.base, facts.remotes)
-        if base_remote:
-            if base_remote not in branches_by_remote:
-                branches_by_remote[base_remote] = set()
-            branches_by_remote[base_remote].add(base_branch)
-    
-    # Add upstream branch if different from base
-    if facts.upstream and facts.upstream != facts.base:
-        upstream_remote, upstream_branch = _split_remote_branch(
-            facts.upstream, facts.remotes
+
+    steps: list[GitStep] = []
+
+    if base_remote is not None:
+        branches = {base_branch} | extras.pop(base_remote, set())
+        steps.append(_step(facts.bare, base_remote, branches))
+
+    if up_remote is not None:
+        # The comment marks this as the upstream step: run_fetches turns a
+        # "couldn't find remote ref" failure here into a note, not an error.
+        steps.append(
+            GitStep(
+                _argv(facts.bare, up_remote, {up_branch}),
+                comment=f"upstream {up_remote}/{up_branch}",
+                mutating=False,
+            )
         )
-        if upstream_remote:
-            if upstream_remote not in branches_by_remote:
-                branches_by_remote[upstream_remote] = set()
-            branches_by_remote[upstream_remote].add(upstream_branch)
-    
-    # Build steps in order of first-seen remote
-    seen_remotes = []
-    steps = []
-    
+
     for remote in facts.remotes:
-        if remote in branches_by_remote and remote not in seen_remotes:
-            seen_remotes.append(remote)
-            branches = sorted(branches_by_remote[remote])
-            
-            argv = ["git", "-C", str(facts.bare), "fetch", remote] + branches
-            steps.append(GitStep(tuple(argv), mutating=False))
-    
+        if remote in extras:
+            steps.append(_step(facts.bare, remote, extras.pop(remote)))
+
     return tuple(steps)
 
 
-def _split_remote_branch(ref: str, remotes: tuple[str, ...]) -> tuple[str, str]:
-    """Split a remote-tracking branch reference.
-    
-    Splits <remote>/<branch> by the longest matching remote name.
-    
-    Args:
-        ref: Remote-tracking reference like "origin/18.0" or "dev/master-phoenix".
-        remotes: Tuple of known remote names.
-    
-    Returns:
-        Tuple of (remote, branch) or ("", "") if no match.
-    """
+def _argv(bare, remote: str, branches: set[str]) -> tuple[str, ...]:
+    argv = ["git", "-C", str(bare), "fetch", remote]
+    for branch in sorted(branches):
+        argv.append(f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}")
+    return tuple(argv)
+
+
+def _step(bare, remote: str, branches: set[str]) -> GitStep:
+    return GitStep(_argv(bare, remote, branches), mutating=False)
+
+
+def _split(ref: str, remotes: tuple[str, ...]) -> tuple[str | None, str | None]:
+    """Split <remote>/<branch> by the longest matching remote name."""
     if "/" not in ref:
-        return ("", "")
-    
-    # Find the longest matching remote
-    longest_remote = ""
+        return (None, None)
+
+    longest = ""
     for remote in remotes:
-        if ref.startswith(remote + "/"):
-            if len(remote) > len(longest_remote):
-                longest_remote = remote
-    
-    if longest_remote:
-        branch = ref[len(longest_remote) + 1 :]
-        return (longest_remote, branch)
-    
-    return ("", "")
+        if ref.startswith(remote + "/") and len(remote) > len(longest):
+            longest = remote
+
+    if not longest:
+        return (None, None)
+    return (longest, ref[len(longest) + 1 :])

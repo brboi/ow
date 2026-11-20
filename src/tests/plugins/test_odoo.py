@@ -6,15 +6,13 @@ import configparser
 import json
 import os
 from pathlib import Path
-from types import MappingProxyType
 
 import pytest
 import tomllib
 
-from ow.core.config import Layer, resolve_settings
-from ow.core.plugins import GeneratedFile, load_plugins
 from ow.core.workspace import Repo, Workspace
 from ow.plugins import odoo
+from tests.conftest import diagnostics_of, files_of, resolved_workspace
 
 # The default `odoo.admin_passwd`.
 _PASSWORD = "Password"
@@ -35,33 +33,6 @@ def _repos(*specs: tuple[str, Path]) -> tuple[Repo, ...]:
     )
 
 
-def _workspace(
-    root: Path,
-    repos: tuple[Repo, ...],
-    overrides: dict[str, object] | None = None,
-) -> Workspace:
-    """A workspace whose settings come from `resolve_settings` over empty layers."""
-    declared = {setting.key: setting for setting in load_plugins().settings()}
-    empty = Workspace(root=root, name=root.name, repos=repos, settings=MappingProxyType({}))
-    values, _ = resolve_settings(
-        declared,
-        Layer(values={}, unknown={}, wrong_type=()),
-        Layer(values=dict(overrides or {}), unknown={}, wrong_type=()),
-        empty,
-    )
-    return Workspace(
-        root=root, name=root.name, repos=repos, settings=MappingProxyType(values)
-    )
-
-
-def _files(result: list) -> list[GeneratedFile]:
-    return [item for item in result if isinstance(item, GeneratedFile)]
-
-
-def _diagnostics(result: list) -> list:
-    return [item for item in result if not isinstance(item, GeneratedFile)]
-
-
 def _core_workspace(
     lab,
     name: str = "myws",
@@ -73,7 +44,7 @@ def _core_workspace(
     root = lab.ws(name)
     core = root / "community"
     _write(core, lab.odoo_files(python=python, with_demo=with_demo))
-    return _workspace(root, _repos(("community", core)), overrides)
+    return resolved_workspace(root, _repos(("community", core)), overrides)
 
 
 def test_odoo_writes_the_four_files_in_order(lab):
@@ -81,7 +52,7 @@ def test_odoo_writes_the_four_files_in_order(lab):
     ws = _core_workspace(lab)
 
     result = odoo.ow_generated_files(ws, lambda hook: [])
-    files = _files(result)
+    files = files_of(result)
 
     assert [f.path.as_posix() for f in files] == [
         "odoorc",
@@ -90,7 +61,7 @@ def test_odoo_writes_the_four_files_in_order(lab):
         "requirements-dev.txt",
     ]
     assert files[0].mode == 0o600
-    assert _diagnostics(result) == []
+    assert diagnostics_of(result) == []
 
 
 def test_odoo_odoorc_holds_the_expected_keys(lab):
@@ -100,7 +71,7 @@ def test_odoo_odoorc_holds_the_expected_keys(lab):
     core = root / "community"
 
     result = odoo.ow_generated_files(ws, lambda hook: [])
-    odoorc = next(f for f in _files(result) if f.path.as_posix() == "odoorc")
+    odoorc = next(f for f in files_of(result) if f.path.as_posix() == "odoorc")
 
     parser = configparser.ConfigParser(interpolation=None)
     parser.read_string(odoorc.data.decode("utf-8"))
@@ -141,7 +112,7 @@ def test_odoo_odoorc_escapes_dbfilter(lab):
     ws = _core_workspace(lab, name="myws", overrides={"odoo.db_name": "a.b"})
 
     result = odoo.ow_generated_files(ws, lambda hook: [])
-    odoorc = next(f for f in _files(result) if f.path.as_posix() == "odoorc")
+    odoorc = next(f for f in files_of(result) if f.path.as_posix() == "odoorc")
 
     parser = configparser.ConfigParser(interpolation=None)
     parser.read_string(odoorc.data.decode("utf-8"))
@@ -154,7 +125,7 @@ def test_odoo_odools_and_pyright_shapes(lab):
     ws = _core_workspace(lab, name="myws")
 
     result = odoo.ow_generated_files(ws, lambda hook: [])
-    files = {f.path.as_posix(): f for f in _files(result)}
+    files = {f.path.as_posix(): f for f in files_of(result)}
 
     odools = tomllib.loads(files["odools.toml"].data.decode("utf-8"))
     assert odools["config"][0]["name"] == "[Odoo Workspace] myws"
@@ -187,10 +158,10 @@ def test_odoo_addons_path_order(lab):
         # Two names for one directory: the walk must not list it twice.
         ("enterprise-again", root / "enterprise"),
     )
-    ws = _workspace(root, repos)
+    ws = resolved_workspace(root, repos)
 
     result = odoo.ow_generated_files(ws, lambda hook: [])
-    odoorc = next(f for f in _files(result) if f.path.as_posix() == "odoorc")
+    odoorc = next(f for f in files_of(result) if f.path.as_posix() == "odoorc")
 
     parser = configparser.ConfigParser(interpolation=None)
     parser.read_string(odoorc.data.decode("utf-8"))
@@ -226,12 +197,28 @@ def test_odoo_debug_args_default_without_demo_core(lab):
     assert contribution.launches[0].args == ("--dev=all", "--without-demo=all")
 
 
+def test_odoo_demo_flag_prefers_with_demo(lab):
+    """A core declaring both demo flags is treated as `--with-demo`."""
+    root = lab.ws("both")
+    files = lab.odoo_files()
+    files["odoo/tools/config.py"] = (
+        'group.add_option("--without-demo", dest="without_demo")\n'
+        'group.add_option("--with-demo", dest="with_demo")\n'
+    )
+    _write(root / "community", files)
+    ws = resolved_workspace(root, _repos(("community", root / "community")))
+
+    contribution = odoo.editors_contribution(ws)
+    assert contribution is not None
+    assert contribution.launches[0].args == ("--dev=all",)
+
+
 def test_odoo_two_cores_one_warning_and_nothing_else(lab):
     """Two cores: one warning, no files, no answers anywhere."""
     root = lab.ws("two")
     _write(root / "community", lab.odoo_files())
     _write(root / "enterprise", lab.odoo_files())
-    ws = _workspace(
+    ws = resolved_workspace(
         root,
         _repos(("community", root / "community"), ("enterprise", root / "enterprise")),
         # An invalid port must not add a second warning while the core is broken.
@@ -255,7 +242,7 @@ def test_odoo_malformed_bound_one_warning_and_nothing_else(lab):
     files = lab.odoo_files()
     del files["odoo/release.py"]
     _write(root / "community", files)
-    ws = _workspace(root, _repos(("community", root / "community")))
+    ws = resolved_workspace(root, _repos(("community", root / "community")))
 
     diagnostics = odoo.ow_diagnostics(ws)
     assert len(diagnostics) == 1
@@ -267,21 +254,68 @@ def test_odoo_malformed_bound_one_warning_and_nothing_else(lab):
     assert odoo.editors_contribution(ws) is None
 
 
-def test_odoo_unreadable_config_one_warning_and_nothing_else(lab):
-    """A config.py without a demo flag: one warning naming that cause."""
+def test_odoo_missing_demo_flag_produces_odoorc(lab):
+    """A config.py without a demo flag is treated as False and generates odoorc."""
     root = lab.ws("nodesc")
     files = lab.odoo_files()
-    files["odoo/tools/config.py"] = "# nothing declares --with-demo here\n"
+    files["odoo/tools/config.py"] = "# no demo flag here\n"
     _write(root / "community", files)
-    ws = _workspace(root, _repos(("community", root / "community")))
+    ws = resolved_workspace(root, _repos(("community", root / "community")))
+
+    diagnostics = odoo.ow_diagnostics(ws)
+    assert diagnostics == []
+
+    result = odoo.ow_generated_files(ws, lambda hook: [])
+    assert len(files_of(result)) == 4
+    assert odoo.editors_contribution(ws) is not None
+
+
+def test_odoo_unparsable_config_warns_and_contributes_nothing(lab):
+    """A config.py that fails to parse warns and blocks every contribution."""
+    root = lab.ws("badconfig")
+    files = lab.odoo_files()
+    files["odoo/tools/config.py"] = "def (\n"
+    _write(root / "community", files)
+    ws = resolved_workspace(root, _repos(("community", root / "community")))
 
     diagnostics = odoo.ow_diagnostics(ws)
     assert len(diagnostics) == 1
-    assert diagnostics[0].level == "warning"
-    assert "--with-demo" in diagnostics[0].text
+    assert "community" in diagnostics[0].text
+    assert "config.py" in diagnostics[0].text
 
     assert odoo.ow_generated_files(ws, lambda hook: []) == []
+    assert odoo.mise_environment(ws) is None
     assert odoo.editors_contribution(ws) is None
+
+
+def test_odoo_postinstall_quotes_paths_for_space(lab):
+    """Postinstall command quotes paths so spaces work."""
+    root = lab.ws("my workspace")
+    _write(root / "community", lab.odoo_files())
+    ws = resolved_workspace(root, _repos(("community", root / "community")))
+
+    answer = odoo.mise_environment(ws)
+    assert answer is not None
+    assert answer.postinstall == (
+        "python -m ensurepip --default-pip && pip install -r \"{{config_root}}/community/requirements.txt\" -r \"{{config_root}}/requirements-dev.txt\"",
+    )
+    assert answer.aliases == {"osh": "odoo-bin shell --no-http -c \"$ODOO_RC\""}
+
+
+def test_odoo_password_with_newline_rejected(lab):
+    """A password with newline in db_password or admin_passwd is rejected."""
+    root = lab.ws("badpass")
+    _write(root / "community", lab.odoo_files())
+    ws = resolved_workspace(
+        root,
+        _repos(("community", root / "community")),
+        overrides={"odoo.db_password": "pass\nword"},
+    )
+
+    diagnostics = odoo.ow_diagnostics(ws)
+    assert len(diagnostics) == 1
+    assert "odoo.db_password" in diagnostics[0].text
+    assert "invalid" in diagnostics[0].text
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
@@ -296,14 +330,14 @@ def test_odoo_unreadable_directory_skipped_silently(lab):
     locked.chmod(0o000)
 
     try:
-        ws = _workspace(
+        ws = resolved_workspace(
             root,
             _repos(("community", root / "community"), ("enterprise", root / "enterprise")),
         )
         result = odoo.ow_generated_files(ws, lambda hook: [])
 
-        assert _diagnostics(result) == []
-        odoorc = next(f for f in _files(result) if f.path.as_posix() == "odoorc")
+        assert diagnostics_of(result) == []
+        odoorc = next(f for f in files_of(result) if f.path.as_posix() == "odoorc")
         parser = configparser.ConfigParser(interpolation=None)
         parser.read_string(odoorc.data.decode("utf-8"))
         assert "locked" not in parser["options"]["addons_path"]
@@ -320,19 +354,19 @@ def test_odoo_addon_path_with_comma_skipped_with_warning(lab):
         root / "enterprise" / "odd,addons" / "my_addon",
         {"__manifest__.py": "{'name': 'My'}"},
     )
-    ws = _workspace(
+    ws = resolved_workspace(
         root,
         _repos(("community", core), ("enterprise", root / "enterprise")),
     )
 
     result = odoo.ow_generated_files(ws, lambda hook: [])
 
-    diagnostics = _diagnostics(result)
+    diagnostics = diagnostics_of(result)
     assert len(diagnostics) == 1
     assert diagnostics[0].level == "warning"
     assert "addons_path" in diagnostics[0].text
 
-    odoorc = next(f for f in _files(result) if f.path.as_posix() == "odoorc")
+    odoorc = next(f for f in files_of(result) if f.path.as_posix() == "odoorc")
     parser = configparser.ConfigParser(interpolation=None)
     parser.read_string(odoorc.data.decode("utf-8"))
     assert "," in parser["options"]["addons_path"]
@@ -365,7 +399,7 @@ def test_odoo_invalid_port_warns_and_falls_back(lab, port):
     assert "odoo.http_port" in diagnostics[0].text
 
     result = odoo.ow_generated_files(ws, lambda hook: [])
-    odoorc = next(f for f in _files(result) if f.path.as_posix() == "odoorc")
+    odoorc = next(f for f in files_of(result) if f.path.as_posix() == "odoorc")
     parser = configparser.ConfigParser(interpolation=None)
     parser.read_string(odoorc.data.decode("utf-8"))
     assert parser["options"]["http_port"] == "8069"
@@ -375,7 +409,7 @@ def test_odoo_no_core_is_silent(lab):
     """Without an Odoo core the plugin says and does nothing at all."""
     root = lab.ws("plain")
     root.mkdir(parents=True)
-    ws = _workspace(root, (), {"odoo.http_port": 0})
+    ws = resolved_workspace(root, (), {"odoo.http_port": 0})
 
     assert odoo.ow_diagnostics(ws) == []
     assert odoo.ow_generated_files(ws, lambda hook: []) == []
@@ -384,7 +418,7 @@ def test_odoo_no_core_is_silent(lab):
 
 
 def test_odoo_mise_environment_answers(lab):
-    """The mise answer carries the core path, range, postinstall and shell alias."""
+    """The mise answer carries the core path, range, postinstall with ensurepip, quoted paths, and quoted alias."""
     ws = _core_workspace(lab)
 
     answer = odoo.mise_environment(ws)
@@ -393,10 +427,9 @@ def test_odoo_mise_environment_answers(lab):
     assert answer.path == ("{{config_root}}/community",)
     assert answer.python == ((3, 10), (3, 12))
     assert answer.postinstall == (
-        "pip install -r {{config_root}}/community/requirements.txt"
-        " -r {{config_root}}/requirements-dev.txt",
+        "python -m ensurepip --default-pip && pip install -r \"{{config_root}}/community/requirements.txt\" -r \"{{config_root}}/requirements-dev.txt\"",
     )
-    assert answer.aliases == {"osh": "odoo-bin shell --no-http -c $ODOO_RC"}
+    assert answer.aliases == {"osh": "odoo-bin shell --no-http -c \"$ODOO_RC\""}
 
 
 def test_odoo_known_repos():

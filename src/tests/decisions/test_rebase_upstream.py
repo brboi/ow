@@ -1,7 +1,7 @@
-"""The rebase upstream step as a pure decision table (§7).
+"""The rebase upstream step as a pure decision table.
 
 `plan_rebase` takes the reads' results as `RebaseInputs`, so every row of the
-flowchart — plus the base step, `--base` and `--autostash` — can be expressed
+guard — plus the base step, `--base` and `--autostash` — can be expressed
 without git or a filesystem.
 """
 
@@ -57,7 +57,7 @@ def _argvs(plan):
 
 
 class TestUpstreamStep:
-    """The three questions of §7, in order."""
+    """The three questions of the guard, in order."""
 
     def test_upstream_already_taken_in_runs_nothing(self):
         """An ancestor of a past branch value is nothing new to take in."""
@@ -93,15 +93,23 @@ class TestUpstreamStep:
         )
         assert plan.steps == ()
 
-    def test_fast_forward_with_new_commits_cherry_picks_the_range(self):
-        """The colleague's commits land on top, named by the SHA they follow."""
+    def test_fast_forward_with_new_commits_fast_forwards_the_range(self):
+        """The colleague's commits land as they are, named by the SHA they follow."""
         plan = _plan(
             inputs=RebaseInputs(
                 last_taken=TAKEN, last_taken_fast_forward=True, new_upstream_commits=2
             )
         )
         assert _argvs(plan) == [
-            ("git", "-C", str(WORKTREE), "cherry-pick", "--empty=drop", f"{TAKEN}..{UPSTREAM}")
+            (
+                "git",
+                "-C",
+                str(WORKTREE),
+                "cherry-pick",
+                "--ff",
+                "--empty=drop",
+                f"{TAKEN}..{UPSTREAM}",
+            )
         ]
         step = plan.steps[0]
         assert step.comment == f"{TAKEN[:10]} = {UPSTREAM} as this branch last took it in"
@@ -118,15 +126,29 @@ class TestUpstreamStep:
         ]
 
     def test_no_usable_reflog_falls_back_to_fork_point(self):
-        """No upstream reflog entry is contained in a past branch value."""
-        plan = _plan(inputs=RebaseInputs(upstream_values=(), last_taken=None))
+        """No upstream reflog entry has all its patches in HEAD."""
+        plan = _plan(inputs=RebaseInputs(last_taken=None))
+        assert _argvs(plan) == [
+            ("git", "-C", str(WORKTREE), "rebase", "--fork-point", UPSTREAM)
+        ]
+
+    def test_a_merge_in_the_range_falls_back_to_fork_point(self):
+        """A cherry-pick cannot replay a merge, so the fork-point path runs instead."""
+        plan = _plan(
+            inputs=RebaseInputs(
+                last_taken=TAKEN,
+                last_taken_fast_forward=True,
+                new_upstream_commits=2,
+                has_merge_in_range=True,
+            )
+        )
         assert _argvs(plan) == [
             ("git", "-C", str(WORKTREE), "rebase", "--fork-point", UPSTREAM)
         ]
 
 
 class TestBaseStep:
-    """`rebase <base>`, only when the base is not an ancestor of HEAD."""
+    """`rebase <base>`, unless the branch holds the base, or the upstream lands it."""
 
     def test_runs_when_the_base_is_not_an_ancestor(self):
         plan = _plan(
@@ -138,6 +160,40 @@ class TestBaseStep:
         plan = _plan(inputs=RebaseInputs(upstream_in_branch_past=True, base_is_ancestor=True))
         assert plan.steps == ()
 
+    def test_is_skipped_when_the_upstream_step_lands_the_base(self):
+        """The base is an ancestor of the upstream, so the step onto it brings it in."""
+        plan = _plan(
+            inputs=RebaseInputs(
+                base_is_ancestor=False,
+                base_in_upstream=True,
+                last_taken=TAKEN,
+                last_taken_fast_forward=True,
+                new_upstream_commits=2,
+            )
+        )
+        assert _argvs(plan) == [
+            (
+                "git",
+                "-C",
+                str(WORKTREE),
+                "cherry-pick",
+                "--ff",
+                "--empty=drop",
+                f"{TAKEN}..{UPSTREAM}",
+            )
+        ]
+
+    def test_is_kept_when_no_upstream_step_lands_the_base(self):
+        """An upstream already taken in leaves the base its own step."""
+        plan = _plan(
+            inputs=RebaseInputs(
+                upstream_in_branch_past=True,
+                base_is_ancestor=False,
+                base_in_upstream=True,
+            )
+        )
+        assert _argvs(plan) == [("git", "-C", str(WORKTREE), "rebase", BASE)]
+
     def test_a_detached_head_runs_only_the_base_step(self):
         """Detached: no upstream step, the base step against the default base."""
         plan = _plan(
@@ -145,17 +201,6 @@ class TestBaseStep:
             inputs=RebaseInputs(base_is_ancestor=False),
         )
         assert _argvs(plan) == [("git", "-C", str(WORKTREE), "rebase", BASE)]
-
-    def test_a_detached_head_without_a_base_is_refused(self):
-        plan = _plan(
-            facts=_facts(
-                branch=None, upstream=None, head=None, base=None,
-                default_base=None, explicit_base=None,
-            ),
-            inputs=RebaseInputs(base_is_ancestor=False),
-        )
-        assert plan.steps == ()
-        assert plan.refusal == "no default base; run `ow init`"
 
 
 class TestBaseReplacement:
@@ -172,6 +217,18 @@ class TestBaseReplacement:
         """The re-run after a successful `--base` falls back to the plain base step."""
         plan = _plan(new_base=BASE)
         assert plan.steps == ()
+
+    def test_a_new_base_already_in_head_only_records_it(self):
+        """A re-run must not replay the new base's own history onto itself."""
+        plan = _plan(
+            inputs=RebaseInputs(
+                upstream_in_branch_past=True, new_base_is_ancestor=True
+            ),
+            new_base="origin/18.1",
+        )
+        assert _argvs(plan) == [
+            ("git", "-C", str(WORKTREE), "config", f"branch.{BRANCH}.ow-base", "origin/18.1"),
+        ]
 
     def test_a_detached_head_rebases_but_records_no_base(self):
         plan = _plan(
@@ -199,7 +256,15 @@ class TestAutostash:
         )
         assert _argvs(plan) == [
             ("git", "-C", str(WORKTREE), "stash", "push", "-m", AUTOSTASH_MESSAGE),
-            ("git", "-C", str(WORKTREE), "cherry-pick", "--empty=drop", f"{TAKEN}..{UPSTREAM}"),
+            (
+                "git",
+                "-C",
+                str(WORKTREE),
+                "cherry-pick",
+                "--ff",
+                "--empty=drop",
+                f"{TAKEN}..{UPSTREAM}",
+            ),
             ("git", "-C", str(WORKTREE), "stash", "pop"),
         ]
         # The stash is not a branch move: it must not trigger the post-batch refresh.
@@ -217,5 +282,13 @@ class TestAutostash:
     def test_adds_nothing_without_a_modification(self):
         plan = _plan(inputs=self._cherry_pick_inputs(), autostash=True)
         assert _argvs(plan) == [
-            ("git", "-C", str(WORKTREE), "cherry-pick", "--empty=drop", f"{TAKEN}..{UPSTREAM}")
+            (
+                "git",
+                "-C",
+                str(WORKTREE),
+                "cherry-pick",
+                "--ff",
+                "--empty=drop",
+                f"{TAKEN}..{UPSTREAM}",
+            )
         ]

@@ -1,39 +1,18 @@
-"""`ow prune` — machine-wide cleanup: stale worktree references, orphan branches, dead index
-entries (§7).
-
-One batch spans the whole machine, so one prompt covers everything. Per bare repo of
-`repos_dir()`, the plan holds what that bare needs; the plan's repo names are bare names,
-not workspace repos, so the batch displays with `root=None` and every path prints
-absolutely or `~`-relative. Each prunable worktree is listed before the plan with the
-§7 hint, as its own line:
-
-    # ~/ws/voip/community: prunable (moved a workspace? run `ow init` there first)
-
-An orphan branch — a local branch checked out in no worktree, where a prunable
-worktree's branch still counts as checked out — goes with `branch -D` when pushed, and
-otherwise stays, listed as `# <bare>: kept unpushed branch <b>`. A dead index entry (a
-path that no longer holds `.ow/config.toml`) is forgotten as a workspace-level step,
-shown as `ow forget <path>`. Nothing to do prints nothing and asks nothing.
-"""
+"""`ow prune`: machine-wide cleanup of stale worktrees, orphan branches and dead index entries."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ow import term
 from ow.core import git, index
 from ow.core.paths import repos_dir
-from ow.core.plan import Batch, GitStep, OwStep, RepoPlan, run_batch
-from ow.recipes.removal import branch_is_pushed
-
-if TYPE_CHECKING:
-    from ow.core.plugins import Plugins
+from ow.core.plan import Batch, GitStep, OwStep, RepoPlan, Step, run_batch
+from ow.recipes.removal import branch_removal
 
 
-def run(plugins: "Plugins", *, dry_run: bool, yes: bool) -> int:
-    """Survey every bare and the index, then run the one machine-wide batch (§7)."""
-    _ = plugins  # prune runs no plugin hook: the core spec gives it none
+def run(*, dry_run: bool, yes: bool) -> int:
+    """Survey every bare and the index, then run the one machine-wide batch."""
     plans: list[RepoPlan] = []
     for bare in _bares():
         plan, hints = _survey(bare)
@@ -43,16 +22,13 @@ def run(plugins: "Plugins", *, dry_run: bool, yes: bool) -> int:
             plans.append(plan)
     after = tuple(
         OwStep(
-            shown=git.show(("ow", "forget", str(path))),
+            shown=f"# drop {_display(path)} from the index",
             run=lambda entry=path: index.remove(entry),
         )
         for path in _dead_entries()
     )
     outcome = run_batch(
-        Batch(root=None, repos=tuple(plans), after=after),
-        prompt=True,
-        dry_run=dry_run,
-        yes=yes,
+        Batch(root=None, repos=tuple(plans), after=after), prompt=True, dry_run=dry_run, yes=yes
     )
     return outcome.exit_code
 
@@ -73,30 +49,36 @@ def _bares() -> tuple[Path, ...]:
 
 
 def _survey(bare: Path) -> tuple[RepoPlan | None, tuple[str, ...]]:
-    """What `bare` needs (§7), plus one hint line per prunable worktree."""
+    """What `bare` needs, plus one hint line per prunable worktree."""
     prunable, checked_out = _worktrees(bare)
     hints = tuple(
         f"# {_display(path)}: prunable (moved a workspace? run `ow init` there first)"
         for path in prunable
     )
-    steps: list[GitStep] = []
+    steps: list[Step] = []
     if prunable:
         steps.append(GitStep(("git", "-C", str(bare), "worktree", "prune")))
     notes: list[str] = []
+    head_branch = _head_branch(bare)
     for branch in _local_branches(bare):
-        if branch in checked_out:
+        if branch in checked_out or branch == head_branch:
             continue
-        if branch_is_pushed(bare, branch):
-            steps.append(GitStep(("git", "-C", str(bare), "branch", "-D", branch)))
-        else:
-            notes.append(f"kept unpushed branch {branch}")
+        branch_steps, branch_notes = branch_removal(bare, branch)
+        steps.extend(branch_steps)
+        notes.extend(branch_notes)
     if not steps and not notes:
         return None, hints
     return RepoPlan(repo=bare.stem, steps=tuple(steps), notes=tuple(notes)), hints
 
 
+def _head_branch(bare: Path) -> str | None:
+    """The branch the bare's HEAD points at, or None when it is detached."""
+    result = git.run(["git", "-C", str(bare), "symbolic-ref", "--quiet", "--short", "HEAD"])
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def _worktrees(bare: Path) -> tuple[tuple[Path, ...], frozenset[str]]:
-    """(prunable worktree paths, checked-out branches) from one porcelain listing (§7).
+    """(prunable worktree paths, checked-out branches) from one porcelain listing.
 
     A prunable worktree's branch still counts as checked out: the listing is read before
     anything runs, so the branch pass sees the repo as it is, not as prune will make it.
@@ -132,21 +114,22 @@ def _worktrees(bare: Path) -> tuple[tuple[Path, ...], frozenset[str]]:
 
 
 def _local_branches(bare: Path) -> tuple[str, ...]:
-    """The bare's local branches, in git's order: plumbing, so no colour can reach a name."""
+    """The bare's local branch names, without the `refs/heads/` prefix.
+
+    `lstrip=2`, not `short`: a tag named like a branch would make `short` print
+    `heads/<b>`, a name no ref answers to.
+    """
     output = git.read(
-        ["git", "-C", str(bare), "for-each-ref", "--format=%(refname:short)", "refs/heads/"]
+        ["git", "-C", str(bare), "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"]
     )
     return tuple(line.strip() for line in output.split("\n") if line.strip())
 
 
 def _dead_entries() -> tuple[Path, ...]:
-    """The index entries whose path no longer holds `.ow/config.toml` (§7)."""
+    """The index entries whose path no longer holds `.ow/config.toml`."""
     return tuple(path for path in index.read() if not (path / ".ow" / "config.toml").exists())
 
 
 def _display(path: Path) -> str:
-    """`~/…` under `$HOME`, else absolute: a note, not a command line, so no quoting."""
-    try:
-        return "~/" + str(path.relative_to(Path.home()))
-    except ValueError:
-        return str(path)
+    """The path as the git lines print it: `~/…` under `$HOME`, else absolute."""
+    return git.show(("git", "-C", str(path))).removeprefix("git -C ")

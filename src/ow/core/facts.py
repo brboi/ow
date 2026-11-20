@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,7 +96,6 @@ def gather_facts(location) -> RepoFacts:
     explicit_base = location.explicit_base
     problem = location.problem
     
-    # If there's a problem, return minimal facts without git calls
     if problem:
         return RepoFacts(
             name=name,
@@ -116,18 +114,13 @@ def gather_facts(location) -> RepoFacts:
             untracked=(),
             problem=problem,
         )
-    
-    # Read git status --porcelain=v2 --branch
+
     status_output = git.read(
         ["git", "-C", str(path), "status", "--porcelain=v2", "--branch"],
         check=True,
     )
-    
-    # Parse branch headers
     branch = None
     head = None
-    upstream = None
-    upstream_ab = None
     
     for line in status_output.split("\n"):
         if line.startswith("# branch.oid "):
@@ -139,16 +132,7 @@ def gather_facts(location) -> RepoFacts:
             if branch_name != "(detached)":
                 branch = branch_name
             else:
-                # Detached HEAD
                 branch = None
-        elif line.startswith("# branch.upstream "):
-            upstream = line[18:].strip()
-        elif line.startswith("# branch.ab "):
-            ab_part = line[12:].strip()
-            # Format: +A -B
-            match = re.match(r"\+(\d+)\s+-(\d+)", ab_part)
-            if match:
-                upstream_ab = (int(match.group(1)), int(match.group(2)))
     
     # Parse file entries. Each porcelain-v2 record is space-separated up to
     # its path, which is the last field and may itself contain spaces.
@@ -173,13 +157,12 @@ def gather_facts(location) -> RepoFacts:
         elif kind == "?":  # ? <path>
             untracked.append(_unquote(line[2:]))
 
-    # Read remotes from the bare repo (the worktree itself has none)
+    # The worktree has no remotes of its own; they live in the bare.
     remotes_output = git.read(["git", "-C", str(bare), "remote"], check=True)
     remotes = tuple(remotes_output.split("\n")) if remotes_output else ()
-    
-    # Check for operations in progress
+    upstream = _upstream(path, branch) if branch is not None else None
+    upstream_ab = _upstream_ab(path, upstream) if upstream is not None else None
     operation = operation_in_progress(path)
-    
     return RepoFacts(
         name=name,
         path=path,
@@ -199,15 +182,38 @@ def gather_facts(location) -> RepoFacts:
     )
 
 
-def gather_all(locations: Sequence) -> tuple[RepoFacts, ...]:
-    """Gather facts for multiple repositories in parallel.
-    
-    Args:
-        locations: Sequence of RepoLocation objects.
-    
-    Returns:
-        Tuple of RepoFacts, one per location.
+def _upstream(path: Path, branch: str) -> str | None:
+    """`<remote>/<branch>` from the branch's config, or None when it tracks no remote branch.
+
+    ow writes `branch.<b>.remote` and `merge` itself: without a refspec, `git status`
+    reports no upstream, so the config is the one source. One `git config` read covers both.
     """
+    result = git.run(["git", "-C", str(path), "config", "--get-regexp", r"^branch\."])
+    prefix = f"branch.{branch}."
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key.startswith(prefix):
+            values[key[len(prefix):]] = value
+    remote = values.get("remote")
+    merge = values.get("merge", "")
+    if not remote or remote == "." or not merge.startswith("refs/heads/"):
+        return None
+    return f"{remote}/{merge[len('refs/heads/'):]}"
+
+
+def _upstream_ab(path: Path, upstream: str) -> tuple[int, int] | None:
+    """HEAD's (ahead, behind) against `refs/remotes/<upstream>`; None when that ref is missing."""
+    spec = f"HEAD...refs/remotes/{upstream}"
+    result = git.run(["git", "-C", str(path), "rev-list", "--left-right", "--count", spec])
+    if result.returncode != 0:
+        return None
+    ahead, behind = result.stdout.split()
+    return int(ahead), int(behind)
+
+
+def gather_all(locations: Sequence) -> tuple[RepoFacts, ...]:
+    """Gather facts for multiple repositories in parallel."""
     with ThreadPoolExecutor() as executor:
         results = executor.map(gather_facts, locations)
     

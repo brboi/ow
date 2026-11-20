@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from ow.core.plugins import GeneratedFile, hookimpl
-from ow.specs.editors import EditorsSpec, merge as merge_editors
+from ow.specs.editors import EditorsSpec, json_text, merge as merge_editors
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
@@ -30,11 +29,6 @@ _SEARCH_EXCLUDE_GLOBS: dict[str, bool] = {
     "**/.settings": True,
     "**/.venv": True,
 }
-
-
-def json_text(value: object) -> str:
-    """Serialize to JSON with stable indentation and trailing newline."""
-    return json.dumps(value, ensure_ascii=False, indent=2) + "\n"
 
 
 @hookimpl

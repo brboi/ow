@@ -1,39 +1,94 @@
-"""Decision table for the §7 "pushed" rule: a branch tip contained in some refs/remotes/*.
-
-Pure: `contains` is injected, so the table needs no git.
-"""
+"""The pushed rule and the branch-removal step, against a real bare."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from ow.recipes.removal import is_pushed
+from ow.errors import Refused
+from ow.recipes.removal import branch_is_pushed, branch_removal
+from tests.conftest import git, git_ok
 
 
-def _contains(pairs):
-    """A `contains` built from explicit (ancestor, descendant) pairs; equality included."""
-    edges = set(pairs)
-    return lambda ancestor, descendant: (ancestor, descendant) in edges
+def _bare(tmp_path: Path) -> Path:
+    """A bare that has fetched `origin/master`, so a branch at it is pushed."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(tmp_path, "init", "-q", str(origin))
+    (origin / "a.txt").write_text("a\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-qm", "one")
+    git(origin, "branch", "-M", "master")
+
+    bare = tmp_path / "bare.git"
+    git(tmp_path, "init", "-q", "--bare", str(bare))
+    git(bare, "remote", "add", "origin", str(origin))
+    git(bare, "fetch", "-q", "origin", "master")
+    return bare
 
 
-@pytest.mark.parametrize(
-    "tip,remote_tips,pairs,expected",
-    [
-        # Equal to the only remote tip: a branch just created from its base.
-        ("T", ["T"], [("T", "T")], True),
-        # An ancestor of the only remote tip.
-        ("T", ["R"], [("T", "R")], True),
-        # An ancestor of none: the containment runs the other way, so the
-        # argument order is part of what this row pins down.
-        ("T", ["R"], [("R", "T")], False),
-        # Multiple remote tips: contained in the second.
-        ("T", ["R1", "R2"], [("T", "R2")], True),
-        # Multiple remote tips: contained in none of them.
-        ("T", ["R1", "R2"], [("R1", "R2"), ("R2", "R1")], False),
-        # No remote tip at all: refusing to delete is the safe direction.
-        ("T", [], [("T", "T")], False),
-    ],
-)
-def test_is_pushed_table(tip, remote_tips, pairs, expected):
-    """The §7 rule over the injected `contains`: some remote tip contains the branch tip."""
-    assert is_pushed(tip, remote_tips, _contains(pairs)) is expected
+def _unpushed(bare: Path, branch: str) -> str:
+    """Create `branch` at a commit no ref but itself reaches; return its SHA."""
+    tree = git(bare, "rev-parse", "origin/master^{tree}")
+    sha = git(bare, "commit-tree", tree, "-m", "local only")
+    git(bare, "branch", branch, sha)
+    return sha
+
+
+def test_a_branch_at_a_remote_tip_is_pushed(tmp_path):
+    bare = _bare(tmp_path)
+    git(bare, "branch", "pushed", "origin/master")
+    assert branch_is_pushed(bare, "pushed") is True
+
+
+def test_a_branch_no_remote_reaches_is_not_pushed(tmp_path):
+    bare = _bare(tmp_path)
+    _unpushed(bare, "kept")
+    assert branch_is_pushed(bare, "kept") is False
+
+
+def test_a_branch_that_does_not_resolve_is_not_pushed(tmp_path):
+    assert branch_is_pushed(_bare(tmp_path), "nope") is False
+
+
+def test_branch_removal_keeps_an_unpushed_branch_and_names_the_delete_command(tmp_path):
+    bare = _bare(tmp_path)
+    sha = _unpushed(bare, "kept")
+
+    steps, notes = branch_removal(bare, "kept")
+
+    assert steps == ()
+    assert len(notes) == 1
+    assert notes[0].startswith("kept unpushed branch kept; delete it with `git -C ")
+    assert notes[0].endswith("branch -D kept`")
+    assert git(bare, "rev-parse", "refs/heads/kept") == sha
+
+
+def test_branch_removal_deletes_a_pushed_branch(tmp_path):
+    bare = _bare(tmp_path)
+    git(bare, "branch", "pushed", "origin/master")
+
+    steps, notes = branch_removal(bare, "pushed")
+
+    assert notes == ()
+    assert len(steps) == 1
+    assert steps[0].shown.endswith("branch -D pushed")
+    steps[0].run()
+    assert not git_ok(bare, "rev-parse", "--verify", "--quiet", "refs/heads/pushed")
+
+
+def test_branch_removal_refuses_when_the_tip_moved_after_planning(tmp_path):
+    bare = _bare(tmp_path)
+    git(bare, "branch", "pushed", "origin/master")
+    steps, _ = branch_removal(bare, "pushed")
+
+    # A commit lands on the branch while the prompt is open.
+    moved = _unpushed(bare, "other")
+    git(bare, "update-ref", "refs/heads/pushed", moved)
+
+    with pytest.raises(Refused):
+        steps[0].run()
+
+    # The new tip is still there: nothing was deleted.
+    assert git(bare, "rev-parse", "refs/heads/pushed") == moved

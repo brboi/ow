@@ -1,11 +1,11 @@
-"""`ow fetch` — the shared fetch, then the `status` table (§7).
+"""Run the shared fetch, then the status table.
 
-Every fetch line prints first, in workspace order, before any of them runs (P6); the
-repos are then fetched in parallel and the failures are reported in workspace order.
-The table is gathered *after* the fetch, so it shows the remote-tracking refs the fetch
-just moved. A repo with nothing to fetch (no base and no upstream, or a broken
-worktree) contributes no line. A failure shows git's stderr and gives exit code 1, and
-the other repos go on.
+Prints all fetch lines first, in workspace repo order, before any of them runs.
+The repos are then fetched in parallel and the failures are reported in workspace
+order. The table is gathered after the fetch, so it shows the remote-tracking
+refs the fetch just moved. A repo with nothing to fetch (no base and no upstream,
+or a broken worktree) contributes no line. A failure shows git's stdout and
+stderr and gives exit code 1, and the other repos go on.
 
 `--only` limits both the fetches and the table to the named repos.
 """
@@ -39,7 +39,7 @@ def run(session: Session, *, only: Sequence[str]) -> int:
         for facts in gather_all(locations)
         if (steps := fetch_steps(facts))
     }
-    failures = run_fetches(steps_by_repo, root)
+    failures = run_fetches(steps_by_repo, root, hint=None)
 
     print_table(session, gather_all(locations))
     return 1 if any(failure is not None for failure in failures.values()) else 0

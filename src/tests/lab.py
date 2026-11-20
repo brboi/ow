@@ -1,14 +1,45 @@
 """Lab fixture for creating test repositories and workspaces."""
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
+from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from ow.cli import build_app
 from ow.core.plugins import load_plugins
+
+
+def git(path: Path, *args: str) -> str:
+    """Run `git -C <path> <args>`, failing loudly, and return its stripped stdout."""
+    result = subprocess.run(
+        ["git", "-C", str(path), *args], check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+
+def git_ok(path: Path, *args: str) -> bool:
+    """Whether `git -C <path> <args>` succeeds; a failure is a state under test."""
+    return subprocess.run(["git", "-C", str(path), *args], capture_output=True).returncode == 0
+
+
+def file_url(path: Path) -> str:
+    """The `file://` URL of a local repo, as `ow repo add` takes it."""
+    return f"file://{path}"
+
+
+def _write_files(root: Path, files: dict[str, str | bytes]) -> None:
+    """Materialise `files` (relative path -> content) under `root`."""
+    for file_path, content in files.items():
+        full_path = root / file_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            full_path.write_bytes(content)
+        else:
+            full_path.write_text(content)
 
 
 class Collaborator:
@@ -19,63 +50,26 @@ class Collaborator:
         self.path = path
 
     def commit(self, files: dict[str, str | bytes], message: str = "Test commit", branch: str | None = None) -> str:
-        """Commit files to the repository."""
+        """Commit files to the repository; returns the new HEAD's sha."""
         if branch:
-            subprocess.run(["git", "-C", str(self.path), "checkout", "-b", branch], check=True)
-        
-        for file_path, content in files.items():
-            full_path = self.path / file_path
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(content, bytes):
-                full_path.write_bytes(content)
-            else:
-                full_path.write_text(content)
-            subprocess.run(["git", "-C", str(self.path), "add", file_path], check=True)
-        
-        subprocess.run(
-            ["git", "-C", str(self.path), "commit", "-m", message],
-            check=True,
-            capture_output=True,
-        )
-        
-        result = subprocess.run(
-            ["git", "-C", str(self.path), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout.strip()
+            git(self.path, "checkout", "-b", branch)
+        _write_files(self.path, files)
+        git(self.path, "add", *files)
+        git(self.path, "commit", "-m", message)
+        return git(self.path, "rev-parse", "HEAD")
 
     def push(self, branch: str) -> None:
         """Push a branch to the remote."""
-        subprocess.run(
-            ["git", "-C", str(self.path), "push", "origin", branch],
-            check=True,
-            capture_output=True,
-        )
+        git(self.path, "push", "origin", branch)
 
     def force_push(self, branch: str, onto: str) -> None:
         """Force push a branch after resetting it."""
-        subprocess.run(
-            ["git", "-C", str(self.path), "reset", "--hard", onto],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.path), "push", "--force", "origin", branch],
-            check=True,
-            capture_output=True,
-        )
+        git(self.path, "reset", "--hard", onto)
+        git(self.path, "push", "--force", "origin", branch)
 
     def git(self, *args: str) -> str:
-        """Run git command and return stdout."""
-        result = subprocess.run(
-            ["git", "-C", str(self.path), *args],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout.strip()
+        """Run git command in the clone and return stdout."""
+        return git(self.path, *args)
 
 
 class Lab:
@@ -90,16 +84,17 @@ class Lab:
         ow(...): Run ow CLI via CliRunner.
         git(path, ...): Run git command at path.
         sha(path, ref): Get SHA of a git ref.
-        ws(name): Get workspace path (~/<name>).
+        ws(name): Get workspace path (~/ws/<name>).
     """
 
-    def __init__(self, root: Path, monkeypatch: Any):
+    def __init__(self, root: Path, monkeypatch: MonkeyPatch):
         """Initialize lab with root path and monkeypatch."""
         self.root = root / "lab"
         self.root.mkdir(parents=True, exist_ok=True)
         self.home = root / "home"
         self._tmp_root = root  # Store tmp_path root for remotes
-        self.monkeypatch = monkeypatch
+        self._monkeypatch = monkeypatch
+
     def remote(
         self,
         name: str,
@@ -110,90 +105,36 @@ class Lab:
         remotes_dir = self._tmp_root / "remotes"
         remotes_dir.mkdir(parents=True, exist_ok=True)
         bare_path = remotes_dir / f"{name}.git"
-        
-        # Initialize bare repository
-        subprocess.run(["git", "init", "--bare", str(bare_path)], check=True, capture_output=True)
-        
-        # Configure uploadpack options
-        subprocess.run(
-            ["git", "-C", str(bare_path), "config", "uploadpack.allowFilter", "true"],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(bare_path), "config", "uploadpack.allowAnySHA1InWant", "true"],
-            check=True,
-            capture_output=True,
-        )
-        
-        # Create branches with commits if provided
-        if branches:
-            # Create a temporary clone to add commits
-            temp_path = self.root / f"temp_{name}"
-            subprocess.run(["git", "clone", str(bare_path), str(temp_path)], check=True, capture_output=True)
-            
-            # Create root commit
-            root_commit_file = temp_path / ".root"
-            root_commit_file.write_text("root")
-            subprocess.run(["git", "-C", str(temp_path), "add", ".root"], check=True, capture_output=True)
-            subprocess.run(
-                ["git", "-C", str(temp_path), "commit", "-m", "Initial commit"],
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(temp_path), "push", "-u", "origin", "master"],
-                check=True,
-                capture_output=True,
-            )
-            
-            # Create branches
-            for branch_name, files in branches.items():
-                if branch_name != "master":
-                    subprocess.run(
-                        ["git", "-C", str(temp_path), "checkout", "-b", branch_name],
-                        check=True,
-                        capture_output=True,
-                    )
-                else:
-                    subprocess.run(
-                        ["git", "-C", str(temp_path), "checkout", branch_name],
-                        check=True,
-                        capture_output=True,
-                    )
-                
-                # Add files
-                for file_path, content in files.items():
-                    full_path = temp_path / file_path
-                    full_path.parent.mkdir(parents=True, exist_ok=True)
-                    if isinstance(content, bytes):
-                        full_path.write_bytes(content)
-                    else:
-                        full_path.write_text(content)
-                    subprocess.run(["git", "-C", str(temp_path), "add", file_path], check=True, capture_output=True)
-                
-                subprocess.run(
-                    ["git", "-C", str(temp_path), "commit", "-m", f"Add files for {branch_name}"],
-                    check=True,
-                    capture_output=True,
-                )
-                subprocess.run(
-                    ["git", "-C", str(temp_path), "push", "-u", "origin", branch_name],
-                    check=True,
-                    capture_output=True,
-                )
-            
-            # Set HEAD to specified branch
-            subprocess.run(
-                ["git", "-C", str(bare_path), "symbolic-ref", "HEAD", f"refs/heads/{head}"],
-                check=True,
-                capture_output=True,
-            )
-            
-            # Clean up temp clone
-            import shutil
-            shutil.rmtree(temp_path)
-        
+
+        git(remotes_dir, "init", "--bare", str(bare_path))
+        git(bare_path, "config", "uploadpack.allowFilter", "true")
+        git(bare_path, "config", "uploadpack.allowAnySHA1InWant", "true")
+
+        if not branches:
+            return bare_path
+
+        # A temporary clone adds the commits the bare is fed with.
+        temp_path = self.root / f"temp_{name}"
+        git(remotes_dir, "clone", str(bare_path), str(temp_path))
+
+        (temp_path / ".root").write_text("root")
+        git(temp_path, "add", ".root")
+        git(temp_path, "commit", "-m", "Initial commit")
+        git(temp_path, "push", "-u", "origin", "master")
+
+        for branch_name, files in branches.items():
+            if branch_name == "master":
+                git(temp_path, "checkout", branch_name)
+            else:
+                git(temp_path, "checkout", "-b", branch_name)
+            _write_files(temp_path, files)
+            git(temp_path, "add", *files)
+            git(temp_path, "commit", "-m", f"Add files for {branch_name}")
+            git(temp_path, "push", "-u", "origin", branch_name)
+
+        git(bare_path, "symbolic-ref", "HEAD", f"refs/heads/{head}")
+
+        shutil.rmtree(temp_path)
         return bare_path
 
     def odoo_files(
@@ -241,47 +182,27 @@ class Lab:
     def collaborator(self, name: str, of: Path) -> Collaborator:
         """Create a working clone of a remote repository."""
         collab_dir = self.root / "collab" / name
-        subprocess.run(["git", "clone", str(of), str(collab_dir)], check=True, capture_output=True)
+        git(self.root, "clone", str(of), str(collab_dir))
         return Collaborator(collab_dir)
 
     def ow(self, *args: str, input: str | None = None, cwd: Path | None = None) -> Any:
-        """Run ow CLI command."""
+        """Run ow CLI command; `cwd` is the directory the command sees."""
         runner = CliRunner()
         app = build_app(load_plugins())
-        
-        original_cwd = None
-        if cwd:
-            original_cwd = Path.cwd()
-            import os
-            os.chdir(cwd)
-        
-        try:
+        if cwd is None:
             return runner.invoke(app, list(args), input=input, catch_exceptions=False)
-        finally:
-            if original_cwd:
-                import os
-                os.chdir(original_cwd)
+        with self._monkeypatch.context() as patch:
+            patch.chdir(cwd)
+            return runner.invoke(app, list(args), input=input, catch_exceptions=False)
 
     def git(self, path: Path, *args: str) -> str:
         """Run git command at given path."""
-        result = subprocess.run(
-            ["git", "-C", str(path), *args],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout.strip()
+        return git(path, *args)
 
     def sha(self, path: Path, ref: str) -> str:
         """Get SHA of a git ref."""
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", ref],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout.strip()
+        return git(path, "rev-parse", ref)
 
     def ws(self, name: str) -> Path:
-        """Get workspace path."""
+        """Get workspace path (~/ws/<name>)."""
         return self.home / "ws" / name

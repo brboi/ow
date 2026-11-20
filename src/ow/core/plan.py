@@ -1,16 +1,20 @@
+"""Plan execution: print steps, run them, report outcomes."""
+
 from __future__ import annotations
 
 import re
-import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from ow.core import git
+from ow.core import facts, git
 from ow.errors import OwError, UsageError
 from ow import term
 from ow.term import error, out, warn
+
+_FORCED_UPDATE = re.compile(r"->\s*(\S+)\s+\(forced update\)")
+
 
 @dataclass(frozen=True)
 class GitStep:
@@ -19,6 +23,7 @@ class GitStep:
     argv: tuple[str, ...]
     comment: str | None = None
     mutating: bool = True
+    live: bool = False
 
 
 @dataclass(frozen=True)
@@ -61,307 +66,222 @@ class Outcome:
     refused: tuple[str, ...]
     mutated: bool
     exit_code: int
+    after_failed: bool = False
 
 
 def show(step: Step, root: Path | None = None) -> str:
-    """Display a step for user consumption.
-    
-    Args:
-        step: GitStep or OwStep to display.
-        root: Display base for worktree paths.
-    
-    Returns:
-        String representation of the step.
-    """
+    """Display a step for user consumption."""
     if isinstance(step, GitStep):
         return git.show(step.argv, root)
-    else:
-        return step.shown
+    return step.shown
 
 
-def _err_lines(text: str) -> None:
-    """Report git's (possibly multi-line) stderr one prefixed line at a time."""
-    for line in text.strip().splitlines():
+def _print_steps(steps: Sequence[Step], root: Path | None = None) -> None:
+    """Print each step, with its comment line when it has one."""
+    for step in steps:
+        if isinstance(step, GitStep) and step.comment:
+            out(f"# {step.comment}")
+        out(show(step, root))
+
+
+def _err_lines(stderr: str, stdout: str = "") -> None:
+    """Report git's stdout plainly, then its stderr as error lines."""
+    for line in stdout.strip().splitlines():
+        out(line)
+    for line in stderr.strip().splitlines():
         error(line)
 
 
-def run_batch(
-    batch: Batch, *, prompt: bool, dry_run: bool, yes: bool
-) -> Outcome:
-    """Execute a batch of repository plans.
-    
-    Args:
-        batch: Batch to execute.
-        prompt: Whether to prompt before execution.
-        dry_run: Whether to perform a dry run.
-        yes: Whether to automatically confirm.
-    
-    Returns:
-        Outcome with results.
-    """
-    # Print refusals and notes first
+def _report_failure(repo: str | None, step_shown: str, stderr: str, stdout: str) -> None:
+    """Print a failed step's command line, git output and auth hint."""
+    if repo is None:
+        error(step_shown)
+    else:
+        error(f"{repo}: {step_shown}")
+    _err_lines(stderr, stdout)
+    hint = git.auth_hint(stderr)
+    if hint:
+        warn(hint)
+
+
+def _conflict_tail(step: GitStep, root: Path | None) -> bool:
+    """Print labelled continue/abort lines; True when an operation is running."""
+    if len(step.argv) < 3 or step.argv[1] != "-C":
+        return False
+    git_dir = Path(step.argv[2])
+    try:
+        operation = facts.operation_in_progress(git_dir)
+    except (OSError, git.GitFailed):
+        return False
+    if operation is None or operation == "bisect":
+        return False
+    out("# resolve the conflict, then:")
+    out(git.show(["git", "-C", str(git_dir), operation, "--continue"], root))
+    out("# or give up:")
+    out(git.show(["git", "-C", str(git_dir), operation, "--abort"], root))
+    return True
+
+
+def run_batch(batch: Batch, *, prompt: bool, dry_run: bool, yes: bool) -> Outcome:
+    """Execute a batch of repository plans."""
     for repo_plan in batch.repos:
         if repo_plan.refusal:
             out(f"# {repo_plan.repo}: {repo_plan.refusal}")
         for note in repo_plan.notes:
             out(f"# {repo_plan.repo}: {note}")
-    
-    # Build list of all non-refusal steps with their comments
-    plan_steps = []
-    for repo_plan in batch.repos:
-        if repo_plan.refusal:
-            continue
-        for step in repo_plan.steps:
-            plan_steps.append((repo_plan.repo, step))
-    
-    # Check if there are any steps to execute
-    has_executable_steps = bool(plan_steps) or bool(batch.after)
-    
+
+    refused = tuple(rp.repo for rp in batch.repos if rp.refusal)
+    plan_steps = [
+        (repo_plan.repo, step)
+        for repo_plan in batch.repos
+        if not repo_plan.refusal
+        for step in repo_plan.steps
+    ]
+
     if prompt:
-        # Print the whole plan upfront
-        for repo_name, step in plan_steps:
-            if isinstance(step, GitStep) and step.comment:
-                out(f"# {step.comment}")
-            out(show(step, batch.root))
-        
-        # Print after steps
-        for step in batch.after:
-            if isinstance(step, GitStep) and step.comment:
-                out(f"# {step.comment}")
-            out(show(step, batch.root))
-        
-        # Handle prompting
-        if not has_executable_steps:
-            # No steps to run: return immediately
-            refused = tuple(rp.repo for rp in batch.repos if rp.refusal)
-            return Outcome(ok=(), failed=(), refused=refused, mutated=False, exit_code=1 if refused else 0)
-        
+        _print_steps([step for _, step in plan_steps], batch.root)
+        _print_steps(batch.after, batch.root)
+
+        if not plan_steps and not batch.after:
+            return Outcome((), (), refused, False, 1 if refused else 0)
         if dry_run:
-            refused = tuple(rp.repo for rp in batch.repos if rp.refusal)
-            return Outcome(ok=(), failed=(), refused=refused, mutated=False, exit_code=1 if refused else 0)
-        
+            return Outcome((), (), refused, False, 1 if refused else 0)
         if not yes and not term.interactive():
             raise UsageError("no terminal to confirm; re-run with -y")
-
         if not yes and not term.confirm("Proceed?"):
             raise UsageError("aborted")
-    else:
-        # prompt=False
-        if dry_run:
-            # Print the whole plan and return
-            for repo_name, step in plan_steps:
-                if isinstance(step, GitStep) and step.comment:
-                    out(f"# {step.comment}")
-                out(show(step, batch.root))
-            
-            # Print after steps
-            for step in batch.after:
-                if isinstance(step, GitStep) and step.comment:
-                    out(f"# {step.comment}")
-                out(show(step, batch.root))
-            
-            refused = tuple(rp.repo for rp in batch.repos if rp.refusal)
-            return Outcome(ok=(), failed=(), refused=refused, mutated=False, exit_code=1 if refused else 0)
-    
-    # Execute steps
-    ok = []
-    failed = []
+    elif dry_run:
+        _print_steps([step for _, step in plan_steps], batch.root)
+        _print_steps(batch.after, batch.root)
+        return Outcome((), (), refused, False, 1 if refused else 0)
+
+    ok: list[str] = []
+    failed: list[str] = []
     mutated = False
-    
+
     for repo_plan in batch.repos:
         if repo_plan.refusal:
             continue
-        
+
         repo_ok = True
-        for step in repo_plan.steps:
+        for i, step in enumerate(repo_plan.steps):
             step_shown = show(step, batch.root)
-            # With a prompt the plan was printed whole before the prompt; an
-            # additive command prints each line just before it runs (§13).
+            # Without a prompt there is no upfront plan; each line prints
+            # just before it runs.
             if not prompt:
-                if isinstance(step, GitStep) and step.comment:
-                    out(f"# {step.comment}")
-                out(step_shown)
+                _print_steps((step,), batch.root)
 
             if isinstance(step, GitStep):
-                # Run the git step
-                result = git.run(step.argv)
-                
+                result = git.run(step.argv, live=step.live)
                 if result.returncode != 0:
-                    error(f"{repo_plan.repo}: {step_shown}")
-                    _err_lines(result.stderr)
-                    # Detect operation in progress in the failed step's directory
-                    git_dir = None
-                    if len(step.argv) > 2 and step.argv[1] == "-C":
-                        git_dir = Path(step.argv[2])
-                    
-                    if git_dir:
-                        try:
-                            # Get git paths for various operations
-                            paths_result = git.run([
-                                "git", "-C", str(git_dir), "rev-parse",
-                                "--git-path", "rebase-merge",
-                                "--git-path", "rebase-apply",
-                                "--git-path", "CHERRY_PICK_HEAD",
-                                "--git-path", "MERGE_HEAD",
-                                "--git-path", "REVERT_HEAD",
-                            ])
-                            
-                            if paths_result.returncode == 0:
-                                git_paths = paths_result.stdout.rstrip("\n").split("\n")
-                                
-                                # Find which operation is in progress and print continuation/abort commands
-                                for git_path_str in git_paths:
-                                    git_path = Path(git_path_str)
-                                    if not git_path.is_absolute():
-                                        git_path = git_dir / git_path
-                                    
-                                    if git_path.exists():
-                                        # Determine the operation type and print commands
-                                        if "rebase-merge" in git_path_str or "rebase-apply" in git_path_str:
-                                            out(git.show(["git", "-C", str(git_dir), "rebase", "--continue"], batch.root))
-                                            out(git.show(["git", "-C", str(git_dir), "rebase", "--abort"], batch.root))
-                                        elif "CHERRY_PICK_HEAD" in git_path_str:
-                                            out(git.show(["git", "-C", str(git_dir), "cherry-pick", "--continue"], batch.root))
-                                            out(git.show(["git", "-C", str(git_dir), "cherry-pick", "--abort"], batch.root))
-                                        elif "MERGE_HEAD" in git_path_str:
-                                            out(git.show(["git", "-C", str(git_dir), "merge", "--continue"], batch.root))
-                                            out(git.show(["git", "-C", str(git_dir), "merge", "--abort"], batch.root))
-                                        elif "REVERT_HEAD" in git_path_str:
-                                            out(git.show(["git", "-C", str(git_dir), "revert", "--continue"], batch.root))
-                                            out(git.show(["git", "-C", str(git_dir), "revert", "--abort"], batch.root))
-                                        break  # Print only the first found operation
-                        except (OSError, git.GitFailed):
-                            pass  # Ignore detection failures
-                    
-                    # Print remaining steps of the repo
-                    step_idx = repo_plan.steps.index(step)
-                    for remaining_step in repo_plan.steps[step_idx + 1:]:
-                        if isinstance(remaining_step, GitStep) and remaining_step.comment:
-                            out(f"# {remaining_step.comment}")
-                        out(show(remaining_step, batch.root))
-                    
+                    _report_failure(repo_plan.repo, step_shown, result.stderr, result.stdout)
+                    remaining = repo_plan.steps[i + 1 :]
+                    if _conflict_tail(step, batch.root) and remaining:
+                        out("# then:")
+                    if remaining:
+                        _print_steps(remaining, batch.root)
                     repo_ok = False
                     break
-                
                 if step.mutating:
                     mutated = True
             else:
-                # OwStep
                 try:
                     step.run()
                     if step.mutating:
                         mutated = True
                 except (OSError, OwError) as e:
-                    error(f"{repo_plan.repo}: {step_shown}")
-                    _err_lines(str(e))
+                    _report_failure(repo_plan.repo, step_shown, str(e))
                     repo_ok = False
                     break
-        
-        if repo_ok:
-            ok.append(repo_plan.repo)
-        else:
-            failed.append(repo_plan.repo)
-    
-    # Execute after steps (only if no repo failed)
-    if not failed:
+
+        (ok if repo_ok else failed).append(repo_plan.repo)
+
+    after_failed = False
+    if failed:
+        if batch.after:
+            out("# not run:")
+            _print_steps(batch.after, batch.root)
+    else:
         for step in batch.after:
             step_shown = show(step, batch.root)
             if not prompt:
-                if isinstance(step, GitStep) and step.comment:
-                    out(f"# {step.comment}")
-                out(step_shown)
+                _print_steps((step,), batch.root)
 
             if isinstance(step, GitStep):
-                # Run the git step
-                result = git.run(step.argv)
-                
+                result = git.run(step.argv, live=step.live)
                 if result.returncode != 0:
-                    error(step_shown)
-                    _err_lines(result.stderr)
-                    # Mark the after step as failed and stop processing
-                    failed.append("<after>")
+                    _report_failure(None, step_shown, result.stderr, result.stdout)
+                    after_failed = True
                     break
-                
                 if step.mutating:
                     mutated = True
             else:
-                # OwStep
                 try:
                     step.run()
                     if step.mutating:
                         mutated = True
                 except (OSError, OwError) as e:
-                    error(step_shown)
-                    _err_lines(str(e))
-                    # Mark the after step as failed and stop processing
-                    failed.append("<after>")
+                    _report_failure(None, step_shown, str(e))
+                    after_failed = True
                     break
-    
-    # Build outcome
-    refused = tuple(rp.repo for rp in batch.repos if rp.refusal)
-    ok_tuple = tuple(ok)
-    failed_tuple = tuple(failed)
-    exit_code = 1 if (failed_tuple or refused) else 0
-    
-    return Outcome(ok=ok_tuple, failed=failed_tuple, refused=refused, mutated=mutated, exit_code=exit_code)
+
+    exit_code = 1 if (failed or refused or after_failed) else 0
+    return Outcome(tuple(ok), tuple(failed), refused, mutated, exit_code, after_failed)
 
 
 def run_fetches(
-    steps_by_repo: Mapping[str, Sequence[GitStep]], root: Path | None = None
+    steps_by_repo: Mapping[str, Sequence[GitStep]],
+    root: Path | None = None,
+    *,
+    hint: str | None = "pass --no-fetch to work on cached refs",
 ) -> dict[str, git.GitFailed | None]:
     """Run fetch steps for multiple repositories in parallel.
-    
-    Args:
-        steps_by_repo: Mapping of repo name to fetch steps.
-        root: Display base for worktree paths.
-    
-    Returns:
-        Dict mapping repo name to GitFailed exception or None if successful.
+
+    All fetch lines print first, then the repos are fetched in parallel and
+    reported in the same order. Force-pushed refs and deleted upstreams are
+    reported as notes; other failures print git's output and, once, the hint.
     """
-    # Print all lines first
     for repo_name in steps_by_repo:
         for step in steps_by_repo[repo_name]:
             out(show(step, root))
-    
-    # Run fetches in parallel, maintaining order
+
     repo_names = list(steps_by_repo.keys())
     with ThreadPoolExecutor() as executor:
-        # Use map to preserve order
-        results_list = list(executor.map(
-            lambda repo: _run_fetch_steps(repo, steps_by_repo[repo]),
-            repo_names
-        ))
-    
-    results = dict(zip(repo_names, results_list))
-    
-    # Report failures in order
+        results = list(
+            executor.map(lambda repo: _run_fetch_steps(repo, steps_by_repo[repo]), repo_names)
+        )
+
     has_failures = False
-    for repo in repo_names:
-        if results[repo] is not None:
+    for repo, (failure, notes) in zip(repo_names, results):
+        for note in notes:
+            out(note)
+        if failure is not None:
             has_failures = True
-            git_failed = results[repo]
-            error(f"{repo}: {git.show(git_failed.argv, root)}")
-            _err_lines(git_failed.stderr)
-    # Print hint once if there were failures
-    if has_failures:
-        warn("pass --no-fetch to work on cached refs")
-    
-    return results
+            _report_failure(repo, git.show(failure.argv, root), failure.stderr, failure.stdout)
+    if has_failures and hint:
+        warn(hint)
+
+    return {repo: failure for repo, (failure, _) in zip(repo_names, results)}
 
 
-def _run_fetch_steps(repo: str, steps: Sequence[GitStep]) -> git.GitFailed | None:
-    """Run fetch steps for a single repo.
-    
-    Args:
-        repo: Repository name.
-        steps: Sequence of fetch steps to run.
-    
-    Returns:
-        GitFailed exception if any step failed, None otherwise.
-    """
+def _run_fetch_steps(repo: str, steps: Sequence[GitStep]) -> tuple[git.GitFailed | None, tuple[str, ...]]:
+    """Run one repo's fetch steps; returns (failure, notes)."""
+    notes: list[str] = []
     for step in steps:
-        result = git.run(step.argv)
+        result = git.run(step.argv, live=step.live)
+        stderr = result.stderr or ""
         if result.returncode != 0:
-            return git.GitFailed(step.argv, result.returncode, result.stderr)
-    
-    return None
+            if (
+                step.comment is not None
+                and step.comment.startswith("upstream ")
+                and "couldn't find remote ref" in stderr
+            ):
+                ref = step.comment[len("upstream ") :]
+                notes.append(f"# {repo}: upstream {ref} is gone; `git branch --unset-upstream`")
+                continue
+            return git.GitFailed(step.argv, result.returncode, stderr, result.stdout or ""), tuple(notes)
+        for line in stderr.splitlines():
+            match = _FORCED_UPDATE.search(line)
+            if match:
+                notes.append(f"# {repo}: {match.group(1)} was force-pushed")
+    return None, tuple(notes)
