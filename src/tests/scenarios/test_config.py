@@ -48,6 +48,7 @@ LISTING = [
     "vscode.enabled = true (default) # Enable or disable the vscode plugin",
     "zed.enabled = true (default) # Enable or disable the zed plugin",
     "local.enabled = true (default) # Enable or disable the local plugin",
+    "retarget.enabled = false (default) # Enable or disable the retarget plugin",
 ]
 
 # The same listing outside a workspace: no workspace, so no callable default
@@ -76,6 +77,7 @@ LISTING_OUTSIDE = [
     "vscode.enabled = true (default) # Enable or disable the vscode plugin",
     "zed.enabled = true (default) # Enable or disable the zed plugin",
     "local.enabled = true (default) # Enable or disable the local plugin",
+    "retarget.enabled = false (default) # Enable or disable the retarget plugin",
 ]
 
 
