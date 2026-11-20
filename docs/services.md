@@ -1,14 +1,12 @@
 # Services
 
-This is a copy-paste Docker Compose recipe for a local PostgreSQL + pgvector + Mailpit stack, providing a database for Odoo and an SMTP server for outgoing email testing. This is entirely optional: Odoo works with any PostgreSQL installation and any SMTP provider.
+Odoo needs PostgreSQL, and Mailpit catches outgoing email while you test. This page is a copy-paste Docker Compose stack for both, and how to point a workspace at it. It is optional: Odoo works with any PostgreSQL installation and any SMTP provider, and ow never reads, writes or deletes the compose file or its volumes.
 
-## Docker Compose Stack
+## The stack
 
-Save this as `compose.yml` in your workspace root or anywhere you like:
+Save this as `compose.yml`, in a workspace or anywhere else:
 
 ```yaml
-version: '3.8'
-
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -39,43 +37,69 @@ volumes:
   mailpit_data:
 ```
 
-Run it once to start the services:
+- `pgvector/pgvector:pg17` is PostgreSQL 17 with the pgvector extension. It listens on `localhost:5432`.
+- Mailpit serves its web UI on `http://localhost:8025` and SMTP on `localhost:1025`.
+
+Start it from the directory holding the file:
 
 ```sh
-docker compose -f <file> up -d
+docker compose up -d
 ```
 
-The database listens on `localhost:5432`. Mailpit's web UI is at `http://localhost:8025`, and its SMTP server on `localhost:1025`.
+## Point a workspace at the stack
 
-## Connecting Odoo to the Stack
-
-In your ow configuration, point Odoo to the database:
+The stack creates a database named `odoo`. `odoo.db_name` defaults to the workspace name, so the two disagree. From the workspace, either use the database the stack made:
 
 ```sh
-ow config set odoo.db_host localhost
-ow config set odoo.db_user odoo
-ow config set odoo.db_password odoo
+ow config set odoo.db_name odoo
 ```
 
-To opt in to mail via Mailpit:
+or, from the compose project directory, create one named after the workspace and keep the default:
+
+```sh
+docker compose exec postgres createdb -U odoo <workspace>
+```
+
+`odoo.db_host`, `odoo.db_user` and `odoo.db_password` already default to `localhost`, `odoo` and `odoo`, so they need no change.
+
+## Mail through Mailpit
+
+`odoorc` already carries `smtp_server` and `smtp_port` from the settings. Point the port at Mailpit:
 
 ```sh
 ow config set --global odoo.smtp_port 1025
 ```
 
-Then configure Odoo's SMTP server via the Settings > General > Discuss section as usual, pointing at `localhost:1025` with no auth required.
+## COMPOSE_FILE
 
-## COMPOSE_FILE Tip
-
-If you're running the stack in a fixed location, you can tell compose to use it automatically by setting an environment variable in your global mise configuration. Add to `~/.config/mise/config.toml`:
+Keep the stack in a fixed place and tell compose about it once, in your global mise config at `~/.config/mise/config.toml`:
 
 ```toml
 [env]
 COMPOSE_FILE = "/path/to/compose.yml"
 ```
 
-Then `docker compose` commands work from anywhere and always use that file. If you move workspaces around, use `-f` to specify the file explicitly instead.
+`docker compose` then works from anywhere. If you move workspaces around, pass `-f <file>` instead.
 
-## Your Compose File is Yours
+## Coming from ow 2
 
-If you had an existing `~/.config/ow/services/compose.yml` from ow 2, it is now your file to keep. The `volumes/` directory holds your database. ow 3 never manages these: they are entirely in your control.
+ow 2 kept its compose file at `$XDG_CONFIG_HOME/ow/services/compose.yml` and its data in `$XDG_DATA_HOME/ow/volumes/` (`postgres-data/`, `mailpit-data/`), with a database named `postgres`. ow 3 never reads, writes or deletes any of it: the file and the data are yours.
+
+The stack above uses named volumes and a database named `odoo`, so it starts with an empty database and never sees the old data. To reuse it, bind-mount the old directories instead:
+
+```yaml
+    volumes:
+      - "${XDG_DATA_HOME:-$HOME/.local/share}/ow/volumes/postgres-data:/var/lib/postgresql/data"
+      - "${XDG_DATA_HOME:-$HOME/.local/share}/ow/volumes/mailpit-data:/data"
+```
+
+and point Odoo at the old database:
+
+```sh
+ow config set odoo.db_name postgres
+```
+
+## See also
+
+- [Configuration](configuration.md) — the `odoo.*` settings, their defaults and their layers.
+- [Migrating to 3.0](migrating-to-3.0.md) — what to do with an ow 2 compose file and its volumes.
