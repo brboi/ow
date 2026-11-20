@@ -132,6 +132,10 @@ A dry run or a declined prompt does not refresh.
 - A plugin `error` diagnostic blocks the whole refresh: nothing is written and the command exits 1.
 - A generated path that is absolute, escapes the workspace, or targets `.ow/config.toml` or the lock aborts the command, naming the plugin.
 
+## Outside the workspace
+
+A worktree's `.git` points into its bare repo under `$XDG_DATA_HOME/ow/repos`, and with `mise.shared_venv = true` (the default) `odools.toml`, the editor settings and `ow run` point at `$XDG_DATA_HOME/ow/venvs`. A sandbox around a workspace must mount both, besides the workspace itself, or git and the Python tooling fail inside it. Set `mise.shared_venv = false` to use a local `.venv/` instead.
+
 ## See also
 
 - [Configuration](configuration.md) — the settings behind these files.

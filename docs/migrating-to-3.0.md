@@ -39,8 +39,8 @@ These 2.x keys are unknown to ow 3, so commands warn about them until you remove
 
 ### Never delete
 
-- `$XDG_CONFIG_HOME/ow/services/compose.yml` — yours to manage.
-- `$XDG_DATA_HOME/ow/volumes/` — holds your databases. See [Services](services.md).
+- `$XDG_CONFIG_HOME/ow/services/compose.yml` — yours to manage; ow 3 no longer ships or reads a compose stack.
+- `$XDG_DATA_HOME/ow/volumes/` — holds your databases (`postgres-data/`, `mailpit-data/`, database `postgres`). To keep using them, bind-mount those directories in your own compose file and run `ow config set odoo.db_name postgres`.
 - `$XDG_CONFIG_HOME/ow/local/` — copy-once seed source for `.local/`.
 
 ## Commands that changed
@@ -59,8 +59,8 @@ These 2.x keys are unknown to ow 3, so commands warn about them until you remove
 
 - `OW_WORKSPACE` is gone; ow walks up to `.ow/config.toml` or takes `-w/--workspace`.
 - Templates (`[templates]`, `[vars]`) are gone; see [Generated files](files.md).
-- `COMPOSE_FILE` is no longer set by ow; configure it in `~/.config/mise/config.toml` if needed (see [Services](services.md)).
-- Sandbox recipes live in [Sandboxing AI assistants](sandboxing.md) (mount `$XDG_DATA_HOME/ow/venvs` when `mise.shared_venv = true`).
+- `COMPOSE_FILE` is no longer set by ow; set it yourself (e.g. in `~/.config/mise/config.toml`) if needed.
+- Sandboxes must mount the bare repos and shared venvs; see [Generated files](files.md#outside-the-workspace).
 
 ## Requirements
 

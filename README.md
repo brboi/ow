@@ -83,6 +83,4 @@ ow prune                        # clean up stale state and merged/closed-PR work
 - [Commands](docs/commands.md) — every command, specs, flags, `--json` contract, exit codes and confirmation rules
 - [Configuration](docs/configuration.md) — settings, precedence, and `ow config`
 - [Generated files](docs/files.md) — the fixed outputs, ownership, file states and the refresh model
-- [Services](docs/services.md) — the postgres + pgvector + mailpit compose stack
 - [Migrating to 3.0](docs/migrating-to-3.0.md) — what changed since ow 2 and what to delete
-- [Sandboxing AI Coding Assistants](docs/sandboxing.md) — bwrap recipe for AI assistants with repo access

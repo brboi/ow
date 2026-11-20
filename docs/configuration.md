@@ -148,4 +148,3 @@ warning: dropped future.x = 1
 
 - [Commands](commands.md) — every command with its flags and exit codes.
 - [Generated files](files.md) — what settings produce, and how ownership works.
-- [Services](services.md) — the optional postgres + pgvector + mailpit stack these ports point at.
