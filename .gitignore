@@ -1,7 +1,6 @@
 # Hidden files
 /.*
 !.github
-!.vscode
 
 # Python
 *.egg-info
@@ -9,6 +8,3 @@ __pycache__
 
 # OW version
 src/ow/_version.py
-
-# OW local
-mise.local.toml
