@@ -38,10 +38,12 @@ def test_mise_fragment_parses_with_a_stub_answer(lab):
         ws,
         _answers(
             MiseEnvironment(
-                env={"ODOO_RC": "{{config_root}}/odoorc"},
-                path=("{{config_root}}/community",),
+                env={"FOO": "bar"},
+                env_paths={"ODOO_RC": "odoorc"},
+                path=("community",),
                 python=((3, 10), (3, 12)),
-                postinstall=("pip install -r {{config_root}}/odoorc.txt",),
+                requirements=("community/requirements.txt", "requirements-dev.txt"),
+                postinstall=("echo done",),
                 aliases={"osh": "odoo-bin shell --no-http -c $ODOO_RC"},
             )
         ),
@@ -50,15 +52,19 @@ def test_mise_fragment_parses_with_a_stub_answer(lab):
     assert diagnostics_of(result) == []
     fragment = _fragment(result)
     assert fragment["tools"]["python"] == "3.11"
+    assert fragment["env"]["FOO"] == "bar"
     assert fragment["env"]["ODOO_RC"] == "{{config_root}}/odoorc"
     assert fragment["env"]["_"]["path"] == ["{{config_root}}/community"]
     assert fragment["env"]["_"]["python"]["venv"] == {"path": ".venv", "create": True}
-    assert fragment["hooks"]["postinstall"] == "pip install -r {{config_root}}/odoorc.txt"
+    assert fragment["hooks"]["postinstall"] == (
+        "python -m ensurepip --default-pip && pip install "
+        '-r "{{config_root}}/community/requirements.txt" -r "{{config_root}}/requirements-dev.txt"'
+        " && echo done"
+    )
     assert fragment["shell_alias"] == {
         "osh": "odoo-bin shell --no-http -c $ODOO_RC"
     }
     assert "alias" not in fragment
-    assert "tasks" not in fragment
 
 
 def test_mise_clamps_explicit_python_into_range(lab):

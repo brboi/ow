@@ -30,7 +30,7 @@ def fetch_then_gather(
     Raises UsageError outside a workspace; `facts == ()` when `--only` selects nothing.
     """
     if session.workspace is None:
-        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow add`")
+        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
 
     locations = tuple(
         location for location in session.locations if not only or location.name in only

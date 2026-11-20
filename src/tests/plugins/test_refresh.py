@@ -49,7 +49,6 @@ def plugin(
     `GeneratedFile`/`Diagnostic`; `refreshed` is called with the `owned` tuple.
     """
     mod = types.ModuleType(name)
-    mod.HOOKSPECS = ()
 
     if diagnostics:
         @hookimpl

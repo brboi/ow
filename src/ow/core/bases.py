@@ -5,16 +5,30 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 
-from ow.core.git import run as git_run
+from ow.core.git import remotes_of, run as git_run
 from ow.errors import UsageError
 
 _SHA = re.compile(r"[0-9a-f]{7,40}")
+GENERIC_BASE_BRANCHES = frozenset({"main", "master"})
 
 
 class BaseError(UsageError):
     """An error in base branch parsing or validation."""
 
     exit_code = 2
+
+
+def split_base(ref: str, remotes: Callable[[str], bool]) -> tuple[str, str]:
+    """Split `ref` into `(remote, branch)` at its longest known remote prefix.
+
+    A ref with no known remote prefix is a branch on `origin`.
+    """
+    parts = ref.split("/")
+    for n in range(len(parts) - 1, 0, -1):
+        remote = "/".join(parts[:n])
+        if remotes(remote):
+            return remote, "/".join(parts[n:])
+    return "origin", ref
 
 
 def parse_base(ref: str, remotes: Callable[[str], bool] | None = None) -> str:
@@ -41,21 +55,10 @@ def parse_base(ref: str, remotes: Callable[[str], bool] | None = None) -> str:
     if _SHA.fullmatch(ref):
         raise BaseError(f"base cannot be a SHA: {ref}")
 
-    parts = ref.split("/")
-    prefix_len = 0
-    for n in range(len(parts) - 1, 0, -1):
-        if remotes("/".join(parts[:n])):
-            prefix_len = n
-            break
-
-    if prefix_len:
-        branch = "/".join(parts[prefix_len:])
-        qualified = ref
-    elif explicit_remotes:
+    remote, branch = split_base(ref, remotes)
+    if branch == ref and explicit_remotes:
         raise BaseError(f"unknown remote in base: refs/remotes/{ref}")
-    else:
-        branch = ref
-        qualified = f"origin/{ref}"
+    qualified = f"{remote}/{branch}"
 
     if (
         branch.startswith("-")
@@ -65,6 +68,23 @@ def parse_base(ref: str, remotes: Callable[[str], bool] | None = None) -> str:
         raise BaseError(f"invalid branch name: {branch}")
 
     return qualified
+
+
+def parse_base_for(value: str, name: str) -> str:
+    """`parse_base` a value, with `name`'s bare remotes as the known set."""
+    remotes = set(remotes_of(name)) or {"origin"}
+    return parse_base(value, lambda segment: segment in remotes)
+
+
+def is_base_branch_name(branch: str, base: str | None = None) -> bool:
+    """Whether `branch` is a generic base name (`main`/`master`) or matches `base`."""
+    if branch in GENERIC_BASE_BRANCHES:
+        return True
+    if base:
+        base_branch = base.split("/", 1)[-1]
+        if branch == base_branch:
+            return True
+    return False
 
 
 def is_upstream_base(upstream: str | None, base: str | None) -> bool:

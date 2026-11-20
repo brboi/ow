@@ -13,6 +13,13 @@ from ow.errors import Refused
 from ow.recipes import preflight
 
 DIRTY_HINT = "commit, stash or discard, then re-run"
+PR_REFS = "refs/ow/pr"
+
+
+def pr_ref_of(identity: str) -> str | None:
+    """The `refs/ow/pr/<num>` ref fetched for a recorded PR identity (`<owner>/<repo>#<num>`), or None."""
+    _, sep, num = identity.rpartition("#")
+    return f"{PR_REFS}/{num}" if sep and num.isdigit() else None
 
 
 def orphan_commits(bare: Path, head: str) -> int:
@@ -31,7 +38,7 @@ def branch_is_pushed(bare: Path, branch: str) -> bool:
     result = git.run(
         [
             "git", "-C", str(bare), "for-each-ref", "--count=1",
-            "--contains", f"refs/heads/{branch}", "refs/remotes", "refs/ow/pr",
+            "--contains", f"refs/heads/{branch}", "refs/remotes", PR_REFS,
         ]
     )
     return result.returncode == 0 and bool(result.stdout.strip())
@@ -59,11 +66,9 @@ def branch_removal(bare: Path, branch: str) -> tuple[tuple[Step, ...], tuple[str
         if result.returncode != 0:
             raise git.GitFailed(argv, result.returncode, result.stderr, result.stdout)
         # Clean up any PR fetch ref associated with this branch.
-        if ow_pr and "#" in ow_pr:
-            num = ow_pr.rpartition("#")[2]
-            if num.isdigit():
-                git.run(("git", "-C", str(bare), "update-ref", "-d", f"refs/ow/pr/{num}"))
-        git.run(("git", "-C", str(bare), "update-ref", "-d", f"refs/ow/pr/{branch}"))
+        if ow_pr and (pr_ref := pr_ref_of(ow_pr)) is not None:
+            git.run(("git", "-C", str(bare), "update-ref", "-d", pr_ref))
+        git.run(("git", "-C", str(bare), "update-ref", "-d", f"{PR_REFS}/{branch}"))
 
     return (OwStep(shown=delete_line, run=delete),), ()
 

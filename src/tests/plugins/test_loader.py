@@ -10,7 +10,6 @@ from pathlib import Path, PurePosixPath
 from typing import Mapping
 
 import pytest
-import typer
 from ow.core.plugins import (
     Diagnostic,
     GeneratedFile,
@@ -22,7 +21,7 @@ from ow.core.plugins import (
     load_plugins,
 )
 from ow.specs.editors import DebugLaunch, EditorContribution, merge as merge_editors
-from ow.specs.python_env import PythonEnvironment as MiseEnvironment, PythonEnvSpec as MiseSpec, merge as merge_mise
+from ow.specs.python_env import PythonEnvironment as MiseEnvironment, merge as merge_mise
 
 
 @dataclass(frozen=True)
@@ -58,8 +57,6 @@ def test_load_plugins_basic():
 
     plugin_a.ow_settings = ow_settings
     plugin_b.ow_settings = ow_settings_b
-    plugin_a.HOOKSPECS = ()
-    plugin_b.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
     assert plugins.names == ("a", "b")
@@ -76,7 +73,6 @@ def test_plugins_settings_includes_enabled_and_plugin_settings():
         ]
 
     plugin_a.ow_settings = ow_settings
-    plugin_a.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a),))
     settings = plugins.settings()
@@ -119,11 +115,9 @@ def test_plugins_call_respects_tuple_order():
 
     plugin_a.ow_settings = ow_settings
     plugin_a.ow_diagnostics = ow_diagnostics
-    plugin_a.HOOKSPECS = ()
 
     plugin_b.ow_settings = ow_settings_b
     plugin_b.ow_diagnostics = ow_diagnostics_b
-    plugin_b.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
     fake_ws = FakeWorkspace(root=Path("/tmp"), settings={})
@@ -163,11 +157,9 @@ def test_plugins_call_skips_disabled_plugin():
 
     plugin_a.ow_settings = ow_settings
     plugin_a.ow_diagnostics = ow_diagnostics
-    plugin_a.HOOKSPECS = ()
 
     plugin_b.ow_settings = ow_settings_b
     plugin_b.ow_diagnostics = ow_diagnostics_b
-    plugin_b.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
 
@@ -179,6 +171,40 @@ def test_plugins_call_skips_disabled_plugin():
     # Only a should be in results
     assert len(results) == 1
     assert results[0][0] == "a"
+
+
+def test_plugins_first_returns_first_answer_and_stops():
+    """first() returns the first non-None answer in plugin order and never runs later plugins."""
+    calls: list[str] = []
+    modules = []
+    for name, answer in (("a", None), ("b", "from b"), ("c", "from c")):
+        module = types.ModuleType(f"plugin_{name}")
+
+        @hookimpl
+        def ow_settings():
+            return []
+
+        @hookimpl
+        def ow_stack_name(ws, _name=name, _answer=answer):
+            calls.append(_name)
+            return _answer
+
+        module.ow_settings = ow_settings
+        module.ow_stack_name = ow_stack_name
+        modules.append((name, module))
+
+    plugins = load_plugins(builtins=tuple(modules))
+    fake_ws = FakeWorkspace(root=Path("/tmp"), settings={})
+
+    assert plugins.first("ow_stack_name", ws=fake_ws) == "from b"
+    assert calls == ["a", "b"]
+
+    disabled_ws = FakeWorkspace(root=Path("/tmp"), settings={"b.enabled": False})
+    calls.clear()
+    assert plugins.first("ow_stack_name", ws=disabled_ws) == "from c"
+    assert calls == ["a", "c"]
+
+    assert plugins.first("nonexistent_hook") is None
 
 
 def test_plugins_settings_lists_every_plugin_in_order():
@@ -197,10 +223,8 @@ def test_plugins_settings_lists_every_plugin_in_order():
     ow_settings_b.__name__ = "ow_settings"
 
     plugin_a.ow_settings = ow_settings
-    plugin_a.HOOKSPECS = ()
 
     plugin_b.ow_settings = ow_settings_b
-    plugin_b.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
 
@@ -221,7 +245,6 @@ def test_plugins_call_raises_plugin_error_on_exception():
 
     plugin_a.ow_settings = ow_settings
     plugin_a.ow_diagnostics = ow_diagnostics
-    plugin_a.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a),))
     fake_ws = FakeWorkspace(root=Path("/tmp"), settings={})
@@ -265,11 +288,9 @@ def test_plugins_call_reraises_existing_plugin_error():
 
     plugin_a.ow_settings = ow_settings
     plugin_a.ow_diagnostics = ow_diagnostics
-    plugin_a.HOOKSPECS = ()
 
     plugin_b.ow_settings = ow_settings_b
     plugin_b.ow_diagnostics = ow_diagnostics_b
-    plugin_b.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
     fake_ws = FakeWorkspace(root=Path("/tmp"), settings={})
@@ -296,7 +317,6 @@ def test_plugins_answers_returns_callable():
 
     plugin_a.ow_settings = ow_settings
     plugin_a.python_environment = python_environment
-    plugin_a.HOOKSPECS = (MiseSpec,)
 
     plugins = load_plugins(builtins=(("a", plugin_a),))
     fake_ws = FakeWorkspace(root=Path("/tmp"), settings={})
@@ -336,11 +356,9 @@ def test_plugins_answers_skips_disabled_plugin():
 
     plugin_a.ow_settings = ow_settings
     plugin_a.python_environment = python_environment_a
-    plugin_a.HOOKSPECS = (MiseSpec,)
 
     plugin_b.ow_settings = ow_settings_b
     plugin_b.python_environment = python_environment_b
-    plugin_b.HOOKSPECS = (MiseSpec,)
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
     fake_ws = FakeWorkspace(root=Path("/tmp"), settings={"b.enabled": False})
@@ -351,114 +369,6 @@ def test_plugins_answers_skips_disabled_plugin():
     # Should skip disabled plugin b
     assert len(results) == 1
     assert results[0].env == {"FROM": "a"}
-
-def test_plugins_add_commands_creates_subapps():
-    """Test that add_commands() creates and registers subapps for plugins."""
-    plugin_a = types.ModuleType("plugin_a")
-
-    @hookimpl
-    def ow_settings():
-        return []
-
-    @hookimpl
-    def ow_commands(app):
-        @app.command()
-        def hello():
-            """Say hello."""
-            typer.echo("Hello")
-
-    plugin_a.ow_settings = ow_settings
-    plugin_a.ow_commands = ow_commands
-    plugin_a.HOOKSPECS = ()
-
-    plugins = load_plugins(builtins=(("a", plugin_a),))
-    root_app = typer.Typer()
-    plugins.add_commands(root_app)
-
-    # Verify the subapp group was added under the plugin name
-    assert [g.name for g in root_app.registered_groups] == ["a"]
-
-
-def test_plugins_add_commands_skips_plugins_with_no_commands():
-    """Test that add_commands() doesn't add a group if plugin registered no commands."""
-    plugin_a = types.ModuleType("plugin_a")
-    plugin_b = types.ModuleType("plugin_b")
-
-    @hookimpl
-    def ow_settings():
-        return []
-
-    @hookimpl
-    def ow_commands(app):
-        pass  # No commands registered
-
-    @hookimpl
-    def ow_settings_b():
-        return []
-
-    ow_settings_b.__name__ = "ow_settings"
-
-    @hookimpl
-    def ow_commands_b(app):
-        @app.command()
-        def hello():
-            """Say hello."""
-            typer.echo("Hello")
-
-    ow_commands_b.__name__ = "ow_commands"
-
-    plugin_a.ow_settings = ow_settings
-    plugin_a.ow_commands = ow_commands
-    plugin_a.HOOKSPECS = ()
-
-    plugin_b.ow_settings = ow_settings_b
-    plugin_b.ow_commands = ow_commands_b
-    plugin_b.HOOKSPECS = ()
-
-    plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
-    root_app = typer.Typer()
-    plugins.add_commands(root_app)
-
-    # Plugin b should be added (has command), plugin a should not
-    assert [g.name for g in root_app.registered_groups] == ["b"]
-
-
-def test_hookspecs_declared_once():
-    """Test that HOOKSPECS declared by multiple modules are added only once."""
-    plugin_a = types.ModuleType("plugin_a")
-    plugin_b = types.ModuleType("plugin_b")
-
-    @hookimpl
-    def ow_settings():
-        return []
-
-    @hookimpl
-    def python_environment(ws):
-        return None
-
-    @hookimpl
-    def ow_settings_b():
-        return []
-
-    ow_settings_b.__name__ = "ow_settings"
-
-    @hookimpl
-    def python_environment_b(ws):
-        return None
-
-    python_environment_b.__name__ = "python_environment"
-
-    plugin_a.ow_settings = ow_settings
-    plugin_a.python_environment = python_environment
-    plugin_a.HOOKSPECS = (MiseSpec,)
-
-    plugin_b.ow_settings = ow_settings_b
-    plugin_b.python_environment = python_environment_b
-    plugin_b.HOOKSPECS = (MiseSpec,)  # Same spec as plugin_a
-
-    # Should not raise ValueError about spec being added twice
-    plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
-    assert plugins.names == ("a", "b")
 
 
 def test_check_pending_rejects_misspelled_hookimpl():
@@ -475,26 +385,12 @@ def test_check_pending_rejects_misspelled_hookimpl():
 
     plugin_a.ow_settings = ow_settings
     plugin_a.ow_diagnostics_typo = ow_diagnostics_typo
-    plugin_a.HOOKSPECS = ()
 
     with pytest.raises(PluginError) as exc_info:
         load_plugins(builtins=(("a", plugin_a),))
 
     error = exc_info.value
     assert error.hook == "check_pending"
-
-
-def test_load_plugins_rejects_non_tuple_hookspecs():
-    """A non-tuple HOOKSPECS is a PluginError labelled HOOKSPECS, not check_pending."""
-    plugin_a = types.ModuleType("plugin_a")
-    plugin_a.HOOKSPECS = MiseSpec  # not a tuple
-
-    with pytest.raises(PluginError) as exc_info:
-        load_plugins(builtins=(("a", plugin_a),))
-
-    error = exc_info.value
-    assert error.plugin == "a"
-    assert error.hook == "HOOKSPECS"
 
 
 def test_load_plugins_wraps_hookimpl_signature_mismatch():
@@ -506,7 +402,6 @@ def test_load_plugins_wraps_hookimpl_signature_mismatch():
         return []
 
     plugin_a.ow_diagnostics = ow_diagnostics
-    plugin_a.HOOKSPECS = ()
 
     with pytest.raises(PluginError) as exc_info:
         load_plugins(builtins=(("a", plugin_a),))
@@ -640,17 +535,15 @@ def test_merge_editors_contribution_multiple_servers():
     assert result.language_servers["pylance"]["key2"] == "v2"
 
 
-def test_plugins_settings_rejects_invalid_key_prefix():
-    """Test that settings() raises PluginError for keys not starting with <plugin>."""
+def test_plugins_settings_wraps_a_raising_ow_settings():
+    """A raising `ow_settings` becomes a PluginError naming the plugin."""
     plugin_a = types.ModuleType("plugin_a")
 
     @hookimpl
     def ow_settings():
-        # Return a setting with invalid key prefix
-        return [Setting(key="invalid.key", type=str, default="value", help="Bad key")]
+        raise ValueError("broken settings")
 
     plugin_a.ow_settings = ow_settings
-    plugin_a.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a),))
 
@@ -660,7 +553,7 @@ def test_plugins_settings_rejects_invalid_key_prefix():
     error = exc_info.value
     assert error.plugin == "a"
     assert error.hook == "ow_settings"
-    assert "invalid.key" in str(error.cause)
+    assert "broken settings" in str(error.cause)
 
 
 def test_plugins_call_with_undeclared_hook_returns_empty_list():
@@ -672,7 +565,6 @@ def test_plugins_call_with_undeclared_hook_returns_empty_list():
         return []
 
     plugin_a.ow_settings = ow_settings
-    plugin_a.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a),))
 
@@ -701,13 +593,10 @@ def test_plugins_call_with_errors_collect():
         return [Diagnostic("warning", "diagnostic from c")]
 
     plugin_a.ow_diagnostics = ow_diagnostics_a
-    plugin_a.HOOKSPECS = ()
 
     plugin_b.ow_diagnostics = ow_diagnostics_b
-    plugin_b.HOOKSPECS = ()
 
     plugin_c.ow_diagnostics = ow_diagnostics_c
-    plugin_c.HOOKSPECS = ()
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b), ("c", plugin_c)))
     fake_ws = FakeWorkspace(root=Path("/tmp"), settings={})
@@ -761,11 +650,9 @@ def test_plugins_call_skips_disabled_plugin_without_ws():
 
     plugin_a.ow_settings = ow_settings
     plugin_a.ow_known_repos = ow_known_repos
-    plugin_a.HOOKSPECS = ()
 
     plugin_b.ow_settings = ow_settings_b
     plugin_b.ow_known_repos = ow_known_repos_b
-    plugin_b.HOOKSPECS = ()
 
     # Create a temporary global config file with b.enabled=false
     with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
@@ -782,4 +669,60 @@ def test_plugins_call_skips_disabled_plugin_without_ws():
     finally:
         ow.core.paths.global_config = original
         os.unlink(config_file)
+
+
+def test_plugins_pipe_threads_values_in_order_and_skips_disabled():
+    from ow.core.plugins import ResolvedRepo
+
+    plugin_a = types.ModuleType("plugin_a")
+    plugin_b = types.ModuleType("plugin_b")
+    plugin_c = types.ModuleType("plugin_c")
+
+    @hookimpl
+    def ow_expand_workspace_repos_a(repos):
+        return (*repos, ResolvedRepo(name="from-a"))
+
+    @hookimpl
+    def ow_expand_workspace_repos_b(repos):
+        return (*repos, ResolvedRepo(name="from-b"))
+
+    @hookimpl
+    def ow_expand_workspace_repos_c(repos):
+        return (*repos, ResolvedRepo(name="from-c"))
+
+    ow_expand_workspace_repos_a.__name__ = "ow_expand_workspace_repos"
+    ow_expand_workspace_repos_b.__name__ = "ow_expand_workspace_repos"
+    ow_expand_workspace_repos_c.__name__ = "ow_expand_workspace_repos"
+
+    plugin_a.ow_expand_workspace_repos = ow_expand_workspace_repos_a
+    plugin_b.ow_expand_workspace_repos = ow_expand_workspace_repos_b
+    plugin_c.ow_expand_workspace_repos = ow_expand_workspace_repos_c
+
+    plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b), ("c", plugin_c)))
+    ws = FakeWorkspace(root=Path("/tmp"), settings={"b.enabled": False})
+
+    result = plugins.pipe("ow_expand_workspace_repos", "repos", (), ws=ws)
+    assert [r.name for r in result] == ["from-a", "from-c"]
+
+
+def test_builtin_plugin_order_places_odoo_before_runbot():
+    plugins = load_plugins()
+    assert plugins.names.index("odoo") < plugins.names.index("runbot")
+
+
+def test_plugins_call_propagates_usage_error_unchanged():
+    from ow.errors import UsageError
+
+    plugin_a = types.ModuleType("plugin_a")
+
+    @hookimpl
+    def ow_diagnostics(ws):
+        raise UsageError("bad user input")
+
+    plugin_a.ow_diagnostics = ow_diagnostics
+
+    plugins = load_plugins(builtins=(("a", plugin_a),))
+    fake_ws = FakeWorkspace(root=Path("/tmp"), settings={})
+    with pytest.raises(UsageError, match="bad user input"):
+        plugins.call("ow_diagnostics", ws=fake_ws)
 

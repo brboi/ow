@@ -9,7 +9,7 @@ from typing import Mapping
 from types import ModuleType
 
 from ow.core.plugins import hookimpl, load_plugins
-from ow.specs.editors import DebugLaunch, EditorContribution, EditorsSpec
+from ow.specs.editors import DebugLaunch, EditorContribution
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,6 @@ def test_vscode_settings_json_structure(tmp_path):
     """Test that VSCode settings.json has correct structure."""
     # Create stub that provides contribution via editors_contribution hook
     stub = ModuleType("stub")
-    stub.HOOKSPECS = (EditorsSpec,)
     
     @hookimpl
     def editors_contribution(ws):
@@ -70,7 +69,6 @@ def test_vscode_launch_json_structure(tmp_path):
     """Test that VSCode launch.json has correct structure."""
     # Create stub with launch via editors_contribution hook
     stub = ModuleType("stub")
-    stub.HOOKSPECS = (EditorsSpec,)
     
     @hookimpl
     def editors_contribution(ws):

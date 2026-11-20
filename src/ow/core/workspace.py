@@ -8,6 +8,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, Mapping, Sequence
 
+from ow.core import config
 from ow.core.git import GitFailed, read as git_read
 from ow.core.index import read as read_index
 from ow.core.paths import repos_dir
@@ -41,13 +42,17 @@ class RepoLocation:
 
 @dataclass(frozen=True)
 class Workspace:
-    """A workspace: a collection of repos under one directory."""
+    """A workspace (or one stack inside a multi-stack workspace): repos under one directory."""
 
     root: Path
     name: str
     repos: tuple[Repo, ...]
     settings: Mapping[str, object]  # MappingProxyType in practice
-    task: str | None = None
+    is_stack: bool = False
+
+    def setting_int(self, key: str) -> int | None:
+        """Return integer value of setting `key` (excluding bools), or None."""
+        return config.as_int(self.settings.get(key))
 
 
 def find_root(start: Path | None = None) -> Path | None:
@@ -207,7 +212,7 @@ def build_workspace(
     locations: tuple[RepoLocation, ...],
     settings: dict[str, object],
     *,
-    task: str | None = None,
+    is_stack: bool = False,
 ) -> Workspace:
     """Build a Workspace from RepoLocations and settings."""
     repos = tuple(
@@ -225,55 +230,136 @@ def build_workspace(
         name=root.name,
         repos=repos,
         settings=MappingProxyType(settings),
-        task=task,
+        is_stack=is_stack,
     )
 
 
-def resolve_root(workspace: str | None = None, *, cwd: Path | None = None) -> Path:
-    """Resolve a workspace name or path to its root directory.
+def _entry_kind(path: Path) -> Literal["workspace", "multi"] | None:
+    """Classify an indexed directory as mono-stack workspace, multi-stack workspace, or dead."""
+    from ow.core.stacks import detect_multi_workspace
 
-    An index entry whose config is gone is dead: it is reported with a `ow prune` hint
-    rather than recreated.
+    if (path / ".ow" / "config.toml").exists():
+        return "workspace"
+    if detect_multi_workspace(path):
+        return "multi"
+    return None
+
+
+def resolve_target_root(
+    workspace: str | None = None, *, cwd: Path | None = None
+) -> tuple[Path, Literal["workspace", "multi"]]:
+    """Resolve a workspace or stack name/path to `(root, kind)`.
+
+    Supports:
+    - implicit `cwd` lookup (mono-stack workspace via `find_root`, or multi-stack root via `detect_multi_workspace`);
+    - direct child or filesystem path (prioritizing `./<stack>` inside a multi-stack workspace);
+    - `<workspace>/<stack>` disambiguation against the index;
+    - indexed workspace name (mono-stack or multi-stack);
+    - unique stack name across indexed multi-stack workspaces.
     """
+    from ow.core.stacks import detect_multi_workspace
+
     if cwd is None:
         cwd = Path.cwd()
 
     if workspace is None:
         root = find_root(cwd)
-        if root is None:
-            raise UsageError(
-                "not inside an ow workspace; pass -w <name|path> or run `ow add`"
-            )
-        return root
+        if root is not None:
+            return root, "workspace"
+        if detect_multi_workspace(cwd):
+            return cwd.resolve(), "multi"
+        raise UsageError(
+            "not inside an ow workspace; pass -w <name|path> or run `ow init`"
+        )
 
     candidate = Path(workspace)
     if not candidate.is_absolute():
         candidate = cwd / candidate
 
-    if "/" in workspace or workspace in (".", "..") or (candidate / ".ow" / "config.toml").exists():
-        candidate = candidate.resolve()
-        if not (candidate / ".ow" / "config.toml").exists():
-            raise UsageError(f"not an ow workspace; no .ow/config.toml in {candidate}")
-        return candidate
+    cand_kind = _entry_kind(candidate)
+    if cand_kind is not None:
+        return candidate.resolve(), cand_kind
+
+    # `<workspace>/<stack>` disambiguation against indexed multi-stack workspaces
+    if (
+        "/" in workspace
+        and not workspace.startswith(("/", ".", "~"))
+        and workspace.count("/") == 1
+    ):
+        ws_part, stack_part = workspace.split("/", 1)
+        if ws_part and stack_part:
+            stack_matches: list[Path] = []
+            for entry in read_index():
+                if entry.name == ws_part and detect_multi_workspace(entry):
+                    child = entry / stack_part
+                    if (child / ".ow" / "config.toml").exists():
+                        stack_matches.append(child.resolve())
+            if len(stack_matches) == 1:
+                return stack_matches[0], "workspace"
+            if len(stack_matches) > 1:
+                paths = ", ".join(str(p) for p in stack_matches)
+                raise UsageError(f"stack '{workspace}' is ambiguous; matches: {paths}")
+
+    if "/" in workspace or workspace in (".", ".."):
+        resolved = candidate.resolve()
+        raise UsageError(f"not an ow workspace; no .ow/config.toml in {resolved}")
 
     entries = [e for e in read_index() if e.name == workspace]
-    alive = [e for e in entries if (e / ".ow" / "config.toml").exists()]
+    alive = [(e, kind) for e in entries if (kind := _entry_kind(e)) is not None]
     if len(alive) == 1:
-        return alive[0].resolve()
+        return alive[0][0].resolve(), alive[0][1]
     if len(alive) > 1:
-        paths = ", ".join(str(e) for e in alive)
+        paths = ", ".join(str(e) for e, _ in alive)
         raise UsageError(f"workspace '{workspace}' is ambiguous; matches: {paths}")
     if entries:
         raise UsageError(
             f"workspace '{workspace}' is missing ({entries[0]}); run `ow prune`"
         )
 
-    known = sorted({e.name for e in read_index() if (e / ".ow" / "config.toml").exists()})
+    # Unique stack name across indexed multi-stack workspaces
+    stack_hits: list[tuple[Path, Path]] = []
+    for entry in read_index():
+        stacks = detect_multi_workspace(entry)
+        if not stacks:
+            continue
+        for s in stacks:
+            if s.name == workspace:
+                stack_hits.append((entry, s))
+    if len(stack_hits) == 1:
+        return stack_hits[0][1].resolve(), "workspace"
+    if len(stack_hits) > 1:
+        hints = ", ".join(f"{parent.name}/{stack.name}" for parent, stack in stack_hits)
+        raise UsageError(
+            f"stack '{workspace}' is ambiguous; matches: {hints}; specify <workspace>/<stack>"
+        )
+
+    known = sorted({e.name for e in read_index() if _entry_kind(e) is not None})
     if known:
         raise UsageError(f"unknown workspace '{workspace}'; known: {', '.join(known)}")
     raise UsageError(
-        f"unknown workspace '{workspace}'; nothing indexed yet; run `ow add`"
+        f"unknown workspace '{workspace}'; nothing indexed yet; run `ow init`"
     )
+
+
+def resolve_root(workspace: str | None = None, *, cwd: Path | None = None) -> Path:
+    """Resolve a mono-stack workspace or stack name/path to its root directory.
+
+    Raises UsageError when the resolved target is a multi-stack workspace container.
+    """
+    from ow.core.stacks import detect_multi_workspace
+
+    root, kind = resolve_target_root(workspace, cwd=cwd)
+    if kind == "multi":
+        stacks = detect_multi_workspace(root) or ()
+        names = ", ".join(s.name for s in stacks)
+        if workspace is None:
+            raise UsageError(
+                f"'{root.name}' is a multi-stack workspace; specify a stack with -w <stack> (available: {names})"
+            )
+        raise UsageError(
+            f"'{root.name}' is a multi-stack workspace; specify a stack as {root.name}/<stack> (available: {names})"
+        )
+    return root
 
 
 def stray_checkouts(root: Path, locations: Sequence[RepoLocation]) -> tuple[Path, ...]:

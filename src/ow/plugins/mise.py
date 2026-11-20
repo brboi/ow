@@ -15,23 +15,25 @@ from ow.core.plugins import (
     Setting,
     hookimpl,
 )
-from ow.specs.python_env import (
-    PythonEnvSpec,
-    merge,
-    resolve_venv_path,
-    select_python_version,
-)
+from ow.specs.python_env import merge, workspace_venv
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
 
-HOOKSPECS = (PythonEnvSpec,)
-
 _FRAGMENT = PurePosixPath("mise/conf.d/00-ow.toml")
 _MISE_MIN_VERSION = (2026, 8, 13)
 _MISE_VERSION_RE = re.compile(r"\b(\d+)\.(\d+)\.(\d+)\b")
-_MISE_WARNING = "mise ≥ 2026.8.13 not found; mise/conf.d/00-ow.toml won't be loaded; disable with `ow config set --global mise.enabled false`"
+_MISE_WARNING = (
+    f"mise ≥ {'.'.join(map(str, _MISE_MIN_VERSION))} not found; mise/conf.d/00-ow.toml won't be loaded; "
+    "disable with `ow config set --global mise.enabled false`"
+)
+_CONFIG_ROOT = "{{config_root}}"
+
+
+def _rooted(path: str) -> str:
+    """Workspace-relative `path` as a mise template path."""
+    return f"{_CONFIG_ROOT}/{path}"
 
 
 @hookimpl
@@ -58,55 +60,41 @@ def ow_generated_files(
     ws: Workspace, answers: Callable[[str], list]
 ) -> list[GeneratedFile | Diagnostic]:
     """Generate mise/conf.d/00-ow.toml when needed."""
-    answers_list = answers("python_environment")
-    merged = merge(answers_list)
+    merged = merge(answers("python_environment"))
 
-    python_setting = ws.settings.get("mise.python")
-    shared_venv = bool(ws.settings.get("mise.shared_venv", True))
-
-    if merged is None and not python_setting:
+    if merged is None and not ws.settings.get("mise.python"):
         return []
 
-    bounds = merged.python if merged is not None else None
-    python_value, diagnostics = select_python_version(
-        bounds, python_setting, setting_name="mise.python"
-    )
-
+    venv = workspace_venv(ws, merged)
     fragment: dict[str, object] = {}
 
-    if python_value:
-        venv_key = merged.venv_key if merged is not None else None
-        venv_path = resolve_venv_path(ws, python_value, venv_key, shared=shared_venv)
-        venv_spec = ".venv" if venv_path == (ws.root / ".venv") else str(venv_path)
-        fragment["tools"] = {"python": python_value}
-        fragment["env"] = fragment.get("env", {})
-        fragment["env"]["_"] = {
-            "python": {"venv": {"path": venv_spec, "create": True}}
-        }
+    if venv.python_version:
+        venv_spec = ".venv" if venv.is_local(ws) else str(venv.path)
+        fragment["tools"] = {"python": venv.python_version}
+        fragment["env"] = {"_": {"python": {"venv": {"path": venv_spec, "create": True}}}}
 
-    if merged is not None and merged.env:
-        if "env" not in fragment:
-            fragment["env"] = {}
-        fragment["env"].update(merged.env)
+    if merged is not None:
+        env_vars = {**merged.env, **{k: _rooted(v) for k, v in merged.env_paths.items()}}
+        if env_vars:
+            fragment.setdefault("env", {}).update(env_vars)
 
-    if merged is not None and merged.path:
-        if "env" not in fragment:
-            fragment["env"] = {}
-        if "_" not in fragment["env"]:
-            fragment["env"]["_"] = {}
-        fragment["env"]["_"]["path"] = list(merged.path)
+        if merged.path:
+            fragment.setdefault("env", {}).setdefault("_", {})["path"] = [
+                _rooted(p) for p in merged.path
+            ]
 
-    if merged is not None and merged.postinstall:
-        fragment["hooks"] = {
-            "postinstall": " && ".join(merged.postinstall)
-        }
+        commands = []
+        if merged.requirements:
+            pip_args = " ".join(f'-r "{_rooted(r)}"' for r in merged.requirements)
+            commands.append(f"python -m ensurepip --default-pip && pip install {pip_args}")
+        commands.extend(merged.postinstall)
+        if commands:
+            fragment["hooks"] = {"postinstall": " && ".join(commands)}
 
-    if merged is not None and merged.aliases:
-        fragment["shell_alias"] = merged.aliases
+        if merged.aliases:
+            fragment["shell_alias"] = merged.aliases
 
-    if merged is not None and merged.tasks:
-        fragment["tasks"] = merged.tasks
-
+    diagnostics = list(venv.diagnostics)
     if not fragment:
         return diagnostics
 

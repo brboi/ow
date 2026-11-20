@@ -1,6 +1,6 @@
-"""Generated file ownership, lock tracking, and atomic writes.
+"""Generated file ownership, lock tracking, and atomic writes, for any root (a workspace or a multi-stack root).
 
-`.ow/rendered.lock.toml` records the SHA-256 of what ow last wrote or adopted at each path; bytes that no longer match are "yours" and ow never rewrites them.
+`.ow/rendered.lock.toml` records the SHA-256 of what ow last wrote or adopted at each path; bytes that no longer match are "yours" and ow never rewrites them. Refresh never deletes a generated file: one no plugin produces any more just loses its lock entry. The only deletion is `remove_owned_files`, when ow removes the root itself.
 """
 
 from __future__ import annotations
@@ -11,9 +11,10 @@ import os
 import re
 import stat
 import tomllib
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Literal, Sequence
+from typing import TYPE_CHECKING, Literal
 
 import tomli_w
 
@@ -172,87 +173,21 @@ def _unsafe_destination(name: str, st: os.stat_result) -> str | None:
     return fs.unsafe_destination(name, st)
 
 
-def project(ws: "Workspace", plugins: Plugins) -> Projection:
-    """Inspect generated files and return their status against the lock.
-
-    Raises `PluginError` on a bad path or two owners of one path; a symlinked parent marks just that file `skipped`.
-    """
-    # Collect per plugin, then flatten in plugin tuple order.
-    answers: dict[str, list[Diagnostic]] = {}
-    for plugin_name, diag_list in plugins.call("ow_diagnostics", ws):
-        if not diag_list:
-            continue
-        if not isinstance(diag_list, list):
-            raise PluginError(
-                plugin_name, "ow_diagnostics", f"expected list, got {type(diag_list).__name__}"
-            )
-        answers[plugin_name] = list(diag_list)
-
-    files_by_plugin: dict[str, list[GeneratedFile]] = {}
-    extra_diags: dict[str, list[Diagnostic]] = {}
-    owner_of: dict[str, str] = {}  # path -> owner, for the two-owner abort
-    for plugin_name, contrib_list in plugins.call(
-        "ow_generated_files", ws, answers=plugins.answers(ws)
-    ):
-        if not contrib_list:
-            continue
-        if not isinstance(contrib_list, list):
-            raise PluginError(
-                plugin_name,
-                "ow_generated_files",
-                f"expected list, got {type(contrib_list).__name__}",
-            )
-        for item in contrib_list:
-            if isinstance(item, Diagnostic):
-                extra_diags.setdefault(plugin_name, []).append(item)
-            elif isinstance(item, GeneratedFile):
-                path_key = item.path.as_posix()
-                if path_key in owner_of:
-                    raise PluginError(
-                        f"{owner_of[path_key]} and {plugin_name}",
-                        "ow_generated_files",
-                        f"both produce {path_key}",
-                    )
-                reason = _unsafe_relative(item.path)
-                if reason:
-                    raise PluginError(plugin_name, "ow_generated_files", f"{path_key}: {reason}")
-                owner_of[path_key] = plugin_name
-                files_by_plugin.setdefault(plugin_name, []).append(item)
-            else:
-                raise PluginError(
-                    plugin_name,
-                    "ow_generated_files",
-                    f"expected GeneratedFile or Diagnostic, got {type(item).__name__}",
-                )
-
-    lock, core_diag = _read_lock_or_warn(ws.root)
-
-    # Flatten in plugin tuple order: a plugin's ow_diagnostics answers, then
-    # its contribution diagnostics, then its files in the order it returned them.
-    diagnostics: list[tuple[str, Diagnostic]] = []
-    files: list[tuple[str, GeneratedFile]] = []
-    for name in plugins.names:
-        for diag in answers.get(name, ()):
-            diagnostics.append((name, diag))
-        for diag in extra_diags.get(name, ()):
-            diagnostics.append((name, diag))
-        for gf in files_by_plugin.get(name, ()):
-            files.append((name, gf))
-    if core_diag is not None:
-        diagnostics.append(("core", core_diag))
-
-    # Classify each file against the lock, keeping plugin tuple order.
+def classify_proposals(
+    root: Path,
+    files: Sequence[tuple[str, GeneratedFile]],
+    lock: Mapping[str, str],
+) -> tuple[FileStatus, ...]:
+    """Classify proposed `(owner, GeneratedFile)` entries under `root` against `lock`."""
     file_statuses: list[FileStatus] = []
     for owner, gf in files:
         path_key = gf.path.as_posix()
-        dest = ws.root / gf.path
+        dest = root / gf.path
 
-        ancestry = _ancestry_problem(ws.root, gf.path)
+        ancestry = _ancestry_problem(root, gf.path)
         if ancestry:
             file_statuses.append(
-                FileStatus(
-                    gf.path, owner, "skipped", gf.data, None, ancestry, gf.mode
-                )
+                FileStatus(gf.path, owner, "skipped", gf.data, None, ancestry, gf.mode)
             )
             continue
 
@@ -277,7 +212,7 @@ def project(ws: "Workspace", plugins: Plugins) -> Projection:
             continue
 
         if current == gf.data:
-            state = "up to date"
+            state: Literal["absent", "up to date", "outdated", "yours", "skipped"] = "up to date"
         elif lock.get(path_key) == _sha256_bytes(current):
             state = "outdated"
         else:
@@ -285,16 +220,110 @@ def project(ws: "Workspace", plugins: Plugins) -> Projection:
         file_statuses.append(
             FileStatus(gf.path, owner, state, gf.data, current, None, gf.mode)
         )
+    return tuple(file_statuses)
 
-    stale_lock = tuple(p for p in lock if p not in owner_of)
-    blocked = any(diag.level == "error" for _, diag in diagnostics)
 
+def collect_contributions(
+    hook: str, contributions: Iterable[tuple[str, object]]
+) -> tuple[dict[str, list[GeneratedFile]], dict[str, list[Diagnostic]]]:
+    """Validate each plugin's answer to `hook`: its `GeneratedFile`s and `Diagnostic`s, keyed by plugin.
+
+    Raises `PluginError` on a non-list answer, a bad or reserved path, or two plugins producing one path.
+    """
+    files_by_plugin: dict[str, list[GeneratedFile]] = {}
+    extra_diags: dict[str, list[Diagnostic]] = {}
+    owner_of: dict[str, str] = {}  # path -> owner, for the two-owner abort
+    for plugin_name, contrib_list in contributions:
+        if not contrib_list:
+            continue
+        if not isinstance(contrib_list, list):
+            raise PluginError(
+                plugin_name, hook, f"expected list, got {type(contrib_list).__name__}"
+            )
+        for item in contrib_list:
+            if isinstance(item, Diagnostic):
+                extra_diags.setdefault(plugin_name, []).append(item)
+            elif isinstance(item, GeneratedFile):
+                path_key = item.path.as_posix()
+                if path_key in owner_of:
+                    raise PluginError(
+                        f"{owner_of[path_key]} and {plugin_name}", hook, f"both produce {path_key}"
+                    )
+                reason = _unsafe_relative(item.path)
+                if reason:
+                    raise PluginError(plugin_name, hook, f"{path_key}: {reason}")
+                owner_of[path_key] = plugin_name
+                files_by_plugin.setdefault(plugin_name, []).append(item)
+            else:
+                raise PluginError(
+                    plugin_name,
+                    hook,
+                    f"expected GeneratedFile or Diagnostic, got {type(item).__name__}",
+                )
+    return files_by_plugin, extra_diags
+
+
+def project_files(
+    root: Path,
+    files: Sequence[tuple[str, GeneratedFile]],
+    diagnostics: Sequence[tuple[str, Diagnostic]] = (),
+) -> Projection:
+    """Compare the proposed `(owner, GeneratedFile)` entries with the lock at `root`.
+
+    A malformed lock adds a core warning; a symlinked parent marks just that file `skipped`.
+    """
+    lock, core_diag = _read_lock_or_warn(root)
+    all_diagnostics = list(diagnostics)
+    if core_diag is not None:
+        all_diagnostics.append(("core", core_diag))
+    proposed = {gf.path.as_posix() for _owner, gf in files}
     return Projection(
-        files=tuple(file_statuses),
-        stale_lock=stale_lock,
-        diagnostics=tuple(diagnostics),
-        blocked=blocked,
+        files=classify_proposals(root, files, lock),
+        stale_lock=tuple(p for p in lock if p not in proposed),
+        diagnostics=tuple(all_diagnostics),
+        blocked=any(diag.level == "error" for _, diag in all_diagnostics),
     )
+
+
+def flatten_contributions(
+    plugins: Plugins,
+    answers: Mapping[str, list[Diagnostic]],
+    files_by_plugin: Mapping[str, list[GeneratedFile]],
+    extra_diags: Mapping[str, list[Diagnostic]],
+) -> tuple[list[tuple[str, GeneratedFile]], list[tuple[str, Diagnostic]]]:
+    """Order contributions by plugin: its diagnostic answers, then its contribution diagnostics, then its files."""
+    diagnostics: list[tuple[str, Diagnostic]] = []
+    files: list[tuple[str, GeneratedFile]] = []
+    for name in plugins.names:
+        for diag in answers.get(name, ()):
+            diagnostics.append((name, diag))
+        for diag in extra_diags.get(name, ()):
+            diagnostics.append((name, diag))
+        for gf in files_by_plugin.get(name, ()):
+            files.append((name, gf))
+    return files, diagnostics
+
+
+def project(ws: "Workspace", plugins: Plugins) -> Projection:
+    """Inspect generated files and return their status against the lock.
+
+    Raises `PluginError` on a bad path or two owners of one path; a symlinked parent marks just that file `skipped`.
+    """
+    answers: dict[str, list[Diagnostic]] = {}
+    for plugin_name, diag_list in plugins.call("ow_diagnostics", ws):
+        if not diag_list:
+            continue
+        if not isinstance(diag_list, list):
+            raise PluginError(
+                plugin_name, "ow_diagnostics", f"expected list, got {type(diag_list).__name__}"
+            )
+        answers[plugin_name] = list(diag_list)
+
+    files_by_plugin, extra_diags = collect_contributions(
+        "ow_generated_files", plugins.call("ow_generated_files", ws, answers=plugins.answers(ws))
+    )
+    files, diagnostics = flatten_contributions(plugins, answers, files_by_plugin, extra_diags)
+    return project_files(ws.root, files, diagnostics)
 
 
 @contextlib.contextmanager
@@ -308,17 +337,18 @@ def _refresh_lock(root: Path):
         yield
 
 
-def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePosixPath, ...]]:
-    """Write the generated files a projection says are missing or stale.
+def write_files(
+    root: Path, projection: Projection
+) -> tuple[tuple[PurePosixPath, ...], tuple[PurePosixPath, ...]]:
+    """Write what `projection` says is missing or stale under `root`; return `(written, owned)`.
 
-    A destination is re-read right before writing, so a hand edit landing since projection is left alone; a write failure raises `OwError` naming what already landed.
+    Nothing is written when the projection is blocked. A destination is re-read right before writing, so a hand edit landing since projection is left alone; a write failure raises `OwError` naming what already landed. Lock entries no file claims any more are dropped; their files stay.
     """
-    projection = project(ws, plugins)
     if projection.blocked:
-        return projection, ()
+        return (), ()
 
-    with _refresh_lock(ws.root):
-        lock, _ = _read_lock_or_warn(ws.root)
+    with _refresh_lock(root):
+        lock, _ = _read_lock_or_warn(root)
 
         written: list[PurePosixPath] = []
         owned: list[PurePosixPath] = []
@@ -328,8 +358,8 @@ def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePo
         for status in projection.files:
             path_key = status.path.as_posix()
             if status.state in ("absent", "outdated"):
-                dest = ws.root / status.path
-                if _ancestry_problem(ws.root, status.path):
+                dest = root / status.path
+                if _ancestry_problem(root, status.path):
                     continue
                 # Re-read right before writing: bytes that changed since projection are
                 # a hand edit, which wins. Leave it alone and keep the old lock entry,
@@ -362,16 +392,77 @@ def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePo
             # yours / skipped: keep the old entry already in new_lock, if any.
 
         if failure is None:
-            # Completed: drop the entries no plugin produces any more.
             for path_key in projection.stale_lock:
                 new_lock.pop(path_key, None)
 
-        _write_lock_if_changed(ws.root, new_lock)
+        _write_lock_if_changed(root, new_lock)
         if failure is not None:
             raise failure
 
-    plugins.call("ow_refreshed", ws, owned=tuple(owned))
-    return projection, tuple(written)
+    return tuple(written), tuple(owned)
+
+
+def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePosixPath, ...]]:
+    """Project `ws`'s generated files and write the missing or stale ones; a blocked projection writes nothing."""
+    projection = project(ws, plugins)
+    if projection.blocked:
+        return projection, ()
+    written, owned = write_files(ws.root, projection)
+    plugins.call("ow_refreshed", ws, owned=owned)
+    return projection, written
+
+
+def _owned_regular(root: Path, rel: PurePosixPath) -> Path | None:
+    """`root / rel` when it is a regular file reachable without a symlink, else None."""
+    if _unsafe_relative(rel) or _ancestry_problem(root, rel):
+        return None
+    path = root / rel
+    st = _destination_stat(path)
+    if st is None or _unsafe_destination(rel.as_posix(), st):
+        return None
+    return path
+
+
+def owned_files(root: Path) -> tuple[Path, ...]:
+    """The existing regular files the lock at `root` records, as absolute paths."""
+    lock, _ = _read_lock_or_warn(root)
+    return tuple(
+        path for key in lock if (path := _owned_regular(root, PurePosixPath(key))) is not None
+    )
+
+
+def remove_owned_files(root: Path) -> tuple[Path, ...]:
+    """Delete the recorded files under `root` that still hold the bytes ow wrote, then its lock.
+
+    This is the only deletion of generated files: ow calls it when it removes the workspace root itself. Hand-edited files stay. The `.ow` directory goes too when nothing else is in it.
+    """
+    lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
+    if _ancestry_problem(root, lock_rel):
+        return ()
+    removed: list[Path] = []
+    lock_path = root / RENDERED_LOCK
+    with _refresh_lock(root):
+        lock, _ = _read_lock_or_warn(root)
+        for key, digest in lock.items():
+            path = _owned_regular(root, PurePosixPath(key))
+            if path is None:
+                continue
+            try:
+                if _sha256_bytes(path.read_bytes()) == digest:
+                    path.unlink()
+                    removed.append(path)
+            except OSError:
+                continue
+        st = _destination_stat(lock_path)
+        if st is not None and not _unsafe_destination(RENDERED_LOCK.as_posix(), st):
+            with contextlib.suppress(OSError):
+                lock_path.unlink()
+    # `fs.sidecar_lock` keeps its flock file next to the lock as `.<name>.lock`.
+    with contextlib.suppress(OSError):
+        lock_path.with_name(f".{lock_path.name}.lock").unlink()
+    with contextlib.suppress(OSError):
+        lock_path.parent.rmdir()
+    return tuple(removed)
 
 
 def report(projection: Projection, written: Sequence[PurePosixPath]) -> None:

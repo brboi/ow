@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Sequence
+
 from ow.core.plugins import hookspec
-from ow.errors import PluginError
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
@@ -69,10 +68,8 @@ def merge(answers: Sequence[EditorContribution]) -> EditorContribution:
         if answer.language_servers:
             for server_id, settings in answer.language_servers.items():
                 if not isinstance(settings, Mapping):
-                    raise PluginError(
-                        server_id,
-                        "editors_contribution",
-                        f"language server {server_id!r} settings must be a mapping, not {type(settings).__name__}",
+                    raise ValueError(
+                        f"language server {server_id!r} settings must be a mapping, not {type(settings).__name__}"
                     )
                 if server_id not in merged_language_servers:
                     merged_language_servers[server_id] = {}
@@ -97,6 +94,32 @@ def merge(answers: Sequence[EditorContribution]) -> EditorContribution:
     )
 
 
-def json_text(data: object) -> str:
-    """Serialize to JSON with two-space indentation and a trailing newline."""
-    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+BASE_EXCLUDES: tuple[str, ...] = (
+    "**/.git",
+    "**/.svn",
+    "**/.hg",
+    "**/.jj",
+    "**/CVS",
+    "**/.DS_Store",
+    "**/Thumbs.db",
+    "**/.classpath",
+    "**/.settings",
+    "**/.venv",
+)
+
+
+def default_python(ws: Workspace) -> Path:
+    """The workspace venv interpreter, used when no contribution names one."""
+    return ws.root / ".venv/bin/python"
+
+
+def debugpy_fields(launch: DebugLaunch) -> dict[str, object]:
+    """The debugpy launch keys shared by every editor, in on-disk order."""
+    return {
+        "program": str(launch.program),
+        "args": list(launch.args),
+        "cwd": str(launch.cwd),
+        "justMyCode": False,
+        "pythonArgs": ["-Xfrozen_modules=off"],
+        "env": dict(launch.env),
+    }

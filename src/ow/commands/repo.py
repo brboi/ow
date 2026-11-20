@@ -92,7 +92,7 @@ def rm(session: Session, name: str, *, dry_run: bool, yes: bool) -> int:
     A dirty worktree, or a detached HEAD holding commits no remote has, refuses before the prompt.
     """
     if session.workspace is None:
-        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow add`")
+        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
     location = next((entry for entry in session.locations if entry.name == name), None)
     if location is None:
         return _drop_missing(session, name, dry_run=dry_run, yes=yes)

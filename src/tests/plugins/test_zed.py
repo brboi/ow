@@ -9,7 +9,7 @@ from typing import Mapping
 from types import ModuleType
 
 from ow.core.plugins import hookimpl, load_plugins
-from ow.specs.editors import DebugLaunch, EditorContribution, EditorsSpec
+from ow.specs.editors import DebugLaunch, EditorContribution
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,6 @@ def test_zed_settings_json_structure(tmp_path):
     """Test that Zed settings.json has correct structure."""
     # Create stub that provides contribution via editors_contribution hook
     stub = ModuleType("stub")
-    stub.HOOKSPECS = (EditorsSpec,)
     
     @hookimpl
     def editors_contribution(ws):
@@ -76,7 +75,6 @@ def test_zed_debug_json_structure(tmp_path):
     """Test that Zed debug.json has correct structure."""
     # Create stub with launch via editors_contribution hook
     stub = ModuleType("stub")
-    stub.HOOKSPECS = (EditorsSpec,)
     
     @hookimpl
     def editors_contribution(ws):
@@ -136,7 +134,6 @@ def test_zed_excludes_deduplication(tmp_path):
     """Test that Zed deduplicates excludes while preserving order."""
     # Create two stubs with overlapping excludes
     stub1 = ModuleType("stub1")
-    stub1.HOOKSPECS = (EditorsSpec,)
     
     @hookimpl
     def editors_contribution_1(ws):
@@ -145,7 +142,6 @@ def test_zed_excludes_deduplication(tmp_path):
     stub1.editors_contribution = editors_contribution_1
     
     stub2 = ModuleType("stub2")
-    stub2.HOOKSPECS = (EditorsSpec,)
     
     @hookimpl
     def editors_contribution_2(ws):

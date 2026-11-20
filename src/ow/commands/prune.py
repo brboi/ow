@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ow import term
-from ow.core import git, index, tasks
+from ow.core import git, index, refresh, stacks
 from ow.core.facts import gather_all
 from ow.core.json_schema import envelope
 from ow.core.paths import repos_dir
@@ -42,7 +42,7 @@ def run(
         skipped_candidates: list[dict[str, Any]] = []
         after: list[Step] = []
 
-        # 1. Plugin-recommended workspace removals (e.g. merged/closed GitHub PRs)
+        # 1. Plugin-recommended workspace/stack removals (e.g. merged/closed GitHub PRs)
         if plugins is not None:
             live_sessions = _load_live_sessions(plugins)
             live_workspaces = tuple(
@@ -85,18 +85,30 @@ def run(
                     ws_notes.extend(rp.notes)
 
                 ws_root = ws.root
-                ws_task = ws.task
+                ws_is_stack = ws.is_stack
+                parent_multi = stacks.parent_multi_workspace(ws_root) if ws_is_stack else None
 
-                def _cleanup_ws(root: Path = ws_root, task_name: str | None = ws_task) -> None:
+                def _cleanup_ws(
+                    root: Path = ws_root,
+                    parent: Path | None = parent_multi,
+                ) -> None:
                     shutil.rmtree(root)
-                    index.remove(root)
                     removed_roots.add(root)
-                    if task_name and plugins is not None:
-                        remaining = tasks.find_task(task_name, plugins)
+                    if parent is not None and plugins is not None:
+                        remaining = stacks.load_multi_workspace(parent, plugins)
                         if remaining is None:
-                            tasks.cleanup_task_files(task_name)
+                            refresh.remove_owned_files(parent)
+                            index.remove(parent)
+                            if parent.exists():
+                                try:
+                                    if not any(parent.iterdir()):
+                                        parent.rmdir()
+                                except OSError:
+                                    pass
                         else:
-                            tasks.sync_task_files(remaining, plugins)
+                            stacks.sync_multi_workspace_files(remaining[0], plugins)
+                    else:
+                        index.remove(root)
 
                 ws_steps.append(
                     OwStep(
@@ -167,14 +179,23 @@ def run(
 def _load_live_sessions(plugins: "Plugins") -> dict[Path, Session]:
     result: dict[Path, Session] = {}
     for path in index.read():
-        if not (path / ".ow" / "config.toml").exists():
+        if (path / ".ow" / "config.toml").exists():
+            try:
+                sess = open_session(str(path), need_workspace=False, plugins=plugins)
+            except Exception:
+                continue
+            if sess.workspace is not None:
+                result[sess.workspace.root.resolve()] = sess
             continue
-        try:
-            sess = open_session(str(path), need_workspace=False, plugins=plugins)
-        except Exception:
-            continue
-        if sess.workspace is not None:
-            result[sess.workspace.root.resolve()] = sess
+        stack_paths = stacks.detect_multi_workspace(path)
+        if stack_paths:
+            for sp in stack_paths:
+                try:
+                    sess = open_session(str(sp), need_workspace=False, plugins=plugins)
+                except Exception:
+                    continue
+                if sess.workspace is not None:
+                    result[sess.workspace.root.resolve()] = sess
     return result
 
 
@@ -282,4 +303,9 @@ def _local_branches(bare: Path) -> tuple[str, ...]:
 
 
 def _dead_entries() -> tuple[Path, ...]:
-    return tuple(path for path in index.read() if not (path / ".ow" / "config.toml").exists())
+    return tuple(
+        path
+        for path in index.read()
+        if not (path / ".ow" / "config.toml").exists()
+        and not stacks.detect_multi_workspace(path)
+    )

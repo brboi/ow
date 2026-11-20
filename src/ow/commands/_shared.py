@@ -10,11 +10,12 @@ import tomli_w
 
 from ow import term
 from ow.core.git import remotes_of
-from ow.core.plan import Batch, GitStep, RepoPlan, run_batch
+from ow.core.plan import Batch, GitStep, RepoPlan, Step, run_batch
 from ow.core.refresh import refresh_after, refresh_workspace
 
 if TYPE_CHECKING:
     from ow.core.plugins import KnownRepo, Plugins
+    from ow.core.workspace import Workspace
 
 __all__ = [
     "known_repo_catalog",
@@ -27,10 +28,10 @@ __all__ = [
 ]
 
 
-def known_repo_catalog(plugins: "Plugins") -> dict[str, "KnownRepo"]:
-    """Canonical repo name -> KnownRepo from every `ow_known_repos` answer."""
+def known_repo_catalog(plugins: "Plugins", ws: "Workspace | None" = None) -> dict[str, "KnownRepo"]:
+    """Canonical repo name -> KnownRepo from every `ow_known_repos` answer of plugins enabled for `ws`."""
     catalog: dict[str, "KnownRepo"] = {}
-    for _plugin, answer in plugins.call("ow_known_repos"):
+    for _plugin, answer in plugins.call("ow_known_repos", ws=ws):
         for repo in answer or ():
             catalog[repo.name] = repo
     return catalog
@@ -53,7 +54,7 @@ def print_dropped(dropped: Mapping[str, object]) -> None:
         term.warn(f"dropped {key} = {render_value(value)}")
 
 
-def run_steps(name: str, steps: Sequence[GitStep], root: Path | None = None) -> int:
+def run_steps(name: str, steps: Sequence[Step], root: Path | None = None) -> int:
     """Print each step as it runs, one after the other; 1 when one failed."""
     outcome = run_batch(
         Batch(root=root, repos=(RepoPlan(repo=name, steps=tuple(steps)),)),
