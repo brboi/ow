@@ -141,6 +141,32 @@ def test_add_named_stack_promotes_mono_stack_workspace_with_confirmation_and_pre
     assert cfg["workspace"]["stack"] is True
 
 
+def test_add_named_stack_in_empty_workspace_does_not_promote(lab):
+    """Adding `voip=community@18.0` after bare `ow init` converts cleanly to multi-stack without `main/`."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")}, base="18.0")
+
+    ws = lab.home / "porting"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", cwd=ws).exit_code == 0
+
+    bad_as = lab.ow("add", "voip=community@18.0", "--as", "main", cwd=ws)
+    assert bad_as.exit_code == 2
+    assert "--as" in bad_as.stderr
+
+    res = lab.ow("add", "voip=community@18.0", cwd=ws)
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "promoting" not in res.stdout
+    assert not (ws / "main").exists()
+    assert not (ws / ".ow" / "config.toml").exists()
+    assert (ws / "voip" / "community" / "odoo-bin").is_file()
+    assert "http_port = 8069" in (ws / "voip" / "odoorc").read_text()
+
+    code_ws = ws / "porting.code-workspace"
+    assert code_ws.is_file()
+    folders = [f["name"] for f in json.loads(code_ws.read_text())["folders"]]
+    assert folders == ["voip"]
+
+
 def test_add_promotes_when_auto_name_equals_repo_dir_name(lab):
     """Promotion staging must succeed even when existing stack's auto-name (`voip`) equals its repo dir (`voip/`)."""
     add_repo(lab, "voip", {"master": {"README.md": "voip\n"}}, base="master")

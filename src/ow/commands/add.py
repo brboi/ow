@@ -60,6 +60,18 @@ def _resolve_units(
     return resolved
 
 
+def _is_empty_mono_workspace(session: Session) -> bool:
+    """Whether a mono-stack workspace has no repos and no workspace-level config."""
+    return (
+        not session.locations
+        and not session.accepted_bases
+        and not session.rejected_bases
+        and not session.workspace_layer.values
+        and not session.workspace_layer.unknown
+        and not session.workspace_layer.wrong_type
+    )
+
+
 def _apply_mono_specs(
     plugins: Plugins,
     ws_root: Path,
@@ -102,7 +114,7 @@ def _apply_mono_specs(
             exit_code=exit_code,
         )
 
-    # Named stack(s) inside a mono-stack workspace -> promote to multi-stack!
+    # Named stack(s) inside a mono-stack workspace -> convert empty workspace or promote to multi-stack.
     new_names: list[str] = []
     seen_new: set[str] = set()
     for unit in units:
@@ -113,29 +125,37 @@ def _apply_mono_specs(
         new_names.append(unit.name)
 
     session = _open_workspace_session(plugins, ws_root)
+    assert session.workspace is not None
+    empty_mono = _is_empty_mono_workspace(session)
+    if empty_mono and as_name is not None:
+        raise UsageError(
+            "--as is only used when promoting a non-empty mono-stack workspace to multi-stack"
+        )
+
     parsed_units = _resolve_units(
         units, plugins, unnamed_ws=None, named_ws=session.workspace
     )
-    assert session.workspace is not None
 
     pending: list[dict[str, object]] = []
-    existing_name = infer_existing_stack_name(session, seen_new, explicit=as_name)
-    moved_root, promo_code = promote_to_multi_workspace(
-        session,
-        existing_name=existing_name,
-        new_names=new_names,
-        dry_run=dry_run,
-        yes=yes,
-        pending=pending,
-    )
-    if promo_code != 0 or (not dry_run and moved_root is None):
-        return AddResult(
-            workspaces=(),
-            workspace_root=ws_root,
-            multi_stack=False,
+    existing_name: str | None = None
+    if not empty_mono:
+        existing_name = infer_existing_stack_name(session, seen_new, explicit=as_name)
+        moved_root, promo_code = promote_to_multi_workspace(
+            session,
+            existing_name=existing_name,
+            new_names=new_names,
             dry_run=dry_run,
-            exit_code=promo_code,
+            yes=yes,
+            pending=pending,
         )
+        if promo_code != 0 or (not dry_run and moved_root is None):
+            return AddResult(
+                workspaces=(),
+                workspace_root=ws_root,
+                multi_stack=False,
+                dry_run=dry_run,
+                exit_code=promo_code,
+            )
 
     created_list = []
     exit_code = 0
@@ -155,6 +175,10 @@ def _apply_mono_specs(
             exit_code = max(exit_code, code)
     finally:
         if not dry_run:
+            if empty_mono and any(stacks.is_stack_config(ws_root / n) for n in new_names):
+                (ws_root / ".ow" / "config.toml").unlink(missing_ok=True)
+                (ws_root / ".ow" / ".config.toml.lock").unlink(missing_ok=True)
+                index.add(ws_root)
             ws_files = sync_multi_files(ws_root, plugins)
 
     return AddResult(
@@ -162,7 +186,7 @@ def _apply_mono_specs(
         workspace_root=ws_root,
         multi_stack=True,
         workspace_files=ws_files,
-        promoted_from=existing_name if not dry_run else None,
+        promoted_from=existing_name if (not dry_run and existing_name is not None) else None,
         dry_run=dry_run,
         exit_code=exit_code,
     )
