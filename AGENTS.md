@@ -41,12 +41,12 @@ src/ow/
 │   └── removal.py    # pushed-branch rule, branch and workspace removal plans
 ├── commands/         # one module per command; _-prefixed modules are shared helpers
 │   ├── _shared.py _repos.py _targets.py _promote.py _workspace.py
-│   └── init add run repo config status refresh files ls cd shell_init rm prune retarget
+│   └── init add run sandbox repo config status refresh files ls cd shell_init rm prune retarget
 ├── specs/            # hookspecs plugins share, with their merge rules
 │   ├── python_env.py # PythonEnvSpec; workspace_venv computes the venv once
 │   ├── editors.py    # EditorsSpec
 │   └── services.py   # ServicesSpec: DatabaseService, SmtpService
-└── plugins/          # built-ins: mise, odoo, postgres, mailsink, github, runbot, vscode, zed, local
+└── plugins/          # built-ins: mise, odoo, postgres, mailsink, github, runbot, vscode, zed, local, sandbox
     ├── _containers.py# Docker/Podman helper shared by postgres and mailsink
     ├── _github.py    # GitHub and bare-catalog support shared by github, odoo, runbot
     ├── _odoo_repos.py# Odoo repo identity table shared by odoo and runbot
@@ -59,7 +59,7 @@ src/ow/
     │   ├── targets.py    # @<base> resolution, base inference, companion core expansion
     │   ├── stacks.py     # ports, promotion pinning, stack name and info
     │   └── runner.py     # the `ow run` command: venv python, else mise exec, else python3
-    └── mise.py postgres.py mailsink.py github.py runbot.py vscode.py zed.py local.py
+    └── mise.py postgres.py mailsink.py github.py runbot.py vscode.py zed.py local.py sandbox.py
 
 src/tests/            # conftest.py (hermetic autouse fixture), lab.py (real remotes, fake_gh, fake_runbot)
 ├── scenarios/        # test_<command>.py: CLI integration against real git
@@ -85,7 +85,7 @@ src/tests/            # conftest.py (hermetic autouse fixture), lab.py (real rem
 - `ow_settings`, `ow_diagnostics`, `ow_known_repos`
 - `ow_generated_files`, `ow_multi_workspace_files`
 - `ow_resolve_target`, `ow_expand_workspace_repos`
-- `ow_runner`, `ow_before_run`, `ow_status`, `ow_prune_candidates`
+- `ow_runner`, `ow_before_run`, `ow_sandbox_mounts`, `ow_status`, `ow_prune_candidates`
 - `ow_stack_values`, `ow_stack_name`, `ow_stack_info`, `ow_is_base_branch`
 - events: `ow_workspace_created`, `ow_refreshed`
 

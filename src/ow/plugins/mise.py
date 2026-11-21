@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Callable
 
 import tomli_w
@@ -12,6 +13,7 @@ import tomli_w
 from ow.core.plugins import (
     Diagnostic,
     GeneratedFile,
+    SandboxMounts,
     Setting,
     hookimpl,
 )
@@ -152,3 +154,28 @@ def ow_refreshed(ws: Workspace, owned: tuple[PurePosixPath, ...]) -> None:
             term.warn(f"mise trust failed: {detail}")
     except OSError:
         pass
+
+
+@hookimpl
+def ow_sandbox_mounts(ws: Workspace) -> SandboxMounts | None:
+    """Expose mise installs/config read-only and keep mise caches inside `/tmp`."""
+    home = Path(os.environ.get("HOME") or Path.home()).resolve()
+    xdg_data = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share")).resolve()
+    xdg_config = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config")).resolve()
+
+    ro_paths = tuple(
+        candidate
+        for candidate in (xdg_data / "mise", xdg_config / "mise")
+        if candidate.exists()
+    )
+    if not ro_paths:
+        return None
+    return SandboxMounts(
+        ro_paths=ro_paths,
+        env={
+            "MISE_DATA_DIR": str(xdg_data / "mise"),
+            "MISE_CONFIG_DIR": str(xdg_config / "mise"),
+            "MISE_CACHE_DIR": "/tmp/ow-sandbox/mise-cache",
+            "MISE_STATE_DIR": "/tmp/ow-sandbox/mise-state",
+        },
+    )

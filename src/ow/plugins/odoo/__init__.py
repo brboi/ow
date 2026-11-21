@@ -16,6 +16,7 @@ from ow.core.plugins import (
     ResolvedRepo,
     ResolvedTarget,
     RunCommand,
+    SandboxMounts,
     Setting,
     StackInfo,
     hookimpl,
@@ -140,3 +141,17 @@ def ow_runner(ws: Workspace, args: tuple[str, ...]) -> RunCommand | None:
 def ow_known_repos() -> list[KnownRepo]:
     """Provide known Odoo repositories."""
     return [KnownRepo(name=repo.name, url=repo.clone_url) for repo in ODOO_REPOS]
+
+
+@hookimpl
+def ow_sandbox_mounts(ws: Workspace) -> SandboxMounts | None:
+    """Expose Odoo's shared Python virtualenv read-only and forward `ODOO_RC`."""
+    core, core_diagnostics = get_core(ws)
+    if core_diagnostics or core is None:
+        return None
+    venv = files.odoo_venv(ws, core)
+    ro_paths = (venv.path,) if (not venv.is_local(ws) and venv.path.exists()) else ()
+    return SandboxMounts(
+        ro_paths=ro_paths,
+        env={"ODOO_RC": str(ws.root / "odoorc")},
+    )

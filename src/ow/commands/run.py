@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from ow import term
 from ow.commands._repos import pr_local_ref
-from ow.commands._shared import known_repo_catalog
+from ow.commands._shared import known_repo_catalog, prepare_services
 from ow.commands._targets import deduplicate_name, parse_unit_spec
 from ow.commands._workspace import (
     UnitMode,
@@ -247,27 +247,6 @@ def _run_multi(
     return exit_code
 
 
-def _prepare_services(
-    workspaces: Sequence[Workspace], plugins: Plugins
-) -> None:
-    """Invoke `ow_before_run` once across enabled plugins; failures warn without blocking."""
-    if not workspaces:
-        return
-    results = plugins.call(
-        "ow_before_run",
-        ws=workspaces[0],
-        workspaces=tuple(workspaces),
-        errors="collect",
-    )
-    for plugin_name, result in results:
-        if isinstance(result, PluginError):
-            term.warn(f"{plugin_name}: {result.cause}")
-        elif isinstance(result, list):
-            for line in result:
-                if isinstance(line, str) and line:
-                    term.out(f"# {line}")
-
-
 def _run_workspaces(
     items: Sequence[tuple[str, Workspace, tuple[str, ...]]],
     plugins: Plugins,
@@ -278,7 +257,7 @@ def _run_workspaces(
     if len(items) == 1:
         _label, ws, args = items[0]
         cmd = _select_runner(ws, plugins, args)
-        _prepare_services((ws,), plugins)
+        prepare_services((ws,), plugins)
         return _run_single(cmd)
 
     runnable: list[tuple[str, str | None, RunCommand]] = []
@@ -295,7 +274,7 @@ def _run_workspaces(
         names = ", ".join(label for label, _, _ in items)
         raise UsageError(f"no runnable stacks among: {names}")
 
-    _prepare_services(runnable_ws, plugins)
+    prepare_services(runnable_ws, plugins)
 
     if len(runnable) == 1:
         return _run_single(runnable[0][2])

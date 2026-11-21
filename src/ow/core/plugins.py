@@ -122,6 +122,15 @@ class PruneCandidate:
     data: Mapping[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class SandboxMounts:
+    """Extra paths and environment variables a plugin needs inside `ow sandbox`."""
+
+    ro_paths: tuple[Path, ...] = ()
+    rw_paths: tuple[Path, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+
+
 class CoreSpec:
     """Core hookspecs declared by ow."""
 
@@ -234,10 +243,25 @@ class CoreSpec:
     def ow_is_base_branch(self, repo: str, branch: str) -> bool | None:
         """Return True if `branch` on `repo` is an upstream base series (checked out detached)."""
 
+    @hookspec
+    def ow_sandbox_mounts(self, ws: Workspace) -> SandboxMounts | None:
+        """Return extra sandbox mounts and environment variables needed for `ws`, or None."""
+
 
 def _get_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
     """Get all built-in plugin modules in order."""
-    from ow.plugins import github, local, mailsink, mise, odoo, postgres, runbot, vscode, zed
+    from ow.plugins import (
+        github,
+        local,
+        mailsink,
+        mise,
+        odoo,
+        postgres,
+        runbot,
+        sandbox,
+        vscode,
+        zed,
+    )
 
     # Order matters: `Plugins.pipe` threads values in this order (odoo expands companion
     # repos before runbot pins them).
@@ -251,6 +275,7 @@ def _get_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
         ("vscode", vscode),
         ("zed", zed),
         ("local", local),
+        ("sandbox", sandbox),
     )
 
 

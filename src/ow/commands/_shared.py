@@ -12,6 +12,7 @@ from ow import term
 from ow.core.git import remotes_of
 from ow.core.plan import Batch, GitStep, RepoPlan, Step, run_batch
 from ow.core.refresh import refresh_after, refresh_workspace
+from ow.errors import PluginError
 
 if TYPE_CHECKING:
     from ow.core.plugins import KnownRepo, Plugins
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "known_repo_catalog",
+    "prepare_services",
     "print_dropped",
     "refresh_after",
     "refresh_workspace",
@@ -26,6 +28,25 @@ __all__ = [
     "render_value",
     "run_steps",
 ]
+
+
+def prepare_services(workspaces: Sequence["Workspace"], plugins: "Plugins") -> None:
+    """Invoke `ow_before_run` once across enabled plugins; failures warn without blocking."""
+    if not workspaces:
+        return
+    results = plugins.call(
+        "ow_before_run",
+        ws=workspaces[0],
+        workspaces=tuple(workspaces),
+        errors="collect",
+    )
+    for plugin_name, result in results:
+        if isinstance(result, PluginError):
+            term.warn(f"{plugin_name}: {result.cause}")
+        elif isinstance(result, list):
+            for line in result:
+                if isinstance(line, str) and line:
+                    term.out(f"# {line}")
 
 
 def known_repo_catalog(plugins: "Plugins", ws: "Workspace | None" = None) -> dict[str, "KnownRepo"]:

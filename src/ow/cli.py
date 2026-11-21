@@ -343,6 +343,57 @@ def build_app(plugins: Plugins) -> typer.Typer:
             )
         )
 
+    # -- sandbox ---------------------------------------------------------
+
+    @app.command(
+        "sandbox",
+        cls=_RunCommand,
+        context_settings={
+            "allow_extra_args": True,
+            "ignore_unknown_options": False,
+            "allow_interspersed_args": False,
+        },
+    )
+    def sandbox_cmd(
+        ctx: typer.Context,
+        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
+        profile: str = typer.Option(
+            None,
+            "--profile",
+            metavar="NAME",
+            help="Harness profile: auto, claude, opencode, codex, pi, omp, or none",
+        ),
+        ro: list[str] = typer.Option(
+            None, "--ro", metavar="PATH", help="Extra host path to mount read-only (repeatable)"
+        ),
+        rw: list[str] = typer.Option(
+            None, "--rw", metavar="PATH", help="Extra host path to mount read-write (repeatable)"
+        ),
+        env: list[str] = typer.Option(
+            None,
+            "--env",
+            metavar="VAR",
+            help="Extra host environment variable name to forward (repeatable)",
+        ),
+        dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
+    ) -> None:
+        """Run a command or AI harness inside a bubblewrap sandbox."""
+        git.check_version()
+        passthrough = tuple(ctx.meta.get("ow_run_passthrough", ()))
+        command = tuple(ctx.args) + passthrough
+        _exit(
+            _command_module("sandbox").run(
+                plugins,
+                command=command,
+                workspace=workspace,
+                profile=profile,
+                ro_paths=tuple(ro or ()),
+                rw_paths=tuple(rw or ()),
+                pass_env=tuple(env or ()),
+                dry_run=dry_run,
+            )
+        )
+
     # -- repo ------------------------------------------------------------
 
     repo_app = typer.Typer(

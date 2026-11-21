@@ -111,6 +111,10 @@ Each `[repos]` value is validated against the bare repo's remotes: the longest r
 | `github.cache_ttl` | int | `120` |
 | `runbot.url` | str | `"https://runbot.odoo.com"` |
 | `runbot.cache_ttl` | int | `120` |
+| `sandbox.profile` | str | — |
+| `sandbox.ro_paths` | list | `[]` |
+| `sandbox.rw_paths` | list | `[]` |
+| `sandbox.pass_env` | list | `[]` |
 
 `odoo.debug_args` also gets `--without-demo=all` when the Odoo core predates 19. `odoo.db_name` and `odoo.debug_test_args` are computed from the workspace, so they read as `(unset)` outside one.
 
