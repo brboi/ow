@@ -57,7 +57,7 @@ def ow_generated_files(
     core, _ = get_core(ws)
     if core is None:
         return []
-    return files.generated_files(ws, core)
+    return files.generated_files(ws, core, answers=answers)
 
 
 @hookimpl

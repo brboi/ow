@@ -28,7 +28,7 @@ from ow.core.paths import repos_dir
 from ow.core.plugins import ResolvedTarget, RunCommand
 from ow.core.session import global_settings, open_session
 from ow.core.workspace import resolve_target_root
-from ow.errors import UsageError
+from ow.errors import PluginError, UsageError
 from ow.recipes.removal import pr_ref_of
 
 if TYPE_CHECKING:
@@ -247,6 +247,27 @@ def _run_multi(
     return exit_code
 
 
+def _prepare_services(
+    workspaces: Sequence[Workspace], plugins: Plugins
+) -> None:
+    """Invoke `ow_before_run` once across enabled plugins; failures warn without blocking."""
+    if not workspaces:
+        return
+    results = plugins.call(
+        "ow_before_run",
+        ws=workspaces[0],
+        workspaces=tuple(workspaces),
+        errors="collect",
+    )
+    for plugin_name, result in results:
+        if isinstance(result, PluginError):
+            term.warn(f"{plugin_name}: {result.cause}")
+        elif isinstance(result, list):
+            for line in result:
+                if isinstance(line, str) and line:
+                    term.out(f"# {line}")
+
+
 def _run_workspaces(
     items: Sequence[tuple[str, Workspace, tuple[str, ...]]],
     plugins: Plugins,
@@ -257,19 +278,24 @@ def _run_workspaces(
     if len(items) == 1:
         _label, ws, args = items[0]
         cmd = _select_runner(ws, plugins, args)
+        _prepare_services((ws,), plugins)
         return _run_single(cmd)
 
     runnable: list[tuple[str, str | None, RunCommand]] = []
+    runnable_ws: list[Workspace] = []
     for label, ws, args in items:
         cmd = _find_runner(ws, plugins, args)
         if cmd is None:
             term.out(f"# {label}: no runner available, skipping")
             continue
         runnable.append((label, stack_info(ws, plugins).note, cmd))
+        runnable_ws.append(ws)
 
     if not runnable:
         names = ", ".join(label for label, _, _ in items)
         raise UsageError(f"no runnable stacks among: {names}")
+
+    _prepare_services(runnable_ws, plugins)
 
     if len(runnable) == 1:
         return _run_single(runnable[0][2])
