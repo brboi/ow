@@ -10,6 +10,7 @@ from urllib.parse import quote
 from ow import term
 from ow.core import config
 from ow.core.plugins import Setting, StatusInfo, hookimpl
+from ow.errors import UsageError
 from ow.plugins import _containers as containers
 from ow.specs.services import DatabaseService
 
@@ -108,7 +109,21 @@ def database_service(ws: Workspace) -> DatabaseService | None:
         user=user,
         password=password,
         admin_url=f"http://localhost:{pgweb_port}" if pgweb else None,
+        drop=lambda db_name, _eng=engine: drop_database(_eng, db_name),
     )
+
+
+def drop_database(engine: str, db_name: str) -> None:
+    """Force-drop `db_name` inside the managed PostgreSQL container."""
+    res = _psql(
+        engine,
+        _PG_ADMIN_USER,
+        "postgres",
+        f"DROP DATABASE IF EXISTS {_sql_ident(db_name)} WITH (FORCE);",
+    )
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout).strip()
+        raise UsageError(f"postgres: failed to drop database {db_name!r}: {detail}")
 
 
 _PG_ADMIN_USER = "postgres"

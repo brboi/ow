@@ -7,6 +7,7 @@ which backend provides them.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ class DatabaseService:
     user: str
     password: str
     admin_url: str | None = None
+    drop: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)

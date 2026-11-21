@@ -85,7 +85,7 @@ src/tests/            # conftest.py (hermetic autouse fixture), lab.py (real rem
 - `ow_settings`, `ow_diagnostics`, `ow_known_repos`
 - `ow_generated_files`, `ow_multi_workspace_files`
 - `ow_resolve_target`, `ow_expand_workspace_repos`
-- `ow_runner`, `ow_before_run`, `ow_sandbox_mounts`, `ow_status`, `ow_prune_candidates`
+- `ow_runner`, `ow_before_run`, `ow_reset_run`, `ow_sandbox_mounts`, `ow_status`, `ow_prune_candidates`
 - `ow_stack_values`, `ow_stack_name`, `ow_stack_info`, `ow_is_base_branch`
 - events: `ow_workspace_created`, `ow_refreshed`
 

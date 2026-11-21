@@ -326,6 +326,11 @@ def build_app(plugins: Plugins) -> typer.Typer:
             "--fail-fast",
             help="Stop all running stacks as soon as one exits non-zero",
         ),
+        reset: bool = typer.Option(
+            False,
+            "--reset",
+            help="Drop each launched stack's database and local filestore before starting",
+        ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
         """Run a workspace (single TTY or parallel multi-stack)."""
@@ -339,6 +344,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
                 workspace=workspace,
                 tmp=tmp,
                 fail_fast=fail_fast,
+                reset=reset,
                 extra_args=tuple(extra_args),
             )
         )

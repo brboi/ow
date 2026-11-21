@@ -191,6 +191,12 @@ class CoreSpec:
         """Prepare shared local services before `ow run` starts workspaces; return info lines."""
 
     @hookspec
+    def ow_reset_run(
+        self, ws: Workspace, answers: Callable[[str], list]
+    ) -> list[str] | None:
+        """Reset local runtime state (e.g. database, filestore) before `ow run --reset`; return info lines."""
+
+    @hookspec
     def ow_status(
         self,
         ws: Workspace | None,

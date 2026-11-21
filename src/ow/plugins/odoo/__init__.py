@@ -138,6 +138,15 @@ def ow_runner(ws: Workspace, args: tuple[str, ...]) -> RunCommand | None:
 
 
 @hookimpl
+def ow_reset_run(ws: Workspace, answers: Callable[[str], list]) -> list[str] | None:
+    """Drop the workspace's Odoo database and filestore before `ow run --reset`."""
+    core, core_diagnostics = get_core(ws)
+    if core_diagnostics or core is None:
+        return None
+    return runner.reset_workspace(ws, answers)
+
+
+@hookimpl
 def ow_known_repos() -> list[KnownRepo]:
     """Provide known Odoo repositories."""
     return [KnownRepo(name=repo.name, url=repo.clone_url) for repo in ODOO_REPOS]
