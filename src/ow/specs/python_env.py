@@ -7,16 +7,26 @@ virtualenv, environment variables, PATH entries and aliases.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import shutil
+import subprocess
+import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import TYPE_CHECKING
 
+from ow import term
+from ow.core.fs import sidecar_lock
 from ow.core.paths import venvs_dir
 from ow.core.plugins import Diagnostic, hookspec
+from ow.errors import UsageError
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
+
+_REQ_STAMP = ".ow-requirements.sha256"
 
 
 @dataclass(frozen=True)
@@ -177,3 +187,129 @@ def workspace_venv(ws: Workspace, env: PythonEnvironment | None) -> WorkspaceVen
     venv_key = env.venv_key if env is not None else None
     path = resolve_venv_path(ws, python_version, venv_key, shared=shared)
     return WorkspaceVenv(python_version, path, tuple(diagnostics))
+
+
+def _requirements_hash(files: Sequence[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _is_stamped(venv_path: Path, req_hash: str) -> bool:
+    stamp = venv_path / _REQ_STAMP
+    if not stamp.is_file():
+        return False
+    try:
+        return stamp.read_text(encoding="utf-8").strip() == req_hash
+    except OSError:
+        return False
+
+
+def _run_bootstrap(
+    cmd: Sequence[str],
+    *,
+    cwd: Path,
+    log_to_stderr: bool,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    """Run a venv bootstrap command, routing its stdout to stderr when `log_to_stderr` is True."""
+    if not log_to_stderr:
+        return subprocess.run(cmd, cwd=cwd, check=False)
+    try:
+        sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+        if res.stdout:
+            sys.stderr.write(res.stdout)
+        if res.stderr:
+            sys.stderr.write(res.stderr)
+        return res
+    return subprocess.run(cmd, cwd=cwd, stdout=sys.stderr, check=False)
+
+
+def _ensure_pip(
+    venv_path: Path, venv_python: Path, cwd: Path, *, log_to_stderr: bool = False
+) -> None:
+    """Bootstrap `pip` via `ensurepip` when missing from `venv_path`."""
+    has_pip = subprocess.run(
+        [str(venv_python), "-m", "pip", "--version"],
+        capture_output=True,
+        check=False,
+    )
+    if has_pip.returncode != 0:
+        ensure = _run_bootstrap(
+            [str(venv_python), "-m", "ensurepip", "--default-pip"],
+            cwd=cwd,
+            log_to_stderr=log_to_stderr,
+        )
+        if ensure.returncode != 0:
+            raise UsageError(f"failed to bootstrap pip in {venv_path}")
+
+
+def ensure_venv_ready(
+    ws: Workspace,
+    venv_path: Path,
+    *,
+    requirements: Sequence[str] = (),
+    log_to_stderr: bool = False,
+) -> None:
+    """Ensure `venv_path` exists (via `mise` when enabled) and its `requirements` are installed.
+
+    When `log_to_stderr` is True, progress lines and bootstrap subprocess stdout are routed
+    to `stderr` so callers like `ow exec` keep `stdout` clean for pipelines.
+    """
+    venv_python = venv_path / "bin" / "python"
+    req_files = tuple(p for rel in requirements if (p := ws.root / rel).is_file())
+    req_hash = _requirements_hash(req_files) if req_files else None
+
+    if venv_python.exists():
+        # Skip synthetic non-venv interpreters (e.g. test stubs without pyvenv.cfg).
+        if not (venv_path / "pyvenv.cfg").is_file():
+            return
+        if req_hash is None or _is_stamped(venv_path, req_hash):
+            return
+
+    def _log(msg: str) -> None:
+        if log_to_stderr:
+            print(msg, file=sys.stderr)
+        else:
+            term.out(msg)
+
+    with sidecar_lock(venv_path):
+        created = False
+        if venv_python.exists():
+            if not (venv_path / "pyvenv.cfg").is_file():
+                return
+            if req_hash is None or _is_stamped(venv_path, req_hash):
+                return
+        else:
+            if not (ws.settings.get("mise.enabled", True) and shutil.which("mise")):
+                return
+            _log(f"# {ws.name}: preparing Python virtualenv at {venv_path}")
+            _run_bootstrap(["mise", "install"], cwd=ws.root, log_to_stderr=log_to_stderr)
+            _run_bootstrap(
+                ["mise", "exec", "--", "python", "-c", ""],
+                cwd=ws.root,
+                log_to_stderr=log_to_stderr,
+            )
+            if not venv_python.exists() or not (venv_path / "pyvenv.cfg").is_file():
+                return
+            created = True
+
+        if req_files and req_hash is not None:
+            _log(f"# {ws.name}: installing Python requirements into {venv_path}")
+            _ensure_pip(venv_path, venv_python, ws.root, log_to_stderr=log_to_stderr)
+
+            pip_cmd = [str(venv_python), "-m", "pip", "install"]
+            for req in req_files:
+                pip_cmd.extend(["-r", str(req)])
+            res = _run_bootstrap(pip_cmd, cwd=ws.root, log_to_stderr=log_to_stderr)
+            if res.returncode != 0:
+                raise UsageError(f"failed to install Python requirements into {venv_path}")
+
+            (venv_path / _REQ_STAMP).write_text(f"{req_hash}\n", encoding="utf-8")
+        elif created:
+            _ensure_pip(venv_path, venv_python, ws.root, log_to_stderr=log_to_stderr)
