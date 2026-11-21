@@ -349,6 +349,41 @@ def build_app(plugins: Plugins) -> typer.Typer:
             )
         )
 
+    # -- exec ------------------------------------------------------------
+
+    @app.command(
+        "exec",
+        cls=_RunCommand,
+        context_settings={"allow_extra_args": True, "ignore_unknown_options": False},
+    )
+    def exec_cmd(
+        ctx: typer.Context,
+        target: str = typer.Argument(
+            None,
+            metavar="WS",
+            help="Workspace or stack to enter (default: current directory)",
+            autocompletion=complete_workspace,
+        ),
+        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
+    ) -> None:
+        """Run a command or shell in a stack's virtualenv."""
+        git.check_version()
+        if ctx.args:
+            hint_tokens = ([target] if target is not None else []) + list(ctx.args)
+            hint = " ".join(hint_tokens)
+            raise errors.UsageError(
+                f"unexpected arguments before `--`; pass commands after `--` (e.g. `ow exec -- {hint}`)"
+            )
+        command = tuple(ctx.meta.get("ow_run_passthrough", ()))
+        _exit(
+            _command_module("exec").run(
+                plugins,
+                target=target,
+                workspace=workspace,
+                command=command,
+            )
+        )
+
     # -- sandbox ---------------------------------------------------------
 
     @app.command(

@@ -57,6 +57,11 @@ ow run odoo:"-i voip --dev=all" iap:"--log-level=debug"
 # Throwaway run without initializing a persistent workspace (cleaned up on exit)
 ow run --tmp enterprise#12345 -- -i sale
 ow run --tmp odoo=enterprise#12345:"-i voip" iap=iap#4321
+
+# Run commands or open a shell inside a stack's Python virtualenv & environment
+ow exec -- pip install phonenumbers
+ow exec iap -- python -m pytest
+ow exec iap
 ```
 
 ### Evolve an existing workspace (`ow add` & `ow retarget`)

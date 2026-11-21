@@ -41,7 +41,7 @@ src/ow/
 │   └── removal.py    # pushed-branch rule, branch and workspace removal plans
 ├── commands/         # one module per command; _-prefixed modules are shared helpers
 │   ├── _shared.py _repos.py _targets.py _promote.py _workspace.py
-│   └── init add run sandbox repo config status refresh files ls cd shell_init rm prune retarget
+│   └── init add run exec sandbox repo config status refresh files ls cd shell_init rm prune retarget
 ├── specs/            # hookspecs plugins share, with their merge rules
 │   ├── python_env.py # PythonEnvSpec; workspace_venv computes the venv once
 │   ├── editors.py    # EditorsSpec
