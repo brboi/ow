@@ -298,12 +298,21 @@ def _run_workspaces(
     return _run_multi(runnable, fail_fast=fail_fast)
 
 
-def _open_ws(path: Path, plugins: Plugins) -> Workspace:
+def _open_ws(path: Path, plugins: Plugins) -> tuple[Workspace, Plugins]:
     session = open_session(str(path), need_workspace=True, plugins=plugins, cwd=path)
     for warning in session.warnings:
         term.warn(warning)
     assert session.workspace is not None
-    return session.workspace
+    return session.workspace, session.plugins
+
+
+def _find_multi_runner(
+    multi: stacks.MultiWorkspace, plugins: Plugins, args: tuple[str, ...]
+) -> RunCommand | None:
+    """Return the first workspace-wide RunCommand contributed by an enabled plugin, or None."""
+    ws_ctx = multi.stacks[0] if multi.stacks else None
+    answer = plugins.first("ow_multi_runner", ws=ws_ctx, multi=multi, args=args)
+    return answer if isinstance(answer, RunCommand) else None
 
 
 def _looks_like_target_spec(token: str) -> bool:
@@ -361,13 +370,16 @@ def run(
                     plugins,
                     root=unit_root,
                     resolved=resolved,
-                    mode=UnitMode.ephemeral(is_stack=len(targets) > 1),
+                    mode=UnitMode.ephemeral(
+                        is_stack=len(targets) > 1,
+                        parent_multi_root=ephemeral_parent if len(targets) > 1 else None,
+                    ),
                     pending=pending if len(targets) > 1 else None,
                 )
                 created_ephemerals.append((created.root, resolved))
                 if code != 0:
                     return code
-                ws = _open_ws(created.root, plugins)
+                ws, _ws_plugins = _open_ws(created.root, plugins)
                 combined_args = unit.extra_args + (passthrough if len(targets) == 1 else ())
                 to_run.append((label, ws, combined_args))
 
@@ -384,19 +396,26 @@ def run(
     if not targets:
         root, kind = resolve_target_root(workspace, cwd=base_cwd)
         if kind == "workspace":
-            ws = _open_ws(root, plugins)
-            return _run_workspaces([(ws.name, ws, passthrough)], plugins, fail_fast=fail_fast, reset=reset)
+            ws, eff_plugins = _open_ws(root, plugins)
+            return _run_workspaces([(ws.name, ws, passthrough)], eff_plugins, fail_fast=fail_fast, reset=reset)
 
         loaded = stacks.load_multi_workspace(root, plugins)
         if loaded is None:
             raise UsageError(f"no valid stacks found in {root}")
         multi, sessions = loaded
+        eff_plugins = sessions[0].plugins if sessions else plugins
         for sess in sessions:
             for warning in sess.warnings:
                 term.warn(warning)
+        multi_cmd = _find_multi_runner(multi, eff_plugins, passthrough)
+        if multi_cmd is not None:
+            prepare_services(multi.stacks, eff_plugins)
+            if reset:
+                _reset_workspaces(multi.stacks, eff_plugins)
+            return _run_single(multi_cmd)
         if passthrough:
             runnable_ws = [
-                ws for ws in multi.stacks if _find_runner(ws, plugins, passthrough) is not None
+                ws for ws in multi.stacks if _find_runner(ws, eff_plugins, passthrough) is not None
             ]
             if len(runnable_ws) > 1:
                 names = ", ".join(ws.name for ws in runnable_ws)
@@ -405,10 +424,11 @@ def run(
                     'specify a stack with `ow run <stack> -- ...` or `ow run <stack>:"..."`'
                 )
         items = [(ws.name, ws, passthrough) for ws in multi.stacks]
-        return _run_workspaces(items, plugins, fail_fast=fail_fast, reset=reset)
+        return _run_workspaces(items, eff_plugins, fail_fast=fail_fast, reset=reset)
 
     # Mode 3: Positional targets without `--tmp` -> existing workspace(s) or stack(s) only
     to_run = []
+    run_plugins = plugins
     for raw in targets:
         unit = parse_unit_spec(raw, allow_run_args=True)
         lookup = unit.name if unit.name is not None else unit.spec
@@ -432,17 +452,31 @@ def run(
 
         combined_args = unit.extra_args + (passthrough if len(targets) == 1 else ())
         if kind == "workspace":
-            ws = _open_ws(root, plugins)
+            ws, eff_plugins = _open_ws(root, plugins)
+            run_plugins = eff_plugins
             to_run.append((ws.name, ws, combined_args))
         else:
+            loaded = stacks.load_multi_workspace(root, plugins)
+            if loaded is None:
+                raise UsageError(f"no valid stacks found in {root}")
+            multi, sessions = loaded
+            eff_plugins = sessions[0].plugins if sessions else plugins
+            run_plugins = eff_plugins
+            if len(targets) == 1:
+                multi_cmd = _find_multi_runner(multi, eff_plugins, combined_args)
+                if multi_cmd is not None:
+                    for sess in sessions:
+                        for warning in sess.warnings:
+                            term.warn(warning)
+                    prepare_services(multi.stacks, eff_plugins)
+                    if reset:
+                        _reset_workspaces(multi.stacks, eff_plugins)
+                    return _run_single(multi_cmd)
             if combined_args:
                 raise UsageError(
                     f"{root.name!r} is a multi-stack workspace; pass arguments to individual stacks"
                 )
-            loaded = stacks.load_multi_workspace(root, plugins)
-            if loaded is None:
-                raise UsageError(f"no valid stacks found in {root}")
-            for ws in loaded[0].stacks:
+            for ws in multi.stacks:
                 to_run.append((ws.name, ws, ()))
 
-    return _run_workspaces(to_run, plugins, fail_fast=fail_fast, reset=reset)
+    return _run_workspaces(to_run, run_plugins, fail_fast=fail_fast, reset=reset)

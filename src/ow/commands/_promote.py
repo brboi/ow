@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ow.commands._shared import print_dropped, refresh_workspace, remotes_of
 from ow.commands._workspace import pin_stack_values
-from ow.core import bases, config, index, stacks
+from ow.core import bases, config, index, refresh, stacks
 from ow.core.plan import Batch, GitStep, OwStep, RepoPlan, Step, run_batch
 from ow.core.session import Session, global_settings, open_session
 from ow.errors import UsageError
@@ -112,7 +112,7 @@ def promote_to_multi_workspace(
     )
 
     entries_to_move = sorted(
-        (p for p in root.iterdir() if p.name != staging.name),
+        (p for p in root.iterdir() if p.name not in (staging.name, ".ow")),
         key=lambda p: p.name,
     )
 
@@ -123,14 +123,15 @@ def promote_to_multi_workspace(
         staging.rename(dest)
 
     def _update_config_and_refresh() -> None:
-        dest_cfg = dest / ".ow" / "config.toml"
-        dropped = config.write_workspace(
-            dest_cfg,
+        root_cfg = root / ".ow" / "config.toml"
+        refresh.migrate_lock_to_prefix(root, existing_name)
+        dropped = config.promote_to_multi(
+            root_cfg,
+            existing_name,
             dict(session.accepted_bases),
             preserved_values,
             declared=session.declared,
             remotes_of=remotes_of,
-            stack=True,
         )
         print_dropped(dropped)
         index.add(root)

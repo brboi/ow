@@ -267,19 +267,38 @@ def project_files(
     root: Path,
     files: Sequence[tuple[str, GeneratedFile]],
     diagnostics: Sequence[tuple[str, Diagnostic]] = (),
+    *,
+    lock_root: Path | None = None,
+    lock_prefix: PurePosixPath | None = None,
+    ignore_lock_prefixes: Sequence[str] = (),
 ) -> Projection:
-    """Compare the proposed `(owner, GeneratedFile)` entries with the lock at `root`.
+    """Compare the proposed `(owner, GeneratedFile)` entries with the lock at `lock_root` (or `root`).
 
+    When `lock_prefix` is given, only lock entries under `<lock_prefix>/` are inspected (stripped
+    of that prefix). When `ignore_lock_prefixes` is given, lock entries starting with any of those
+    prefixes (unless proposed here) are ignored for `stale_lock`.
     A malformed lock adds a core warning; a symlinked parent marks just that file `skipped`.
     """
-    lock, core_diag = _read_lock_or_warn(root)
+    effective_lock_root = lock_root if lock_root is not None else root
+    full_lock, core_diag = _read_lock_or_warn(effective_lock_root)
+    if lock_prefix is not None:
+        pfx = f"{lock_prefix.as_posix().rstrip('/')}/"
+        lock = {k[len(pfx) :]: v for k, v in full_lock.items() if k.startswith(pfx)}
+    else:
+        lock = full_lock
     all_diagnostics = list(diagnostics)
     if core_diag is not None:
         all_diagnostics.append(("core", core_diag))
     proposed = {gf.path.as_posix() for _owner, gf in files}
+    stale = tuple(
+        p
+        for p in lock
+        if p not in proposed
+        and not any(p.startswith(ign) for ign in ignore_lock_prefixes)
+    )
     return Projection(
         files=classify_proposals(root, files, lock),
-        stale_lock=tuple(p for p in lock if p not in proposed),
+        stale_lock=stale,
         diagnostics=tuple(all_diagnostics),
         blocked=any(diag.level == "error" for _, diag in all_diagnostics),
     )
@@ -304,13 +323,25 @@ def flatten_contributions(
     return files, diagnostics
 
 
-def project(ws: "Workspace", plugins: Plugins) -> Projection:
+def _stack_lock_location(ws: "Workspace") -> tuple[Path, PurePosixPath | None]:
+    """Return `(lock_root, lock_prefix)` for `ws` (parent root + stack name when `ws.is_stack`)."""
+    if ws.is_stack:
+        return ws.root.parent, PurePosixPath(ws.name)
+    return ws.root, None
+
+
+def project(
+    ws: "Workspace",
+    plugins: Plugins,
+    *,
+    multi: object | None = None,
+) -> Projection:
     """Inspect generated files and return their status against the lock.
 
     Raises `PluginError` on a bad path or two owners of one path; a symlinked parent marks just that file `skipped`.
     """
     answers: dict[str, list[Diagnostic]] = {}
-    for plugin_name, diag_list in plugins.call("ow_diagnostics", ws):
+    for plugin_name, diag_list in plugins.call("ow_diagnostics", ws, multi=multi):
         if not diag_list:
             continue
         if not isinstance(diag_list, list):
@@ -320,10 +351,18 @@ def project(ws: "Workspace", plugins: Plugins) -> Projection:
         answers[plugin_name] = list(diag_list)
 
     files_by_plugin, extra_diags = collect_contributions(
-        "ow_generated_files", plugins.call("ow_generated_files", ws, answers=plugins.answers(ws))
+        "ow_generated_files",
+        plugins.call("ow_generated_files", ws, answers=plugins.answers(ws), multi=multi),
     )
     files, diagnostics = flatten_contributions(plugins, answers, files_by_plugin, extra_diags)
-    return project_files(ws.root, files, diagnostics)
+    lock_root, lock_prefix = _stack_lock_location(ws)
+    return project_files(
+        ws.root,
+        files,
+        diagnostics,
+        lock_root=lock_root,
+        lock_prefix=lock_prefix,
+    )
 
 
 @contextlib.contextmanager
@@ -338,7 +377,11 @@ def _refresh_lock(root: Path):
 
 
 def write_files(
-    root: Path, projection: Projection
+    root: Path,
+    projection: Projection,
+    *,
+    lock_root: Path | None = None,
+    lock_prefix: PurePosixPath | None = None,
 ) -> tuple[tuple[PurePosixPath, ...], tuple[PurePosixPath, ...]]:
     """Write what `projection` says is missing or stale under `root`; return `(written, owned)`.
 
@@ -347,8 +390,11 @@ def write_files(
     if projection.blocked:
         return (), ()
 
-    with _refresh_lock(root):
-        lock, _ = _read_lock_or_warn(root)
+    effective_lock_root = lock_root if lock_root is not None else root
+    pfx = f"{lock_prefix.as_posix().rstrip('/')}/" if lock_prefix is not None else ""
+
+    with _refresh_lock(effective_lock_root):
+        lock, _ = _read_lock_or_warn(effective_lock_root)
 
         written: list[PurePosixPath] = []
         owned: list[PurePosixPath] = []
@@ -357,6 +403,7 @@ def write_files(
 
         for status in projection.files:
             path_key = status.path.as_posix()
+            lock_key = f"{pfx}{path_key}"
             if status.state in ("absent", "outdated"):
                 dest = root / status.path
                 if _ancestry_problem(root, status.path):
@@ -383,31 +430,69 @@ def write_files(
                         msg = f"{msg} (already wrote {written_paths})"
                     failure = OwError(msg)
                     break
-                new_lock[path_key] = _sha256_bytes(status.proposal)
+                new_lock[lock_key] = _sha256_bytes(status.proposal)
                 written.append(status.path)
                 owned.append(status.path)
             elif status.state == "up to date":
-                new_lock[path_key] = _sha256_bytes(status.proposal)
+                new_lock[lock_key] = _sha256_bytes(status.proposal)
                 owned.append(status.path)
             # yours / skipped: keep the old entry already in new_lock, if any.
 
         if failure is None:
             for path_key in projection.stale_lock:
-                new_lock.pop(path_key, None)
+                new_lock.pop(f"{pfx}{path_key}", None)
 
-        _write_lock_if_changed(root, new_lock)
+        _write_lock_if_changed(effective_lock_root, new_lock)
         if failure is not None:
             raise failure
 
     return tuple(written), tuple(owned)
 
 
-def refresh(ws: "Workspace", plugins: Plugins) -> tuple[Projection, tuple[PurePosixPath, ...]]:
+def remove_lock_prefix(lock_root: Path, prefix: str) -> None:
+    """Drop all lock entries under `<prefix>/` from `lock_root`'s rendered lock."""
+    lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
+    if _ancestry_problem(lock_root, lock_rel):
+        return
+    if not (lock_root / RENDERED_LOCK).exists():
+        return
+    pfx = f"{prefix.rstrip('/')}/"
+    with _refresh_lock(lock_root):
+        lock, _ = _read_lock_or_warn(lock_root)
+        new_lock = {k: v for k, v in lock.items() if not k.startswith(pfx)}
+        _write_lock_if_changed(lock_root, new_lock)
+
+
+def migrate_lock_to_prefix(lock_root: Path, prefix: str) -> None:
+    """Prefix every existing lock entry at `lock_root` with `<prefix>/` (used during promotion)."""
+    lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
+    if _ancestry_problem(lock_root, lock_rel):
+        return
+    if not (lock_root / RENDERED_LOCK).exists():
+        return
+    pfx = f"{prefix.rstrip('/')}/"
+    with _refresh_lock(lock_root):
+        lock, _ = _read_lock_or_warn(lock_root)
+        new_lock = {
+            (k if k.startswith(pfx) else f"{pfx}{k}"): v for k, v in lock.items()
+        }
+        _write_lock_if_changed(lock_root, new_lock)
+
+
+def refresh(
+    ws: "Workspace",
+    plugins: Plugins,
+    *,
+    multi: object | None = None,
+) -> tuple[Projection, tuple[PurePosixPath, ...]]:
     """Project `ws`'s generated files and write the missing or stale ones; a blocked projection writes nothing."""
-    projection = project(ws, plugins)
+    projection = project(ws, plugins, multi=multi) if multi is not None else project(ws, plugins)
     if projection.blocked:
         return projection, ()
-    written, owned = write_files(ws.root, projection)
+    lock_root, lock_prefix = _stack_lock_location(ws)
+    written, owned = write_files(
+        ws.root, projection, lock_root=lock_root, lock_prefix=lock_prefix
+    )
     plugins.call("ow_refreshed", ws, owned=owned)
     return projection, written
 
@@ -493,10 +578,24 @@ def report(projection: Projection, written: Sequence[PurePosixPath]) -> None:
         error("nothing was written")
 
 
-def refresh_workspace(session: "Session") -> int:
+def _enclosing_multi(ws: "Workspace", plugins: Plugins) -> object | None:
+    """Load the enclosing `MultiWorkspace` for a stack without re-discovering repo plugins."""
+    if not ws.is_stack:
+        return None
+    from ow.core import stacks
+
+    parent = stacks.parent_multi_workspace(ws.root)
+    if parent is None:
+        return None
+    loaded = stacks.load_multi_workspace(parent, plugins, discover_repo_plugins=False)
+    return loaded[0] if loaded is not None else None
+
+
+def refresh_workspace(session: "Session", *, multi: object | None = None) -> int:
     """Refresh the session's workspace and print the summary; 1 when an error diagnostic blocked it."""
     assert session.workspace is not None
-    projection, written = refresh(session.workspace, session.plugins)
+    eff_multi = multi if multi is not None else _enclosing_multi(session.workspace, session.plugins)
+    projection, written = refresh(session.workspace, session.plugins, multi=eff_multi)
     report(projection, written)
     return 1 if projection.blocked else 0
 

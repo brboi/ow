@@ -13,7 +13,7 @@ A directory initialized with `ow init` and tracked in the workspace index. A mon
 _Avoid_: project, environment, task
 
 **Stack**:
-A named subdirectory inside a multi-stack workspace (e.g. `odoo/`, `iap/`, `voip/`) carrying `[workspace] stack = true` in its `.ow/config.toml`. Each stack owns its own worktrees, ports and editor config, plus an `odoorc` when it holds an Odoo core; address it from anywhere as `<workspace>/<stack>` or locally as `<stack>`.
+A named subdirectory inside a multi-stack workspace (e.g. `odoo/`, `iap/`, `voip/`) declared under `[stacks.<name>]` in the workspace root's `.ow/config.toml` (stacks hold no `.ow/` directory of their own). Each stack owns its own worktrees, ports and editor config, plus an `odoorc` when it holds an Odoo core; address it from anywhere as `<workspace>/<stack>` or locally as `<stack>`.
 _Avoid_: sub-workspace, task
 
 **Promotion**:

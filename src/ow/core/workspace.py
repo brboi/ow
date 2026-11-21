@@ -56,13 +56,33 @@ class Workspace:
 
 
 def find_root(start: Path | None = None) -> Path | None:
-    """The first directory at or above `start` holding `.ow/config.toml`, or None."""
+    """The enclosing mono-stack workspace or stack directory at or above `start`, or None.
+
+    When an ancestor `.ow/config.toml` declares a multi-stack workspace (`[stacks]`),
+    returns `<root>/<stack>` if `start` is inside a declared stack, else `None` (so
+    callers at the multi-stack root detect the container via `detect_multi_workspace`).
+    """
     if start is None:
         start = Path.cwd()
 
-    current = start.resolve()
+    resolved_start = start.resolve()
+    current = resolved_start
     while True:
-        if (current / ".ow" / "config.toml").exists():
+        cfg = current / ".ow" / "config.toml"
+        if cfg.exists():
+            if config.is_multi_config(cfg):
+                if resolved_start == current:
+                    return None
+                try:
+                    rel = resolved_start.relative_to(current)
+                except ValueError:
+                    return None
+                top_part = rel.parts[0]
+                if top_part in config.stack_names_in_config(cfg):
+                    stack_dir = current / top_part
+                    if stack_dir.is_dir():
+                        return stack_dir.resolve()
+                return None
             return current
         parent = current.parent
         if parent == current:
@@ -235,13 +255,16 @@ def build_workspace(
 
 
 def _entry_kind(path: Path) -> Literal["workspace", "multi"] | None:
-    """Classify an indexed directory as mono-stack workspace, multi-stack workspace, or dead."""
-    from ow.core.stacks import detect_multi_workspace
+    """Classify an indexed or target directory as mono-stack workspace/stack, multi-stack workspace, or dead."""
+    from ow.core.stacks import detect_multi_workspace, is_stack_dir, is_stack_dir
 
-    if (path / ".ow" / "config.toml").exists():
+    cfg = path / ".ow" / "config.toml"
+    if cfg.exists():
+        if config.is_multi_config(cfg):
+            return "multi" if detect_multi_workspace(path) else None
         return "workspace"
-    if detect_multi_workspace(path):
-        return "multi"
+    if path.is_dir() and is_stack_dir(path):
+        return "workspace"
     return None
 
 
@@ -257,7 +280,7 @@ def resolve_target_root(
     - indexed workspace name (mono-stack or multi-stack);
     - unique stack name across indexed multi-stack workspaces.
     """
-    from ow.core.stacks import detect_multi_workspace
+    from ow.core.stacks import detect_multi_workspace, is_stack_dir
 
     if cwd is None:
         cwd = Path.cwd()
@@ -292,7 +315,7 @@ def resolve_target_root(
             for entry in read_index():
                 if entry.name == ws_part and detect_multi_workspace(entry):
                     child = entry / stack_part
-                    if (child / ".ow" / "config.toml").exists():
+                    if child.is_dir() and is_stack_dir(child):
                         stack_matches.append(child.resolve())
             if len(stack_matches) == 1:
                 return stack_matches[0], "workspace"
@@ -346,7 +369,7 @@ def resolve_root(workspace: str | None = None, *, cwd: Path | None = None) -> Pa
 
     Raises UsageError when the resolved target is a multi-stack workspace container.
     """
-    from ow.core.stacks import detect_multi_workspace
+    from ow.core.stacks import detect_multi_workspace, is_stack_dir
 
     root, kind = resolve_target_root(workspace, cwd=cwd)
     if kind == "multi":

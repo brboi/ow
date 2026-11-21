@@ -3,17 +3,37 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from ow.core import config
 from ow.core.plugins import StackInfo
 from ow.core.stacks import next_free_port
-from ow.plugins.odoo.release import is_odoo_core
+from ow.plugins._odoo_repos import ODOO_CORE_NAMES
+from ow.plugins.odoo.release import get_core, is_odoo_core
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
 _PORT_KEYS = ("odoo.http_port", "odoo.gevent_port")
+
+
+def _has_odoo_core(
+    ws: Workspace | None,
+    repo_paths: Sequence[Path] | None,
+    repo_names: Sequence[str] | None,
+) -> bool:
+    """Whether the target stack holds (or plans to hold) an Odoo core checkout."""
+    if ws is not None:
+        repos = getattr(ws, "repos", None)
+        if repos:
+            return any(is_odoo_core(repo.path) for repo in repos)
+        return True
+    if repo_paths is not None:
+        return any(is_odoo_core(path) for path in repo_paths)
+    if repo_names is not None:
+        return any(name in ODOO_CORE_NAMES for name in repo_names)
+    return True
 
 
 def stack_values(
@@ -22,14 +42,19 @@ def stack_values(
     siblings: Sequence[Workspace],
     pending: Sequence[Mapping[str, object]],
     global_settings: Mapping[str, object],
+    *,
+    repo_paths: Sequence[Path] | None = None,
+    repo_names: Sequence[str] | None = None,
 ) -> dict[str, object] | None:
     """Pin `odoo.http_port` and `odoo.gevent_port` (non-colliding), and `odoo.db_name` on promotion.
 
-    A promoted workspace (`ws`) keeps its current database name and ports; a new stack gets the
-    next free ports not used by `siblings`, `pending` stacks or its own explicit values, counting
-    up from the resolved global port.
+    Stacks without an Odoo core checkout receive nothing. A promoted workspace (`ws`) keeps its
+    current database name and ports; a new stack gets the next free ports not used by `siblings`,
+    `pending` stacks or its own explicit values, counting up from the resolved global port.
     """
     if ws_values.get("odoo.enabled") is False:
+        return None
+    if not _has_odoo_core(ws, repo_paths, repo_names):
         return None
 
     pinned: dict[str, object] = {}
@@ -66,7 +91,11 @@ def stack_name(ws: Workspace) -> str | None:
 
 
 def stack_info(ws: Workspace) -> StackInfo | None:
-    """The HTTP and gevent ports of `ws`."""
+    """The HTTP and gevent ports of `ws` (only when `ws` has an Odoo core checkout)."""
+    if ws.repos:
+        core, diags = get_core(ws)
+        if core is None or diags:
+            return None
     ports = {
         label: port
         for label, key in (("http", "odoo.http_port"), ("gevent", "odoo.gevent_port"))

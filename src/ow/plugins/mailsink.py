@@ -119,8 +119,8 @@ def ow_status(
     return [
         StatusInfo(
             plugin="mailsink",
-            scope="workspace",
-            target=ws.name,
+            scope="service",
+            target="mailsink",
             summary=f"{state.status} on smtp://localhost:{effective_smtp} (ui: {url})",
             data={
                 "status": state.status,

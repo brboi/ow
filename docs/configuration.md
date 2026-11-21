@@ -4,11 +4,12 @@ Settings control what ow generates and how plugins behave. They are key-value pa
 
 ## Layers
 
-Three layers, later ones winning:
+Four layers, later ones winning:
 
 1. Built-in defaults, declared by each plugin.
 2. Global config: `$XDG_CONFIG_HOME/ow/config.toml`, usually `~/.config/ow/config.toml`.
-3. Workspace (or stack) config: `<workspace>/.ow/config.toml`.
+3. Workspace config: `<workspace>/.ow/config.toml` (shared across all stacks in a multi-stack workspace).
+4. Stack config: `[stacks.<name>]` inside `<workspace>/.ow/config.toml` (stacks hold no `.ow/` directory of their own).
 
 ## `ow config`
 
@@ -61,17 +62,25 @@ ow config unset odoo.http_port
 
 An unknown key is accepted: unsetting is how you clear the unknown-key warning. `[repos]` and `[workspace]` are not plugin settings; use `ow repo rm <name>` to remove a repo.
 
-## `[workspace]` & `[repos]`
+## `[repos]` & `[stacks]`
 
-A stack inside a multi-stack workspace carries `stack = true` under `[workspace]` (written automatically by `ow init` and `ow add`), and every workspace/stack stores its repos under `[repos]` as a name → base ref table:
+Every mono-stack workspace stores its repos under `[repos]` as a name → base ref table. A multi-stack workspace stores all of its stacks in a single root `.ow/config.toml` under `[stacks.<name>]` (no `.ow/` directory lives inside stack subdirectories):
 
 ```toml
-[workspace]
-stack = true
+# Optional workspace-wide settings shared across stacks
+[odoo]
+db_host = "localhost"
 
-[repos]
+[stacks.odoo.repos]
 community = "origin/master"
-enterprise = "origin/18.0"
+enterprise = "origin/master"
+
+[stacks.odoo.odoo]
+http_port = 8069
+gevent_port = 8072
+
+[stacks.voipstack.repos]
+voip = "origin/master"
 ```
 
 Each `[repos]` value is validated against the bare repo's remotes: the longest remote-name prefix wins, and a bare ref with no known remote prefix is read as `origin/<name>`. A value ow cannot parse as a base — a SHA, an empty or `refs/`-prefixed ref, an invalid branch name, a non-string — is rejected and a warning names the value.

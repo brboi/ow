@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ow import term
-from ow.core import git, index, refresh, stacks
+from ow.core import config, git, index, refresh, stacks
 from ow.core.facts import gather_all
 from ow.core.json_schema import envelope
 from ow.core.paths import repos_dir
@@ -91,10 +91,13 @@ def run(
                 def _cleanup_ws(
                     root: Path = ws_root,
                     parent: Path | None = parent_multi,
+                    stack_name: str = ws.name,
                 ) -> None:
                     shutil.rmtree(root)
                     removed_roots.add(root)
                     if parent is not None and plugins is not None:
+                        config.remove_stack(parent / ".ow" / "config.toml", stack_name)
+                        refresh.remove_lock_prefix(parent, stack_name)
                         remaining = stacks.load_multi_workspace(parent, plugins)
                         if remaining is None:
                             refresh.remove_owned_files(parent)
@@ -179,14 +182,6 @@ def run(
 def _load_live_sessions(plugins: "Plugins") -> dict[Path, Session]:
     result: dict[Path, Session] = {}
     for path in index.read():
-        if (path / ".ow" / "config.toml").exists():
-            try:
-                sess = open_session(str(path), need_workspace=False, plugins=plugins)
-            except Exception:
-                continue
-            if sess.workspace is not None:
-                result[sess.workspace.root.resolve()] = sess
-            continue
         stack_paths = stacks.detect_multi_workspace(path)
         if stack_paths:
             for sp in stack_paths:
@@ -196,6 +191,14 @@ def _load_live_sessions(plugins: "Plugins") -> dict[Path, Session]:
                     continue
                 if sess.workspace is not None:
                     result[sess.workspace.root.resolve()] = sess
+            continue
+        if (path / ".ow" / "config.toml").exists():
+            try:
+                sess = open_session(str(path), need_workspace=False, plugins=plugins)
+            except Exception:
+                continue
+            if sess.workspace is not None:
+                result[sess.workspace.root.resolve()] = sess
     return result
 
 

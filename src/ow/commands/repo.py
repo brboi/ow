@@ -179,13 +179,23 @@ def _drop_entry(session: Session, name: str) -> None:
     """Rewrite `[repos]` without `name`; the reload of the refresh reads the new file."""
     assert session.config_path is not None  # a session with a workspace always has one
     merged = {repo: value for repo, value in session.accepted_bases.items() if repo != name}
-    dropped = config.write_workspace(
-        session.config_path,
-        merged,
-        dict(session.workspace_layer.values),
-        declared=session.declared,
-        remotes_of=remotes_of,
-    )
+    if session.stack_name is not None:
+        dropped = config.write_stack(
+            session.config_path,
+            session.stack_name,
+            merged,
+            dict(session.stack_layer.values),
+            declared=session.declared,
+            remotes_of=remotes_of,
+        )
+    else:
+        dropped = config.write_workspace(
+            session.config_path,
+            merged,
+            dict(session.workspace_layer.values),
+            declared=session.declared,
+            remotes_of=remotes_of,
+        )
     print_dropped(dropped)
 
 
@@ -209,13 +219,24 @@ def _origin_url(bare: Path) -> str | None:
 
 def _record(session: Session, accepted: Mapping[str, str], name: str, resolved: str) -> int:
     """Rewrite `[repos]` with `name` at `resolved`, print dropped keys, then refresh."""
+    assert session.config_path is not None
     merged = {**accepted, name: resolved}
-    dropped = config.write_workspace(
-        session.config_path,
-        merged,
-        dict(session.workspace_layer.values),
-        declared=session.declared,
-        remotes_of=remotes_of,
-    )
+    if session.stack_name is not None:
+        dropped = config.write_stack(
+            session.config_path,
+            session.stack_name,
+            merged,
+            dict(session.stack_layer.values),
+            declared=session.declared,
+            remotes_of=remotes_of,
+        )
+    else:
+        dropped = config.write_workspace(
+            session.config_path,
+            merged,
+            dict(session.workspace_layer.values),
+            declared=session.declared,
+            remotes_of=remotes_of,
+        )
     print_dropped(dropped)
     return refresh_workspace(session.reload())

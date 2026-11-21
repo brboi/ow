@@ -126,9 +126,9 @@ def test_config_rejects_json_on_set_unset_and_rejects_unsetting_workspace_task(l
     assert bad_set.exit_code == 2
     assert bad_set.stdout == ""
 
-    bad_unset = lab.ow("config", "unset", "workspace.task", cwd=root)
+    bad_unset = lab.ow("config", "unset", "stacks.foo", cwd=root)
     assert bad_unset.exit_code == 2
-    assert "workspace" in bad_unset.stderr.lower()
+    assert "stacks" in bad_unset.stderr.lower()
 
 
 def test_config_lists_keys_inside_and_outside_a_workspace(lab):
