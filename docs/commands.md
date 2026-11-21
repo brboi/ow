@@ -88,6 +88,20 @@ Run one or more stacks locally via their plugin runner (`odoo` launches `odoo-bi
   ow run --tmp odoo=enterprise#12345:"-i voip" iap=iap#4321
   ```
 
+### `ow exec [WS] [-w WS] [-- COMMAND [ARGS…]]`
+
+Run a command (e.g. `pip install phonenumbers`, `pytest`, `odoo-bin shell`) or an interactive shell (when `COMMAND` is omitted) inside a workspace or stack's resolved Python virtualenv and plugin environment.
+
+- **Strict `--` separator**: anything before `--` is an optional workspace or stack target (`WS`, mutually exclusive with `-w/--workspace`), and anything after `--` is executed as `COMMAND [ARGS…]`.
+  ```sh
+  ow exec -- pip install phonenumbers        # current workspace/stack
+  ow exec iap -- pip install phonenumbers    # target a stack from a multi-stack root
+  ow exec iap                                # open an interactive shell in stack `iap`
+  ```
+- **Multi-stack root**: without `WS`/`-w`, auto-selects the single stack with a Python environment (e.g. `odoo/` alongside `voip/`); refuses when multiple Python stacks exist and lists them.
+- **Environment & `cwd`**: sets `VIRTUAL_ENV`, `VIRTUAL_ENV_PROMPT`, `OW_WORKSPACE`, clears `PYTHONHOME`, prepends `<venv>/bin` and plugin `PATH` entries (such as `<ws>/community` for `odoo-bin`), and injects plugin environment variables (such as `ODOO_RC`). Preserves the current directory when already inside the target stack, otherwise changes to its root.
+- **Bootstrap & safety**: shares `ow run`'s virtualenv preparation (creating the venv via `mise` and installing requirements under a sidecar lock when needed, routing bootstrap output to `stderr` so `stdout` stays clean for pipes). Never falls back to system Python (refuses stacks without a Python environment or a missing virtualenv) and never starts container services (`postgres`/`mailsink`). In interactive shell mode (no `COMMAND`), prints `# <ws>: venv <path> (shared|local)` to `stderr`.
+
 ### `ow sandbox [-w WS] [--profile NAME] [--ro PATH…] [--rw PATH…] [--env VAR…] [-n] [-- COMMAND [ARGS…]]`
 
 Run an arbitrary command, AI agent harness (`claude`, `opencode`, `codex`, `pi`, `omp`), or interactive shell (when `COMMAND` is omitted) inside a Linux bubblewrap (`bwrap`) sandbox scoped to a workspace, stack, or multi-stack root.
