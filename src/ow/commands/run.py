@@ -247,17 +247,31 @@ def _run_multi(
     return exit_code
 
 
+def _reset_workspaces(workspaces: Sequence[Workspace], plugins: Plugins) -> None:
+    """Invoke `ow_reset_run` for each workspace to reset runtime state (e.g. DB + filestore)."""
+    for ws in workspaces:
+        results = plugins.call("ow_reset_run", ws=ws, answers=plugins.answers(ws))
+        for _plugin_name, result in results:
+            if isinstance(result, list):
+                for line in result:
+                    if isinstance(line, str) and line:
+                        term.out(f"# {line}")
+
+
 def _run_workspaces(
     items: Sequence[tuple[str, Workspace, tuple[str, ...]]],
     plugins: Plugins,
     *,
     fail_fast: bool = False,
+    reset: bool = False,
 ) -> int:
     """Run one workspace directly (TTY) or multiple workspaces in parallel."""
     if len(items) == 1:
         _label, ws, args = items[0]
         cmd = _select_runner(ws, plugins, args)
         prepare_services((ws,), plugins)
+        if reset:
+            _reset_workspaces((ws,), plugins)
         return _run_single(cmd)
 
     runnable: list[tuple[str, str | None, RunCommand]] = []
@@ -275,6 +289,8 @@ def _run_workspaces(
         raise UsageError(f"no runnable stacks among: {names}")
 
     prepare_services(runnable_ws, plugins)
+    if reset:
+        _reset_workspaces(runnable_ws, plugins)
 
     if len(runnable) == 1:
         return _run_single(runnable[0][2])
@@ -301,6 +317,7 @@ def run(
     workspace: str | None = None,
     tmp: bool = False,
     fail_fast: bool = False,
+    reset: bool = False,
     extra_args: Sequence[str] = (),
     cwd: Path | None = None,
 ) -> int:
@@ -354,7 +371,7 @@ def run(
                 combined_args = unit.extra_args + (passthrough if len(targets) == 1 else ())
                 to_run.append((label, ws, combined_args))
 
-            return _run_workspaces(to_run, plugins, fail_fast=fail_fast)
+            return _run_workspaces(to_run, plugins, fail_fast=fail_fast, reset=reset)
         finally:
             try:
                 for root, resolved in reversed(created_ephemerals):
@@ -368,7 +385,7 @@ def run(
         root, kind = resolve_target_root(workspace, cwd=base_cwd)
         if kind == "workspace":
             ws = _open_ws(root, plugins)
-            return _run_workspaces([(ws.name, ws, passthrough)], plugins, fail_fast=fail_fast)
+            return _run_workspaces([(ws.name, ws, passthrough)], plugins, fail_fast=fail_fast, reset=reset)
 
         loaded = stacks.load_multi_workspace(root, plugins)
         if loaded is None:
@@ -388,7 +405,7 @@ def run(
                     'specify a stack with `ow run <stack> -- ...` or `ow run <stack>:"..."`'
                 )
         items = [(ws.name, ws, passthrough) for ws in multi.stacks]
-        return _run_workspaces(items, plugins, fail_fast=fail_fast)
+        return _run_workspaces(items, plugins, fail_fast=fail_fast, reset=reset)
 
     # Mode 3: Positional targets without `--tmp` -> existing workspace(s) or stack(s) only
     to_run = []
@@ -428,4 +445,4 @@ def run(
             for ws in loaded[0].stacks:
                 to_run.append((ws.name, ws, ()))
 
-    return _run_workspaces(to_run, plugins, fail_fast=fail_fast)
+    return _run_workspaces(to_run, plugins, fail_fast=fail_fast, reset=reset)

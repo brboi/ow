@@ -69,12 +69,13 @@ Evolve an already-initialized workspace (refuses outside a workspace with a hint
   - `<existing-stack>=<spec>` adds repos or attaches PRs into that existing stack.
   - `<new-stack>=<spec>` or an unnamed `<spec>` creates a new stack with coordinated ports and updates `<workspace>.code-workspace`.
 
-### `ow run [TARGET…] [-w WS] [--tmp] [--fail-fast] [-- ARGS…]`
+### `ow run [TARGET…] [-w WS] [--tmp] [--fail-fast] [--reset] [-- ARGS…]`
 
 Run one or more stacks locally via their plugin runner (`odoo` launches `odoo-bin -c odoorc`, preferring `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`, falling back to `mise exec` then `python3`).
 
 - Single stack / mono-stack workspace: inherits the terminal TTY directly so interactive tools (`pdb`, `ow run -- shell`) work natively.
 - Multi-stack root (`ow run` with no target, or multiple targets): runs all runnable stacks in parallel with `[stack]`-prefixed stdout/stderr (skipping non-runnable stacks such as `voip` with a note) and terminates process groups cleanly on `Ctrl+C`. Prints a `# summary:` line if any stack exits non-zero; pass `--fail-fast` to stop remaining stacks as soon as one exits non-zero.
+- `--reset`: before starting each launched stack, drops its PostgreSQL database (`DROP DATABASE IF EXISTS ... WITH (FORCE)` via the managed `postgres` container, or `psql`/`dropdb` on a custom host) and removes its local filestore (`.odoo/filestore/<db>`), without prompting.
 - Per-stack arguments: pass `TARGET:"ARGS"` (parsed with `shlex.split`, splitting on the first `:` outside `://` and `git@host:`), e.g.:
   ```sh
   ow run odoo:"-i voip --dev=all" iap:"--log-level=debug"
