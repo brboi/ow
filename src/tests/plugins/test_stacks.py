@@ -24,8 +24,11 @@ def test_multi_stack_port_allocation_code_workspace_and_cleanup(lab):
 
     s1 = ws_dir / "stack-one"
     s2 = ws_dir / "stack-two"
-    assert (s1 / ".ow" / "config.toml").is_file()
-    assert (s2 / ".ow" / "config.toml").is_file()
+    assert (ws_dir / ".ow" / "config.toml").is_file()
+    assert not (s1 / ".ow").exists()
+    assert not (s2 / ".ow").exists()
+    root_cfg = tomllib.loads((ws_dir / ".ow" / "config.toml").read_text())
+    assert set(root_cfg["stacks"]) == {"stack-one", "stack-two"}
 
     # Distinct auto-allocated HTTP and gevent ports
     assert "http_port = 8069" in (s1 / "odoorc").read_text()
@@ -43,7 +46,10 @@ def test_multi_stack_port_allocation_code_workspace_and_cleanup(lab):
             {"name": "stack-two", "path": "./stack-two"},
         ]
     }
-    assert list(read_lock(ws_dir)) == ["voip-review.code-workspace"]
+    lock = read_lock(ws_dir)
+    assert "voip-review.code-workspace" in lock
+    assert "stack-one/odoorc" in lock
+    assert "stack-two/odoorc" in lock
 
     # Shared virtualenv path by Python version + Odoo series (py3.12-18.0)
     expected_venv = venvs_dir() / "py3.12-18.0"
@@ -103,13 +109,15 @@ def test_multi_stack_refresh_never_deletes_a_file_no_plugin_produces_any_more(la
 
     assert lab.ow("init", "a=community@18.0", cwd=ws_dir).exit_code == 0
     code_ws = ws_dir / "dropped-ws.code-workspace"
-    assert list(read_lock(ws_dir)) == ["dropped-ws.code-workspace"]
+    assert "dropped-ws.code-workspace" in read_lock(ws_dir)
+    assert "a/odoorc" in read_lock(ws_dir)
 
     assert lab.ow("config", "set", "--global", "vscode.enabled", "false").exit_code == 0
     assert lab.ow("refresh", cwd=ws_dir).exit_code == 0
 
     assert code_ws.is_file()
-    assert read_lock(ws_dir) == {}
+    assert "dropped-ws.code-workspace" not in read_lock(ws_dir)
+    assert "a/odoorc" in read_lock(ws_dir)
 
 
 def test_to_json_value_serializes_workspace_with_mapping_proxy(lab):

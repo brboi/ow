@@ -72,7 +72,19 @@ def run(session: Session, *, diff: bool, json_output: bool = False) -> int:
         raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
 
     with term.json_mode(json_output):
-        projection = refresh.project(session.workspace, session.plugins)
+        multi = None
+        if session.workspace.is_stack:
+            parent = stacks.parent_multi_workspace(session.workspace.root)
+            if parent is not None:
+                loaded = stacks.load_multi_workspace(
+                    parent, session.plugins, discover_repo_plugins=False
+                )
+                multi = loaded[0] if loaded is not None else None
+        projection = (
+            refresh.project(session.workspace, session.plugins, multi=multi)
+            if multi is not None
+            else refresh.project(session.workspace, session.plugins)
+        )
         return _emit_projection(
             name=session.workspace.name,
             projection=projection,
@@ -92,9 +104,10 @@ def run_multi(
     loaded = stacks.load_multi_workspace(multi_root, plugins)
     if loaded is None:
         raise UsageError(f"no valid stacks found in {multi_root}")
-    multi, _sessions = loaded
+    multi, sessions = loaded
+    eff_plugins = sessions[0].plugins if sessions else plugins
     with term.json_mode(json_output):
-        projection = stacks.project_multi_workspace_files(multi, plugins)
+        projection = stacks.project_multi_workspace_files(multi, eff_plugins)
         return _emit_projection(
             name=multi.name,
             projection=projection,

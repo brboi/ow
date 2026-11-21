@@ -65,3 +65,12 @@ def cache_dir() -> Path:
     """
     base = _base("XDG_CACHE_HOME", str(Path.home() / ".cache"))
     return Path(base) / "ow"
+
+
+def trusted_plugins_file() -> Path:
+    """Return the path recording trusted in-repo plugin files.
+
+    $XDG_STATE_HOME/ow/trusted-plugins.toml, or ~/.local/state/ow/trusted-plugins.toml.
+    """
+    base = _base("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+    return Path(base) / "ow" / "trusted-plugins.toml"

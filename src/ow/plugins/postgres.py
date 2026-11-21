@@ -418,8 +418,8 @@ def ow_status(
     return [
         StatusInfo(
             plugin="postgres",
-            scope="workspace",
-            target=ws.name,
+            scope="service",
+            target="postgres",
             summary=summary,
             data=data,
         )

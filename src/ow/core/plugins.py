@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import types
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -16,6 +18,10 @@ if TYPE_CHECKING:
     from ow.core.facts import RepoFacts
     from ow.core.stacks import MultiWorkspace
     from ow.core.workspace import Workspace
+
+# Public contract version for external / in-repo plugins (`OW_API_VERSION`).
+PLUGIN_API_VERSION = 1
+SUPPORTED_API_RANGE: tuple[int, int] = (1, 1)
 
 # Hook markers for the "ow" project
 hookspec = pluggy.HookspecMarker("ow")
@@ -104,10 +110,10 @@ class RunCommand:
 
 @dataclass(frozen=True)
 class StatusInfo:
-    """External status contribution for `ow status` (e.g. GitHub PR, Runbot build)."""
+    """External or service status contribution for `ow status` (e.g. GitHub PR, Runbot, Postgres)."""
 
     plugin: str
-    scope: Literal["workspace", "repo", "external"]
+    scope: Literal["workspace", "repo", "external", "service"]
     target: str
     summary: str
     data: Mapping[str, object] = field(default_factory=dict)
@@ -140,12 +146,17 @@ class CoreSpec:
 
     @hookspec
     def ow_generated_files(
-        self, ws: Workspace, answers: Callable[[str], list]
+        self,
+        ws: Workspace,
+        answers: Callable[[str], list],
+        multi: MultiWorkspace | None,
     ) -> list[GeneratedFile | Diagnostic]:
         """Return generated files and optional diagnostic messages."""
 
     @hookspec
-    def ow_diagnostics(self, ws: Workspace) -> list[Diagnostic]:
+    def ow_diagnostics(
+        self, ws: Workspace, multi: MultiWorkspace | None
+    ) -> list[Diagnostic]:
         """Return diagnostic messages."""
 
     @hookspec
@@ -217,8 +228,20 @@ class CoreSpec:
         """Return workspaces recommended for pruning (e.g. merged/closed PRs)."""
 
     @hookspec
-    def ow_multi_workspace_files(self, multi: MultiWorkspace) -> list[GeneratedFile]:
+    def ow_multi_workspace_files(
+        self,
+        multi: MultiWorkspace,
+        answers: Callable[[str], list],
+    ) -> list[GeneratedFile | Diagnostic]:
         """Return generated files for a multi-stack workspace (written in `multi.root`)."""
+
+    @hookspec
+    def ow_multi_runner(
+        self,
+        multi: MultiWorkspace,
+        args: tuple[str, ...],
+    ) -> RunCommand | None:
+        """Return a single workspace-wide command for `ow run` at a multi-stack root, or None."""
 
     @hookspec
     def ow_stack_values(
@@ -228,6 +251,8 @@ class CoreSpec:
         siblings: Sequence[Workspace],
         pending: Sequence[Mapping[str, object]],
         global_settings: Mapping[str, object],
+        repo_paths: Sequence[Path] | None,
+        repo_names: Sequence[str] | None,
     ) -> dict[str, object] | None:
         """Return the settings to pin explicitly for a stack (e.g. database name, coordinated ports).
 
@@ -288,9 +313,103 @@ def _get_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
 class Plugins:
     """Manages plugin registry and hooks."""
 
-    def __init__(self, pm: pluggy.PluginManager, names: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        pm: pluggy.PluginManager,
+        names: tuple[str, ...],
+        *,
+        builtins: tuple[tuple[str, types.ModuleType], ...] = (),
+        external_paths: tuple[Path, ...] = (),
+    ) -> None:
         self.pm = pm
         self.names = names
+        self._builtins = builtins
+        self.external_paths = external_paths
+
+    def with_repo_plugins(
+        self,
+        repo_dirs: Sequence[tuple[str, Path] | Path],
+    ) -> tuple[Plugins, tuple[str, ...]]:
+        """Return `(plugins_with_in_repo_plugins, warnings)` for `repo_dirs`.
+
+        Discovers `[tool.ow] plugin` (in `pyproject.toml`) or `ow_plugin.py` in each repo dir.
+        Untrusted files are skipped with a warning pointing to `ow trust`. Trusted files must
+        declare an integer `OW_API_VERSION` within `SUPPORTED_API_RANGE`.
+        """
+        from ow.core import git, trust
+
+        discovered = trust.discover_repo_plugins(repo_dirs)
+        if not discovered:
+            return self, ()
+
+        warnings: list[str] = []
+        extra_modules: list[tuple[str, types.ModuleType, Path]] = []
+        builtin_names = {name for name, _mod in self._builtins} or set(self.names)
+        seen_names = set(builtin_names)
+
+        for item in discovered:
+            shown = git.display_path(item.path)
+            if not trust.is_trusted(item.path):
+                warnings.append(
+                    f"untrusted plugin {shown}; run `ow trust` to enable it"
+                )
+                continue
+
+            digest = hashlib.sha256(str(item.path).encode("utf-8")).hexdigest()[:12]
+            mod_name = f"ow_repo_plugin_{item.repo_name}_{digest}"
+            try:
+                spec = importlib.util.spec_from_file_location(mod_name, item.path)
+                if spec is None or spec.loader is None:
+                    warnings.append(f"skipping plugin {shown}: cannot load module spec")
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception as exc:
+                warnings.append(f"skipping plugin {shown}: failed to import ({exc})")
+                continue
+
+            api_ver = getattr(module, "OW_API_VERSION", None)
+            if (
+                not isinstance(api_ver, int)
+                or isinstance(api_ver, bool)
+                or not (SUPPORTED_API_RANGE[0] <= api_ver <= SUPPORTED_API_RANGE[1])
+            ):
+                min_v, max_v = SUPPORTED_API_RANGE
+                supported = f"v{min_v}" if min_v == max_v else f"v{min_v}-v{max_v}"
+                warnings.append(
+                    f"skipping plugin {shown}: incompatible OW_API_VERSION={api_ver!r} "
+                    f"(ow supports {supported})"
+                )
+                continue
+
+            raw_name = getattr(module, "PLUGIN_NAME", None) or getattr(module, "NAME", None) or item.repo_name
+            plugin_name = str(raw_name).strip()
+            if not plugin_name or plugin_name in seen_names:
+                warnings.append(
+                    f"skipping plugin {shown}: plugin name {plugin_name!r} is invalid or already registered"
+                )
+                continue
+            seen_names.add(plugin_name)
+            extra_modules.append((plugin_name, module, item.path))
+
+        if not extra_modules:
+            return self, tuple(warnings)
+
+        base_builtins = self._builtins if self._builtins else _get_builtins()
+        combined = tuple(base_builtins) + tuple((name, mod) for name, mod, _p in extra_modules)
+        try:
+            enriched = load_plugins(combined)
+        except PluginError as exc:
+            warnings.append(f"skipping in-repo plugin ({exc})")
+            return self, tuple(warnings)
+
+        enriched = Plugins(
+            enriched.pm,
+            enriched.names,
+            builtins=base_builtins,
+            external_paths=tuple(p for _n, _m, p in extra_modules),
+        )
+        return enriched, tuple(warnings)
 
     def _global_enabled_flags(self) -> Mapping[str, object]:
         """Read `<name>.enabled` overrides from global config."""
@@ -515,4 +634,4 @@ def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = Non
     except pluggy.PluginValidationError as e:
         raise PluginError(pm.get_name(e.plugin), "check_pending", str(e)) from e
 
-    return Plugins(pm, tuple(names))
+    return Plugins(pm, tuple(names), builtins=builtins)

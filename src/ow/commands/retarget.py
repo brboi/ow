@@ -50,13 +50,23 @@ def _update_default_bases(session: Session, updated_repos: Mapping[str, str]) ->
             changed = True
     if not changed:
         return False
-    dropped = config.update_workspace(
-        session.config_path,
-        merged,
-        lambda current: current,
-        declared=session.declared,
-        remotes_of=git.remotes_of,
-    )
+    if session.stack_name is not None:
+        dropped = config.update_stack(
+            session.config_path,
+            session.stack_name,
+            merged,
+            lambda current: current,
+            declared=session.declared,
+            remotes_of=git.remotes_of,
+        )
+    else:
+        dropped = config.update_workspace(
+            session.config_path,
+            merged,
+            lambda current: current,
+            declared=session.declared,
+            remotes_of=git.remotes_of,
+        )
     print_dropped(dropped)
     return True
 

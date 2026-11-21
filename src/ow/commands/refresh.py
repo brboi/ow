@@ -34,14 +34,15 @@ def run_multi(multi_root: Path, plugins: Plugins) -> int:
     if loaded is None:
         raise UsageError(f"no valid stacks found in {multi_root}")
     multi, sessions = loaded
+    eff_plugins = sessions[0].plugins if sessions else plugins
     exit_code = 0
     for sess in sessions:
         assert sess.workspace is not None
         for warning in sess.warnings:
             term.warn(warning)
         term.out(f"== {sess.workspace.name} ==")
-        exit_code = max(exit_code, refresh_workspace(sess))
+        exit_code = max(exit_code, refresh_workspace(sess, multi=multi))
     if exit_code == 0:
-        for wf in stacks.sync_multi_workspace_files(multi, plugins):
+        for wf in stacks.sync_multi_workspace_files(multi, eff_plugins):
             term.out(f"wrote {wf}")
     return exit_code

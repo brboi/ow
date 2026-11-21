@@ -170,8 +170,6 @@ def build_app(plugins: Plugins) -> typer.Typer:
                     continue
                 if entry.name not in names:
                     names.append(entry.name)
-                if (entry / ".ow" / "config.toml").exists():
-                    continue
                 child_stacks = stacks.detect_multi_workspace(entry)
                 if child_stacks:
                     for sp in child_stacks:
@@ -518,6 +516,49 @@ def build_app(plugins: Plugins) -> typer.Typer:
             json_output or bool(parent.get("json_output")),
         )
 
+    def _open_for_config(
+        workspace: str | None,
+        *,
+        ignore_global: Sequence[str] = (),
+        ignore_workspace: Sequence[str] = (),
+    ) -> tuple[Session, Path | None]:
+        """Open a session for `ow config`, returning `(session, multi_root)` when targeting a multi-stack root."""
+        try:
+            root, kind = resolve_target_root(workspace)
+        except errors.UsageError:
+            if workspace is not None:
+                raise
+            return (
+                _open(
+                    None,
+                    need_workspace=False,
+                    ignore_global=ignore_global,
+                    ignore_workspace=ignore_workspace,
+                ),
+                None,
+            )
+        if kind == "multi":
+            loaded = stacks.load_multi_workspace(root, plugins)
+            eff_plugins = loaded[1][0].plugins if loaded and loaded[1] else plugins
+            sess = open_session(
+                None,
+                need_workspace=False,
+                plugins=eff_plugins,
+                cwd=root,
+                ignore_global=ignore_global,
+                ignore_workspace=ignore_workspace,
+            )
+            return sess, root
+        return (
+            _open(
+                str(root),
+                need_workspace=False,
+                ignore_global=ignore_global,
+                ignore_workspace=ignore_workspace,
+            ),
+            None,
+        )
+
     @config_app.callback()
     def config_callback(
         ctx: typer.Context,
@@ -529,11 +570,11 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ctx.obj = {"workspace": workspace, "global_": global_, "json_output": json_output}
         if ctx.invoked_subcommand is not None:
             return
-        session = _open(workspace, need_workspace=False)
+        session, multi_root = _open_for_config(workspace)
         _announce(session)
         _exit(
             _command_module("config").show_all(
-                session, global_=global_, json_output=json_output
+                session, global_=global_, multi_root=multi_root, json_output=json_output
             )
         )
 
@@ -549,11 +590,11 @@ def build_app(plugins: Plugins) -> typer.Typer:
     ) -> None:
         """Print one setting's effective value."""
         workspace, _global_, _json = _config_context(ctx, workspace, global_, json_output)
-        session = _open(workspace, need_workspace=False)
+        session, multi_root = _open_for_config(workspace)
         _announce(session)
         _exit(
             _command_module("config").get(
-                session, key, global_=_global_, json_output=_json
+                session, key, global_=_global_, multi_root=multi_root, json_output=_json
             )
         )
 
@@ -577,9 +618,13 @@ def build_app(plugins: Plugins) -> typer.Typer:
         workspace, global_, _json = _config_context(ctx, workspace, global_, False)
         if _json:
             raise errors.UsageError("--json is not supported on `ow config set`")
-        session = _open(workspace, need_workspace=False)
+        session, multi_root = _open_for_config(workspace)
         _announce(session)
-        _exit(_command_module("config").set_(session, key, _only(values), global_=global_))
+        _exit(
+            _command_module("config").set_(
+                session, key, _only(values), global_=global_, multi_root=multi_root
+            )
+        )
 
     @config_app.command("unset")
     def config_unset(
@@ -596,14 +641,17 @@ def build_app(plugins: Plugins) -> typer.Typer:
         workspace, global_, _json = _config_context(ctx, workspace, global_, False)
         if _json:
             raise errors.UsageError("--json is not supported on `ow config unset`")
-        session = _open(
+        session, multi_root = _open_for_config(
             workspace,
-            need_workspace=False,
             ignore_global=(key,) if global_ else (),
             ignore_workspace=() if global_ else (key,),
         )
         _announce(session)
-        _exit(_command_module("config").unset(session, key, global_=global_))
+        _exit(
+            _command_module("config").unset(
+                session, key, global_=global_, multi_root=multi_root
+            )
+        )
 
     app.add_typer(config_app, name="config")
 
@@ -752,6 +800,32 @@ def build_app(plugins: Plugins) -> typer.Typer:
         session = _open(str(root))
         _announce(session)
         _exit(_command_module("files").run(session, diff=diff, json_output=json_output))
+
+    @app.command("trust")
+    def trust_cmd(
+        path: str = typer.Argument(
+            None,
+            metavar="PATH",
+            help="Specific plugin file to trust or untrust (default: all in-repo plugins in the workspace)",
+        ),
+        untrust: bool = typer.Option(
+            False, "--untrust", help="Revoke trust for the plugin file(s)"
+        ),
+        list_all: bool = typer.Option(
+            False, "--list", help="List all trusted plugin file paths"
+        ),
+        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
+    ) -> None:
+        """Trust, untrust, or list in-repo plugins."""
+        _exit(
+            _command_module("trust").run(
+                plugins,
+                path=path,
+                workspace=workspace,
+                untrust=untrust,
+                list_all=list_all,
+            )
+        )
 
     # -- fleet: ls, cd, shell-init, rm, prune ----------------------------
 
