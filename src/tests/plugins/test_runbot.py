@@ -248,3 +248,38 @@ def test_runbot_unreachable_prints_fallback_notice(lab):
     res = lab.ow("init", "enterprise#31415", cwd=ws)
     assert res.exit_code == 0, res.stderr + res.stdout
     assert "# runbot: unreachable, using base ref" in res.stdout
+
+
+def test_runbot_missing_bundle_warns_about_private_project_fallback(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    _setup_pr_repo(
+        lab,
+        "iap-apps",
+        "18.0",
+        {"iap_mod/__manifest__.py": "{}"},
+        1992,
+        "18.0-phone-service",
+        {"iap_mod/phone.py": "ok = True\n"},
+    )
+    lab.fake_gh(
+        [
+            {
+                "repo": "odoo/iap-apps",
+                "number": 1992,
+                "title": "Phone service",
+                "url": "https://github.com/odoo/iap-apps/pull/1992",
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefName": "18.0-phone-service",
+                "baseRefName": "18.0",
+            }
+        ]
+    )
+    lab.fake_runbot(bundles=[], batches=[])
+
+    ws = lab.home / "iap-private"
+    ws.mkdir(parents=True)
+    res = lab.ow("init", "iap-apps#1992", cwd=ws)
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "warning: runbot: no public bundle found for iap-apps:1992" in res.stderr
+    assert "using base ref for community" in res.stderr
