@@ -82,6 +82,7 @@ class TestRunEnv:
         monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
         monkeypatch.delenv("GIT_SSH", raising=False)
         monkeypatch.setattr(git, "_user_ssh_configured", lambda: False)
+        monkeypatch.setattr(git.term, "interactive", lambda: False)
         seen = self._record_env(monkeypatch)
 
         run(["git", "version"])
@@ -91,8 +92,29 @@ class TestRunEnv:
         assert seen[0]["LC_MESSAGES"] == "C"
         assert seen[0]["LANGUAGE"] == "C"
 
+    def test_interactive_run_allows_ssh_passphrase_prompt(self, monkeypatch) -> None:
+        monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+        monkeypatch.delenv("GIT_SSH", raising=False)
+        monkeypatch.delenv("GIT_TERMINAL_PROMPT", raising=False)
+        monkeypatch.setattr(git, "_user_ssh_configured", lambda: False)
+        monkeypatch.setattr(git.term, "interactive", lambda: True)
+        seen = self._record_env(monkeypatch)
+
+        run(["git", "version"])
+
+        assert "GIT_SSH_COMMAND" not in seen[0]
+        assert "GIT_TERMINAL_PROMPT" not in seen[0]
+        assert seen[0]["LC_MESSAGES"] == "C"
+        assert seen[0]["LANGUAGE"] == "C"
+
+        # Explicit interactive=False still forces BatchMode (e.g. parallel fetches).
+        run(["git", "version"], interactive=False)
+        assert seen[1]["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
+        assert seen[1]["GIT_TERMINAL_PROMPT"] == "0"
+
     def test_user_ssh_command_is_kept(self, monkeypatch) -> None:
         monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /tmp/key")
+        monkeypatch.setattr(git.term, "interactive", lambda: False)
         seen = self._record_env(monkeypatch)
 
         run(["git", "version"])
@@ -103,6 +125,7 @@ class TestRunEnv:
         monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
         monkeypatch.delenv("GIT_SSH", raising=False)
         monkeypatch.setattr(git, "_user_ssh_configured", lambda: True)
+        monkeypatch.setattr(git.term, "interactive", lambda: False)
         seen = self._record_env(monkeypatch)
 
         run(["git", "version"])
