@@ -8,9 +8,12 @@ to run a parallel surgical fetch first.
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +41,7 @@ def run(
     json_output: bool = False,
 ) -> int:
     """Inspect mono-stack workspace, multi-stack workspace, or external target."""
-    active_plugins = plugins or (session.plugins if session is not None else None)
+    active_plugins = (session.plugins if session is not None else None) or plugins
     assert active_plugins is not None
 
     with term.json_mode(json_output):
@@ -130,6 +133,20 @@ def _code_workspace_path(multi: stacks.MultiWorkspace) -> str | None:
     return None
 
 
+def _dedupe_services(infos: Sequence[StatusInfo]) -> list[StatusInfo]:
+    """Keep one StatusInfo per `(plugin, target)` among `scope == 'service'` entries."""
+    seen: set[tuple[str, str]] = set()
+    result: list[StatusInfo] = []
+    for info in infos:
+        if info.scope != "service":
+            continue
+        key = (info.plugin, info.target)
+        if key not in seen:
+            seen.add(key)
+            result.append(info)
+    return result
+
+
 def _run_multi(
     plugins: Plugins,
     *,
@@ -142,9 +159,13 @@ def _run_multi(
     if loaded is None:
         raise UsageError(f"no valid stacks found in {multi_root}")
     multi, sessions = loaded
+    eff_plugins = sessions[0].plugins if sessions else plugins
 
     exit_code = 0
     stack_payloads: list[dict[str, Any]] = []
+    gathered: list[tuple[Session, tuple[RepoFacts, ...], list[StatusInfo], str | None]] = []
+    all_services: list[StatusInfo] = []
+
     for sess in sessions:
         assert sess.workspace is not None
         ws = sess.workspace
@@ -158,29 +179,61 @@ def _run_multi(
                 exit_code = 1
         else:
             facts = gather_all(sess.locations)
-        infos = _collect_plugin_status(plugins, ws=ws, facts=facts, target=None, offline=offline)
+        infos = _collect_plugin_status(eff_plugins, ws=ws, facts=facts, target=None, offline=offline)
+        all_services.extend(i for i in infos if i.scope == "service")
+        non_service = [i for i in infos if i.scope != "service"]
         if json_output:
-            stack_payloads.append(_workspace_entry_json(sess, facts, infos, fetch_failures=fetch_failures))
+            stack_payloads.append(
+                _workspace_entry_json(sess, facts, non_service, fetch_failures=fetch_failures)
+            )
         else:
-            note = stack_info(ws, plugins).note
-            port_str = f" [{note}]" if note else ""
-            term.out(f"== {ws.name} ({ws.root}){port_str} ==")
-            print_table(sess, facts, infos)
+            note = stack_info(ws, eff_plugins).note
+            gathered.append((sess, facts, non_service, note))
+
+    services = _dedupe_services(all_services)
 
     if json_output:
-        term.emit_json(
-            envelope(
-                {
-                    "workspace": {
-                        "name": multi.name,
-                        "root": str(multi.root),
-                        "multi_stack": True,
-                        "code_workspace": _code_workspace_path(multi),
-                        "stacks": stack_payloads,
-                    }
-                }
+        ws_payload: dict[str, Any] = {
+            "name": multi.name,
+            "root": str(multi.root),
+            "multi_stack": True,
+            "code_workspace": _code_workspace_path(multi),
+            "stacks": stack_payloads,
+        }
+        if services:
+            ws_payload["services"] = {
+                svc.plugin: {"summary": svc.summary, "data": dict(svc.data)}
+                for svc in services
+            }
+        term.emit_json(envelope({"workspace": ws_payload}))
+        return exit_code
+
+    if sys.stdout.isatty():
+        sections = [
+            _build_tty_section(
+                sess.workspace.name,
+                note,
+                sess,
+                facts,
+                non_service,
             )
+            for sess, facts, non_service, note in gathered
+            if sess.workspace is not None
+        ]
+        _print_tty_sections(
+            sections,
+            services,
+            header=(multi.name, _display_path(multi.root)),
         )
+    else:
+        for sess, facts, non_service, note in gathered:
+            assert sess.workspace is not None
+            ws = sess.workspace
+            port_str = f" [{note}]" if note else ""
+            term.out(f"== {ws.name} ({ws.root}){port_str} ==")
+            print_table(sess, facts, non_service)
+        for svc in services:
+            term.out(f"# {svc.plugin}: {svc.summary}")
     return exit_code
 
 
@@ -316,12 +369,252 @@ def _workspace_json(
     return payload
 
 
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_AHEAD_BEHIND_RE = re.compile(r"^ahead (\d+), behind (\d+)$")
+
+
+def _use_color() -> bool:
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def _ansi(text: str, code: str) -> str:
+    if not text or not _use_color():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _visible_len(text: str) -> int:
+    return len(_ANSI_RE.sub("", text))
+
+
+def _pad(text: str, width: int) -> str:
+    extra = width - _visible_len(text)
+    return text + (" " * extra if extra > 0 else "")
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
+@dataclass(frozen=True)
+class _TtySection:
+    title: str
+    note: str | None
+    rows: tuple[dict[str, str], ...]
+    notes: tuple[StatusInfo, ...]
+    diagnostics: tuple[tuple[str, str], ...]
+
+
+def _format_tty_delta(raw: str) -> str:
+    if raw == "(even)":
+        return _ansi("=", "2")
+    match = _AHEAD_BEHIND_RE.match(raw)
+    if match:
+        ahead, behind = int(match.group(1)), int(match.group(2))
+        parts: list[str] = []
+        if ahead:
+            parts.append(_ansi(f"↑{ahead}", "32"))
+        if behind:
+            parts.append(_ansi(f"↓{behind}", "33"))
+        return " ".join(parts) if parts else _ansi("=", "2")
+    if raw == "(?)":
+        return _ansi("?", "2")
+    return _ansi(raw, "2")
+
+
+def _format_tty_upstream(facts: RepoFacts) -> str:
+    upstream = facts.upstream
+    if upstream is None or upstream == facts.base:
+        return ""
+    if facts.upstream_ab is None:
+        return _ansi(upstream, "36")
+    ahead, behind = facts.upstream_ab
+    parts: list[str] = []
+    if ahead:
+        parts.append(_ansi(f"↑{ahead}", "32"))
+    if behind:
+        parts.append(_ansi(f"↓{behind}", "33"))
+    suffix = f" {' '.join(parts)}" if parts else ""
+    return f"{_ansi(upstream, '36')}{suffix}"
+
+
+def _format_tty_external(entries: Sequence[str]) -> str:
+    if not entries:
+        return ""
+    styled: list[str] = []
+    for text in entries:
+        lower = text.lower()
+        if "merged" in lower:
+            styled.append(_ansi(text, "36"))
+        elif "closed" in lower or "changes_requested" in lower:
+            styled.append(_ansi(text, "33"))
+        elif "approved" in lower or "open" in lower:
+            styled.append(_ansi(text, "32"))
+        else:
+            styled.append(text)
+    return ", ".join(styled)
+
+
+def _format_tty_note_summary(summary: str) -> str:
+    lower = summary.lower()
+    if "done ko" in lower or "failed" in lower or "error" in lower:
+        return _ansi(summary, "31")
+    if "done ok" in lower or "running" in lower:
+        return _ansi(summary, "32")
+    if "pending" in lower or "testing" in lower:
+        return _ansi(summary, "33")
+    return summary
+
+
+def _format_tty_port_note(note: str | None) -> str | None:
+    if not note:
+        return None
+    if note.startswith("port ") and note[5:].isdigit():
+        return f":{note[5:]}"
+    return note
+
+
+def _build_tty_section(
+    title: str,
+    note: str | None,
+    session: Session,
+    facts: Sequence[RepoFacts],
+    infos: Sequence[StatusInfo],
+) -> _TtySection:
+    base_counts_cache = _compute_base_counts_parallel(facts)
+    extra_by_repo: dict[str, list[str]] = {}
+    ws_notes: list[StatusInfo] = []
+    for info in infos:
+        if info.scope == "repo":
+            extra_by_repo.setdefault(info.target, []).append(info.summary)
+        elif info.scope != "service":
+            ws_notes.append(info)
+
+    rows: list[dict[str, str]] = []
+    for i, f in enumerate(facts):
+        if f.problem:
+            state_cell = _ansi(f"({f.problem} worktree)", "31")
+        elif f.branch:
+            state_cell = f.branch
+        elif f.head:
+            state_cell = _ansi(f"detached {f.head[:10]}", "2")
+        else:
+            state_cell = _ansi("detached", "2")
+
+        if f.base is None:
+            base_cell = _ansi("no base", "2")
+        elif f.explicit_base is None and f.default_base is not None:
+            base_cell = _ansi(f.base, "2")
+        else:
+            base_cell = f.base
+
+        dirty_count = len(f.modified) + len(f.untracked)
+        rows.append(
+            {
+                "name": _ansi(f.name, "1"),
+                "state": state_cell,
+                "base": base_cell,
+                "upstream": _format_tty_upstream(f),
+                "delta": _format_tty_delta(base_counts_cache.get(i, "(?)")),
+                "dirty": _ansi(f"{dirty_count} dirty", "33") if dirty_count else "",
+                "operation": _ansi(f.operation, "31") if f.operation else "",
+                "external": _format_tty_external(extra_by_repo.get(f.name, ())),
+            }
+        )
+
+    info_diags = tuple(
+        (plugin, diag.text)
+        for plugin, diag in session.diagnostics
+        if diag.level == "info"
+    )
+    return _TtySection(
+        title=title,
+        note=_format_tty_port_note(note),
+        rows=tuple(rows),
+        notes=tuple(ws_notes),
+        diagnostics=info_diags,
+    )
+
+
+def _print_tty_sections(
+    sections: Sequence[_TtySection],
+    services: Sequence[StatusInfo],
+    *,
+    header: tuple[str, str] | None = None,
+) -> None:
+    """Render aligned, airy sections for TTY output with global column widths and one services footer."""
+    all_rows = [row for sec in sections for row in sec.rows]
+    columns = ["name", "state", "base", "delta"]
+    for opt in ("upstream", "dirty", "operation", "external"):
+        if any(row.get(opt) for row in all_rows):
+            columns.append(opt)
+
+    widths: dict[str, int] = {col: 0 for col in columns}
+    for row in all_rows:
+        for col in columns:
+            widths[col] = max(widths[col], _visible_len(row.get(col, "")))
+
+    first_block = True
+    if header is not None:
+        name, path_display = header
+        _line(f"{_ansi(name, '1')}  {_ansi(path_display, '2')}")
+        first_block = False
+
+    for sec in sections:
+        if not first_block:
+            _line("")
+        first_block = False
+        if sec.title:
+            title_line = _ansi(sec.title, "1")
+            if sec.note:
+                title_line += f"  {_ansi(sec.note, '2')}"
+            _line(title_line)
+        indent = "  " if sec.title else ""
+        for row in sec.rows:
+            last_non_empty = len(columns) - 1
+            while last_non_empty > 0 and not row.get(columns[last_non_empty]):
+                last_non_empty -= 1
+            parts: list[str] = []
+            for idx in range(last_non_empty + 1):
+                val = row.get(columns[idx], "")
+                parts.append(_pad(val, widths[columns[idx]]) if idx < last_non_empty else val)
+            _line(f"{indent}{'  '.join(parts)}")
+        for info in sec.notes:
+            _line(
+                f"{indent}{_ansi(info.plugin + ':', '2')} {_format_tty_note_summary(info.summary)}"
+            )
+        for plugin, text in sec.diagnostics:
+            _line(f"{indent}{_ansi(plugin + ':', '2')} {text}")
+
+    if services:
+        if not first_block:
+            _line("")
+        _line(_ansi("services", "1"))
+        svc_width = max(len(svc.plugin) for svc in services)
+        for svc in services:
+            label = _ansi(svc.plugin.ljust(svc_width), "36")
+            _line(f"  {label}  {svc.summary}")
+
+
 def print_table(
     session: Session,
     facts: Sequence[RepoFacts],
     infos: Sequence[StatusInfo] = (),
 ) -> None:
-    """Format and print table: aligned columns (TTY) or tab-separated (piped)."""
+    """Format and print table: clean TTY sections/columns or tab-separated (piped)."""
+    if sys.stdout.isatty():
+        services = _dedupe_services(infos)
+        non_service = [i for i in infos if i.scope != "service"]
+        ws = session.workspace
+        note = stack_info(ws, session.plugins).note if ws is not None else None
+        title = ws.name if ws is not None else ""
+        section = _build_tty_section(title, note, session, facts, non_service)
+        _print_tty_sections([section], services)
+        return
+
     base_counts_cache = _compute_base_counts_parallel(facts)
     extra_by_repo: dict[str, list[str]] = {}
     for info in infos:
@@ -329,15 +622,8 @@ def print_table(
             extra_by_repo.setdefault(info.target, []).append(info.summary)
 
     rows = [_row(f, base_counts_cache, i, extra_by_repo.get(f.name, ())) for i, f in enumerate(facts)]
-
-    if sys.stdout.isatty():
-        headers = ["name", "state", "base", "upstream", "base counts", "dirty", "operation"]
-        if extra_by_repo:
-            headers.append("external")
-        _print_aligned(headers, rows)
-    else:
-        for row in rows:
-            _line(row)
+    for row in rows:
+        _line(row)
 
     for info in infos:
         if info.scope != "repo":

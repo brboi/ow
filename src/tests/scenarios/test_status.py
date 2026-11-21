@@ -176,3 +176,57 @@ def test_status_without_a_base_reports_unset(lab):
     assert result.stdout.splitlines() == [
         f"community\tdetached at {head[:10]}\tno base\t(none)\tno base"
     ]
+
+
+def test_status_multi_stack_tty_dedupes_services_hides_non_odoo_port_and_aligns_globally(lab, monkeypatch):
+    """Multi-stack TTY status renders airy sections, hides phantom ports on non-Odoo stacks, and shows services once."""
+    from io import StringIO
+
+    from ow.commands import status as status_cmd
+    from ow.core.plugins import StatusInfo, load_plugins
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    add_repo(lab, "voip", {"master": {"README.md": "voip\n"}}, base="master")
+
+    ws = lab.home / "porting"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "odoo=@18.0", "voipstack=voip", cwd=ws).exit_code == 0
+
+    # Piped mode: voipstack has no [port ...] and services aren't repeated
+    piped = lab.ow("status", cwd=ws)
+    assert piped.exit_code == 0, piped.stderr
+    assert "== odoo (" in piped.stdout and "[port 8069]" in piped.stdout
+    assert "== voipstack (" in piped.stdout
+    voip_header = next(l for l in piped.stdout.splitlines() if l.startswith("== voipstack "))
+    assert "[port " not in voip_header
+
+    # TTY mode with synthetic global service infos: printed ONCE in `services` block
+    class _FakeTty(StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    fake_out = _FakeTty()
+    monkeypatch.setattr("sys.stdout", fake_out)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(
+        status_cmd,
+        "_collect_plugin_status",
+        lambda plugins, *, ws, facts, target, offline: [
+            StatusInfo("postgres", "service", "postgres", "running on localhost:5432"),
+            StatusInfo("mailsink", "service", "mailsink", "running on smtp://localhost:1025"),
+        ],
+    )
+
+    rc = status_cmd.run(None, plugins=load_plugins(), multi_root=ws, offline=True)
+    assert rc == 0
+    out = fake_out.getvalue()
+    assert out.startswith("porting  ")
+    assert "odoo  :8069" in out
+    assert "\nvoipstack\n" in out
+    assert out.count("running on localhost:5432") == 1
+    assert out.count("running on smtp://localhost:1025") == 1
+    assert "\nservices\n" in out
+    # Empty optional columns (`upstream`, `dirty`, `operation`) do not clutter rows
+    assert "(none)" not in out
+    assert "dirty" not in out

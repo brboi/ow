@@ -7,8 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Mapping
 
-from ow.core import git
-from ow.core.config import Layer, read_global, read_workspace_config, resolve_settings
+from ow.core import git, stacks
+from ow.core.config import (
+    Layer,
+    read_global,
+    read_multi_config,
+    read_workspace_config,
+    resolve_settings,
+)
 from ow.core.paths import global_config, repos_dir
 from ow.core.plugins import Diagnostic, Plugins, load_plugins
 from ow.core.workspace import (
@@ -25,6 +31,9 @@ if TYPE_CHECKING:
     from ow.core.plugins import Setting
 
 
+_EMPTY_LAYER = Layer(values={}, unknown={}, wrong_type=())
+
+
 @dataclass(frozen=True)
 class Session:
     """Immutable session state for every command."""
@@ -33,7 +42,7 @@ class Session:
     declared: Mapping[str, Setting]
     workspace: Workspace | None
     locations: tuple[RepoLocation, ...]
-    origins: Mapping[str, Literal["default", "global", "workspace"]]
+    origins: Mapping[str, Literal["default", "global", "workspace", "stack"]]
     warnings: tuple[str, ...]
     diagnostics: tuple[tuple[str, Diagnostic], ...]
     config_path: Path | None
@@ -41,6 +50,8 @@ class Session:
     accepted_bases: Mapping[str, str]
     global_layer: Layer
     workspace_layer: Layer
+    stack_name: str | None = None
+    stack_layer: Layer = _EMPTY_LAYER
 
     def reload(self) -> Session:
         """Re-open the same workspace with fresh data, to pick up branch changes."""
@@ -68,6 +79,23 @@ def global_settings(plugins: Plugins) -> dict[str, object]:
     return values
 
 
+def _workspace_repo_dirs(root: Path, *, is_stack: bool) -> list[tuple[str, Path]]:
+    """Return `(repo_name, path)` pairs of git worktrees under `root` (or all sibling stacks)."""
+    roots_to_scan: list[Path]
+    if is_stack:
+        parent = root.parent.resolve()
+        stack_paths = stacks.detect_multi_workspace(parent)
+        roots_to_scan = list(stack_paths) if stack_paths else [root]
+    else:
+        roots_to_scan = [root]
+
+    found: list[tuple[str, Path]] = []
+    for scan_root in roots_to_scan:
+        for loc in derive_repos(scan_root):
+            found.append((loc.name, loc.path))
+    return found
+
+
 def open_session(
     workspace: str | None = None,
     *,
@@ -76,6 +104,7 @@ def open_session(
     cwd: Path | None = None,
     ignore_global: Collection[str] = (),
     ignore_workspace: Collection[str] = (),
+    discover_repo_plugins: bool = True,
 ) -> Session:
     """Open a session for a command to run.
 
@@ -87,9 +116,6 @@ def open_session(
 
     if cwd is None:
         cwd = Path.cwd()
-
-    declared_list = plugins.settings()
-    declared = {s.key: s for s in declared_list}
 
     # Only the implicit lookup may fall through to a workspace-less session.
     root: Path | None
@@ -104,6 +130,8 @@ def open_session(
         root = resolve_root(workspace, cwd=cwd)
 
     if root is None:
+        declared_list = plugins.settings()
+        declared = {s.key: s for s in declared_list}
         global_layer = read_global(global_config(), declared)
         ws_layer_empty = Layer(values={}, unknown={}, wrong_type=())
 
@@ -137,7 +165,17 @@ def open_session(
             workspace_layer=ws_layer_empty,
         )
 
-    config_path = root / ".ow" / "config.toml"
+    is_stack = stacks.is_stack_dir(root)
+    repo_plugin_warnings: tuple[str, ...] = ()
+    if discover_repo_plugins:
+        repo_dirs = _workspace_repo_dirs(root, is_stack=is_stack)
+        plugins, repo_plugin_warnings = plugins.with_repo_plugins(repo_dirs)
+
+    declared_list = plugins.settings()
+    declared = {s.key: s for s in declared_list}
+
+    config_path = (root.parent / ".ow" / "config.toml") if is_stack else (root / ".ow" / "config.toml")
+    stack_name = root.name if is_stack else None
     global_layer = read_global(global_config(), declared)
 
     # remotes_of validates [repos] values: read the bare's remotes, cached per bare,
@@ -154,26 +192,48 @@ def open_session(
         remotes_cache[bare] = remotes
         return remotes
 
-    workspace_layer, accepted_bases, rejected_bases, meta = read_workspace_config(
-        config_path, declared, remotes_of=remotes_of
-    )
+    if is_stack:
+        assert stack_name is not None
+        workspace_layer, stacks_cfg = read_multi_config(
+            config_path, declared, remotes_of=remotes_of
+        )
+        stack_cfg = stacks_cfg.get(stack_name)
+        if stack_cfg is not None:
+            stack_layer = stack_cfg.layer
+            accepted_bases = stack_cfg.accepted_repos
+            rejected_bases = stack_cfg.rejected_repos
+        else:
+            stack_layer = _EMPTY_LAYER
+            accepted_bases = {}
+            rejected_bases = {}
+    else:
+        workspace_layer, accepted_bases, rejected_bases = read_workspace_config(
+            config_path, declared, remotes_of=remotes_of
+        )
+        stack_layer = _EMPTY_LAYER
 
     locations = derive_repos(root, accepted_bases)
 
     # Callable defaults see the real repos but no settings, so resolution never
     # depends on the values it is computing.
-    defaults_workspace = build_workspace(root, locations, {}, is_stack=meta.stack)
+    defaults_workspace = build_workspace(root, locations, {}, is_stack=is_stack)
     values, origins = resolve_settings(
-        declared, global_layer, workspace_layer, ws_for_defaults=defaults_workspace
+        declared,
+        global_layer,
+        workspace_layer,
+        ws_for_defaults=defaults_workspace,
+        stack_layer=stack_layer if is_stack else None,
     )
 
-    workspace = build_workspace(root, locations, values, is_stack=meta.stack)
+    workspace = build_workspace(root, locations, values, is_stack=is_stack)
 
-    warnings = _collect_warnings(
+    warnings = repo_plugin_warnings + _collect_warnings(
         global_layer,
         workspace_layer,
         declared,
         rejected_bases,
+        stack_layer=stack_layer if is_stack else None,
+        stack_name=stack_name,
         ignore_global=ignore_global,
         ignore_workspace=ignore_workspace,
     )
@@ -202,6 +262,8 @@ def open_session(
         accepted_bases=accepted_bases,
         global_layer=global_layer,
         workspace_layer=workspace_layer,
+        stack_name=stack_name,
+        stack_layer=stack_layer,
     )
 
 
@@ -211,6 +273,8 @@ def _collect_warnings(
     declared: Mapping[str, object],
     rejected_bases: Mapping[str, str],
     *,
+    stack_layer: Layer | None = None,
+    stack_name: str | None = None,
     ignore_global: Collection[str] = (),
     ignore_workspace: Collection[str] = (),
 ) -> tuple[str, ...]:
@@ -242,6 +306,19 @@ def _collect_warnings(
         for key in workspace_layer.wrong_type
         if key not in ignore_workspace
     ]
+    if stack_layer is not None:
+        where = f".ow/config.toml [stacks.{stack_name}]"
+        ws_parts += [
+            f"unknown setting {key} in {where}; "
+            f"remove it with `ow config unset {key}`"
+            for key in stack_layer.unknown
+            if key not in ignore_workspace
+        ]
+        ws_parts += [
+            _wrong_type_note(key, where, declared)
+            for key in stack_layer.wrong_type
+            if key not in ignore_workspace
+        ]
     ws_parts += [
         f"ignoring default base {raw} for {name} in .ow/config.toml: invalid base"
         for name, raw in rejected_bases.items()

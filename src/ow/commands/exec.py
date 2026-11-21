@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -46,12 +47,12 @@ def _default_shell(host_env: Mapping[str, str]) -> str:
     return "/bin/sh"
 
 
-def _open_ws(path: Path, plugins: Plugins) -> Workspace:
+def _open_ws(path: Path, plugins: Plugins) -> tuple[Workspace, Plugins]:
     session = open_session(str(path), need_workspace=True, plugins=plugins, cwd=path)
     for warning in session.warnings:
         term.warn(warning)
     assert session.workspace is not None
-    return session.workspace
+    return session.workspace, session.plugins
 
 
 def resolve_python_env(
@@ -107,7 +108,7 @@ def _resolve_workspace(
     *,
     base_cwd: Path,
     positional_target: str | None,
-) -> Workspace:
+) -> tuple[Workspace, Plugins]:
     try:
         root, kind = resolve_target_root(lookup, cwd=base_cwd)
     except UsageError as exc:
@@ -124,21 +125,24 @@ def _resolve_workspace(
     if loaded is None:
         raise UsageError(f"no valid stacks found in {root}")
     multi, sessions = loaded
+    eff_plugins = sessions[0].plugins if sessions else plugins
     for sess in sessions:
         for warning in sess.warnings:
             term.warn(warning)
 
-    py_stacks = [ws for ws in multi.stacks if resolve_python_env(ws, plugins) is not None]
+    py_stacks = [ws for ws in multi.stacks if resolve_python_env(ws, eff_plugins) is not None]
     if len(py_stacks) == 1:
-        return py_stacks[0]
+        return py_stacks[0], eff_plugins
     if len(py_stacks) > 1:
         names = ", ".join(ws.name for ws in py_stacks)
         raise UsageError(
             f"multiple Python stacks in {multi.name!r} ({names}); "
             "specify one with `ow exec <stack> -- ...`"
         )
+    if len(multi.stacks) == 1:
+        return multi.stacks[0], eff_plugins
     names = ", ".join(ws.name for ws in multi.stacks)
-    raise UsageError(f"no stack with a Python environment in {multi.name!r} ({names})")
+    raise UsageError(f"no stack with a Python environment in {multi.name!r} ({names}); specify one with `ow exec <stack> -- ...`")
 
 
 def run(
@@ -149,46 +153,57 @@ def run(
     command: Sequence[str] = (),
     cwd: Path | None = None,
 ) -> int:
-    """Run `command` (or an interactive shell) inside a workspace/stack's Python environment."""
+    """Run `command` (or an interactive shell) inside a workspace/stack's environment."""
     if target is not None and workspace is not None:
         raise UsageError("pass either WS or -w/--workspace, not both")
 
     base_cwd = (cwd or Path.cwd()).resolve()
     lookup = target if target is not None else workspace
-    ws = _resolve_workspace(
+    ws, eff_plugins = _resolve_workspace(
         lookup,
         plugins,
         base_cwd=base_cwd,
         positional_target=target,
     )
 
-    resolved = resolve_python_env(ws, plugins)
-    if resolved is None:
-        raise UsageError(f"no Python environment configured for workspace {ws.name!r}")
-    merged, venv = resolved
-
-    for diag in venv.diagnostics:
-        if diag.level == "warning":
-            term.warn(diag.text)
-
-    requirements = merged.requirements if merged is not None else ()
-    ensure_venv_ready(ws, venv.path, requirements=requirements, log_to_stderr=True)
-
-    venv_python = venv.path / "bin" / "python"
-    if not venv_python.exists():
-        raise UsageError(
-            f"virtualenv not found at {venv.path}; ensure mise is installed or create the virtualenv first"
-        )
-
-    env = build_exec_env(ws, merged, venv)
     exec_cwd = resolve_exec_cwd(ws, base_cwd)
-
-    if command:
-        argv = tuple(command)
+    resolved = resolve_python_env(ws, eff_plugins)
+    if resolved is None:
+        env = dict(os.environ)
+        for stale in ("PYTHONHOME", "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "ODOO_RC"):
+            env.pop(stale, None)
+        env["OW_WORKSPACE"] = ws.name
+        use_mise = bool(ws.settings.get("mise.enabled", True)) and bool(shutil.which("mise"))
+        if command:
+            argv = ("mise", "exec", "--", *command) if use_mise else tuple(command)
+        else:
+            shell = _default_shell(env)
+            argv = ("mise", "exec", "--", shell) if use_mise else (shell,)
+            mode_label = "mise" if use_mise else "shell"
+            print(f"# {ws.name}: {mode_label} (no Python venv)", file=sys.stderr)
     else:
-        argv = (_default_shell(env),)
-        kind_label = "local" if venv.is_local(ws) else "shared"
-        print(f"# {ws.name}: venv {venv.path} ({kind_label})", file=sys.stderr)
+        merged, venv = resolved
+
+        for diag in venv.diagnostics:
+            if diag.level == "warning":
+                term.warn(diag.text)
+
+        requirements = merged.requirements if merged is not None else ()
+        ensure_venv_ready(ws, venv.path, requirements=requirements, log_to_stderr=True)
+
+        venv_python = venv.path / "bin" / "python"
+        if not venv_python.exists():
+            raise UsageError(
+                f"virtualenv not found at {venv.path}; ensure mise is installed or create the virtualenv first"
+            )
+
+        env = build_exec_env(ws, merged, venv)
+        if command:
+            argv = tuple(command)
+        else:
+            argv = (_default_shell(env),)
+            kind_label = "local" if venv.is_local(ws) else "shared"
+            print(f"# {ws.name}: venv {venv.path} ({kind_label})", file=sys.stderr)
 
     try:
         proc = subprocess.run(argv, cwd=exec_cwd, env=env)

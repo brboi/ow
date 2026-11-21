@@ -7,6 +7,7 @@ module owning the behavior.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ow.core.plugins import (
@@ -111,9 +112,19 @@ def ow_stack_values(
     siblings: Sequence[Workspace],
     pending: Sequence[Mapping[str, object]],
     global_settings: Mapping[str, object],
+    repo_paths: Sequence[Path] | None = None,
+    repo_names: Sequence[str] | None = None,
 ) -> dict[str, object] | None:
     """Pin `odoo.http_port` and `odoo.gevent_port` (non-colliding), and `odoo.db_name` on promotion."""
-    return stacks.stack_values(ws, ws_values, siblings, pending, global_settings)
+    return stacks.stack_values(
+        ws,
+        ws_values,
+        siblings,
+        pending,
+        global_settings,
+        repo_paths=repo_paths,
+        repo_names=repo_names,
+    )
 
 
 @hookimpl

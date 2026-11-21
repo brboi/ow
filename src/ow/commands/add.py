@@ -175,9 +175,7 @@ def _apply_mono_specs(
             exit_code = max(exit_code, code)
     finally:
         if not dry_run:
-            if empty_mono and any(stacks.is_stack_config(ws_root / n) for n in new_names):
-                (ws_root / ".ow" / "config.toml").unlink(missing_ok=True)
-                (ws_root / ".ow" / ".config.toml.lock").unlink(missing_ok=True)
+            if empty_mono and any(stacks.is_stack_dir(ws_root / n) for n in new_names):
                 index.add(ws_root)
             ws_files = sync_multi_files(ws_root, plugins)
 

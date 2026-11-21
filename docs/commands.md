@@ -54,7 +54,7 @@ Initialize, compose, adopt, or repair the current directory (`.`) in place.
 - 0 specs in an empty directory: creates an empty `.ow/config.toml` and registers `.` in the workspace index.
 - `--branch BRANCH`: creates or checks out `BRANCH` in every added repo.
 - 1 unnamed spec (e.g. `ow init enterprise#12345`, `ow init @18.0 --branch 18.0-fix`): initializes a mono-stack workspace directly in `.`.
-- 1+ named specs or 2+ specs (e.g. `ow init odoo=community#56789,enterprise#12345 iap=iap#4321 voip=voip`): initializes a multi-stack workspace where each stack is a direct subdirectory marked `[workspace] stack = true`, with auto-allocated non-colliding `odoo.http_port` / `odoo.gevent_port` and a root `<workspace>.code-workspace`.
+- 1+ named specs or 2+ specs (e.g. `ow init odoo=community#56789,enterprise#12345 iap=iap#4321 voip=voip`): initializes a multi-stack workspace with a single root `.ow/config.toml` declaring `[stacks.<name>]` (no `.ow/` inside stack directories), auto-allocated non-colliding `odoo.http_port` / `odoo.gevent_port` on Odoo stacks, and a root `<workspace>.code-workspace`.
 - Re-running `ow init` inside an existing or moved workspace repairs worktrees (`git worktree repair`), updates the workspace index, refreshes generated files (and `<workspace>.code-workspace`), and applies any additional `SPEC` arguments.
 - Refuses to initialize a parent directory that already contains standalone (non-stack) ow workspaces.
 
@@ -100,7 +100,7 @@ Run a command (e.g. `pip install phonenumbers`, `pytest`, `odoo-bin shell`) or a
   ```
 - **Multi-stack root**: without `WS`/`-w`, auto-selects the single stack with a Python environment (e.g. `odoo/` alongside `voip/`); refuses when multiple Python stacks exist and lists them.
 - **Environment & `cwd`**: sets `VIRTUAL_ENV`, `VIRTUAL_ENV_PROMPT`, `OW_WORKSPACE`, clears `PYTHONHOME`, prepends `<venv>/bin` and plugin `PATH` entries (such as `<ws>/community` for `odoo-bin`), and injects plugin environment variables (such as `ODOO_RC`). Preserves the current directory when already inside the target stack, otherwise changes to its root.
-- **Bootstrap & safety**: shares `ow run`'s virtualenv preparation (creating the venv via `mise` and installing requirements under a sidecar lock when needed, routing bootstrap output to `stderr` so `stdout` stays clean for pipes). Never falls back to system Python (refuses stacks without a Python environment or a missing virtualenv) and never starts container services (`postgres`/`mailsink`). In interactive shell mode (no `COMMAND`), prints `# <ws>: venv <path> (shared|local)` to `stderr`.
+- **Bootstrap & non-Python stacks**: for Python stacks, shares `ow run`'s virtualenv preparation (creating the venv via `mise` and installing requirements under a sidecar lock when needed, routing bootstrap output to `stderr` so `stdout` stays clean for pipes) and never falls back to system Python when the configured venv is missing. For non-Python stacks (e.g. `voipstack`), runs directly in the stack directory (via `mise exec --` when `mise` is available). Never starts container services (`postgres`/`mailsink`). In interactive shell mode (no `COMMAND`), prints `# <ws>: venv <path> (shared|local)` (or `mise`/`shell`) to `stderr`.
 
 ### `ow sandbox [-w WS] [--profile NAME] [--ro PATH…] [--rw PATH…] [--env VAR…] [-n] [-- COMMAND [ARGS…]]`
 
@@ -142,11 +142,14 @@ Recompute and write owned generated files (and sync `<workspace>.code-workspace`
 ### `ow files [--diff] [--json] [-w WS]`
 Show generated files and their ownership state (`absent`, `up to date`, `outdated`, `yours`, `skipped`), or unified diffs with `--diff`. Works at mono-stack workspaces, individual stacks, and multi-stack workspace roots (inspecting `<workspace>.code-workspace`).
 
+### `ow trust [PATH] [--untrust] [--list] [-w WS]`
+Trust, untrust, or list in-repo plugin files (`[tool.ow] plugin = "..."` in `pyproject.toml`, or `ow_plugin.py` at a repo root). Plugins require an explicit `ow trust` (tracked by canonical file path) and a compatible `OW_API_VERSION` matching `ow.plugin_api.PLUGIN_API_VERSION`. Running `ow trust` inside a workspace trusts its discovered plugins and refreshes generated files immediately.
+
 ### `ow config [--global] [--json] [-w WS]`
 ### `ow config get KEY [--global] [--json] [-w WS]`
 ### `ow config set KEY VALUE… [--global] [-w WS]`
 ### `ow config unset KEY [--global] [-w WS]`
-Read and write typed plugin settings across default, global (`$XDG_CONFIG_HOME/ow/config.toml`), and workspace (`.ow/config.toml`) layers.
+Read and write typed plugin settings across default, global (`$XDG_CONFIG_HOME/ow/config.toml`), workspace (`.ow/config.toml`), and stack (`[stacks.<name>]`) layers. At a multi-stack root, `set`/`unset` writes shared workspace-level settings; inside a stack or with `-w <stack>`, it writes stack-level overrides.
 
 ---
 

@@ -40,19 +40,23 @@ def _repair_and_adopt_single(
 ) -> tuple[UnitResult, int]:
     """Repair prunable worktrees, adopt any missing `[repos]` entries, re-index, and refresh."""
     declared = {s.key: s for s in plugins.settings()}
-    config_path = root / ".ow" / "config.toml"
-    is_new_config = not config_path.is_file()
+    is_stack = stacks.is_stack_dir(root)
+    config_path = (root.parent / ".ow" / "config.toml") if is_stack else (root / ".ow" / "config.toml")
+    is_new_config = not is_stack and not config_path.is_file()
 
-    if not is_new_config:
-        ws_layer, accepted, _rejected, meta = config.read_workspace_config(
+    if is_stack:
+        _ws_layer, stacks_cfg = config.read_multi_config(config_path, declared, remotes_of)
+        sc = stacks_cfg.get(root.name)
+        accepted = dict(sc.accepted_repos) if sc else {}
+        ws_values = dict(sc.layer.values) if sc else {}
+    elif not is_new_config:
+        ws_layer, accepted, _rejected = config.read_workspace_config(
             config_path, declared, remotes_of
         )
         ws_values = dict(ws_layer.values)
-        is_stack = meta.stack
     else:
         accepted = {}
         ws_values = {}
-        is_stack = False
 
     if dry_run:
         initial_locations = derive_repos(root, accepted)
@@ -119,14 +123,23 @@ def _repair_and_adopt_single(
                 term.warn(f"{loc.name}: {exc}")
 
     if changed:
-        dropped = config.write_workspace(
-            config_path,
-            accepted,
-            ws_values,
-            declared=declared,
-            remotes_of=remotes_of,
-            stack=is_stack,
-        )
+        if is_stack:
+            dropped = config.write_stack(
+                config_path,
+                root.name,
+                accepted,
+                ws_values,
+                declared=declared,
+                remotes_of=remotes_of,
+            )
+        else:
+            dropped = config.write_workspace(
+                config_path,
+                accepted,
+                ws_values,
+                declared=declared,
+                remotes_of=remotes_of,
+            )
         print_dropped(dropped)
 
     if not is_stack:
@@ -157,12 +170,12 @@ def _repair_and_adopt_single(
 
 
 def _has_unrelated_child_workspaces(target_dir: Path) -> bool:
-    """True when `target_dir` holds direct child mono-stack workspaces (e.g. `~/dev`)."""
+    """True when `target_dir` holds direct child standalone workspaces (e.g. `~/dev`)."""
     try:
         for entry in target_dir.iterdir():
             if entry.name.startswith(".") or not entry.is_dir():
                 continue
-            if (entry / ".ow" / "config.toml").is_file() and not stacks.is_stack_config(entry):
+            if (entry / ".ow" / "config.toml").is_file():
                 return True
     except OSError:
         return False
@@ -250,8 +263,8 @@ def _execute(
             exit_code=exit_code,
         )
 
-    # 2. Existing mono-stack workspace (or directory with adoptable/interrupted ow worktrees)
-    has_own_config = (target_dir / ".ow" / "config.toml").is_file()
+    # 2. Existing mono-stack workspace or stack (or directory with adoptable/interrupted ow worktrees)
+    has_own_config = (target_dir / ".ow" / "config.toml").is_file() or stacks.is_stack_dir(target_dir)
     adoptable_locs = () if has_own_config else derive_repos(target_dir)
     if has_own_config or adoptable_locs:
         if not specs:

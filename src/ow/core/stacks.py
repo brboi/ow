@@ -53,39 +53,41 @@ class MultiWorkspace:
     stacks: tuple[Workspace, ...]
 
 
-def is_stack_config(path: Path) -> bool:
-    """Cheaply check whether `path/.ow/config.toml` marks this directory as a stack (`[workspace].stack = true`)."""
-    cfg = path / ".ow" / "config.toml"
-    if not cfg.is_file():
-        return False
+def is_stack_dir(path: Path) -> bool:
+    """Whether `path` is a declared stack subdirectory of its parent multi-stack workspace."""
     try:
-        with open(cfg, "rb") as handle:
-            data = tomllib.load(handle)
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        resolved = path.resolve()
+        parent_cfg = resolved.parent / ".ow" / "config.toml"
+        if not parent_cfg.is_file():
+            return False
+        return resolved.name in config.stack_names_in_config(parent_cfg)
+    except OSError:
         return False
-    ws_table = data.get("workspace")
-    return isinstance(ws_table, dict) and ws_table.get("stack") is True
+
+
+# Alias kept for concise readability
+is_stack_config = is_stack_dir
 
 
 def detect_multi_workspace(path: Path) -> tuple[Path, ...] | None:
     """Return sorted child stack paths if `path` is a multi-stack workspace root, else None.
 
-    A directory is a multi-stack workspace root iff it does not hold `.ow/config.toml` itself
-    and at least one direct subdirectory holds `.ow/config.toml` with `[workspace].stack = true`.
-    Standalone sibling workspaces (without `stack = true`) are never grouped.
+    A directory is a multi-stack workspace root iff `<path>/.ow/config.toml` declares `[stacks]`
+    and at least one declared stack directory exists on disk.
     """
     try:
         resolved = path.resolve()
         if not resolved.is_dir():
             return None
-        if (resolved / ".ow" / "config.toml").exists():
+        cfg = resolved / ".ow" / "config.toml"
+        if not config.is_multi_config(cfg):
             return None
-        stacks: list[Path] = []
-        for subdir in sorted(resolved.iterdir(), key=lambda p: p.name):
-            if subdir.name.startswith(".") or not subdir.is_dir():
-                continue
-            if is_stack_config(subdir):
-                stacks.append(subdir.resolve())
+        names = config.stack_names_in_config(cfg)
+        stacks = [
+            (resolved / name).resolve()
+            for name in names
+            if (resolved / name).is_dir()
+        ]
         return tuple(stacks) if stacks else None
     except OSError:
         return None
@@ -94,26 +96,47 @@ def detect_multi_workspace(path: Path) -> tuple[Path, ...] | None:
 def parent_multi_workspace(ws_root: Path) -> Path | None:
     """Return the enclosing multi-stack workspace root when `ws_root` is a stack, else None."""
     resolved = ws_root.resolve()
-    if is_stack_config(resolved):
+    if is_stack_dir(resolved):
         return resolved.parent.resolve()
     return None
 
 
 def load_multi_workspace(
-    root: Path, plugins: Plugins
+    root: Path,
+    plugins: Plugins,
+    *,
+    discover_repo_plugins: bool = True,
 ) -> tuple[MultiWorkspace, tuple[Session, ...]] | None:
     """Open every stack Session under multi-stack workspace `root`."""
+    from dataclasses import replace
+
     from ow.core.session import open_session
+    from ow.core.workspace import derive_repos
 
     stack_paths = detect_multi_workspace(root)
     if not stack_paths:
         return None
     resolved_root = root.resolve()
+
+    repo_plugin_warnings: tuple[str, ...] = ()
+    if discover_repo_plugins:
+        repo_dirs = [
+            (loc.name, loc.path)
+            for stack_path in stack_paths
+            for loc in derive_repos(stack_path)
+        ]
+        plugins, repo_plugin_warnings = plugins.with_repo_plugins(repo_dirs)
+
     sessions: list[Session] = []
     workspaces: list[Workspace] = []
     for stack_path in stack_paths:
         try:
-            sess = open_session(str(stack_path), need_workspace=False, plugins=plugins)
+            sess = open_session(
+                str(stack_path),
+                need_workspace=False,
+                plugins=plugins,
+                discover_repo_plugins=False,
+            )
         except Exception:
             continue
         if sess.workspace is not None:
@@ -121,6 +144,10 @@ def load_multi_workspace(
             workspaces.append(sess.workspace)
     if not workspaces:
         return None
+    if repo_plugin_warnings and sessions:
+        sessions[0] = replace(
+            sessions[0], warnings=repo_plugin_warnings + sessions[0].warnings
+        )
     multi = MultiWorkspace(
         root=resolved_root,
         name=resolved_root.name,
@@ -156,11 +183,19 @@ def workspace_flock(root: Path) -> Iterator[None]:
 
 def project_multi_workspace_files(multi: MultiWorkspace, plugins: Plugins) -> refresh.Projection:
     """Inspect the multi-stack root's generated files (e.g. `<name>.code-workspace`) against `<root>/.ow/rendered.lock.toml`."""
+    answers = plugins.answers(multi.stacks[0]) if multi.stacks else (lambda _hook: [])
     files_by_plugin, extra_diags = refresh.collect_contributions(
-        "ow_multi_workspace_files", plugins.call("ow_multi_workspace_files", multi=multi)
+        "ow_multi_workspace_files",
+        plugins.call("ow_multi_workspace_files", multi=multi, answers=answers),
     )
     files, diagnostics = refresh.flatten_contributions(plugins, {}, files_by_plugin, extra_diags)
-    return refresh.project_files(multi.root, files, diagnostics)
+    stack_prefixes = tuple(f"{s.name}/" for s in multi.stacks)
+    return refresh.project_files(
+        multi.root,
+        files,
+        diagnostics,
+        ignore_lock_prefixes=stack_prefixes,
+    )
 
 
 def sync_multi_workspace_files(multi: MultiWorkspace, plugins: Plugins) -> tuple[Path, ...]:

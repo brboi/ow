@@ -167,10 +167,16 @@ def test_exec_refuses_non_python_stack_missing_venv_and_syntax_errors(lab):
     multi.mkdir(parents=True)
     assert lab.ow("init", "odoo=community@18.0", "voip=voip", cwd=multi).exit_code == 0
 
-    # Non-Python stack refused (never falls back to system python/pip)
-    r_voip = lab.ow("exec", "voip", "--", "pip", "install", "phonenumbers", cwd=multi)
-    assert r_voip.exit_code == 2
-    assert "no Python environment configured" in r_voip.stderr
+    # Non-Python stack executes commands directly in the stack dir with OW_WORKSPACE set
+    log_path = lab.root / "nonpy.jsonl"
+    tool = _make_recording_script(lab.root / "bin" / "mytool", log_path)
+    r_voip = lab.ow("exec", "voip", "--", str(tool), "status", cwd=multi)
+    assert r_voip.exit_code == 0, r_voip.stderr
+    rec = _read_records(log_path)[0]
+    assert rec["ow_workspace"] == "voip"
+    assert Path(rec["cwd"]).resolve() == (multi / "voip").resolve()
+    assert rec["argv"] == ["status"]
+    assert rec["virtual_env"] is None
 
     # Missing virtualenv (mise not installed on hermetic PATH, no venv created) -> refused
     r_missing = lab.ow("exec", "odoo", "--", "pip", "install", "phonenumbers", cwd=multi)

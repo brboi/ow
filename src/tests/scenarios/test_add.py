@@ -136,9 +136,12 @@ def test_add_named_stack_promotes_mono_stack_workspace_with_confirmation_and_pre
     folders = [f["name"] for f in json.loads(code_ws.read_text())["folders"]]
     assert folders == ["iap", "main-odoo"]
 
-    # Both stacks have `[workspace] stack = true`
-    cfg = tomllib.loads((ws / "main-odoo" / ".ow" / "config.toml").read_text())
-    assert cfg["workspace"]["stack"] is True
+    # Single root `.ow/config.toml` declares both stacks; no `.ow/` inside stacks
+    assert not (ws / "main-odoo" / ".ow").exists()
+    assert not (ws / "iap" / ".ow").exists()
+    cfg = tomllib.loads((ws / ".ow" / "config.toml").read_text())
+    assert set(cfg["stacks"]) == {"main-odoo", "iap"}
+    assert cfg["stacks"]["main-odoo"]["odoo"]["db_name"] == "my-feature"
 
 
 def test_add_named_stack_in_empty_workspace_does_not_promote(lab):
@@ -157,7 +160,8 @@ def test_add_named_stack_in_empty_workspace_does_not_promote(lab):
     assert res.exit_code == 0, res.stderr + res.stdout
     assert "promoting" not in res.stdout
     assert not (ws / "main").exists()
-    assert not (ws / ".ow" / "config.toml").exists()
+    assert (ws / ".ow" / "config.toml").is_file()
+    assert not (ws / "voip" / ".ow").exists()
     assert (ws / "voip" / "community" / "odoo-bin").is_file()
     assert "http_port = 8069" in (ws / "voip" / "odoorc").read_text()
 

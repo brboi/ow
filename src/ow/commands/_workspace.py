@@ -84,10 +84,10 @@ class UnitMode:
         )
 
     @classmethod
-    def ephemeral(cls, *, is_stack: bool = False) -> UnitMode:
+    def ephemeral(cls, *, is_stack: bool = False, parent_multi_root: Path | None = None) -> UnitMode:
         return cls(
             is_stack=is_stack,
-            parent_multi_root=None,
+            parent_multi_root=parent_multi_root.resolve() if parent_multi_root is not None else None,
             register_index=False,
             detach=True,
             allow_existing_dir=False,
@@ -132,10 +132,10 @@ def repo_url(name: str, explicit_url: str | None, catalog: Mapping[str, KnownRep
 
 
 def is_resumable_workspace(root: Path) -> bool:
-    """Whether an existing `root` is an ow workspace (complete or interrupted mid-creation)."""
+    """Whether an existing `root` is an ow workspace or stack (complete or interrupted mid-creation)."""
     if not root.is_dir():
         return False
-    if (root / ".ow" / "config.toml").is_file():
+    if (root / ".ow" / "config.toml").is_file() or stacks.is_stack_dir(root):
         return True
     locations = derive_repos(root)
     return bool(locations) and not stray_checkouts(root, locations)
@@ -175,6 +175,8 @@ def pin_stack_values(
     siblings: Sequence[Workspace],
     pending: list[dict[str, object]] | None,
     global_settings: Mapping[str, object],
+    repo_paths: Sequence[Path] | None = None,
+    repo_names: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Merge the `ow_stack_values` answers into `ws_values` (explicit values win).
 
@@ -189,6 +191,8 @@ def pin_stack_values(
         siblings=siblings,
         pending=tuple(pending or ()),
         global_settings=global_settings,
+        repo_paths=repo_paths,
+        repo_names=repo_names,
     ):
         if isinstance(contrib, Mapping):
             for key, value in contrib.items():
@@ -205,7 +209,9 @@ def sync_multi_files(multi_root: Path, plugins: Plugins) -> tuple[Path, ...]:
     loaded = stacks.load_multi_workspace(multi_root, plugins)
     if loaded is None:
         return ()
-    return stacks.sync_multi_workspace_files(loaded[0], plugins)
+    multi, sessions = loaded
+    eff_plugins = sessions[0].plugins if sessions else plugins
+    return stacks.sync_multi_workspace_files(multi, eff_plugins)
 
 
 def report_result(
@@ -404,6 +410,7 @@ def _preview_unit_dry_run(
 
     if effective_stack or mode.parent_multi_root is not None or pending is not None:
         siblings = _load_sibling_stacks(mode.parent_multi_root, root, plugins)
+        planned_names = tuple(dict.fromkeys([*accepted.keys(), *(s.name for s in repo_specs)]))
         pin_stack_values(
             plugins,
             ws_values,
@@ -411,6 +418,7 @@ def _preview_unit_dry_run(
             siblings=siblings,
             pending=pending,
             global_settings=settings,
+            repo_names=planned_names,
         )
 
     preview_ws = build_workspace(root, (), ws_values, is_stack=effective_stack)
@@ -544,6 +552,7 @@ def _apply_stack_defaults(
     pending: list[dict[str, object]] | None,
     persist: Callable[[], Mapping[str, object]],
     mark_indexed: Callable[[], None],
+    accepted: Mapping[str, str] = (),
 ) -> None:
     """Pin plugin stack settings (e.g. non-colliding ports), write config, and update index."""
     need_defaults = (
@@ -559,6 +568,7 @@ def _apply_stack_defaults(
     with lock_cm:
         if need_defaults:
             siblings = _load_sibling_stacks(mode.parent_multi_root, root, plugins)
+            locs = derive_repos(root, dict(accepted))
             pin_stack_values(
                 plugins,
                 ws_values,
@@ -566,6 +576,8 @@ def _apply_stack_defaults(
                 siblings=siblings,
                 pending=pending,
                 global_settings=settings,
+                repo_paths=tuple(loc.path for loc in locs),
+                repo_names=tuple(loc.name for loc in locs),
             )
         dropped = persist()
         print_dropped(dropped)
@@ -599,19 +611,34 @@ def create_workspace_unit(
 
     _validate_unit_repos(root, repo_specs, catalog, existed_before=existed_before)
 
-    config_path = root / ".ow" / "config.toml"
-    if existed_before and config_path.is_file():
-        existing_layer, existing_accepted, _rejected, existing_meta = config.read_workspace_config(
+    effective_stack = mode.is_stack or (existed_before and stacks.is_stack_dir(root))
+    multi_root = (
+        mode.parent_multi_root
+        if mode.parent_multi_root is not None
+        else (root.parent.resolve() if effective_stack else None)
+    )
+    config_path = (
+        (multi_root / ".ow" / "config.toml")
+        if (effective_stack and multi_root is not None)
+        else (root / ".ow" / "config.toml")
+    )
+
+    if effective_stack and config_path.is_file():
+        ws_top_layer, stacks_cfg = config.read_multi_config(config_path, declared, remotes_of)
+        sc = stacks_cfg.get(ws_name)
+        accepted = dict(sc.accepted_repos) if sc else {}
+        ws_values = dict(sc.layer.values) if sc else {}
+        settings = {**settings, **ws_top_layer.values, **ws_values}
+    elif not effective_stack and existed_before and config_path.is_file():
+        existing_layer, existing_accepted, _rejected = config.read_workspace_config(
             config_path, declared, remotes_of
         )
-        accepted: dict[str, str] = dict(existing_accepted)
-        ws_values: dict[str, object] = dict(existing_layer.values)
-        effective_stack = mode.is_stack or existing_meta.stack
+        accepted = dict(existing_accepted)
+        ws_values = dict(existing_layer.values)
         settings = {**settings, **ws_values}
     else:
         accepted = {}
         ws_values = {}
-        effective_stack = mode.is_stack
 
     if mode.dry_run:
         return _preview_unit_dry_run(
@@ -639,13 +666,21 @@ def create_workspace_unit(
     in_progress: tuple[Path, Path] | None = None
 
     def persist() -> Mapping[str, object]:
+        if effective_stack:
+            return config.write_stack(
+                config_path,
+                ws_name,
+                accepted,
+                ws_values,
+                declared=declared,
+                remotes_of=remotes_of,
+            )
         return config.write_workspace(
             config_path,
             accepted,
             ws_values,
             declared=declared,
             remotes_of=remotes_of,
-            stack=effective_stack,
         )
 
     def _rollback() -> None:
@@ -653,12 +688,14 @@ def create_workspace_unit(
             to_clean = list(added_worktrees)
             if in_progress is not None:
                 to_clean.append(in_progress)
+            if effective_stack and created_config:
+                config.remove_stack(config_path, ws_name)
             _rollback_workspace(
                 root,
                 to_clean,
                 indexed=indexed,
                 remove_root=not existed_before,
-                created_config=created_config,
+                created_config=created_config and not effective_stack,
             )
         elif in_progress is not None:
             cleanup_worktree(*in_progress)
@@ -666,7 +703,8 @@ def create_workspace_unit(
     with contextlib.ExitStack() as cleanup_stack:
         cleanup_stack.callback(_rollback)
 
-        if not config_path.is_file():
+        stack_already_declared = effective_stack and (ws_name in config.stack_names_in_config(config_path))
+        if (effective_stack and not stack_already_declared) or (not effective_stack and not config_path.is_file()):
             persist()
             created_config = True
 
@@ -704,6 +742,7 @@ def create_workspace_unit(
             pending=pending,
             persist=persist,
             mark_indexed=_mark_indexed,
+            accepted=accepted,
         )
 
         session = open_session(str(root), need_workspace=True, plugins=plugins, cwd=root)

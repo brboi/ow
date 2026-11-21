@@ -19,21 +19,23 @@ src/ow/
 ├── errors.py         # OwError family; each carries its exit code
 ├── term.py           # message helpers; --json routes progress and plans to stderr
 ├── core/
-│   ├── paths.py      # XDG locations: repos, index, global config, local seed, venvs, cache
+│   ├── paths.py      # XDG locations: repos, index, global config, local seed, venvs, cache, trusted plugins
 │   ├── fs.py         # atomic writes, sidecar locks, path-safety checks
 │   ├── cache.py      # file-backed TTL JSON cache
 │   ├── json_schema.py# --json envelope (schema v1)
 │   ├── git.py        # git runner; check_version() requires ≥ 2.45
 │   ├── index.py      # workspace index
 │   ├── bases.py      # base branch parsing and inference
-│   ├── config.py     # layers: default < global < workspace; a write rewrites the whole file
-│   ├── plugins.py    # CoreSpec, plugin records (Setting, GeneratedFile, StackInfo…), Plugins, load_plugins
+│   ├── config.py     # layers: default < global < workspace < stack; single root `.ow/config.toml`
+│   ├── trust.py      # in-repo plugin discovery (`pyproject.toml` / `ow_plugin.py`) and path-based trust
+│   ├── plugins.py    # CoreSpec, plugin records, Plugins, load_plugins, versioned in-repo plugin loader
 │   ├── workspace.py  # Workspace, Repo, RepoLocation derived from worktrees; frozen, derive never mutate
 │   ├── stacks.py     # multi-stack roots: detection, ports, workspace-level files
 │   ├── session.py    # Session: the immutable state every command starts from
 │   ├── facts.py      # RepoFacts, gathered once per command, in parallel
 │   ├── plan.py       # GitStep/OwStep, RepoPlan, Batch, run_batch prints the whole plan first
-│   └── refresh.py    # generated files for a workspace or multi-stack root
+│   └── refresh.py    # generated files and unified lock for a workspace or multi-stack root
+├── plugin_api.py     # stable versioned public API (`PLUGIN_API_VERSION = 1`) for external/in-repo plugins
 ├── recipes/          # decision tables: gather_* reads git, plan_* is pure
 │   ├── preflight.py  # refusals: operation in progress, dirty state
 │   ├── fetch.py      # narrow parallel fetch steps
@@ -41,7 +43,7 @@ src/ow/
 │   └── removal.py    # pushed-branch rule, branch and workspace removal plans
 ├── commands/         # one module per command; _-prefixed modules are shared helpers
 │   ├── _shared.py _repos.py _targets.py _promote.py _workspace.py
-│   └── init add run exec sandbox repo config status refresh files ls cd shell_init rm prune retarget
+│   └── init add run exec sandbox repo config status refresh files trust ls cd shell_init rm prune retarget
 ├── specs/            # hookspecs plugins share, with their merge rules
 │   ├── python_env.py # PythonEnvSpec; workspace_venv computes the venv once
 │   ├── editors.py    # EditorsSpec
@@ -85,7 +87,7 @@ src/tests/            # conftest.py (hermetic autouse fixture), lab.py (real rem
 - `ow_settings`, `ow_diagnostics`, `ow_known_repos`
 - `ow_generated_files`, `ow_multi_workspace_files`
 - `ow_resolve_target`, `ow_expand_workspace_repos`
-- `ow_runner`, `ow_before_run`, `ow_reset_run`, `ow_sandbox_mounts`, `ow_status`, `ow_prune_candidates`
+- `ow_runner`, `ow_multi_runner`, `ow_before_run`, `ow_reset_run`, `ow_sandbox_mounts`, `ow_status`, `ow_prune_candidates`
 - `ow_stack_values`, `ow_stack_name`, `ow_stack_info`, `ow_is_base_branch`
 - events: `ow_workspace_created`, `ow_refreshed`
 
@@ -93,8 +95,10 @@ src/tests/            # conftest.py (hermetic autouse fixture), lab.py (real rem
 
 ## Invariants
 
-- One ownership lock, `.ow/rendered.lock.toml`, per workspace or multi-stack root, taken in `core/refresh.py`. Bytes not matching the lock are the user's and are never rewritten; refresh never deletes a generated file.
-- Config precedence is default < global (`$XDG_CONFIG_HOME/ow/config.toml`) < workspace (`.ow/config.toml`).
+- One `.ow/` directory per workspace root (`<root>/.ow/config.toml` and `<root>/.ow/rendered.lock.toml`) — stacks under a multi-stack workspace carry no `.ow/` directory of their own; their repos/settings live under `[stacks.<name>]` and their locked paths are prefixed `<name>/` in the root lock.
+- Bytes not matching the lock are the user's and are never rewritten; refresh never deletes a generated file.
+- Config precedence is default < global (`$XDG_CONFIG_HOME/ow/config.toml`) < workspace (`.ow/config.toml`) < stack (`[stacks.<name>]`).
+- External / in-repo plugins (`[tool.ow] plugin` in `pyproject.toml`, fallback `ow_plugin.py`) require path trust (`ow trust`) and a compatible integer `OW_API_VERSION` matching `ow.plugin_api.PLUGIN_API_VERSION`.
 - `Session.reload()` re-opens a session after git moved branches.
 
 ## Tests

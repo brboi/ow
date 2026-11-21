@@ -95,9 +95,6 @@ def _inspect(path: Path, plugins: "Plugins") -> dict[str, Any]:
             "ports": {},
             "repos": [],
         }
-    if (path / ".ow" / "config.toml").exists():
-        return _inspect_single(path, plugins)
-
     stack_paths = stacks.detect_multi_workspace(path)
     if stack_paths:
         stack_items = [_inspect_single(sp, plugins) for sp in stack_paths]
@@ -109,6 +106,9 @@ def _inspect(path: Path, plugins: "Plugins") -> dict[str, Any]:
             "stacks": stack_items,
             "repos": [],
         }
+
+    if (path / ".ow" / "config.toml").exists():
+        return _inspect_single(path, plugins)
 
     return {
         "name": path.name,

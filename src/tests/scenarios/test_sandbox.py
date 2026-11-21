@@ -448,13 +448,14 @@ def test_cli_multi_stack_root_and_single_stack_targeting(lab):
     multi.mkdir(parents=True)
     assert lab.ow("init", "odoo=community@18.0", "iap=community@18.0", "voip=voip", cwd=multi).exit_code == 0
 
-    # At multi-stack root: whole root RW, each stack's .ow RO, conflicting ODOO_RC omitted
+    # At multi-stack root: whole root RW, root .ow RO (no per-stack .ow), conflicting ODOO_RC omitted
     res_root = lab.ow("sandbox", "-n", "--", "true", cwd=multi)
     assert res_root.exit_code == 0, res_root.stderr
     assert f"--bind {shlex.quote(str(multi.resolve()))} {shlex.quote(str(multi.resolve()))}" in res_root.stdout
+    root_ow = (multi / ".ow").resolve()
+    assert f"--ro-bind {shlex.quote(str(root_ow))} {shlex.quote(str(root_ow))}" in res_root.stdout
     for stack_name in ("odoo", "iap", "voip"):
-        ow_dir = (multi / stack_name / ".ow").resolve()
-        assert f"--ro-bind {shlex.quote(str(ow_dir))} {shlex.quote(str(ow_dir))}" in res_root.stdout
+        assert not (multi / stack_name / ".ow").exists()
     assert "ODOO_RC" not in res_root.stdout
 
     # Targeting a single stack via `-w odoo`: scoped only to `review-multi/odoo`, ODOO_RC set

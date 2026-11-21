@@ -560,11 +560,12 @@ def test_retarget_switches_detached_core_updates_config_skips_missing_series_and
     # 2. Branched `enterprise` replayed feature commit onto origin/19.0 and updated ow-base
     assert (ent_wt / "feat.py").is_file()
     assert lab.git(ent_wt, "config", "--get", "branch.master-feat.ow-base") == "origin/19.0"
-    # 3. `[repos]` default bases updated in `.ow/config.toml` for community & enterprise, NOT upgrade
-    cfg = tomllib.loads((ws / "odoo" / ".ow" / "config.toml").read_text())
-    assert cfg["repos"]["community"] == "origin/19.0"
-    assert cfg["repos"]["enterprise"] == "origin/19.0"
-    assert cfg["repos"]["upgrade"] == "origin/master"
+    # 3. `[stacks.odoo.repos]` default bases updated in root `.ow/config.toml` for community & enterprise, NOT upgrade
+    cfg = tomllib.loads((ws / ".ow" / "config.toml").read_text())
+    odoo_repos = cfg["stacks"]["odoo"]["repos"]
+    assert odoo_repos["community"] == "origin/19.0"
+    assert odoo_repos["enterprise"] == "origin/19.0"
+    assert odoo_repos["upgrade"] == "origin/master"
     # 4. Generated files refreshed to 19.0 series venv
     odools = tomllib.loads((ws / "odoo" / "odools.toml").read_text())
     assert "19.0" in odools["config"][0]["python_path"]

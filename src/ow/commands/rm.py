@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ow import term
-from ow.core import git, index, refresh, stacks
+from ow.core import config, git, index, refresh, stacks
 from ow.core.facts import RepoFacts, gather_all
 from ow.core.json_schema import envelope
 from ow.core.plan import Batch, OwStep, RepoPlan, Step, run_batch
@@ -106,8 +106,10 @@ def run_multi(
                 ws_notes.extend(rp.notes)
             ws_root = ws.root
 
-            def _drop_stack(root: Path = ws_root) -> None:
+            def _drop_stack(root: Path = ws_root, stack_name: str = ws.name) -> None:
                 shutil.rmtree(root)
+                config.remove_stack(multi.root / ".ow" / "config.toml", stack_name)
+                refresh.remove_lock_prefix(multi.root, stack_name)
                 removed_roots.add(root)
 
             ws_steps.append(
@@ -125,6 +127,13 @@ def run_multi(
             remaining = stacks.load_multi_workspace(multi.root, plugins)
             if remaining is None:
                 refresh.remove_owned_files(multi.root)
+                cfg = multi.root / ".ow" / "config.toml"
+                cfg.unlink(missing_ok=True)
+                cfg.with_name(f".{cfg.name}.lock").unlink(missing_ok=True)
+                try:
+                    (multi.root / ".ow").rmdir()
+                except OSError:
+                    pass
                 index.remove(multi.root)
                 if multi.root.exists():
                     try:
@@ -208,6 +217,8 @@ def _remove_one(session: Session, *, dry_run: bool, yes: bool) -> tuple[int, dic
     def _finish_parent() -> None:
         if parent_multi is None:
             return
+        config.remove_stack(parent_multi / ".ow" / "config.toml", workspace.name)
+        refresh.remove_lock_prefix(parent_multi, workspace.name)
         remaining = stacks.load_multi_workspace(parent_multi, session.plugins)
         if remaining is None:
             refresh.remove_owned_files(parent_multi)
