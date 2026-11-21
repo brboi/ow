@@ -176,6 +176,12 @@ class CoreSpec:
         """Return the command to run this workspace via `ow run`, or None."""
 
     @hookspec
+    def ow_before_run(
+        self, ws: Workspace, workspaces: Sequence[Workspace]
+    ) -> list[str] | None:
+        """Prepare shared local services before `ow run` starts workspaces; return info lines."""
+
+    @hookspec
     def ow_status(
         self,
         ws: Workspace | None,
@@ -231,13 +237,15 @@ class CoreSpec:
 
 def _get_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
     """Get all built-in plugin modules in order."""
-    from ow.plugins import github, local, mise, odoo, runbot, vscode, zed
+    from ow.plugins import github, local, mailsink, mise, odoo, postgres, runbot, vscode, zed
 
     # Order matters: `Plugins.pipe` threads values in this order (odoo expands companion
     # repos before runbot pins them).
     return (
         ("mise", mise),
         ("odoo", odoo),
+        ("postgres", postgres),
+        ("mailsink", mailsink),
         ("github", github),
         ("runbot", runbot),
         ("vscode", vscode),
@@ -453,12 +461,13 @@ def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = Non
     """
     from ow.specs.editors import EditorsSpec
     from ow.specs.python_env import PythonEnvSpec
+    from ow.specs.services import ServicesSpec
 
     if builtins is None:
         builtins = _get_builtins()
 
     pm = pluggy.PluginManager("ow")
-    for spec in (CoreSpec, PythonEnvSpec, EditorsSpec):
+    for spec in (CoreSpec, PythonEnvSpec, EditorsSpec, ServicesSpec):
         pm.add_hookspecs(spec)
 
     names = []

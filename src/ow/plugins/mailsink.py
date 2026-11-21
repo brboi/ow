@@ -1,0 +1,131 @@
+"""Mailsink plugin: global shared Mailpit container auto-started on `ow run`."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
+
+from ow import term
+from ow.core import config
+from ow.core.plugins import Setting, StatusInfo, hookimpl
+from ow.plugins import _containers as containers
+from ow.specs.services import SmtpService
+
+if TYPE_CHECKING:
+    from ow.core.facts import RepoFacts
+    from ow.core.workspace import Workspace
+
+_CONTAINER = "ow-mailsink"
+_DEFAULT_IMAGE = "axllent/mailpit"
+
+
+@hookimpl
+def ow_settings() -> list[Setting]:
+    """Provide mailsink (Mailpit) settings."""
+    return [
+        Setting(
+            key="mailsink.image",
+            type=str,
+            default=_DEFAULT_IMAGE,
+            help="Mailpit container image",
+        ),
+        Setting(
+            key="mailsink.smtp_port",
+            type=int,
+            default=1025,
+            help="Host SMTP port for mailsink",
+        ),
+        Setting(
+            key="mailsink.web_port",
+            type=int,
+            default=8025,
+            help="Host Web UI port for mailsink",
+        ),
+    ]
+
+
+def _cfg(settings: Mapping[str, object]) -> tuple[str, int, int]:
+    image = str(settings.get("mailsink.image") or _DEFAULT_IMAGE)
+    raw_smtp = config.as_int(settings.get("mailsink.smtp_port"))
+    smtp_port = raw_smtp if raw_smtp is not None and 1 <= raw_smtp <= 65535 else 1025
+    raw_web = config.as_int(settings.get("mailsink.web_port"))
+    web_port = raw_web if raw_web is not None and 1 <= raw_web <= 65535 else 8025
+    return image, smtp_port, web_port
+
+
+@hookimpl
+def smtp_service(ws: Workspace) -> SmtpService | None:
+    """Expose Mailpit SMTP details when a container engine is ready."""
+    engine = containers.detect_engine()
+    if engine is None or not containers.engine_ready(engine):
+        return None
+    _image, smtp_port, web_port = _cfg(ws.settings)
+    return SmtpService(
+        host="localhost",
+        port=smtp_port,
+        web_url=f"http://localhost:{web_port}",
+    )
+
+
+@hookimpl
+def ow_before_run(ws: Workspace, workspaces: Sequence[Workspace]) -> list[str] | None:
+    """Ensure the shared Mailpit container is running before `ow run`."""
+    engine = containers.detect_engine()
+    if engine is None or not containers.engine_ready(engine):
+        term.warn("mailsink: docker/podman unavailable; skipping container startup")
+        return None
+
+    image, smtp_port, web_port = _cfg(ws.settings)
+    try:
+        state = containers.inspect_container(engine, _CONTAINER)
+        if state is None or state.status != "running":
+            term.out(f"# mailsink: starting {_CONTAINER} ({image})...")
+        containers.ensure_container(
+            engine,
+            _CONTAINER,
+            image=image,
+            ports=((smtp_port, 1025), (web_port, 8025)),
+        )
+    except RuntimeError as exc:
+        term.warn(f"mailsink: {exc}")
+        return None
+
+    return [f"mailsink: smtp://localhost:{smtp_port} (ui: http://localhost:{web_port})"]
+
+
+@hookimpl
+def ow_status(
+    ws: Workspace | None,
+    facts: Sequence[RepoFacts],
+    target: str | None,
+    offline: bool,
+    settings: Mapping[str, object],
+) -> list[StatusInfo]:
+    """Report shared Mailpit container status in `ow status`."""
+    if target is not None or ws is None:
+        return []
+    engine = containers.detect_engine()
+    if engine is None or not containers.engine_ready(engine):
+        return []
+
+    state = containers.inspect_container(engine, _CONTAINER)
+    if state is None:
+        return []
+
+    _image, smtp_port, web_port = _cfg(ws.settings)
+    effective_smtp = state.ports.get(1025, smtp_port)
+    effective_web = state.ports.get(8025, web_port)
+    url = f"http://localhost:{effective_web}"
+    return [
+        StatusInfo(
+            plugin="mailsink",
+            scope="workspace",
+            target=ws.name,
+            summary=f"{state.status} on smtp://localhost:{effective_smtp} (ui: {url})",
+            data={
+                "status": state.status,
+                "smtp_port": effective_smtp,
+                "web_url": url,
+            },
+        )
+    ]

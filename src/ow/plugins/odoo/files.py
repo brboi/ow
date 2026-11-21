@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from configparser import ConfigParser
 from io import StringIO
 from pathlib import Path, PurePosixPath
@@ -17,6 +18,7 @@ from ow.plugins.odoo.release import read_odoo_series, read_python_bounds
 from ow.plugins.odoo.settings import get_setting
 from ow.specs.editors import DebugLaunch, EditorContribution
 from ow.specs.python_env import PythonEnvironment, WorkspaceVenv, workspace_venv
+from ow.specs.services import DatabaseService, SmtpService
 
 if TYPE_CHECKING:
     from ow.core.workspace import Repo, Workspace
@@ -39,7 +41,12 @@ def odoo_venv(ws: Workspace, core: Repo) -> WorkspaceVenv:
     return workspace_venv(ws, python_environment(core))
 
 
-def generated_files(ws: Workspace, core: Repo) -> list[GeneratedFile | Diagnostic]:
+def generated_files(
+    ws: Workspace,
+    core: Repo,
+    *,
+    answers: Callable[[str], list] | None = None,
+) -> list[GeneratedFile | Diagnostic]:
     """`odoorc`, `odools.toml`, `pyrightconfig.json` and `requirements-dev.txt` for `ws`."""
     diagnostics: list[Diagnostic] = []
     files: list[GeneratedFile] = []
@@ -68,6 +75,26 @@ def generated_files(ws: Workspace, core: Repo) -> list[GeneratedFile | Diagnosti
     admin_passwd, _ = get_setting("odoo.admin_passwd", settings, ws)
     smtp_server, _ = get_setting("odoo.smtp_server", settings, ws)
     smtp_port, _ = get_setting("odoo.smtp_port", settings, ws)
+
+    if answers is not None:
+        db_services = [a for a in answers("database_service") if isinstance(a, DatabaseService)]
+        if db_services:
+            svc = db_services[0]
+            if db_host == "localhost":
+                db_host = svc.host
+            if db_port == 5432:
+                db_port = svc.port
+            if db_user == "odoo":
+                db_user = svc.user
+            if db_password == "odoo":
+                db_password = svc.password
+        smtp_services = [a for a in answers("smtp_service") if isinstance(a, SmtpService)]
+        if smtp_services:
+            svc_smtp = smtp_services[0]
+            if smtp_server == "localhost":
+                smtp_server = svc_smtp.host
+            if smtp_port == 25:
+                smtp_port = svc_smtp.port
 
     parser = ConfigParser(interpolation=None)
     parser["options"] = {

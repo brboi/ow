@@ -97,6 +97,16 @@ Each `[repos]` value is validated against the bare repo's remotes: the longest r
 | `odoo.debug_args` | list | `["--dev=all"]` |
 | `odoo.debug_test_args` | list | `["--test-tags=<workspace>"]` |
 | `odoo.default_repos` | list | `["community", "enterprise"]` |
+| `postgres.image` | str | `"pgvector/pgvector:pg17"` |
+| `postgres.port` | int | `0` (auto: `5432` if free, else `5433`) |
+| `postgres.user` | str | `"odoo"` |
+| `postgres.password` | str | `"odoo"` |
+| `postgres.pgweb` | bool | `true` |
+| `postgres.pgweb_image` | str | `"sosedoff/pgweb"` |
+| `postgres.pgweb_port` | int | `8081` |
+| `mailsink.image` | str | `"axllent/mailpit"` |
+| `mailsink.smtp_port` | int | `1025` |
+| `mailsink.web_port` | int | `8025` |
 | `github.default_org` | str | `"odoo"` |
 | `github.cache_ttl` | int | `120` |
 | `runbot.url` | str | `"https://runbot.odoo.com"` |
