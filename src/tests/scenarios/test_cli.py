@@ -14,7 +14,7 @@ REPO = "community"
 BASE = "18.0"
 
 COMMANDS = (
-    "init", "add", "run", "status",
+    "init", "add", "run", "sandbox", "status",
     "refresh", "files", "ls", "cd", "shell-init", "rm", "prune",
     "repo", "config", "retarget",
 )

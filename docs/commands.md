@@ -13,7 +13,7 @@ Every ow command, its specs, flags, `--json` contract, and exit codes.
 
 - **`-w, --workspace WS`** — workspace or stack to act on, by name or path (default: current directory). Inside a multi-stack workspace root, a bare stack name resolves to `./<stack>` first; from anywhere, use `<workspace>/<stack>` (e.g. `review/iap`).
 - **`--only REPO`** — repeatable; limits `status` (single workspace/stack) and `retarget` to named repos.
-- **`-n, --dry-run`** — print the plan without running it (`init`, `add`, `repo rm`, `rm`, `prune`, `retarget`).
+- **`-n, --dry-run`** — print the plan without running it (`init`, `add`, `sandbox`, `repo rm`, `rm`, `prune`, `retarget`).
 - **`-y, --yes`** — skip confirmation prompts (`init`/`add` promotion, `repo rm`, `rm`, `prune`, `retarget`).
 - **`--json`** — emit canonical `schema_version: 1` JSON on `stdout` and route all progress/plans to `stderr` (`init`, `add`, `status`, `ls`, `rm`, `prune`, `files`, `config`, `retarget`). Implies non-interactive mode.
 - **`--offline`** — skip external network lookups (`status`, `prune`).
@@ -86,6 +86,16 @@ Run one or more stacks locally via their plugin runner (`odoo` launches `odoo-bi
   ow run --tmp enterprise#12345 -- -i sale
   ow run --tmp odoo=enterprise#12345:"-i voip" iap=iap#4321
   ```
+
+### `ow sandbox [-w WS] [--profile NAME] [--ro PATH…] [--rw PATH…] [--env VAR…] [-n] [-- COMMAND [ARGS…]]`
+
+Run an arbitrary command, AI agent harness (`claude`, `opencode`, `codex`, `pi`, `omp`), or interactive shell (when `COMMAND` is omitted) inside a Linux bubblewrap (`bwrap`) sandbox scoped to a workspace, stack, or multi-stack root.
+
+- **Filesystem isolation**: `$HOME` is an empty `tmpfs` (allowlist-only), system directories (`/usr`, `/etc`, `/opt`, …) are read-only, and only the target workspace root (or multi-stack root) is mounted read-write. Each stack's `.ow/` directory and each repo's `.git` pointer file are overlaid read-only so the sandboxed process cannot alter workspace configuration or replace git pointers.
+- **Shared bare repos (partial RW)**: only bare repos referenced by the target workspace/stack(s) are mounted; each bare root, `config`, `hooks/`, and sibling workspaces' `worktrees/*` stay read-only while `objects/`, `refs/`, `logs/`, and this workspace's `worktrees/<id>/` are read-write — enabling `git add`/`commit`/`stash`/`rebase` without exposing hook/config sandbox-escape vectors. `~/.gitconfig` (and `~/.config/git/{config,ignore,attributes}`, never `credentials`) is mounted read-only.
+- **Environment & harness profiles**: `bwrap --clearenv` starts from a strict allowlist (`HOME`, `USER`, `PATH`, `TERM`, `LANG`/`LC_*`, `OW_SANDBOX=1`, `OW_WORKSPACE`, plugin vars such as `ODOO_RC` and `MISE_*`). Known harnesses (`claude`, `opencode`, `codex`, `pi`, `omp`) are auto-detected from `COMMAND` to mount only that harness's own state/config/binary paths and API env vars; override with `--profile <name|auto|none>` or `sandbox.profile` (e.g. `ow sandbox --profile claude` to open a shell prepared for `claude`).
+- **Runtimes & local services**: shared Python virtualenvs (`$XDG_DATA_HOME/ow/venvs/...`) and `mise` installs/config are contributed read-only by plugins (`ow_sandbox_mounts`), network is shared (`--share-net`) so local services and LLM APIs work natively, and `ow_before_run` starts shared local services (`postgres`, `mailsink`) before entering the sandbox (Docker/Podman sockets are never mounted).
+- **Extensibility & auditing**: pass `--ro PATH`, `--rw PATH`, `--env VAR` (repeatable) or set `sandbox.ro_paths`, `sandbox.rw_paths`, `sandbox.pass_env` via `ow config`. Pass `-n`/`--dry-run` to inspect the exact `bwrap` command and forwarded env keys (with secret values redacted) without executing.
 
 ---
 
