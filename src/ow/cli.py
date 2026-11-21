@@ -111,8 +111,20 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- session plumbing ------------------------------------------------
 
-    def _open(workspace: str | None, *, need_workspace: bool = True) -> Session:
-        return open_session(workspace, need_workspace=need_workspace, plugins=plugins)
+    def _open(
+        workspace: str | None,
+        *,
+        need_workspace: bool = True,
+        ignore_global: Sequence[str] = (),
+        ignore_workspace: Sequence[str] = (),
+    ) -> Session:
+        return open_session(
+            workspace,
+            need_workspace=need_workspace,
+            plugins=plugins,
+            ignore_global=ignore_global,
+            ignore_workspace=ignore_workspace,
+        )
 
     def _announce(session: Session) -> None:
         for warning in session.warnings:
@@ -492,7 +504,12 @@ def build_app(plugins: Plugins) -> typer.Typer:
         workspace, global_, _json = _config_context(ctx, workspace, global_, False)
         if _json:
             raise errors.UsageError("--json is not supported on `ow config unset`")
-        session = _open(workspace, need_workspace=False)
+        session = _open(
+            workspace,
+            need_workspace=False,
+            ignore_global=(key,) if global_ else (),
+            ignore_workspace=() if global_ else (key,),
+        )
         _announce(session)
         _exit(_command_module("config").unset(session, key, global_=global_))
 

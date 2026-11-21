@@ -5,7 +5,7 @@ rewrites the whole file, prints what it dropped, and refreshes the resolved work
 from __future__ import annotations
 
 import tomllib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 
 from ow import term
@@ -102,7 +102,10 @@ def unset(session: Session, key: str, *, global_: bool) -> int:
     if not _sets_key(path, key):
         return 0
     return _update(
-        session, lambda current: {k: v for k, v in current.items() if k != key}, global_=global_
+        session,
+        lambda current: {k: v for k, v in current.items() if k != key},
+        global_=global_,
+        ignore_dropped=(key,),
     )
 
 
@@ -136,6 +139,7 @@ def _update(
     mutate: Callable[[dict[str, object]], Mapping[str, object]],
     *,
     global_: bool,
+    ignore_dropped: Collection[str] = (),
 ) -> int:
     """Apply `mutate` to the target file, print what the rewrite dropped, then refresh."""
     if global_:
@@ -151,7 +155,7 @@ def _update(
             remotes_of=remotes_of,
         )
 
-    print_dropped(dropped)
+    print_dropped({k: v for k, v in dropped.items() if k not in ignore_dropped})
 
     if session.workspace is None:
         return 0

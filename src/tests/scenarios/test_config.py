@@ -226,8 +226,27 @@ def test_config_unset_an_unknown_key(lab):
 
     result = lab.ow("config", "unset", "theme.dark", cwd=root)
     assert result.exit_code == 0
-    assert "warning: dropped theme.dark = true" in result.stderr
+    assert result.stderr == ""
     assert tomllib.loads(config_path.read_text()) == {"repos": {REPO: f"origin/{BASE}"}}
+
+
+def test_config_unset_unknown_global_key_is_quiet_for_that_key(lab):
+    root = workspace(lab, branches={BASE: {"README.md": "hi\n"}})
+    global_config().parent.mkdir(parents=True, exist_ok=True)
+    global_config().write_text("[retarget]\nenabled = true\n")
+
+    result = lab.ow("config", "unset", "--global", "retarget.enabled", cwd=root)
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert tomllib.loads(global_config().read_text()) == {}
+
+    # Other unknown keys in the same file still get reported when dropped.
+    global_config().write_text("[retarget]\nenabled = true\n\n[future]\nx = 1\n")
+    result = lab.ow("config", "unset", "--global", "retarget.enabled", cwd=root)
+    assert result.exit_code == 0
+    assert "retarget.enabled" not in result.stderr
+    assert "warning: dropped future.x = 1" in result.stderr
+    assert tomllib.loads(global_config().read_text()) == {}
 
 
 def test_config_workspace_overrides_global(lab):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Mapping
@@ -73,6 +74,8 @@ def open_session(
     need_workspace: bool,
     plugins: Plugins | None = None,
     cwd: Path | None = None,
+    ignore_global: Collection[str] = (),
+    ignore_workspace: Collection[str] = (),
 ) -> Session:
     """Open a session for a command to run.
 
@@ -108,7 +111,14 @@ def open_session(
             declared, global_layer, ws_layer_empty, ws_for_defaults=None
         )
 
-        warnings = _collect_warnings(global_layer, ws_layer_empty, declared, {})
+        warnings = _collect_warnings(
+            global_layer,
+            ws_layer_empty,
+            declared,
+            {},
+            ignore_global=ignore_global,
+            ignore_workspace=ignore_workspace,
+        )
         diag_warnings, diag_list = _call_diagnostics(plugins, None)
         warnings = warnings + diag_warnings
 
@@ -159,7 +169,14 @@ def open_session(
 
     workspace = build_workspace(root, locations, values, is_stack=meta.stack)
 
-    warnings = _collect_warnings(global_layer, workspace_layer, declared, rejected_bases)
+    warnings = _collect_warnings(
+        global_layer,
+        workspace_layer,
+        declared,
+        rejected_bases,
+        ignore_global=ignore_global,
+        ignore_workspace=ignore_workspace,
+    )
 
     strays = stray_checkouts(root, locations)
     if strays:
@@ -193,6 +210,9 @@ def _collect_warnings(
     workspace_layer: Layer,
     declared: Mapping[str, object],
     rejected_bases: Mapping[str, str],
+    *,
+    ignore_global: Collection[str] = (),
+    ignore_workspace: Collection[str] = (),
 ) -> tuple[str, ...]:
     """One warning per config file, naming every unknown key and rejected base."""
     warnings = []
@@ -201,10 +221,12 @@ def _collect_warnings(
         f"unknown setting {key} in {global_config()}; "
         f"remove it with `ow config unset --global {key}`"
         for key in global_layer.unknown
+        if key not in ignore_global
     ]
     global_parts += [
         _wrong_type_note(key, global_config(), declared)
         for key in global_layer.wrong_type
+        if key not in ignore_global
     ]
     if global_parts:
         warnings.append("; ".join(global_parts))
@@ -213,10 +235,12 @@ def _collect_warnings(
         f"unknown setting {key} in .ow/config.toml; "
         f"remove it with `ow config unset {key}`"
         for key in workspace_layer.unknown
+        if key not in ignore_workspace
     ]
     ws_parts += [
         _wrong_type_note(key, ".ow/config.toml", declared)
         for key in workspace_layer.wrong_type
+        if key not in ignore_workspace
     ]
     ws_parts += [
         f"ignoring default base {raw} for {name} in .ow/config.toml: invalid base"
