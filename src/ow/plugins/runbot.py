@@ -434,6 +434,16 @@ def ow_expand_workspace_repos(
         term.out("# runbot: unreachable, using base ref")
         return None
     if bundle is None:
+        target_label = (
+            ", ".join(f"{repo}:{num}" for repo, num in pr_specs)
+            if pr_specs
+            else (primary_branch or "target")
+        )
+        unpinned = ", ".join(r.name for r in detached_unpinned)
+        term.warn(
+            f"runbot: no public bundle found for {target_label} "
+            f"(private project or not yet built); using base ref for {unpinned}"
+        )
         return None
 
     batch_id = _bundle_last_batch_id(bundle)
