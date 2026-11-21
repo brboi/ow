@@ -31,6 +31,43 @@ def _read_runs(log_path: Path) -> list[dict]:
     return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
 
+def test_run_installs_requirements_once_for_real_venv_with_pyvenv_cfg(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = init_workspace(lab, "community", name="req-ws")
+    venv_dir = venvs_dir() / "py3.12-18.0"
+    (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+    (venv_dir / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+
+    pip_log = lab.root / "pip.jsonl"
+    run_log = lab.root / "runs.jsonl"
+    py = venv_dir / "bin" / "python"
+    py.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "if args[:2] == ['-m', 'pip']:\n"
+        f"    with open({str(pip_log)!r}, 'a', encoding='utf-8') as f:\n"
+        "        f.write(json.dumps(args) + '\\n')\n"
+        "    sys.exit(0)\n"
+        f"with open({str(run_log)!r}, 'a', encoding='utf-8') as f:\n"
+        "    f.write(json.dumps(args) + '\\n')\n",
+        encoding="utf-8",
+    )
+    py.chmod(py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    r1 = lab.ow("run", cwd=ws)
+    assert r1.exit_code == 0, r1.stderr + r1.stdout
+    assert (venv_dir / ".ow-requirements.sha256").is_file()
+    pip_calls_1 = [json.loads(line) for line in pip_log.read_text().splitlines()]
+    assert any(call[:3] == ["-m", "pip", "install"] for call in pip_calls_1)
+
+    # Second run skips pip install because the requirements hash is stamped.
+    r2 = lab.ow("run", cwd=ws)
+    assert r2.exit_code == 0, r2.stderr + r2.stdout
+    pip_calls_2 = [json.loads(line) for line in pip_log.read_text().splitlines()]
+    assert len(pip_calls_2) == len(pip_calls_1)
+
+
 def test_run_inside_workspace_passes_args_and_odoorc(lab):
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
     ws = init_workspace(lab, "community", name="my-ws")
