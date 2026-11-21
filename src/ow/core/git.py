@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from ow import term
 from ow.errors import OwError, UsageError
 
 
@@ -53,22 +54,30 @@ def _user_ssh_configured() -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def run(argv: Sequence[str], *, live: bool = False) -> subprocess.CompletedProcess[str]:
+def run(
+    argv: Sequence[str],
+    *,
+    live: bool = False,
+    interactive: bool | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run git, capturing stdout; stderr is inherited when live on a tty.
 
-    Never prompts: BatchMode ssh and GIT_TERMINAL_PROMPT=0 unless the user set one;
-    raises UsageError when git is missing.
+    Allows SSH/credential prompts on `/dev/tty` when interactive; otherwise disables
+    prompts (`BatchMode=yes` and `GIT_TERMINAL_PROMPT=0` unless the user set one).
+    Raises UsageError when git is missing.
     """
+    allow_prompt = term.interactive() if interactive is None else interactive
     env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"
     env["LC_MESSAGES"] = "C"
     env["LANGUAGE"] = "C"
-    if (
-        not env.get("GIT_SSH_COMMAND")
-        and not env.get("GIT_SSH")
-        and not _user_ssh_configured()
-    ):
-        env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+    if not allow_prompt:
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        if (
+            not env.get("GIT_SSH_COMMAND")
+            and not env.get("GIT_SSH")
+            and not _user_ssh_configured()
+        ):
+            env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
 
     stderr: int | None = None if live and sys.stderr.isatty() else subprocess.PIPE
     try:
@@ -170,7 +179,7 @@ def auth_hint(stderr: str) -> str | None:
     """One-line hint for an ssh/https auth failure, or None."""
     text = stderr.lower()
     if "permission denied" in text and "publickey" in text:
-        return "load your key with `ssh-add`; ow never prompts for a passphrase"
+        return "load your key with `ssh-add` (non-interactive runs never prompt for a passphrase)"
     if "host key verification failed" in text:
         return "trust the host first: `ssh-keyscan <host> >> ~/.ssh/known_hosts`"
     if "could not read username" in text or "could not read password" in text:

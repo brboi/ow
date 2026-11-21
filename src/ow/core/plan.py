@@ -246,10 +246,23 @@ def run_fetches(
             out(show(step, root))
 
     repo_names = list(steps_by_repo.keys())
-    with ThreadPoolExecutor() as executor:
-        results = list(
-            executor.map(lambda repo: _run_fetch_steps(repo, steps_by_repo[repo]), repo_names)
-        )
+    if len(repo_names) <= 1:
+        results = [
+            _run_fetch_steps(repo, steps_by_repo[repo], interactive=term.interactive())
+            for repo in repo_names
+        ]
+    else:
+        with ThreadPoolExecutor() as executor:
+            results = list(
+                executor.map(
+                    lambda repo: _run_fetch_steps(repo, steps_by_repo[repo], interactive=False),
+                    repo_names,
+                )
+            )
+        if term.interactive():
+            for idx, (repo, (failure, _notes)) in enumerate(zip(repo_names, results)):
+                if failure is not None and _is_ssh_auth_failure(failure.stderr):
+                    results[idx] = _run_fetch_steps(repo, steps_by_repo[repo], interactive=True)
 
     has_failures = False
     for repo, (failure, notes) in zip(repo_names, results):
@@ -264,11 +277,22 @@ def run_fetches(
     return {repo: failure for repo, (failure, _) in zip(repo_names, results)}
 
 
-def _run_fetch_steps(repo: str, steps: Sequence[GitStep]) -> tuple[git.GitFailed | None, tuple[str, ...]]:
+def _is_ssh_auth_failure(stderr: str) -> bool:
+    """Whether `stderr` indicates an SSH publickey auth failure."""
+    text = stderr.lower()
+    return "permission denied" in text and "publickey" in text
+
+
+def _run_fetch_steps(
+    repo: str,
+    steps: Sequence[GitStep],
+    *,
+    interactive: bool = False,
+) -> tuple[git.GitFailed | None, tuple[str, ...]]:
     """Run one repo's fetch steps; returns (failure, notes)."""
     notes: list[str] = []
     for step in steps:
-        result = git.run(step.argv, live=step.live)
+        result = git.run(step.argv, live=step.live, interactive=interactive)
         stderr = result.stderr or ""
         if result.returncode != 0:
             if (
