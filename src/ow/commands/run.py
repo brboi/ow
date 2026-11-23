@@ -88,19 +88,39 @@ def _cleanup_ephemeral(
             term.warn(f"could not remove temporary directory {root}: {exc}")
 
 
+def _find_runner_with_name(
+    ws: Workspace, plugins: Plugins, args: tuple[str, ...]
+) -> tuple[str, RunCommand] | None:
+    """Return `(plugin_name, RunCommand)` for the first enabled plugin answering `ow_runner`, or None."""
+    hit = plugins.first_with_name("ow_runner", ws=ws, args=args)
+    if hit is not None and isinstance(hit[1], RunCommand):
+        return hit[0], hit[1]
+    return None
+
+
 def _find_runner(ws: Workspace, plugins: Plugins, args: tuple[str, ...]) -> RunCommand | None:
     """Return the first RunCommand contributed by an enabled plugin for `ws`, or None."""
-    answer = plugins.first("ow_runner", ws=ws, args=args)
-    return answer if isinstance(answer, RunCommand) else None
+    hit = _find_runner_with_name(ws, plugins, args)
+    return hit[1] if hit is not None else None
 
 
-def _select_runner(ws: Workspace, plugins: Plugins, args: tuple[str, ...]) -> RunCommand:
-    cmd = _find_runner(ws, plugins, args)
-    if cmd is None:
+def _select_runner(ws: Workspace, plugins: Plugins, args: tuple[str, ...]) -> tuple[str, RunCommand]:
+    hit = _find_runner_with_name(ws, plugins, args)
+    if hit is None:
         raise UsageError(
             f"no runner available for workspace {ws.name!r}; ensure a runnable plugin (e.g. odoo) is enabled"
         )
-    return cmd
+    return hit
+
+
+def _announce_plugin_runner(target_name: str, plugin_name: str, plugins: Plugins, *, always: bool) -> None:
+    """Print which plugin is executing `ow run` (always for multi-runners, and for external plugins)."""
+    ext_map = dict(plugins.external_plugins)
+    if plugin_name in ext_map:
+        shown = git.display_path(ext_map[plugin_name])
+        term.out(f"# starting {target_name} (plugin {plugin_name}: {shown})")
+    elif always:
+        term.out(f"# starting {target_name} (plugin {plugin_name})")
 
 
 def _run_single(cmd: RunCommand) -> int:
@@ -268,10 +288,11 @@ def _run_workspaces(
     """Run one workspace directly (TTY) or multiple workspaces in parallel."""
     if len(items) == 1:
         _label, ws, args = items[0]
-        cmd = _select_runner(ws, plugins, args)
+        plugin_name, cmd = _select_runner(ws, plugins, args)
         prepare_services((ws,), plugins)
         if reset:
             _reset_workspaces((ws,), plugins)
+        _announce_plugin_runner(ws.name, plugin_name, plugins, always=False)
         return _run_single(cmd)
 
     runnable: list[tuple[str, str | None, RunCommand]] = []
@@ -308,11 +329,13 @@ def _open_ws(path: Path, plugins: Plugins) -> tuple[Workspace, Plugins]:
 
 def _find_multi_runner(
     multi: stacks.MultiWorkspace, plugins: Plugins, args: tuple[str, ...]
-) -> RunCommand | None:
-    """Return the first workspace-wide RunCommand contributed by an enabled plugin, or None."""
+) -> tuple[str, RunCommand] | None:
+    """Return `(plugin_name, RunCommand)` for the first enabled plugin answering `ow_multi_runner`, or None."""
     ws_ctx = multi.stacks[0] if multi.stacks else None
-    answer = plugins.first("ow_multi_runner", ws=ws_ctx, multi=multi, args=args)
-    return answer if isinstance(answer, RunCommand) else None
+    hit = plugins.first_with_name("ow_multi_runner", ws=ws_ctx, multi=multi, args=args)
+    if hit is not None and isinstance(hit[1], RunCommand):
+        return hit[0], hit[1]
+    return None
 
 
 def _looks_like_target_spec(token: str) -> bool:
@@ -407,11 +430,13 @@ def run(
         for sess in sessions:
             for warning in sess.warnings:
                 term.warn(warning)
-        multi_cmd = _find_multi_runner(multi, eff_plugins, passthrough)
-        if multi_cmd is not None:
+        multi_hit = _find_multi_runner(multi, eff_plugins, passthrough)
+        if multi_hit is not None:
+            plugin_name, multi_cmd = multi_hit
             prepare_services(multi.stacks, eff_plugins)
             if reset:
                 _reset_workspaces(multi.stacks, eff_plugins)
+            _announce_plugin_runner(multi.name, plugin_name, eff_plugins, always=True)
             return _run_single(multi_cmd)
         if passthrough:
             runnable_ws = [
@@ -463,14 +488,16 @@ def run(
             eff_plugins = sessions[0].plugins if sessions else plugins
             run_plugins = eff_plugins
             if len(targets) == 1:
-                multi_cmd = _find_multi_runner(multi, eff_plugins, combined_args)
-                if multi_cmd is not None:
+                multi_hit = _find_multi_runner(multi, eff_plugins, combined_args)
+                if multi_hit is not None:
+                    plugin_name, multi_cmd = multi_hit
                     for sess in sessions:
                         for warning in sess.warnings:
                             term.warn(warning)
                     prepare_services(multi.stacks, eff_plugins)
                     if reset:
                         _reset_workspaces(multi.stacks, eff_plugins)
+                    _announce_plugin_runner(multi.name, plugin_name, eff_plugins, always=True)
                     return _run_single(multi_cmd)
             if combined_args:
                 raise UsageError(

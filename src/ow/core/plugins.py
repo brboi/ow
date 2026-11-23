@@ -319,12 +319,17 @@ class Plugins:
         names: tuple[str, ...],
         *,
         builtins: tuple[tuple[str, types.ModuleType], ...] = (),
-        external_paths: tuple[Path, ...] = (),
+        external_plugins: tuple[tuple[str, Path], ...] = (),
     ) -> None:
         self.pm = pm
         self.names = names
         self._builtins = builtins
-        self.external_paths = external_paths
+        self.external_plugins = external_plugins
+
+    @property
+    def external_paths(self) -> tuple[Path, ...]:
+        """Canonical file paths of all loaded external/in-repo plugins."""
+        return tuple(path for _name, path in self.external_plugins)
 
     def with_repo_plugins(
         self,
@@ -407,7 +412,7 @@ class Plugins:
             enriched.pm,
             enriched.names,
             builtins=base_builtins,
-            external_paths=tuple(p for _n, _m, p in extra_modules),
+            external_plugins=tuple((name, p) for name, _m, p in extra_modules),
         )
         return enriched, tuple(warnings)
 
@@ -547,12 +552,10 @@ class Plugins:
 
         return result
 
-    def first(self, hook: str, ws: Workspace | None = None, **kwargs: Any) -> object | None:
-        """Return the first non-None answer of `hook` among enabled plugins, in plugin order.
-
-        Stops at that answer: later implementations do not run. Enablement and error
-        semantics are those of `call` with errors="raise".
-        """
+    def first_with_name(
+        self, hook: str, ws: Workspace | None = None, **kwargs: Any
+    ) -> tuple[str, object] | None:
+        """Return `(plugin_name, answer)` for the first non-None answer of `hook`, else None."""
         is_enabled = self._enabled_predicate(ws)
 
         for name, impl in self._ordered_impls(hook):
@@ -560,8 +563,17 @@ class Plugins:
                 continue
             ret = self._invoke(name, impl, hook, self._bind_kwargs(impl, ws, kwargs))
             if ret is not None:
-                return ret
+                return name, ret
         return None
+
+    def first(self, hook: str, ws: Workspace | None = None, **kwargs: Any) -> object | None:
+        """Return the first non-None answer of `hook` among enabled plugins, in plugin order.
+
+        Stops at that answer: later implementations do not run. Enablement and error
+        semantics are those of `call` with errors="raise".
+        """
+        hit = self.first_with_name(hook, ws=ws, **kwargs)
+        return hit[1] if hit is not None else None
 
     def pipe(
         self,

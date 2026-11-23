@@ -191,6 +191,7 @@ def _run_multi(
             gathered.append((sess, facts, non_service, note))
 
     services = _dedupe_services(all_services)
+    external_plugins = eff_plugins.external_plugins
 
     if json_output:
         ws_payload: dict[str, Any] = {
@@ -205,6 +206,10 @@ def _run_multi(
                 svc.plugin: {"summary": svc.summary, "data": dict(svc.data)}
                 for svc in services
             }
+        if external_plugins:
+            ws_payload["external_plugins"] = [
+                {"name": name, "path": str(path)} for name, path in external_plugins
+            ]
         term.emit_json(envelope({"workspace": ws_payload}))
         return exit_code
 
@@ -223,6 +228,7 @@ def _run_multi(
         _print_tty_sections(
             sections,
             services,
+            external_plugins=external_plugins,
             header=(multi.name, _display_path(multi.root)),
         )
     else:
@@ -231,9 +237,11 @@ def _run_multi(
             ws = sess.workspace
             port_str = f" [{note}]" if note else ""
             term.out(f"== {ws.name} ({ws.root}){port_str} ==")
-            print_table(sess, facts, non_service)
+            print_table(sess, facts, non_service, show_external_plugins=False)
         for svc in services:
             term.out(f"# {svc.plugin}: {svc.summary}")
+        for name, path in external_plugins:
+            term.out(f"# plugin: {name} ({_display_path(path)})")
     return exit_code
 
 
@@ -339,9 +347,12 @@ def _workspace_json(
 ) -> dict[str, Any]:
     assert session.workspace is not None
     ws = session.workspace
-    payload: dict[str, Any] = {
-        "workspace": _workspace_entry_json(session, facts, infos, fetch_failures=fetch_failures)
-    }
+    ws_entry = _workspace_entry_json(session, facts, infos, fetch_failures=fetch_failures)
+    if plugins.external_plugins:
+        ws_entry["external_plugins"] = [
+            {"name": name, "path": str(path)} for name, path in plugins.external_plugins
+        ]
+    payload: dict[str, Any] = {"workspace": ws_entry}
     if ws.is_stack:
         parent_root = stacks.parent_multi_workspace(ws.root)
         if parent_root is not None:
@@ -543,6 +554,7 @@ def _print_tty_sections(
     sections: Sequence[_TtySection],
     services: Sequence[StatusInfo],
     *,
+    external_plugins: Sequence[tuple[str, Path]] = (),
     header: tuple[str, str] | None = None,
 ) -> None:
     """Render aligned, airy sections for TTY output with global column widths and one services footer."""
@@ -592,19 +604,32 @@ def _print_tty_sections(
     if services:
         if not first_block:
             _line("")
+        first_block = False
         _line(_ansi("services", "1"))
         svc_width = max(len(svc.plugin) for svc in services)
         for svc in services:
             label = _ansi(svc.plugin.ljust(svc_width), "36")
             _line(f"  {label}  {svc.summary}")
 
+    if external_plugins:
+        if not first_block:
+            _line("")
+        _line(_ansi("plugins", "1"))
+        plug_width = max(len(name) for name, _p in external_plugins)
+        for name, path in external_plugins:
+            label = _ansi(name.ljust(plug_width), "36")
+            _line(f"  {label}  {_ansi(_display_path(path), '2')}")
+
 
 def print_table(
     session: Session,
     facts: Sequence[RepoFacts],
     infos: Sequence[StatusInfo] = (),
+    *,
+    show_external_plugins: bool = True,
 ) -> None:
     """Format and print table: clean TTY sections/columns or tab-separated (piped)."""
+    external_plugins = session.plugins.external_plugins if show_external_plugins else ()
     if sys.stdout.isatty():
         services = _dedupe_services(infos)
         non_service = [i for i in infos if i.scope != "service"]
@@ -612,7 +637,7 @@ def print_table(
         note = stack_info(ws, session.plugins).note if ws is not None else None
         title = ws.name if ws is not None else ""
         section = _build_tty_section(title, note, session, facts, non_service)
-        _print_tty_sections([section], services)
+        _print_tty_sections([section], services, external_plugins=external_plugins)
         return
 
     base_counts_cache = _compute_base_counts_parallel(facts)
@@ -632,6 +657,9 @@ def print_table(
     for plugin, diagnostic in session.diagnostics:
         if diagnostic.level == "info":
             term.out(f"# {plugin}: {diagnostic.text}")
+
+    for name, path in external_plugins:
+        term.out(f"# plugin: {name} ({_display_path(path)})")
 
 
 def _compute_base_counts_parallel(facts: Sequence[RepoFacts]) -> dict[int, str]:
