@@ -16,10 +16,12 @@ def _make_fake_engine(
     monkeypatch,
     *,
     running: dict[str, dict[int, int]] | None = None,
+    running_ips: dict[str, dict[int, str]] | None = None,
     stopped: set[str] | None = None,
 ):
     """Stub container CLI calls in `_containers` and record every command run."""
     running_map = dict(running or {})
+    ip_map = {k: dict(v) for k, v in (running_ips or {}).items()}
     stopped_set = set(stopped or set())
     networks: set[str] = set()
     calls: list[list[str]] = []
@@ -46,8 +48,9 @@ def _make_fake_engine(
         if cmd[0] == "inspect":
             name = cmd[1]
             if name in running_map:
+                default_ip = "0.0.0.0" if name == "ow-postgres" else "127.0.0.1"
                 ports = {
-                    f"{c}/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(h)}]
+                    f"{c}/tcp": [{"HostIp": ip_map.get(name, {}).get(c, default_ip), "HostPort": str(h)}]
                     for c, h in running_map[name].items()
                 }
                 payload = [{"State": {"Running": True}, "NetworkSettings": {"Ports": ports}}]
@@ -61,15 +64,30 @@ def _make_fake_engine(
             stopped_set.discard(name)
             running_map.setdefault(name, {})
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if cmd[0] == "stop":
+            name = cmd[1]
+            if name in running_map:
+                stopped_set.add(name)
+                running_map.pop(name, None)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if cmd[0] == "rm":
+            name = cmd[1]
+            running_map.pop(name, None)
+            ip_map.pop(name, None)
+            stopped_set.discard(name)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         if cmd[0] == "run":
             name = cmd[cmd.index("--name") + 1]
             ports: dict[int, int] = {}
+            ips: dict[int, str] = {}
             for i, tok in enumerate(cmd):
                 if tok == "-p" and i + 1 < len(cmd):
                     parts = cmd[i + 1].split(":")
                     host_p, cont_p = int(parts[-2]), int(parts[-1])
                     ports[cont_p] = host_p
+                    ips[cont_p] = parts[0] if len(parts) == 3 else "0.0.0.0"
             running_map[name] = ports
+            ip_map[name] = ips
             return subprocess.CompletedProcess(argv, 0, stdout="cid\n", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
@@ -100,6 +118,9 @@ def test_postgres_before_run_creates_network_postgres_and_pgweb(monkeypatch):
     assert any(c[:3] == ["docker", "network", "create"] for c in calls)
     pg_run = next(c for c in calls if c[:2] == ["docker", "run"] and "ow-postgres" in c)
     assert "POSTGRES_USER=postgres" in pg_run
+    assert "0.0.0.0:5432:5432" in pg_run
+    pgweb_run = next(c for c in calls if c[:2] == ["docker", "run"] and "ow-pgweb" in c)
+    assert "127.0.0.1:8081:8081" in pgweb_run
     role_execs = [c for c in calls if c[:3] == ["docker", "exec", "ow-postgres"] and "psql" in c]
     assert any("NOSUPERUSER CREATEDB" in c[-1] for c in role_execs)
 
@@ -200,3 +221,90 @@ def test_before_run_warns_without_blocking_when_engine_missing(monkeypatch, caps
     err = capsys.readouterr().err
     assert "postgres: docker/podman unavailable" in err
     assert "mailsink: docker/podman unavailable" in err
+
+
+def test_stopped_postgres_container_recreated_on_fallback_port_when_5432_is_busy(monkeypatch):
+    """When stopped `ow-postgres` is bound to busy 5432, it is recreated on 5433 preserving its volume."""
+    stopped_ports: dict[str, dict[int, int]] = {"ow-postgres": {5432: 5432}}
+    running_map: dict[str, dict[int, int]] = {}
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(containers, "detect_engine", lambda: "podman")
+    containers.engine_ready.cache_clear()
+    monkeypatch.setattr(containers, "engine_ready", lambda engine: True)
+    monkeypatch.setattr(containers, "wait_for_tcp", lambda host, port, timeout=15.0: True)
+    monkeypatch.setattr(containers, "wait_for_exec", lambda engine, name, cmd, timeout=30.0: True)
+    monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": port != 5432)
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        cmd = argv[1:]
+        if cmd[:2] == ["network", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if cmd[0] == "inspect":
+            name = cmd[1]
+            if name in running_map:
+                ports = {
+                    f"{c}/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(h)}]
+                    for c, h in running_map[name].items()
+                }
+                payload = [{"State": {"Running": True}, "NetworkSettings": {"Ports": ports}}]
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+            if name in stopped_ports:
+                bindings = {
+                    f"{c}/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(h)}]
+                    for c, h in stopped_ports[name].items()
+                }
+                payload = [
+                    {
+                        "State": {"Running": False},
+                        "NetworkSettings": {"Ports": {}},
+                        "HostConfig": {"PortBindings": bindings},
+                    }
+                ]
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such object")
+        if cmd[0] == "rm":
+            stopped_ports.pop(cmd[1], None)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if cmd[0] == "run":
+            name = cmd[cmd.index("--name") + 1]
+            ports: dict[int, int] = {}
+            for i, tok in enumerate(cmd):
+                if tok == "-p" and i + 1 < len(cmd):
+                    parts = cmd[i + 1].split(":")
+                    ports[int(parts[-1])] = int(parts[-2])
+            running_map[name] = ports
+            return subprocess.CompletedProcess(argv, 0, stdout="cid\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(containers.subprocess, "run", fake_run)
+    ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={"postgres.pgweb": False})
+
+    notes = postgres.ow_before_run(ws, (ws,))
+    assert notes == ["postgres: localhost:5433"]
+    assert ["podman", "rm", "ow-postgres"] in calls
+    assert running_map["ow-postgres"] == {5432: 5433}
+    pg_run = next(c for c in calls if c[:2] == ["podman", "run"] and "ow-postgres" in c)
+    assert "ow-postgres-data:/var/lib/postgresql/data" in pg_run
+    assert "0.0.0.0:5433:5432" in pg_run
+
+
+def test_running_postgres_container_recreated_when_bind_address_changes(monkeypatch):
+    """When running `ow-postgres` is bound to 127.0.0.1, switching to 0.0.0.0 stops, removes, and recreates it."""
+    calls, running = _make_fake_engine(
+        monkeypatch,
+        running={"ow-postgres": {5432: 5433}},
+        running_ips={"ow-postgres": {5432: "127.0.0.1"}},
+    )
+    monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": port != 5432)
+
+    ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={"postgres.pgweb": False})
+    notes = postgres.ow_before_run(ws, (ws,))
+    assert notes == ["postgres: localhost:5433"]
+    assert ["docker", "stop", "ow-postgres"] in calls
+    assert ["docker", "rm", "ow-postgres"] in calls
+    pg_run = next(c for c in calls if c[:2] == ["docker", "run"] and "ow-postgres" in c)
+    assert "0.0.0.0:5433:5432" in pg_run
+    assert "ow-postgres-data:/var/lib/postgresql/data" in pg_run
+    assert running["ow-postgres"] == {5432: 5433}

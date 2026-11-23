@@ -14,16 +14,17 @@ import socket
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
 @dataclass(frozen=True)
 class ContainerState:
-    """Observed state and published `container_port -> host_port` map of one container."""
+    """Observed state, published `container_port -> host_port` and bind addresses of one container."""
 
     status: Literal["running", "stopped"]
     ports: Mapping[int, int]
+    bind_addresses: Mapping[int, str] = field(default_factory=dict)
 
 
 def detect_engine() -> str | None:
@@ -53,11 +54,12 @@ def engine_ready(engine: str) -> bool:
         return False
 
 
-def _parse_ports(raw_ports: object) -> dict[int, int]:
-    """Parse Docker/Podman `NetworkSettings.Ports` into `{container_port: host_port}`."""
+def _parse_ports(raw_ports: object) -> tuple[dict[int, int], dict[int, str]]:
+    """Parse Docker/Podman port mappings into `({container_port: host_port}, {container_port: host_ip})`."""
     if not isinstance(raw_ports, dict):
-        return {}
-    result: dict[int, int] = {}
+        return {}, {}
+    ports: dict[int, int] = {}
+    bind_addresses: dict[int, str] = {}
     for spec, bindings in raw_ports.items():
         if not isinstance(spec, str) or not isinstance(bindings, list) or not bindings:
             continue
@@ -68,8 +70,11 @@ def _parse_ports(raw_ports: object) -> dict[int, int]:
         if isinstance(first, dict):
             host_port = str(first.get("HostPort") or "")
             if host_port.isdigit():
-                result[int(port_part)] = int(host_port)
-    return result
+                cport = int(port_part)
+                ports[cport] = int(host_port)
+                raw_ip = str(first.get("HostIp") or "").strip()
+                bind_addresses[cport] = raw_ip or "0.0.0.0"
+    return ports, bind_addresses
 
 
 def inspect_container(engine: str, name: str) -> ContainerState | None:
@@ -96,8 +101,15 @@ def inspect_container(engine: str, name: str) -> ContainerState | None:
     state = entry.get("State")
     running = isinstance(state, dict) and bool(state.get("Running"))
     net = entry.get("NetworkSettings")
-    ports = _parse_ports(net.get("Ports") if isinstance(net, dict) else None)
-    return ContainerState(status="running" if running else "stopped", ports=ports)
+    ports, bind_addresses = _parse_ports(net.get("Ports") if isinstance(net, dict) else None)
+    if not ports:
+        host_cfg = entry.get("HostConfig")
+        ports, bind_addresses = _parse_ports(host_cfg.get("PortBindings") if isinstance(host_cfg, dict) else None)
+    return ContainerState(
+        status="running" if running else "stopped",
+        ports=ports,
+        bind_addresses=bind_addresses,
+    )
 
 
 def is_port_free(port: int, host: str = "127.0.0.1") -> bool:
@@ -116,13 +128,17 @@ def resolve_host_port(
     container_port: int,
     preferred: int,
     fallback: int,
+    *,
+    bind_address: str = "127.0.0.1",
 ) -> int:
-    """Pick the host port for `container_name`: existing mapping, else `preferred` if free, else `fallback`."""
+    """Pick the host port for `container_name`: running mapping, else stopped mapping if free, else `preferred`/`fallback`."""
     if engine is not None:
         state = inspect_container(engine, container_name)
         if state is not None and container_port in state.ports:
-            return state.ports[container_port]
-    return preferred if is_port_free(preferred) else fallback
+            existing = state.ports[container_port]
+            if state.status == "running" or is_port_free(existing, bind_address):
+                return existing
+    return preferred if is_port_free(preferred, bind_address) else fallback
 
 
 def ensure_network(engine: str, name: str = "ow-net") -> None:
@@ -146,6 +162,21 @@ def ensure_network(engine: str, name: str = "ow-net") -> None:
         raise RuntimeError(f"{engine} network create {name} failed: {detail}")
 
 
+def _bindings_match(
+    state: ContainerState,
+    ports: Sequence[tuple[int, int]],
+    bind_address: str,
+) -> bool:
+    """Whether `state`'s published ports and bind addresses match the desired configuration."""
+    desired_ports = {container_port: host_port for host_port, container_port in ports}
+    if desired_ports and state.ports and dict(state.ports) != desired_ports:
+        return False
+    desired_ips = {container_port: bind_address for _host_port, container_port in ports}
+    if desired_ips and state.bind_addresses and dict(state.bind_addresses) != desired_ips:
+        return False
+    return True
+
+
 def ensure_container(
     engine: str,
     name: str,
@@ -155,28 +186,52 @@ def ensure_container(
     env: Mapping[str, str] = (),
     volumes: Sequence[tuple[str, str]] = (),
     network: str | None = None,
+    bind_address: str = "127.0.0.1",
 ) -> Literal["running", "started", "created"]:
     """Ensure container `name` is running, starting or creating it if needed."""
     state = inspect_container(engine, name)
     if state is not None:
+        if _bindings_match(state, ports, bind_address):
+            if state.status == "running":
+                return "running"
+            started = subprocess.run(
+                [engine, "start", name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if started.returncode == 0:
+                return "started"
+            detail = (started.stderr or started.stdout).strip()
+            raise RuntimeError(f"{engine} start {name} failed: {detail}")
+        # Existing container's port or bind address no longer matches (e.g. host port busy
+        # or bind_address changed); cleanly stop if running, remove, and recreate while
+        # preserving named volumes.
         if state.status == "running":
-            return "running"
-        started = subprocess.run(
-            [engine, "start", name],
+            stopped = subprocess.run(
+                [engine, "stop", name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if stopped.returncode != 0:
+                detail = (stopped.stderr or stopped.stdout).strip()
+                raise RuntimeError(f"{engine} stop {name} failed: {detail}")
+        removed = subprocess.run(
+            [engine, "rm", name],
             capture_output=True,
             text=True,
             check=False,
         )
-        if started.returncode != 0:
-            detail = (started.stderr or started.stdout).strip()
-            raise RuntimeError(f"{engine} start {name} failed: {detail}")
-        return "started"
+        if removed.returncode != 0:
+            detail = (removed.stderr or removed.stdout).strip()
+            raise RuntimeError(f"{engine} rm {name} failed: {detail}")
 
     argv = [engine, "run", "-d", "--name", name]
     if network:
         argv.extend(["--network", network])
     for host_port, container_port in ports:
-        argv.extend(["-p", f"127.0.0.1:{host_port}:{container_port}"])
+        argv.extend(["-p", f"{bind_address}:{host_port}:{container_port}"])
     for source, target in volumes:
         argv.extend(["-v", f"{source}:{target}"])
     if isinstance(env, Mapping):

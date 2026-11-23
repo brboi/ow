@@ -108,6 +108,7 @@ Each `[repos]` value is validated against the bare repo's remotes: the longest r
 | `odoo.default_repos` | list | `["community", "enterprise"]` |
 | `postgres.image` | str | `"pgvector/pgvector:pg17"` |
 | `postgres.port` | int | `0` (auto: `5432` if free, else `5433`) |
+| `postgres.bind_address` | str | `"0.0.0.0"` |
 | `postgres.user` | str | `"odoo"` |
 | `postgres.password` | str | `"odoo"` |
 | `postgres.pgweb` | bool | `true` |

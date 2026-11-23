@@ -24,6 +24,7 @@ _PG_VOLUME = "ow-postgres-data"
 _NETWORK = "ow-net"
 _DEFAULT_IMAGE = "pgvector/pgvector:pg17"
 _DEFAULT_PGWEB_IMAGE = "sosedoff/pgweb"
+_DEFAULT_BIND_ADDRESS = "0.0.0.0"
 
 
 @hookimpl
@@ -41,6 +42,12 @@ def ow_settings() -> list[Setting]:
             type=int,
             default=0,
             help="Host port for PostgreSQL (0 = auto: 5432 if free, else 5433)",
+        ),
+        Setting(
+            key="postgres.bind_address",
+            type=str,
+            default=_DEFAULT_BIND_ADDRESS,
+            help="Host address to bind PostgreSQL on (0.0.0.0 allows containers via host.docker.internal; use 127.0.0.1 for loopback only)",
         ),
         Setting(
             key="postgres.user",
@@ -75,24 +82,25 @@ def ow_settings() -> list[Setting]:
     ]
 
 
-def _cfg(settings: Mapping[str, object]) -> tuple[str, int, str, str, bool, str, int]:
+def _cfg(settings: Mapping[str, object]) -> tuple[str, int, str, str, str, bool, str, int]:
     image = str(settings.get("postgres.image") or _DEFAULT_IMAGE)
     raw_port = config.as_int(settings.get("postgres.port"))
     port = raw_port if raw_port is not None and 0 <= raw_port <= 65535 else 0
+    bind_address = str(settings.get("postgres.bind_address") or _DEFAULT_BIND_ADDRESS).strip() or _DEFAULT_BIND_ADDRESS
     user = str(settings.get("postgres.user") or "odoo")
     password = str(settings.get("postgres.password") or "odoo")
     pgweb = bool(settings.get("postgres.pgweb", True))
     pgweb_image = str(settings.get("postgres.pgweb_image") or _DEFAULT_PGWEB_IMAGE)
     raw_pgweb_port = config.as_int(settings.get("postgres.pgweb_port"))
     pgweb_port = raw_pgweb_port if raw_pgweb_port is not None and 1 <= raw_pgweb_port <= 65535 else 8081
-    return image, port, user, password, pgweb, pgweb_image, pgweb_port
+    return image, port, bind_address, user, password, pgweb, pgweb_image, pgweb_port
 
 
 def _effective_port(settings: Mapping[str, object], engine: str | None) -> int:
-    _image, port, _user, _password, _pgweb, _pgweb_image, _pgweb_port = _cfg(settings)
+    _image, port, bind_address, _user, _password, _pgweb, _pgweb_image, _pgweb_port = _cfg(settings)
     if port > 0:
         return port
-    return containers.resolve_host_port(engine, _PG_CONTAINER, 5432, 5432, 5433)
+    return containers.resolve_host_port(engine, _PG_CONTAINER, 5432, 5432, 5433, bind_address=bind_address)
 
 
 @hookimpl
@@ -101,7 +109,7 @@ def database_service(ws: Workspace) -> DatabaseService | None:
     engine = containers.detect_engine()
     if engine is None or not containers.engine_ready(engine):
         return None
-    _image, _port, user, password, pgweb, _pgweb_image, pgweb_port = _cfg(ws.settings)
+    _image, _port, _bind_address, user, password, pgweb, _pgweb_image, pgweb_port = _cfg(ws.settings)
     port = _effective_port(ws.settings, engine)
     return DatabaseService(
         host="localhost",
@@ -330,7 +338,7 @@ def ow_before_run(ws: Workspace, workspaces: Sequence[Workspace]) -> list[str] |
         term.warn("postgres: docker/podman unavailable; skipping container startup")
         return None
 
-    image, _raw_port, user, password, pgweb, pgweb_image, pgweb_port = _cfg(ws.settings)
+    image, _raw_port, bind_address, user, password, pgweb, pgweb_image, pgweb_port = _cfg(ws.settings)
     port = _effective_port(ws.settings, engine)
 
     try:
@@ -338,6 +346,11 @@ def ow_before_run(ws: Workspace, workspaces: Sequence[Workspace]) -> list[str] |
         pg_state = containers.inspect_container(engine, _PG_CONTAINER)
         if pg_state is None or pg_state.status != "running":
             term.out(f"# postgres: starting {_PG_CONTAINER} ({image})...")
+        elif pg_state.bind_addresses.get(5432) not in (None, bind_address) or pg_state.ports.get(5432) not in (
+            None,
+            port,
+        ):
+            term.out(f"# postgres: recreating {_PG_CONTAINER} ({image}) on {bind_address}:{port}...")
         action = containers.ensure_container(
             engine,
             _PG_CONTAINER,
@@ -350,6 +363,7 @@ def ow_before_run(ws: Workspace, workspaces: Sequence[Workspace]) -> list[str] |
             },
             volumes=((_PG_VOLUME, "/var/lib/postgresql/data"),),
             network=_NETWORK,
+            bind_address=bind_address,
         )
         if action != "running":
             containers.wait_for_exec(engine, _PG_CONTAINER, ("pg_isready",), timeout=30.0)
@@ -402,7 +416,7 @@ def ow_status(
     if pg_state is None:
         return []
 
-    _image, _raw_port, _user, _password, pgweb, _pgweb_image, pgweb_port = _cfg(ws.settings)
+    _image, _raw_port, _bind_address, _user, _password, pgweb, _pgweb_image, pgweb_port = _cfg(ws.settings)
     port = pg_state.ports.get(5432) or _effective_port(ws.settings, engine)
     data: dict[str, object] = {"status": pg_state.status, "host": "localhost", "port": port}
     summary = f"{pg_state.status} on localhost:{port}"
