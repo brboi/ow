@@ -397,3 +397,34 @@ def test_run_reset_multi_stack_only_resets_targeted_stack(lab, monkeypatch):
     drop_sqls = [c[-1] for c in calls if c[:3] == ["docker", "exec", "ow-postgres"] and "DROP DATABASE" in c[-1]]
     assert any('"odoo"' in s for s in drop_sqls)
     assert not any('"iap"' in s for s in drop_sqls)
+
+
+def test_run_refreshes_stale_generated_files_when_postgres_port_changes(lab, monkeypatch):
+    """When ow-postgres moves from 5432 to 5433 after init, `ow run` refreshes odoorc before launching."""
+    from ow.plugins import _containers as containers
+    from tests.plugins.test_services import _make_fake_engine
+
+    _calls, running = _make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
+    monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = init_workspace(lab, "community", name="port-shift")
+    assert "db_port = 5432" in (ws / "odoorc").read_text()
+
+    # Later, ow-postgres is running on fallback port 5433 instead of 5432.
+    running["ow-postgres"] = {5432: 5433}
+    monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": port != 5432)
+
+    log_path = lab.root / "runs.jsonl"
+    _install_fake_venv_python(venvs_dir() / "py3.12-18.0", log_path)
+
+    res = lab.ow("run", cwd=ws)
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "# refreshed odoorc" in res.stdout
+    assert "db_port = 5433" in (ws / "odoorc").read_text()
+    assert len(_read_runs(log_path)) == 1
+
+    # A second `ow run` with the same port does not rewrite or print `# refreshed`.
+    res2 = lab.ow("run", cwd=ws)
+    assert res2.exit_code == 0, res2.stderr + res2.stdout
+    assert "# refreshed" not in res2.stdout

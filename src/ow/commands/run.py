@@ -23,12 +23,12 @@ from ow.commands._workspace import (
     resolve_required_target,
     stack_info,
 )
-from ow.core import git, stacks
+from ow.core import git, refresh, stacks
 from ow.core.paths import repos_dir
 from ow.core.plugins import ResolvedTarget, RunCommand
 from ow.core.session import global_settings, open_session
 from ow.core.workspace import resolve_target_root
-from ow.errors import PluginError, UsageError
+from ow.errors import OwError, PluginError, UsageError
 from ow.recipes.removal import pr_ref_of
 
 if TYPE_CHECKING:
@@ -278,38 +278,72 @@ def _reset_workspaces(workspaces: Sequence[Workspace], plugins: Plugins) -> None
                         term.out(f"# {line}")
 
 
+def _refresh_before_run(
+    workspaces: Sequence[Workspace],
+    plugins: Plugins,
+    *,
+    multi: stacks.MultiWorkspace | None = None,
+) -> None:
+    """Sync managed files after `prepare_services` if dynamic service values (e.g. Postgres port) changed."""
+    for ws in workspaces:
+        eff_multi = multi if multi is not None else refresh._enclosing_multi(ws, plugins)
+        try:
+            written = refresh.sync_if_stale(ws, plugins, multi=eff_multi)
+        except OwError as exc:
+            term.warn(f"{ws.name}: refresh before run skipped: {exc}")
+            continue
+        if written:
+            prefix = f"{ws.name}/" if ws.is_stack else ""
+            paths = ", ".join(f"{prefix}{p.as_posix()}" for p in written)
+            term.out(f"# refreshed {paths}")
+
+
 def _run_workspaces(
     items: Sequence[tuple[str, Workspace, tuple[str, ...]]],
     plugins: Plugins,
     *,
     fail_fast: bool = False,
     reset: bool = False,
+    multi: stacks.MultiWorkspace | None = None,
 ) -> int:
     """Run one workspace directly (TTY) or multiple workspaces in parallel."""
     if len(items) == 1:
         _label, ws, args = items[0]
-        plugin_name, cmd = _select_runner(ws, plugins, args)
+        # Verify a runner exists before starting services, then re-resolve after syncing generated files.
+        _select_runner(ws, plugins, args)
         prepare_services((ws,), plugins)
+        _refresh_before_run((ws,), plugins, multi=multi)
+        plugin_name, cmd = _select_runner(ws, plugins, args)
         if reset:
             _reset_workspaces((ws,), plugins)
         _announce_plugin_runner(ws.name, plugin_name, plugins, always=False)
         return _run_single(cmd)
 
-    runnable: list[tuple[str, str | None, RunCommand]] = []
-    runnable_ws: list[Workspace] = []
+    runnable_items: list[tuple[str, Workspace, tuple[str, ...]]] = []
     for label, ws, args in items:
-        cmd = _find_runner(ws, plugins, args)
-        if cmd is None:
+        if _find_runner(ws, plugins, args) is None:
             term.out(f"# {label}: no runner available, skipping")
             continue
-        runnable.append((label, stack_info(ws, plugins).note, cmd))
-        runnable_ws.append(ws)
+        runnable_items.append((label, ws, args))
 
-    if not runnable:
+    if not runnable_items:
         names = ", ".join(label for label, _, _ in items)
         raise UsageError(f"no runnable stacks among: {names}")
 
+    runnable_ws = [ws for _label, ws, _args in runnable_items]
     prepare_services(runnable_ws, plugins)
+    _refresh_before_run(runnable_ws, plugins, multi=multi)
+
+    runnable: list[tuple[str, str | None, RunCommand]] = []
+    for label, ws, args in runnable_items:
+        cmd = _find_runner(ws, plugins, args)
+        if cmd is not None:
+            runnable.append((label, stack_info(ws, plugins).note, cmd))
+
+    if not runnable:
+        names = ", ".join(label for label, _, _ in runnable_items)
+        raise UsageError(f"no runnable stacks among: {names}")
+
     if reset:
         _reset_workspaces(runnable_ws, plugins)
 
@@ -432,8 +466,10 @@ def run(
                 term.warn(warning)
         multi_hit = _find_multi_runner(multi, eff_plugins, passthrough)
         if multi_hit is not None:
-            plugin_name, multi_cmd = multi_hit
             prepare_services(multi.stacks, eff_plugins)
+            _refresh_before_run(multi.stacks, eff_plugins, multi=multi)
+            multi_hit = _find_multi_runner(multi, eff_plugins, passthrough) or multi_hit
+            plugin_name, multi_cmd = multi_hit
             if reset:
                 _reset_workspaces(multi.stacks, eff_plugins)
             _announce_plugin_runner(multi.name, plugin_name, eff_plugins, always=True)
@@ -449,7 +485,7 @@ def run(
                     'specify a stack with `ow run <stack> -- ...` or `ow run <stack>:"..."`'
                 )
         items = [(ws.name, ws, passthrough) for ws in multi.stacks]
-        return _run_workspaces(items, eff_plugins, fail_fast=fail_fast, reset=reset)
+        return _run_workspaces(items, eff_plugins, fail_fast=fail_fast, reset=reset, multi=multi)
 
     # Mode 3: Positional targets without `--tmp` -> existing workspace(s) or stack(s) only
     to_run = []
@@ -490,11 +526,13 @@ def run(
             if len(targets) == 1:
                 multi_hit = _find_multi_runner(multi, eff_plugins, combined_args)
                 if multi_hit is not None:
-                    plugin_name, multi_cmd = multi_hit
                     for sess in sessions:
                         for warning in sess.warnings:
                             term.warn(warning)
                     prepare_services(multi.stacks, eff_plugins)
+                    _refresh_before_run(multi.stacks, eff_plugins, multi=multi)
+                    multi_hit = _find_multi_runner(multi, eff_plugins, combined_args) or multi_hit
+                    plugin_name, multi_cmd = multi_hit
                     if reset:
                         _reset_workspaces(multi.stacks, eff_plugins)
                     _announce_plugin_runner(multi.name, plugin_name, eff_plugins, always=True)
