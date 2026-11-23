@@ -497,6 +497,27 @@ def refresh(
     return projection, written
 
 
+def sync_if_stale(
+    ws: "Workspace",
+    plugins: Plugins,
+    *,
+    multi: object | None = None,
+) -> tuple[PurePosixPath, ...]:
+    """Write only missing or stale owned files for `ws`, doing nothing when already up to date."""
+    projection = project(ws, plugins, multi=multi) if multi is not None else project(ws, plugins)
+    if projection.blocked:
+        return ()
+    if not any(status.state in ("absent", "outdated") for status in projection.files):
+        return ()
+    lock_root, lock_prefix = _stack_lock_location(ws)
+    written, _owned = write_files(
+        ws.root, projection, lock_root=lock_root, lock_prefix=lock_prefix
+    )
+    if written:
+        plugins.call("ow_refreshed", ws, owned=written)
+    return written
+
+
 def _owned_regular(root: Path, rel: PurePosixPath) -> Path | None:
     """`root / rel` when it is a regular file reachable without a symlink, else None."""
     if _unsafe_relative(rel) or _ancestry_problem(root, rel):
