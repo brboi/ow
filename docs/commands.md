@@ -69,12 +69,13 @@ Evolve an already-initialized workspace (refuses outside a workspace with a hint
   - `<existing-stack>=<spec>` adds repos or attaches PRs into that existing stack.
   - `<new-stack>=<spec>` or an unnamed `<spec>` creates a new stack with coordinated ports and updates `<workspace>.code-workspace`.
 
-### `ow run [TARGET…] [-w WS] [--tmp] [--fail-fast] [--reset] [-- ARGS…]`
+### `ow run [TARGET…] [-w WS] [-d|--detach] [--tmp] [--fail-fast] [--reset] [-- ARGS…]`
 
 Run one or more stacks locally via their plugin runner (`odoo` launches `odoo-bin -c odoorc`, preferring `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`, falling back to `mise exec` then `python3`).
 
 - Single stack / mono-stack workspace: inherits the terminal TTY directly so interactive tools (`pdb`, `ow run -- shell`) work natively.
 - Multi-stack root (`ow run` with no target, or multiple targets): runs all runnable stacks in parallel with `[stack]`-prefixed stdout/stderr (skipping non-runnable stacks such as `voip` with a note) and terminates process groups cleanly on `Ctrl+C`. Prints a `# summary:` line if any stack exits non-zero; pass `--fail-fast` to stop remaining stacks as soon as one exits non-zero.
+- `-d, --detach`: starts the workspace or stack(s) in the background (recording PID metadata under `<root>/.ow/run/` and output under `<root>/.ow/logs/`, or delegating to a plugin's self-detaching startup such as `voip`'s `dev up`). Refuses if already running (pointing to `ow stop` / `ow logs -f`) and cannot be combined with `--tmp`.
 - `--reset`: before starting each launched stack, drops its PostgreSQL database (`DROP DATABASE IF EXISTS ... WITH (FORCE)` via the managed `postgres` container, or `psql`/`dropdb` on a custom host) and removes its local filestore (`.odoo/filestore/<db>`), without prompting.
 - Per-stack arguments: pass `TARGET:"ARGS"` (parsed with `shlex.split`, splitting on the first `:` outside `://` and `git@host:`), e.g.:
   ```sh
@@ -87,6 +88,18 @@ Run one or more stacks locally via their plugin runner (`odoo` launches `odoo-bi
   ow run --tmp enterprise#12345 -- -i sale
   ow run --tmp odoo=enterprise#12345:"-i voip" iap=iap#4321
   ```
+
+### `ow stop [TARGET…] [-w WS] [--services] [--all]`
+
+Stop running detached workspaces/stacks and/or global shared service containers.
+
+- Without `--services` or `--all`: stops only the targeted workspace/stack(s) (SIGTERM → SIGKILL on detached process groups, or the plugin's `ow_stop`/`ow_multi_stop` hook), leaving shared `postgres`/`mailsink` containers running.
+- `--services`: stops the shared global service containers (`ow-postgres`, `ow-pgweb`, `ow-mailsink`).
+- `--all`: stops every running indexed workspace and all shared global services.
+
+### `ow logs [TARGET…] [-w WS] [-f|--follow] [-n|--lines N]`
+
+Print (or follow with `-f`) the logs of a detached workspace or stack (`<root>/.ow/logs/<stack>.log`, or the plugin's `ow_logs`/`ow_multi_logs` hook such as `voip`'s `dev logs`). Multi-stack output prefixes each line with `[stack]`.
 
 ### `ow exec [WS] [-w WS] [-- COMMAND [ARGS…]]`
 

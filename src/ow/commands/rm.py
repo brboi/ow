@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ow import term
-from ow.core import config, git, index, refresh, stacks
+from ow.core import config, git, index, refresh, runtime, stacks
 from ow.core.facts import RepoFacts, gather_all
 from ow.core.json_schema import envelope
 from ow.core.plan import Batch, OwStep, RepoPlan, Step, run_batch
@@ -35,6 +35,20 @@ def run(
         return code
 
 
+def _running_refusals(ws, plugins: Plugins) -> list[tuple[str, str]]:
+    """Refuse removing a workspace/stack that still has live background processes."""
+    refusals: list[tuple[str, str]] = []
+    proc = runtime.running_for_workspace(ws)
+    if proc is not None:
+        refusals.append(("runtime", f"running (pid {proc.pid}); run `ow stop` first"))
+    for _name, answer in plugins.call("ow_running", ws=ws, errors="collect"):
+        if isinstance(answer, list):
+            items = [str(x) for x in answer if isinstance(x, str) and x]
+            if items:
+                refusals.append(("runtime", f"running ({', '.join(items)}); run `ow stop` first"))
+    return refusals
+
+
 def run_multi(
     plugins: Plugins,
     multi_root: Path,
@@ -59,7 +73,8 @@ def run_multi(
             for warning in session.warnings:
                 term.warn(warning)
             facts = gather_all(session.locations)
-            refusals = workspace_refusals(facts, ws.root, session.locations)
+            refusals = list(workspace_refusals(facts, ws.root, session.locations))
+            refusals.extend(_running_refusals(ws, session.plugins))
             if refusals:
                 any_refused = True
                 for name, text in refusals:
@@ -74,6 +89,13 @@ def run_multi(
                 }
             )
             gathered.append((session, facts))
+
+        # Also catch any root-level detached process tracked directly under `<multi.root>/.ow/run/`.
+        stack_names = {s.workspace.name for s in sessions if s.workspace is not None}
+        for proc in runtime.list_running(multi.root):
+            if proc.label not in stack_names:
+                any_refused = True
+                term.out(f"# {multi.name}/{proc.label}: running (pid {proc.pid}); run `ow stop` first")
 
         if any_refused:
             if json_output:
@@ -127,6 +149,7 @@ def run_multi(
             remaining = stacks.load_multi_workspace(multi.root, plugins)
             if remaining is None:
                 refresh.remove_owned_files(multi.root)
+                runtime.cleanup_runtime_dirs(multi.root)
                 cfg = multi.root / ".ow" / "config.toml"
                 cfg.unlink(missing_ok=True)
                 cfg.with_name(f".{cfg.name}.lock").unlink(missing_ok=True)
@@ -197,7 +220,8 @@ def _remove_one(session: Session, *, dry_run: bool, yes: bool) -> tuple[int, dic
     parent_multi = stacks.parent_multi_workspace(root) if is_stack else None
     facts = gather_all(session.locations)
 
-    refusals = workspace_refusals(facts, root, session.locations)
+    refusals = list(workspace_refusals(facts, root, session.locations))
+    refusals.extend(_running_refusals(workspace, session.plugins))
     if refusals:
         for name, text in refusals:
             term.out(f"# {name}: {text}")
@@ -222,6 +246,7 @@ def _remove_one(session: Session, *, dry_run: bool, yes: bool) -> tuple[int, dic
         remaining = stacks.load_multi_workspace(parent_multi, session.plugins)
         if remaining is None:
             refresh.remove_owned_files(parent_multi)
+            runtime.cleanup_runtime_dirs(parent_multi)
             index.remove(parent_multi)
         else:
             stacks.sync_multi_workspace_files(remaining[0], session.plugins)

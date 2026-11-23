@@ -26,6 +26,7 @@ from ow.core.plugins import (
     StatusInfo,
     hookimpl,
 )
+from ow.core.runtime import follow_files as follow_log_files
 from ow.core.stacks import MultiWorkspace
 from ow.core.workspace import Repo, Workspace
 from ow.plugins._containers import detect_engine as detect_container_engine
@@ -81,6 +82,7 @@ __all__ = [
     "Workspace",
     "WorkspaceVenv",
     "detect_container_engine",
+    "follow_log_files",
     "hookimpl",
     "is_port_free",
     "resolve_stack_python",

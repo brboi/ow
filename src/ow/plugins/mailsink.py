@@ -94,6 +94,20 @@ def ow_before_run(ws: Workspace, workspaces: Sequence[Workspace]) -> list[str] |
 
 
 @hookimpl
+def ow_stop_services(ws: Workspace | None) -> list[str] | None:
+    """Stop the shared Mailpit container (`ow stop --services` / `--all`)."""
+    engine = containers.detect_engine()
+    if engine is None or not containers.engine_ready(engine):
+        return None
+    try:
+        if containers.stop_container(engine, _CONTAINER):
+            return [f"mailsink: stopped {_CONTAINER}"]
+    except RuntimeError as exc:
+        term.warn(f"mailsink: {exc}")
+    return None
+
+
+@hookimpl
 def ow_status(
     ws: Workspace | None,
     facts: Sequence[RepoFacts],

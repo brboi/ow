@@ -275,6 +275,23 @@ def exec_container(
     )
 
 
+def stop_container(engine: str, name: str) -> bool:
+    """Stop container `name` if it is currently running; return True when stopped."""
+    state = inspect_container(engine, name)
+    if state is None or state.status != "running":
+        return False
+    res = subprocess.run(
+        [engine, "stop", name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout).strip()
+        raise RuntimeError(f"{engine} stop {name} failed: {detail}")
+    return True
+
+
 def wait_for_exec(
     engine: str,
     name: str,

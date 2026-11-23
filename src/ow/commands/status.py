@@ -20,7 +20,7 @@ from typing import Any
 from ow import term
 from ow.commands._shared import known_repo_catalog
 from ow.commands._workspace import stack_info
-from ow.core import git, refresh, stacks
+from ow.core import git, refresh, runtime, stacks
 from ow.core.facts import RepoFacts, gather_all
 from ow.core.json_schema import envelope
 from ow.core.plugins import Plugins, StatusInfo
@@ -147,6 +147,16 @@ def _dedupe_services(infos: Sequence[StatusInfo]) -> list[StatusInfo]:
     return result
 
 
+def _stack_note_with_runtime(ws, plugins: Plugins) -> str | None:
+    """Combine plugin `StackInfo.note` with live detached process PID when running."""
+    note = stack_info(ws, plugins).note
+    proc = runtime.running_for_workspace(ws)
+    if proc is None:
+        return note
+    running_tag = f"running (pid {proc.pid})"
+    return f"{note} · {running_tag}" if note else running_tag
+
+
 def _run_multi(
     plugins: Plugins,
     *,
@@ -187,7 +197,7 @@ def _run_multi(
                 _workspace_entry_json(sess, facts, non_service, fetch_failures=fetch_failures)
             )
         else:
-            note = stack_info(ws, eff_plugins).note
+            note = _stack_note_with_runtime(ws, eff_plugins)
             gathered.append((sess, facts, non_service, note))
 
     services = _dedupe_services(all_services)
@@ -332,6 +342,9 @@ def _workspace_entry_json(
     }
     if fetch_failures:
         out["fetch_failures"] = list(fetch_failures)
+    proc = runtime.running_for_workspace(ws)
+    if proc is not None:
+        out["running"] = {"pid": proc.pid, "log": str(proc.log_path), "started_at": proc.started_at}
     if ws_plugins:
         out["plugins"] = ws_plugins
     return out
@@ -634,7 +647,7 @@ def print_table(
         services = _dedupe_services(infos)
         non_service = [i for i in infos if i.scope != "service"]
         ws = session.workspace
-        note = stack_info(ws, session.plugins).note if ws is not None else None
+        note = _stack_note_with_runtime(ws, session.plugins) if ws is not None else None
         title = ws.name if ws is not None else ""
         section = _build_tty_section(title, note, session, facts, non_service)
         _print_tty_sections([section], services, external_plugins=external_plugins)
@@ -649,6 +662,11 @@ def print_table(
     rows = [_row(f, base_counts_cache, i, extra_by_repo.get(f.name, ())) for i, f in enumerate(facts)]
     for row in rows:
         _line(row)
+
+    if session.workspace is not None:
+        proc = runtime.running_for_workspace(session.workspace)
+        if proc is not None:
+            term.out(f"# running: pid {proc.pid} (logs: {_display_path(proc.log_path)})")
 
     for info in infos:
         if info.scope != "repo":

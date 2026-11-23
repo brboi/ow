@@ -329,9 +329,15 @@ def build_app(plugins: Plugins) -> typer.Typer:
             "--reset",
             help="Drop each launched stack's database and local filestore before starting",
         ),
+        detach: bool = typer.Option(
+            False,
+            "-d",
+            "--detach",
+            help="Run workspace/stack(s) in the background (stop with `ow stop`, view logs with `ow logs`)",
+        ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
-        """Run a workspace (single TTY or parallel multi-stack)."""
+        """Run a workspace (foreground or detached with -d)."""
         git.check_version()
         passthrough = tuple(ctx.meta.get("ow_run_passthrough", ()))
         extra_args = list(ctx.args) + list(passthrough)
@@ -343,7 +349,74 @@ def build_app(plugins: Plugins) -> typer.Typer:
                 tmp=tmp,
                 fail_fast=fail_fast,
                 reset=reset,
+                detach=detach,
                 extra_args=tuple(extra_args),
+            )
+        )
+
+    # -- stop ------------------------------------------------------------
+
+    @app.command("stop")
+    def stop_cmd(
+        targets: list[str] = typer.Argument(
+            None,
+            metavar="TARGET",
+            help="Workspace or stack name(s) to stop (default: current workspace)",
+        ),
+        services: bool = typer.Option(
+            False,
+            "--services",
+            help="Stop shared global service containers (postgres, pgweb, mailsink)",
+        ),
+        all_workspaces: bool = typer.Option(
+            False,
+            "--all",
+            help="Stop every running indexed workspace and all shared global services",
+        ),
+        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
+    ) -> None:
+        """Stop detached workspace/stack(s) or global services."""
+        _exit(
+            _command_module("stop").run(
+                plugins,
+                targets=tuple(targets or ()),
+                workspace=workspace,
+                services=services,
+                all_workspaces=all_workspaces,
+            )
+        )
+
+    # -- logs ------------------------------------------------------------
+
+    @app.command("logs")
+    def logs_cmd(
+        targets: list[str] = typer.Argument(
+            None,
+            metavar="TARGET",
+            help="Workspace or stack name(s) whose logs to show (default: current workspace)",
+        ),
+        follow: bool = typer.Option(
+            False,
+            "-f",
+            "--follow",
+            help="Follow log output continuously (Ctrl+C to stop)",
+        ),
+        lines: int = typer.Option(
+            50,
+            "-n",
+            "--lines",
+            help="Number of trailing lines to show per log file",
+        ),
+        workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
+    ) -> None:
+        """View or follow logs of a detached workspace or stack."""
+        _exit(
+            _command_module("logs").run(
+                plugins,
+                targets=tuple(targets or ()),
+                workspace=workspace,
+                follow=follow,
+                lines=lines,
             )
         )
 

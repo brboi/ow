@@ -101,11 +101,12 @@ class StackInfo:
 
 @dataclass(frozen=True)
 class RunCommand:
-    """Command a plugin provides to execute a workspace via `ow run`."""
+    """Command a plugin provides to execute a workspace via `ow run`, `ow stop`, or `ow logs`."""
 
     argv: tuple[str, ...]
     cwd: Path
     env: Mapping[str, str] = field(default_factory=dict)
+    self_detaching: bool = False  # True when the command itself starts background services and exits
 
 
 @dataclass(frozen=True)
@@ -191,9 +192,27 @@ class CoreSpec:
 
     @hookspec
     def ow_runner(
-        self, ws: Workspace, args: tuple[str, ...]
+        self, ws: Workspace, args: tuple[str, ...], detach: bool
     ) -> RunCommand | None:
         """Return the command to run this workspace via `ow run`, or None."""
+
+    @hookspec
+    def ow_running(self, ws: Workspace) -> list[str] | None:
+        """Return active background process/service descriptions for `ws` if managed by this plugin."""
+
+    @hookspec
+    def ow_stop(self, ws: Workspace) -> RunCommand | list[str] | None:
+        """Stop background processes managed by this plugin for `ws` (`ow stop`)."""
+
+    @hookspec
+    def ow_stop_services(self, ws: Workspace | None) -> list[str] | None:
+        """Stop shared global services managed by this plugin (`ow stop --services` / `--all`)."""
+
+    @hookspec
+    def ow_logs(
+        self, ws: Workspace, follow: bool, lines: int
+    ) -> RunCommand | list[tuple[str, Path]] | None:
+        """Return a `RunCommand` or `(label, log_path)` list to display/follow logs for `ws` (`ow logs`)."""
 
     @hookspec
     def ow_before_run(
@@ -240,8 +259,25 @@ class CoreSpec:
         self,
         multi: MultiWorkspace,
         args: tuple[str, ...],
+        detach: bool,
     ) -> RunCommand | None:
         """Return a single workspace-wide command for `ow run` at a multi-stack root, or None."""
+
+    @hookspec
+    def ow_multi_stop(
+        self,
+        multi: MultiWorkspace,
+    ) -> RunCommand | list[str] | None:
+        """Stop a multi-stack workspace managed by this plugin (`ow stop`), or None."""
+
+    @hookspec
+    def ow_multi_logs(
+        self,
+        multi: MultiWorkspace,
+        follow: bool,
+        lines: int,
+    ) -> RunCommand | list[tuple[str, Path]] | None:
+        """Return a `RunCommand` or `(label, log_path)` list to view/follow logs of a multi-stack workspace."""
 
     @hookspec
     def ow_stack_values(

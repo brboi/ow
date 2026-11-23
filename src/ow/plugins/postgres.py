@@ -398,6 +398,22 @@ def ow_before_run(ws: Workspace, workspaces: Sequence[Workspace]) -> list[str] |
 
 
 @hookimpl
+def ow_stop_services(ws: Workspace | None) -> list[str] | None:
+    """Stop shared PostgreSQL and pgweb containers (`ow stop --services` / `--all`)."""
+    engine = containers.detect_engine()
+    if engine is None or not containers.engine_ready(engine):
+        return None
+    notes: list[str] = []
+    for name in (_PGWEB_CONTAINER, _PG_CONTAINER):
+        try:
+            if containers.stop_container(engine, name):
+                notes.append(f"postgres: stopped {name}")
+        except RuntimeError as exc:
+            term.warn(f"postgres: {exc}")
+    return notes or None
+
+
+@hookimpl
 def ow_status(
     ws: Workspace | None,
     facts: Sequence[RepoFacts],
