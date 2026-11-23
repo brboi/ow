@@ -34,6 +34,7 @@ src/ow/
 │   ├── session.py    # Session: the immutable state every command starts from
 │   ├── facts.py      # RepoFacts, gathered once per command, in parallel
 │   ├── plan.py       # GitStep/OwStep, RepoPlan, Batch, run_batch prints the whole plan first
+│   ├── runtime.py    # detached process tracking (.ow/run/*.json, .ow/logs/*.log), stop, log follow
 │   └── refresh.py    # generated files and unified lock for a workspace or multi-stack root
 ├── plugin_api.py     # stable versioned public API (`PLUGIN_API_VERSION = 1`) for external/in-repo plugins
 ├── recipes/          # decision tables: gather_* reads git, plan_* is pure
@@ -43,7 +44,7 @@ src/ow/
 │   └── removal.py    # pushed-branch rule, branch and workspace removal plans
 ├── commands/         # one module per command; _-prefixed modules are shared helpers
 │   ├── _shared.py _repos.py _targets.py _promote.py _workspace.py
-│   └── init add run exec sandbox repo config status refresh files trust ls cd shell_init rm prune retarget
+│   └── init add run stop logs exec sandbox repo config status refresh files trust ls cd shell_init rm prune retarget
 ├── specs/            # hookspecs plugins share, with their merge rules
 │   ├── python_env.py # PythonEnvSpec; workspace_venv computes the venv once
 │   ├── editors.py    # EditorsSpec
@@ -87,7 +88,7 @@ src/tests/            # conftest.py (hermetic autouse fixture), lab.py (real rem
 - `ow_settings`, `ow_diagnostics`, `ow_known_repos`
 - `ow_generated_files`, `ow_multi_workspace_files`
 - `ow_resolve_target`, `ow_expand_workspace_repos`
-- `ow_runner`, `ow_multi_runner`, `ow_before_run`, `ow_reset_run`, `ow_sandbox_mounts`, `ow_status`, `ow_prune_candidates`
+- `ow_runner`, `ow_multi_runner`, `ow_running`, `ow_stop`, `ow_multi_stop`, `ow_stop_services`, `ow_logs`, `ow_multi_logs`, `ow_before_run`, `ow_reset_run`, `ow_sandbox_mounts`, `ow_status`, `ow_prune_candidates`
 - `ow_stack_values`, `ow_stack_name`, `ow_stack_info`, `ow_is_base_branch`
 - events: `ow_workspace_created`, `ow_refreshed`
 

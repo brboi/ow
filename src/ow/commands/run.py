@@ -23,7 +23,7 @@ from ow.commands._workspace import (
     resolve_required_target,
     stack_info,
 )
-from ow.core import git, refresh, stacks
+from ow.core import git, refresh, runtime, stacks
 from ow.core.paths import repos_dir
 from ow.core.plugins import ResolvedTarget, RunCommand
 from ow.core.session import global_settings, open_session
@@ -89,28 +89,57 @@ def _cleanup_ephemeral(
 
 
 def _find_runner_with_name(
-    ws: Workspace, plugins: Plugins, args: tuple[str, ...]
+    ws: Workspace, plugins: Plugins, args: tuple[str, ...], *, detach: bool = False
 ) -> tuple[str, RunCommand] | None:
     """Return `(plugin_name, RunCommand)` for the first enabled plugin answering `ow_runner`, or None."""
-    hit = plugins.first_with_name("ow_runner", ws=ws, args=args)
+    hit = plugins.first_with_name("ow_runner", ws=ws, args=args, detach=detach)
     if hit is not None and isinstance(hit[1], RunCommand):
         return hit[0], hit[1]
     return None
 
 
-def _find_runner(ws: Workspace, plugins: Plugins, args: tuple[str, ...]) -> RunCommand | None:
+def _find_runner(
+    ws: Workspace, plugins: Plugins, args: tuple[str, ...], *, detach: bool = False
+) -> RunCommand | None:
     """Return the first RunCommand contributed by an enabled plugin for `ws`, or None."""
-    hit = _find_runner_with_name(ws, plugins, args)
+    hit = _find_runner_with_name(ws, plugins, args, detach=detach)
     return hit[1] if hit is not None else None
 
 
-def _select_runner(ws: Workspace, plugins: Plugins, args: tuple[str, ...]) -> tuple[str, RunCommand]:
-    hit = _find_runner_with_name(ws, plugins, args)
+def _select_runner(
+    ws: Workspace, plugins: Plugins, args: tuple[str, ...], *, detach: bool = False
+) -> tuple[str, RunCommand]:
+    hit = _find_runner_with_name(ws, plugins, args, detach=detach)
     if hit is None:
         raise UsageError(
             f"no runner available for workspace {ws.name!r}; ensure a runnable plugin (e.g. odoo) is enabled"
         )
     return hit
+
+
+def _plugin_running(ws: Workspace, plugins: Plugins) -> list[str]:
+    """Return running process/service descriptions reported by plugins for `ws`."""
+    found: list[str] = []
+    for _name, answer in plugins.call("ow_running", ws=ws, errors="collect"):
+        if isinstance(answer, list):
+            found.extend(str(item) for item in answer if isinstance(item, str) and item)
+    return found
+
+
+def _ensure_not_running(workspaces: Sequence[Workspace], plugins: Plugins) -> None:
+    """Refuse to start a workspace/stack that already has live background processes."""
+    for ws in workspaces:
+        proc = runtime.running_for_workspace(ws)
+        if proc is not None:
+            raise UsageError(
+                f"{ws.name} is already running (pid {proc.pid}); run `ow stop` or `ow logs -f`"
+            )
+        plugin_procs = _plugin_running(ws, plugins)
+        if plugin_procs:
+            detail = ", ".join(plugin_procs)
+            raise UsageError(
+                f"{ws.name} is already running ({detail}); run `ow stop` or `ow logs -f`"
+            )
 
 
 def _announce_plugin_runner(target_name: str, plugin_name: str, plugins: Plugins, *, always: bool) -> None:
@@ -304,24 +333,32 @@ def _run_workspaces(
     *,
     fail_fast: bool = False,
     reset: bool = False,
+    detach: bool = False,
     multi: stacks.MultiWorkspace | None = None,
 ) -> int:
-    """Run one workspace directly (TTY) or multiple workspaces in parallel."""
+    """Run one workspace directly (TTY) or multiple workspaces in parallel (or detached with `-d`)."""
     if len(items) == 1:
         _label, ws, args = items[0]
         # Verify a runner exists before starting services, then re-resolve after syncing generated files.
-        _select_runner(ws, plugins, args)
+        _select_runner(ws, plugins, args, detach=detach)
+        if not args or detach:
+            _ensure_not_running((ws,), plugins)
         prepare_services((ws,), plugins)
         _refresh_before_run((ws,), plugins, multi=multi)
-        plugin_name, cmd = _select_runner(ws, plugins, args)
+        plugin_name, cmd = _select_runner(ws, plugins, args, detach=detach)
         if reset:
             _reset_workspaces((ws,), plugins)
         _announce_plugin_runner(ws.name, plugin_name, plugins, always=False)
+        if detach and not cmd.self_detaching:
+            root = runtime.runtime_root(ws)
+            proc = runtime.start_detached(root, ws.name, cmd.argv, cwd=cmd.cwd, env=cmd.env)
+            term.out(f"# started {ws.name} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
+            return 0
         return _run_single(cmd)
 
     runnable_items: list[tuple[str, Workspace, tuple[str, ...]]] = []
     for label, ws, args in items:
-        if _find_runner(ws, plugins, args) is None:
+        if _find_runner(ws, plugins, args, detach=detach) is None:
             term.out(f"# {label}: no runner available, skipping")
             continue
         runnable_items.append((label, ws, args))
@@ -331,14 +368,15 @@ def _run_workspaces(
         raise UsageError(f"no runnable stacks among: {names}")
 
     runnable_ws = [ws for _label, ws, _args in runnable_items]
+    _ensure_not_running(runnable_ws, plugins)
     prepare_services(runnable_ws, plugins)
     _refresh_before_run(runnable_ws, plugins, multi=multi)
 
-    runnable: list[tuple[str, str | None, RunCommand]] = []
+    runnable: list[tuple[str, Workspace, str | None, RunCommand]] = []
     for label, ws, args in runnable_items:
-        cmd = _find_runner(ws, plugins, args)
+        cmd = _find_runner(ws, plugins, args, detach=detach)
         if cmd is not None:
-            runnable.append((label, stack_info(ws, plugins).note, cmd))
+            runnable.append((label, ws, stack_info(ws, plugins).note, cmd))
 
     if not runnable:
         names = ", ".join(label for label, _, _ in runnable_items)
@@ -347,10 +385,29 @@ def _run_workspaces(
     if reset:
         _reset_workspaces(runnable_ws, plugins)
 
-    if len(runnable) == 1:
-        return _run_single(runnable[0][2])
+    if detach:
+        started: list[tuple[Path, runtime.RunningProcess]] = []
+        try:
+            for label, ws, _note, cmd in runnable:
+                if cmd.self_detaching:
+                    rc = _run_single(cmd)
+                    if rc != 0:
+                        raise UsageError(f"{label} failed to start (exit {rc})")
+                    continue
+                root = runtime.runtime_root(ws)
+                proc = runtime.start_detached(root, ws.name, cmd.argv, cwd=cmd.cwd, env=cmd.env)
+                started.append((root, proc))
+                term.out(f"# started {label} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
+        except Exception:
+            for root, proc in reversed(started):
+                runtime.stop_process(root, proc)
+            raise
+        return 0
 
-    return _run_multi(runnable, fail_fast=fail_fast)
+    if len(runnable) == 1:
+        return _run_single(runnable[0][3])
+
+    return _run_multi([(label, note, cmd) for label, _ws, note, cmd in runnable], fail_fast=fail_fast)
 
 
 def _open_ws(path: Path, plugins: Plugins) -> tuple[Workspace, Plugins]:
@@ -362,14 +419,42 @@ def _open_ws(path: Path, plugins: Plugins) -> tuple[Workspace, Plugins]:
 
 
 def _find_multi_runner(
-    multi: stacks.MultiWorkspace, plugins: Plugins, args: tuple[str, ...]
+    multi: stacks.MultiWorkspace, plugins: Plugins, args: tuple[str, ...], *, detach: bool = False
 ) -> tuple[str, RunCommand] | None:
     """Return `(plugin_name, RunCommand)` for the first enabled plugin answering `ow_multi_runner`, or None."""
     ws_ctx = multi.stacks[0] if multi.stacks else None
-    hit = plugins.first_with_name("ow_multi_runner", ws=ws_ctx, multi=multi, args=args)
+    hit = plugins.first_with_name("ow_multi_runner", ws=ws_ctx, multi=multi, args=args, detach=detach)
     if hit is not None and isinstance(hit[1], RunCommand):
         return hit[0], hit[1]
     return None
+
+
+def _exec_multi_runner(
+    multi: stacks.MultiWorkspace,
+    eff_plugins: Plugins,
+    args: tuple[str, ...],
+    *,
+    reset: bool,
+    detach: bool,
+) -> int:
+    """Prepare services, sync stale files, and run a plugin's `ow_multi_runner` (foreground or detached)."""
+    if not args or detach:
+        _ensure_not_running(multi.stacks, eff_plugins)
+    prepare_services(multi.stacks, eff_plugins)
+    _refresh_before_run(multi.stacks, eff_plugins, multi=multi)
+    multi_hit = _find_multi_runner(multi, eff_plugins, args, detach=detach)
+    assert multi_hit is not None
+    plugin_name, multi_cmd = multi_hit
+    if reset:
+        _reset_workspaces(multi.stacks, eff_plugins)
+    _announce_plugin_runner(multi.name, plugin_name, eff_plugins, always=True)
+    if detach and not multi_cmd.self_detaching:
+        proc = runtime.start_detached(
+            multi.root, multi.name, multi_cmd.argv, cwd=multi_cmd.cwd, env=multi_cmd.env
+        )
+        term.out(f"# started {multi.name} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
+        return 0
+    return _run_single(multi_cmd)
 
 
 def _looks_like_target_spec(token: str) -> bool:
@@ -384,12 +469,15 @@ def run(
     tmp: bool = False,
     fail_fast: bool = False,
     reset: bool = False,
+    detach: bool = False,
     extra_args: Sequence[str] = (),
     cwd: Path | None = None,
 ) -> int:
     """Run a workspace or multi-stack workspace (or create temporary stack(s) with `--tmp`)."""
     if targets and workspace is not None:
         raise UsageError("pass either TARGET(s) or -w/--workspace, not both")
+    if tmp and detach:
+        raise UsageError("cannot combine -d/--detach with --tmp")
     if tmp and not targets:
         raise UsageError("--tmp requires at least one TARGET (e.g. `ow run --tmp enterprise#12345`)")
     if len(targets) > 1 and extra_args:
@@ -454,7 +542,13 @@ def run(
         root, kind = resolve_target_root(workspace, cwd=base_cwd)
         if kind == "workspace":
             ws, eff_plugins = _open_ws(root, plugins)
-            return _run_workspaces([(ws.name, ws, passthrough)], eff_plugins, fail_fast=fail_fast, reset=reset)
+            return _run_workspaces(
+                [(ws.name, ws, passthrough)],
+                eff_plugins,
+                fail_fast=fail_fast,
+                reset=reset,
+                detach=detach,
+            )
 
         loaded = stacks.load_multi_workspace(root, plugins)
         if loaded is None:
@@ -464,19 +558,11 @@ def run(
         for sess in sessions:
             for warning in sess.warnings:
                 term.warn(warning)
-        multi_hit = _find_multi_runner(multi, eff_plugins, passthrough)
-        if multi_hit is not None:
-            prepare_services(multi.stacks, eff_plugins)
-            _refresh_before_run(multi.stacks, eff_plugins, multi=multi)
-            multi_hit = _find_multi_runner(multi, eff_plugins, passthrough) or multi_hit
-            plugin_name, multi_cmd = multi_hit
-            if reset:
-                _reset_workspaces(multi.stacks, eff_plugins)
-            _announce_plugin_runner(multi.name, plugin_name, eff_plugins, always=True)
-            return _run_single(multi_cmd)
+        if _find_multi_runner(multi, eff_plugins, passthrough, detach=detach) is not None:
+            return _exec_multi_runner(multi, eff_plugins, passthrough, reset=reset, detach=detach)
         if passthrough:
             runnable_ws = [
-                ws for ws in multi.stacks if _find_runner(ws, eff_plugins, passthrough) is not None
+                ws for ws in multi.stacks if _find_runner(ws, eff_plugins, passthrough, detach=detach) is not None
             ]
             if len(runnable_ws) > 1:
                 names = ", ".join(ws.name for ws in runnable_ws)
@@ -485,7 +571,7 @@ def run(
                     'specify a stack with `ow run <stack> -- ...` or `ow run <stack>:"..."`'
                 )
         items = [(ws.name, ws, passthrough) for ws in multi.stacks]
-        return _run_workspaces(items, eff_plugins, fail_fast=fail_fast, reset=reset, multi=multi)
+        return _run_workspaces(items, eff_plugins, fail_fast=fail_fast, reset=reset, detach=detach, multi=multi)
 
     # Mode 3: Positional targets without `--tmp` -> existing workspace(s) or stack(s) only
     to_run = []
@@ -524,19 +610,11 @@ def run(
             eff_plugins = sessions[0].plugins if sessions else plugins
             run_plugins = eff_plugins
             if len(targets) == 1:
-                multi_hit = _find_multi_runner(multi, eff_plugins, combined_args)
-                if multi_hit is not None:
+                if _find_multi_runner(multi, eff_plugins, combined_args, detach=detach) is not None:
                     for sess in sessions:
                         for warning in sess.warnings:
                             term.warn(warning)
-                    prepare_services(multi.stacks, eff_plugins)
-                    _refresh_before_run(multi.stacks, eff_plugins, multi=multi)
-                    multi_hit = _find_multi_runner(multi, eff_plugins, combined_args) or multi_hit
-                    plugin_name, multi_cmd = multi_hit
-                    if reset:
-                        _reset_workspaces(multi.stacks, eff_plugins)
-                    _announce_plugin_runner(multi.name, plugin_name, eff_plugins, always=True)
-                    return _run_single(multi_cmd)
+                    return _exec_multi_runner(multi, eff_plugins, combined_args, reset=reset, detach=detach)
             if combined_args:
                 raise UsageError(
                     f"{root.name!r} is a multi-stack workspace; pass arguments to individual stacks"
@@ -544,4 +622,4 @@ def run(
             for ws in multi.stacks:
                 to_run.append((ws.name, ws, ()))
 
-    return _run_workspaces(to_run, run_plugins, fail_fast=fail_fast, reset=reset)
+    return _run_workspaces(to_run, run_plugins, fail_fast=fail_fast, reset=reset, detach=detach)
