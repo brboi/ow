@@ -13,7 +13,6 @@ from tests.conftest import add_repo
 _VOIP_LIKE_PLUGIN = '''
 from pathlib import PurePosixPath
 from ow.plugin_api import (
-    PLUGIN_API_VERSION,
     GeneratedFile,
     RunCommand,
     Setting,
@@ -21,7 +20,7 @@ from ow.plugin_api import (
     resolve_stack_python,
 )
 
-OW_API_VERSION = PLUGIN_API_VERSION
+OW_API_VERSION = 1
 PLUGIN_NAME = "voipdemo"
 
 
@@ -133,13 +132,23 @@ def test_in_repo_plugin_trust_cross_stack_files_config_layers_and_multi_runner(l
     assert stack_set.exit_code == 0, stack_set.stderr + stack_set.stdout
     assert "DB=stack-only-db" in (ws / "voipstack" / "voip" / ".dev" / "config").read_text()
 
-    # 5. `ow run` at multi-stack root uses `ow_multi_runner` with direct args passthrough
+    # 5. `ow status` (piped and --json) reports the active external plugin
+    st_piped = lab.ow("status", cwd=ws)
+    assert st_piped.exit_code == 0, st_piped.stderr
+    assert "# plugin: voipdemo (" in st_piped.stdout
+    st_json = lab.ow("status", "--json", cwd=ws)
+    assert st_json.exit_code == 0, st_json.stderr
+    st_payload = json.loads(st_json.stdout)
+    assert st_payload["workspace"]["external_plugins"][0]["name"] == "voipdemo"
+
+    # 6. `ow run` at multi-stack root uses `ow_multi_runner`, announces the plugin, and forwards args
     run_res = lab.ow("run", "--", "--flag", cwd=ws)
     assert run_res.exit_code == 0, run_res.stderr + run_res.stdout
+    assert "# starting porting (plugin voipdemo:" in run_res.stdout
     recorded = json.loads((ws / "multi_runner.json").read_text())
     assert recorded == {"stack": "voipstack", "args": ["--flag"]}
 
-    # 6. `ow trust --untrust` revokes trust
+    # 7. `ow trust --untrust` revokes trust
     untr = lab.ow("trust", "--untrust", cwd=ws)
     assert untr.exit_code == 0
     assert "untrusted " in untr.stdout
