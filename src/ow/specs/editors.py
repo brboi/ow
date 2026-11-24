@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import TYPE_CHECKING
 
 from ow.core.plugins import hookspec
 
 if TYPE_CHECKING:
+    from ow.core.plugins import Answers
     from ow.core.workspace import Workspace
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class DebugLaunch:
     """A debug launch configuration."""
 
@@ -23,7 +25,7 @@ class DebugLaunch:
     env: Mapping[str, str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class EditorContribution:
     """Editor contribution with launches, language servers, excludes, and optional Python interpreter."""
 
@@ -37,7 +39,7 @@ class EditorsSpec:
     """Hookspec for editor contributions."""
 
     @hookspec
-    def editors_contribution(self, ws: Workspace) -> EditorContribution | None:
+    def editors_contribution(self, ws: Workspace, answers: Answers) -> EditorContribution | None:
         """Return editor contribution or None."""
 
 

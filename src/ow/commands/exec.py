@@ -4,65 +4,24 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ow import term
-from ow.core import stacks
-from ow.core.session import open_session
+from ow.commands._runtime import default_shell, open_target, run_foreground
 from ow.core.workspace import Workspace, resolve_target_root
 from ow.errors import UsageError
 from ow.specs.python_env import (
     PythonEnvironment,
     WorkspaceVenv,
     ensure_venv_ready,
-    merge,
-    workspace_venv,
+    resolve_workspace_python,
 )
 
 if TYPE_CHECKING:
     from ow.core.plugins import Plugins
-
-
-def _is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
-
-
-def _default_shell(host_env: Mapping[str, str]) -> str:
-    """Pick an executable interactive shell for bare `ow exec`."""
-    candidates = [host_env.get("SHELL", "").strip(), "/bin/bash", "/usr/bin/bash", "/bin/sh"]
-    for cand in candidates:
-        if not cand:
-            continue
-        p = Path(cand)
-        if p.is_absolute() and p.exists() and os.access(p, os.X_OK):
-            return cand
-    return "/bin/sh"
-
-
-def _open_ws(path: Path, plugins: Plugins) -> tuple[Workspace, Plugins]:
-    session = open_session(str(path), need_workspace=True, plugins=plugins, cwd=path)
-    for warning in session.warnings:
-        term.warn(warning)
-    assert session.workspace is not None
-    return session.workspace, session.plugins
-
-
-def resolve_python_env(
-    ws: Workspace, plugins: Plugins
-) -> tuple[PythonEnvironment | None, WorkspaceVenv] | None:
-    """Return `(merged_env, venv)` when `ws` has a Python environment, else None."""
-    merged = merge(plugins.answers(ws)("python_environment"))
-    if merged is None and not ws.settings.get("mise.python"):
-        return None
-    return merged, workspace_venv(ws, merged)
 
 
 def build_exec_env(
@@ -99,7 +58,7 @@ def resolve_exec_cwd(ws: Workspace, base_cwd: Path) -> Path:
     """Keep `base_cwd` when already inside `ws.root`, otherwise switch to `ws.root`."""
     ws_root = ws.root.resolve()
     resolved_cwd = base_cwd.resolve()
-    return resolved_cwd if _is_within(resolved_cwd, ws_root) else ws_root
+    return resolved_cwd if resolved_cwd.is_relative_to(ws_root) else ws_root
 
 
 def _resolve_workspace(
@@ -107,30 +66,22 @@ def _resolve_workspace(
     plugins: Plugins,
     *,
     base_cwd: Path,
-    positional_target: str | None,
 ) -> tuple[Workspace, Plugins]:
     try:
         root, kind = resolve_target_root(lookup, cwd=base_cwd)
     except UsageError as exc:
-        if positional_target is not None:
+        if lookup is not None:
             raise UsageError(
-                f"{exc}; to run a command, put it after `--` (e.g. `ow exec -- {positional_target}`)"
+                f"{exc}; to run a command, put it after `--` (e.g. `ow exec -- {lookup}`)"
             ) from exc
         raise
 
-    if kind == "workspace":
-        return _open_ws(root, plugins)
+    target = open_target(root, kind, plugins)
+    if target.multi is None:
+        return target.workspace, target.plugins
+    multi, eff_plugins = target.multi, target.plugins
 
-    loaded = stacks.load_multi_workspace(root, plugins)
-    if loaded is None:
-        raise UsageError(f"no valid stacks found in {root}")
-    multi, sessions = loaded
-    eff_plugins = sessions[0].plugins if sessions else plugins
-    for sess in sessions:
-        for warning in sess.warnings:
-            term.warn(warning)
-
-    py_stacks = [ws for ws in multi.stacks if resolve_python_env(ws, eff_plugins) is not None]
+    py_stacks = [ws for ws in multi.stacks if resolve_workspace_python(ws, eff_plugins.answers(ws)) is not None]
     if len(py_stacks) == 1:
         return py_stacks[0], eff_plugins
     if len(py_stacks) > 1:
@@ -148,36 +99,26 @@ def _resolve_workspace(
 def run(
     plugins: Plugins,
     *,
-    target: str | None = None,
-    workspace: str | None = None,
+    ws_name: str | None = None,
     command: Sequence[str] = (),
     cwd: Path | None = None,
 ) -> int:
     """Run `command` (or an interactive shell) inside a workspace/stack's environment."""
-    if target is not None and workspace is not None:
-        raise UsageError("pass either WS or -w/--workspace, not both")
-
     base_cwd = (cwd or Path.cwd()).resolve()
-    lookup = target if target is not None else workspace
-    ws, eff_plugins = _resolve_workspace(
-        lookup,
-        plugins,
-        base_cwd=base_cwd,
-        positional_target=target,
-    )
+    ws, eff_plugins = _resolve_workspace(ws_name, plugins, base_cwd=base_cwd)
 
     exec_cwd = resolve_exec_cwd(ws, base_cwd)
-    resolved = resolve_python_env(ws, eff_plugins)
+    resolved = resolve_workspace_python(ws, eff_plugins.answers(ws))
     if resolved is None:
         env = dict(os.environ)
-        for stale in ("PYTHONHOME", "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "ODOO_RC"):
+        for stale in ("PYTHONHOME", "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT"):
             env.pop(stale, None)
         env["OW_WORKSPACE"] = ws.name
         use_mise = bool(ws.settings.get("mise.enabled", True)) and bool(shutil.which("mise"))
         if command:
             argv = ("mise", "exec", "--", *command) if use_mise else tuple(command)
         else:
-            shell = _default_shell(env)
+            shell = default_shell(env)
             argv = ("mise", "exec", "--", shell) if use_mise else (shell,)
             mode_label = "mise" if use_mise else "shell"
             print(f"# {ws.name}: {mode_label} (no Python venv)", file=sys.stderr)
@@ -201,17 +142,8 @@ def run(
         if command:
             argv = tuple(command)
         else:
-            argv = (_default_shell(env),)
+            argv = (default_shell(env),)
             kind_label = "local" if venv.is_local(ws) else "shared"
             print(f"# {ws.name}: venv {venv.path} ({kind_label})", file=sys.stderr)
 
-    try:
-        proc = subprocess.run(argv, cwd=exec_cwd, env=env)
-    except KeyboardInterrupt:
-        return 130
-    except OSError as exc:
-        raise UsageError(f"failed to execute {argv[0]!r}: {exc}") from exc
-
-    if proc.returncode < 0:
-        return 128 + abs(proc.returncode)
-    return proc.returncode
+    return run_foreground(argv, cwd=exec_cwd, env=env, interactive=not command)

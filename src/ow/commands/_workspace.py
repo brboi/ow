@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -15,18 +15,17 @@ from ow.commands._repos import (
     attach_pr_to_worktree,
     cleanup_worktree,
     ensure_bare,
-    parse_base_for,
     resolve_base,
     worktree_state,
 )
 from ow.commands._shared import known_repo_catalog, print_dropped, refresh_workspace, remotes_of, run_steps
-from ow.commands._targets import TARGET_USAGE_HINT, resolve_composite_target
+from ow.commands._specs import SPEC_USAGE_HINT, resolve_composite_spec
 from ow.core import config, git, index, stacks
-from ow.core.json_schema import envelope
+from ow.core.bases import parse_base_for
 from ow.core.paths import repos_dir
-from ow.core.plan import Batch, RepoPlan, run_batch
-from ow.core.plugins import KnownRepo, ResolvedRepo, ResolvedTarget, StackInfo
-from ow.core.session import global_settings, open_session
+from ow.core.plan import Step
+from ow.core.plugins import KnownRepo, ResolvedRepo, ResolvedSpec, StackInfo
+from ow.core.session import Session, global_settings, open_session
 from ow.core.workspace import Workspace, build_workspace, derive_repos, stray_checkouts
 from ow.errors import OwError, UsageError
 
@@ -103,11 +102,8 @@ class UnitResult:
     name: str
     root: Path
     is_stack: bool
-    repos: tuple[str, ...]
     action: Literal["created", "updated", "unchanged", "planned"] = "created"
-    ports: Mapping[str, int] = field(default_factory=dict)
     note: str | None = None
-    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -115,11 +111,7 @@ class AddResult:
     """Typed result returned by `ow init` and `ow add`."""
 
     workspaces: tuple[UnitResult, ...]
-    workspace_root: Path | None = None
-    multi_stack: bool = False
     workspace_files: tuple[Path, ...] = ()
-    promoted_from: str | None = None
-    dry_run: bool = False
     exit_code: int = 0
 
 
@@ -141,17 +133,17 @@ def is_resumable_workspace(root: Path) -> bool:
     return bool(locations) and not stray_checkouts(root, locations)
 
 
-def resolve_required_target(
+def resolve_required_spec(
     spec: str,
     plugins: Plugins,
     catalog: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
     ws: Workspace | None = None,
-) -> ResolvedTarget:
+) -> ResolvedSpec:
     """Resolve `spec` via plugins/branch/repo rules or raise `UsageError` with syntax hints."""
-    resolved = resolve_composite_target(spec, plugins, catalog, settings, ws)
+    resolved = resolve_composite_spec(spec, plugins, catalog, settings, ws)
     if resolved is None:
-        raise UsageError(f"unknown target or repo {spec!r}; {TARGET_USAGE_HINT}")
+        raise UsageError(f"unknown spec or repo {spec!r}; {SPEC_USAGE_HINT}")
     return resolved
 
 
@@ -210,21 +202,11 @@ def sync_multi_files(multi_root: Path, plugins: Plugins) -> tuple[Path, ...]:
     if loaded is None:
         return ()
     multi, sessions = loaded
-    eff_plugins = sessions[0].plugins if sessions else plugins
-    return stacks.sync_multi_workspace_files(multi, eff_plugins)
+    return stacks.sync_multi_workspace_files(multi, sessions[0].plugins)
 
 
-def report_result(
-    result: AddResult,
-    *,
-    json_output: bool,
-    create_verb: str = "ready",
-) -> int:
-    """Emit `AddResult` as JSON or human-readable lines and return `result.exit_code`."""
-    if json_output:
-        term.emit_json(envelope({"result": result}))
-        return result.exit_code
-
+def report_result(result: AddResult, *, create_verb: str = "ready") -> int:
+    """Print `AddResult` as human-readable lines and return `result.exit_code`."""
     for ws in result.workspaces:
         port_note = f" ({ws.note})" if ws.is_stack and ws.note else ""
         if ws.action == "planned":
@@ -303,12 +285,105 @@ def _warn_if_commit_differs(spec: ResolvedRepo, wt_path: Path) -> None:
         )
 
 
+@dataclass(frozen=True)
+class _WorktreePlan:
+    """What one repo's worktree needs, decided once for both creation and `--dry-run`."""
+
+    state: Literal["missing", "healthy", "broken"]
+    base: str
+    branch: str | None
+    remote: str | None
+    attach: bool  # an existing worktree that gets a PR or branch attached
+
+
+def _effective_branch(spec: ResolvedRepo, mode: UnitMode, branch: str | None) -> str | None:
+    """The branch `spec`'s worktree is on: none when detached, `branch` when given, else the spec's."""
+    return None if mode.detach else (branch if branch is not None else spec.branch)
+
+
+def _plan_worktree(
+    spec: ResolvedRepo,
+    *,
+    ws_name: str,
+    mode: UnitMode,
+    branch: str | None,
+    accepted: dict[str, str],
+    bare: Path,
+    wt_path: Path,
+    dry_run: bool = False,
+) -> _WorktreePlan:
+    """Decide `spec`'s effective base, branch and remote, and whether its worktree is added, kept or attached.
+
+    A base that cannot be resolved raises, except in a dry run, which assumes `origin/HEAD` until fetched.
+    """
+    if spec.base is not None:
+        base = parse_base_for(spec.base, spec.name)
+    elif spec.name in accepted:
+        base = accepted[spec.name]
+    else:
+        try:
+            base, source = resolve_base(spec.name, None, accepted)
+        except UsageError:
+            if not dry_run:
+                raise
+            base = "origin/HEAD"
+            term.out(f"# {spec.name}: default base unresolved until fetched")
+        else:
+            term.out(f"# {spec.name}: default base {base} ({source})")
+
+    state = worktree_state(bare, wt_path)
+    if state == "foreign":
+        raise UsageError(f"{wt_path} already exists and is not a worktree of {spec.name}")
+    effective_branch = _effective_branch(spec, mode, branch)
+    remote = (
+        None
+        if (spec.fetch_ref is None and branch is not None and branch != spec.branch)
+        else spec.remote
+    )
+    attach = (
+        state == "healthy"
+        and mode.allow_attach
+        and (spec.fetch_ref is not None or effective_branch is not None)
+    )
+    if attach and effective_branch is None:
+        raise UsageError(f"cannot attach {spec.name!r} in workspace {ws_name!r} without a target branch")
+    return _WorktreePlan(state, base, effective_branch, remote, attach)
+
+
+def _worktree_steps(
+    spec: ResolvedRepo, plan: _WorktreePlan, *, bare: Path, wt_path: Path, mode: UnitMode
+) -> tuple[Step, ...]:
+    """The git steps that attach a PR or branch to `spec`'s worktree, or add that worktree."""
+    if plan.attach:
+        assert plan.branch is not None
+        return attach_pr_to_worktree(
+            bare,
+            wt_path,
+            branch=plan.branch,
+            base=plan.base,
+            fetch_ref=spec.fetch_ref,
+            remote_hint=plan.remote,
+            ow_pr=spec.pr,
+        )
+    return add_worktree(
+        bare,
+        wt_path,
+        branch=plan.branch,
+        base=plan.base,
+        fetch_ref=spec.fetch_ref,
+        remote_hint=plan.remote,
+        ow_pr=spec.pr,
+        commit=spec.commit,
+        detach=mode.detach,
+    )
+
+
 def _preview_unit_dry_run(
     plugins: Plugins,
     *,
     root: Path,
     ws_name: str,
-    resolved: ResolvedTarget,
+    resolved: ResolvedSpec,
     mode: UnitMode,
     branch: str | None,
     accepted: dict[str, str],
@@ -328,85 +403,40 @@ def _preview_unit_dry_run(
         term.out(f"# create {kind_label} {ws_name} at {git.display_path(root)}")
 
     for spec in repo_specs:
-        url = repo_url(spec.name, spec.url, catalog)
         bare = repos_dir() / f"{spec.name}.git"
         wt_path = root / spec.name
-        effective_branch = None if mode.detach else (branch if branch is not None else spec.branch)
-        effective_remote = (
-            None
-            if (spec.fetch_ref is None and branch is not None and branch != spec.branch)
-            else spec.remote
-        )
 
         if not bare.is_dir():
+            url = repo_url(spec.name, spec.url, catalog)
             term.out(f"# {spec.name}: would clone bare repo from {url}")
-            target_desc = effective_branch or spec.commit or spec.base or "default base"
+            target_desc = (
+                _effective_branch(spec, mode, branch) or spec.commit or spec.base or "default base"
+            )
             term.out(f"# {spec.name}: would add worktree at {git.display_path(wt_path)} ({target_desc})")
             accepted[spec.name] = spec.base or "origin/HEAD"
             continue
 
-        if spec.base is not None:
-            effective_base = parse_base_for(spec.base, spec.name)
-        elif spec.name in accepted:
-            effective_base = accepted[spec.name]
-        else:
-            try:
-                effective_base, base_src = resolve_base(spec.name, None, accepted)
-                term.out(f"# {spec.name}: default base {effective_base} ({base_src})")
-            except UsageError:
-                effective_base = "origin/HEAD"
-                term.out(f"# {spec.name}: default base unresolved until fetched")
-
-        state = worktree_state(bare, wt_path) if existed_before else "missing"
-        if state == "healthy":
-            if mode.allow_attach and (spec.fetch_ref is not None or effective_branch is not None):
-                if effective_branch is None:
-                    raise UsageError(
-                        f"cannot attach {spec.name!r} in {ws_name!r} without a target branch"
-                    )
-                steps = attach_pr_to_worktree(
-                    bare,
-                    wt_path,
-                    branch=effective_branch,
-                    base=effective_base,
-                    fetch_ref=spec.fetch_ref,
-                    remote_hint=effective_remote,
-                    ow_pr=spec.pr,
-                )
-                run_batch(
-                    Batch(root=root, repos=(RepoPlan(repo=spec.name, steps=steps),)),
-                    prompt=False,
-                    dry_run=True,
-                    yes=True,
-                )
-            else:
-                _warn_if_commit_differs(spec, wt_path)
-                term.out(f"# {spec.name}: already exists")
-            accepted.setdefault(spec.name, effective_base)
+        plan = _plan_worktree(
+            spec,
+            ws_name=ws_name,
+            mode=mode,
+            branch=branch,
+            accepted=accepted,
+            bare=bare,
+            wt_path=wt_path,
+            dry_run=True,
+        )
+        if plan.state == "healthy" and not plan.attach:
+            _warn_if_commit_differs(spec, wt_path)
+            term.out(f"# {spec.name}: already exists")
+            accepted.setdefault(spec.name, plan.base)
             continue
-        if state == "foreign":
-            raise UsageError(f"{wt_path} already exists and is not a worktree of {spec.name}")
-        if state == "broken":
+        if plan.state == "broken":
             term.out(f"# {spec.name}: would clean up incomplete worktree at {wt_path}")
 
-        steps = add_worktree(
-            bare,
-            wt_path,
-            branch=effective_branch,
-            base=effective_base,
-            fetch_ref=spec.fetch_ref,
-            remote_hint=effective_remote,
-            ow_pr=spec.pr,
-            commit=spec.commit,
-            detach=mode.detach,
-        )
-        run_batch(
-            Batch(root=root, repos=(RepoPlan(repo=spec.name, steps=steps),)),
-            prompt=False,
-            dry_run=True,
-            yes=True,
-        )
-        accepted[spec.name] = effective_base
+        steps = _worktree_steps(spec, plan, bare=bare, wt_path=wt_path, mode=mode)
+        run_steps(spec.name, steps, root=root, dry_run=True)
+        accepted[spec.name] = plan.base
 
     if effective_stack or mode.parent_multi_root is not None or pending is not None:
         siblings = _load_sibling_stacks(mode.parent_multi_root, root, plugins)
@@ -428,11 +458,8 @@ def _preview_unit_dry_run(
             name=ws_name,
             root=root,
             is_stack=effective_stack,
-            repos=tuple(dict.fromkeys([*accepted.keys(), *(s.name for s in repo_specs)])),
             action="planned",
-            ports=info.ports,
             note=info.note,
-            source=resolved.source,
         ),
         0,
     )
@@ -469,74 +496,34 @@ def _reconcile_worktree(
         assert url is not None
         ensure_bare(spec.name, url)
 
-    if spec.base is not None:
-        effective_base = parse_base_for(spec.base, spec.name)
-    elif spec.name in accepted:
-        effective_base = accepted[spec.name]
-    else:
-        effective_base, base_src = resolve_base(spec.name, None, accepted)
-        term.out(f"# {spec.name}: default base {effective_base} ({base_src})")
-
     wt_path = root / spec.name
-    state = worktree_state(bare, wt_path)
-    effective_branch = None if mode.detach else (branch if branch is not None else spec.branch)
-    effective_remote = (
-        None
-        if (spec.fetch_ref is None and branch is not None and branch != spec.branch)
-        else spec.remote
+    plan = _plan_worktree(
+        spec, ws_name=ws_name, mode=mode, branch=branch, accepted=accepted, bare=bare, wt_path=wt_path
     )
 
-    if state == "healthy":
-        if mode.allow_attach and (spec.fetch_ref is not None or effective_branch is not None):
-            if effective_branch is None:
-                raise UsageError(
-                    f"cannot attach {spec.name!r} in workspace {ws_name!r} without a target branch"
-                )
-            attach_steps = attach_pr_to_worktree(
-                bare,
-                wt_path,
-                branch=effective_branch,
-                base=effective_base,
-                fetch_ref=spec.fetch_ref,
-                remote_hint=effective_remote,
-                ow_pr=spec.pr,
-            )
-            if run_steps(spec.name, attach_steps, root=root) != 0:
-                raise OwError(f"failed to attach {spec.name!r} in workspace {ws_name!r}")
-            accepted[spec.name] = effective_base
-            persist()
-            return True
-
+    if plan.state == "healthy" and not plan.attach:
         _warn_if_commit_differs(spec, wt_path)
         term.out(f"# {spec.name}: already exists")
         if spec.name not in accepted:
-            accepted[spec.name] = effective_base
+            accepted[spec.name] = plan.base
             return True
         return False
 
-    if state == "foreign":
-        raise UsageError(f"{wt_path} already exists and is not a worktree of {spec.name}")
-    if state == "broken":
+    if plan.state == "broken":
         term.warn(f"{spec.name}: cleaning up incomplete worktree at {wt_path}")
         cleanup_worktree(bare, wt_path)
 
-    steps = add_worktree(
-        bare,
-        wt_path,
-        branch=effective_branch,
-        base=effective_base,
-        fetch_ref=spec.fetch_ref,
-        remote_hint=effective_remote,
-        ow_pr=spec.pr,
-        commit=spec.commit,
-        detach=mode.detach,
-    )
-    set_in_progress((bare, wt_path))
-    if run_steps(spec.name, steps, root=root) != 0:
-        raise OwError(f"failed to add repository {spec.name!r} for workspace {ws_name!r}")
-    set_in_progress(None)
-    added_worktrees.append((bare, wt_path))
-    accepted[spec.name] = effective_base
+    steps = _worktree_steps(spec, plan, bare=bare, wt_path=wt_path, mode=mode)
+    if plan.attach:
+        if run_steps(spec.name, steps, root=root) != 0:
+            raise OwError(f"failed to attach {spec.name!r} in workspace {ws_name!r}")
+    else:
+        set_in_progress((bare, wt_path))
+        if run_steps(spec.name, steps, root=root) != 0:
+            raise OwError(f"failed to add repository {spec.name!r} for workspace {ws_name!r}")
+        set_in_progress(None)
+        added_worktrees.append((bare, wt_path))
+    accepted[spec.name] = plan.base
     persist()
     return True
 
@@ -586,11 +573,61 @@ def _apply_stack_defaults(
             mark_indexed()
 
 
+def unique_setting_values(session: Session, plugins: Plugins) -> dict[str, str]:
+    """`<value>-N` replacements for the `unique` settings `session`'s workspace shares with another one.
+
+    A `unique` setting must differ across workspaces. When the new workspace's value is still
+    at its default and equals the value another indexed workspace resolves to, the next free
+    `<value>-N` (N >= 2) is returned for that key; settings that do not collide, were set
+    explicitly or are not strings are left out. Each other workspace is opened with `plugins`
+    plus its own in-repo plugins, so it only holds a key its own plugin set declares: a setting
+    of an in-repo plugin never collides with a workspace that lacks that plugin.
+    """
+    ws = session.workspace
+    assert ws is not None
+    wanted = {
+        key: value
+        for key, setting in session.declared.items()
+        if setting.unique
+        and session.origins.get(key) == "default"
+        and isinstance(value := ws.settings.get(key), str)
+        and value
+    }
+    if not wanted:
+        return {}
+
+    taken: dict[str, set[str]] = {key: set() for key in wanted}
+    for entry in index.read():
+        for path in stacks.detect_multi_workspace(entry) or (entry,):
+            if path.resolve() == ws.root.resolve():
+                continue
+            try:
+                other = open_session(str(path), need_workspace=False, plugins=plugins)
+            except Exception:
+                continue
+            if other.workspace is None:
+                continue
+            for key, values in taken.items():
+                value = other.workspace.settings.get(key) if key in other.declared else None
+                if isinstance(value, str) and value:
+                    values.add(value)
+
+    replacements: dict[str, str] = {}
+    for key, own in wanted.items():
+        if own not in taken[key]:
+            continue
+        suffix = 2
+        while f"{own}-{suffix}" in taken[key]:
+            suffix += 1
+        replacements[key] = f"{own}-{suffix}"
+    return replacements
+
+
 def create_workspace_unit(
     plugins: Plugins,
     *,
     root: Path,
-    resolved: ResolvedTarget,
+    resolved: ResolvedSpec,
     mode: UnitMode,
     branch: str | None = None,
     pending: list[dict[str, object]] | None = None,
@@ -747,14 +784,21 @@ def create_workspace_unit(
 
         session = open_session(str(root), need_workspace=True, plugins=plugins, cwd=root)
         assert session.workspace is not None
+        if not is_existing_ws:
+            unique_values = unique_setting_values(session, plugins)
+            if unique_values:
+                declared.update(session.declared)  # the keys of in-repo plugins, or persisting drops them
+                ws_values.update(unique_values)
+                print_dropped(persist())
+                session = session.reload()
         for warning in session.warnings:
             term.warn(warning)
 
         if not is_existing_ws:
-            plugins.call("ow_workspace_created", ws=session.workspace)
+            session.plugins.call("ow_workspace_created", ws=session.workspace)
         refreshed = refresh_workspace(session)
 
-        info = stack_info(session.workspace, plugins)
+        info = stack_info(session.workspace, session.plugins)
         action: Literal["created", "updated", "unchanged"] = (
             "created" if not is_existing_ws else ("updated" if mutated_any else "unchanged")
         )
@@ -762,11 +806,8 @@ def create_workspace_unit(
             name=session.workspace.name,
             root=root,
             is_stack=effective_stack,
-            repos=tuple(r.name for r in session.workspace.repos),
             action=action,
-            ports=info.ports,
             note=info.note,
-            source=resolved.source,
         )
         cleanup_stack.pop_all()
         return unit, refreshed
@@ -775,14 +816,14 @@ def create_workspace_unit(
 def add_into_workspace(
     plugins: Plugins,
     root: Path,
-    resolved: ResolvedTarget,
+    resolved: ResolvedSpec,
     *,
     branch: str | None = None,
     dry_run: bool = False,
     pending: list[dict[str, object]] | None = None,
 ) -> tuple[UnitResult, int]:
     """Add missing repos or attach PR/branch specs into an existing workspace or stack."""
-    is_stack = stacks.is_stack_config(root)
+    is_stack = stacks.is_stack_dir(root)
     if is_stack:
         mode = UnitMode.stack(
             root.parent.resolve(),
@@ -810,7 +851,7 @@ def upsert_stack(
     plugins: Plugins,
     multi_root: Path,
     stack_name: str,
-    resolved: ResolvedTarget,
+    resolved: ResolvedSpec,
     *,
     branch: str | None = None,
     dry_run: bool = False,
@@ -818,7 +859,7 @@ def upsert_stack(
 ) -> tuple[UnitResult, int]:
     """Create a new stack or update an existing stack under `multi_root`."""
     target_stack = multi_root / stack_name
-    if stacks.is_stack_config(target_stack):
+    if stacks.is_stack_dir(target_stack):
         return add_into_workspace(
             plugins,
             target_stack,

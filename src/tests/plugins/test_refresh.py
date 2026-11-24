@@ -97,7 +97,7 @@ def by_path(projection: Projection) -> dict[PurePosixPath, FileStatus]:
 
 
 def test_absent_file_carries_owner_state_and_proposal(tmp_path):
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"content")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"content")])
     projection = project(make_ws(tmp_path), plugins_of(("a", mod)))
 
     status = by_path(projection)[PurePosixPath("test.txt")]
@@ -111,7 +111,7 @@ def test_absent_file_carries_owner_state_and_proposal(tmp_path):
 
 def test_identical_file_is_adopted(tmp_path):
     (tmp_path / "test.txt").write_bytes(b"content")
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"content")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"content")])
 
     projection = project(make_ws(tmp_path), plugins_of(("a", mod)))
 
@@ -123,7 +123,7 @@ def test_identical_file_is_adopted(tmp_path):
 def test_file_matching_the_lock_is_outdated(tmp_path):
     (tmp_path / "test.txt").write_bytes(b"old")
     write_lock(tmp_path, {"test.txt": _sha256_bytes(b"old")})
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"new")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"new")])
 
     projection = project(make_ws(tmp_path), plugins_of(("a", mod)))
 
@@ -133,7 +133,7 @@ def test_file_matching_the_lock_is_outdated(tmp_path):
 def test_edited_file_is_yours(tmp_path):
     (tmp_path / "test.txt").write_bytes(b"user edit")
     write_lock(tmp_path, {"test.txt": _sha256_bytes(b"ow's")})
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"ow's")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"ow's")])
 
     projection = project(make_ws(tmp_path), plugins_of(("a", mod)))
 
@@ -142,10 +142,10 @@ def test_edited_file_is_yours(tmp_path):
 
 def test_files_follow_plugin_tuple_order(tmp_path):
     b = plugin("b", files=[
-        GeneratedFile(PurePosixPath("b1.txt"), b"1"),
-        GeneratedFile(PurePosixPath("b2.txt"), b"2"),
+        GeneratedFile(path=PurePosixPath("b1.txt"), data=b"1"),
+        GeneratedFile(path=PurePosixPath("b2.txt"), data=b"2"),
     ])
-    a = plugin("a", files=[GeneratedFile(PurePosixPath("a1.txt"), b"3")])
+    a = plugin("a", files=[GeneratedFile(path=PurePosixPath("a1.txt"), data=b"3")])
 
     projection = project(make_ws(tmp_path), plugins_of(("b", b), ("a", a)))
 
@@ -160,13 +160,13 @@ def test_files_follow_plugin_tuple_order(tmp_path):
 def test_diagnostics_follow_plugin_tuple_order(tmp_path):
     b = plugin(
         "b",
-        diagnostics=[Diagnostic("warning", "b-answer")],
-        files=[Diagnostic("info", "b-contrib"), GeneratedFile(PurePosixPath("b.txt"), b"b")],
+        diagnostics=[Diagnostic(level="warning", text="b-answer")],
+        files=[Diagnostic(level="info", text="b-contrib"), GeneratedFile(path=PurePosixPath("b.txt"), data=b"b")],
     )
     a = plugin(
         "a",
-        diagnostics=[Diagnostic("warning", "a-answer")],
-        files=[Diagnostic("info", "a-contrib")],
+        diagnostics=[Diagnostic(level="warning", text="a-answer")],
+        files=[Diagnostic(level="info", text="a-contrib")],
     )
 
     projection = project(make_ws(tmp_path), plugins_of(("b", b), ("a", a)))
@@ -182,8 +182,8 @@ def test_diagnostics_follow_plugin_tuple_order(tmp_path):
 def test_error_diagnostic_sets_blocked(tmp_path):
     mod = plugin(
         "a",
-        diagnostics=[Diagnostic("error", "boom")],
-        files=[GeneratedFile(PurePosixPath("test.txt"), b"x")],
+        diagnostics=[Diagnostic(level="error", text="boom")],
+        files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"x")],
     )
 
     projection = project(make_ws(tmp_path), plugins_of(("a", mod)))
@@ -206,8 +206,8 @@ def test_raising_generated_files_hook_becomes_plugin_error(tmp_path):
 
 
 def test_two_owners_of_one_path_name_both(tmp_path):
-    a = plugin("a", files=[GeneratedFile(PurePosixPath("same.txt"), b"a")])
-    b = plugin("b", files=[GeneratedFile(PurePosixPath("same.txt"), b"b")])
+    a = plugin("a", files=[GeneratedFile(path=PurePosixPath("same.txt"), data=b"a")])
+    b = plugin("b", files=[GeneratedFile(path=PurePosixPath("same.txt"), data=b"b")])
 
     with pytest.raises(PluginError) as exc:
         project(make_ws(tmp_path), plugins_of(("a", a), ("b", b)))
@@ -221,7 +221,7 @@ def test_two_owners_of_one_path_name_both(tmp_path):
     ["/abs.txt", "../escape.txt", ".ow/config.toml", ".ow/rendered.lock.toml"],
 )
 def test_unsafe_path_aborts_at_collection(tmp_path, bad):
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath(bad), b"x")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath(bad), data=b"x")])
 
     with pytest.raises(PluginError) as exc:
         project(make_ws(tmp_path), plugins_of(("a", mod)))
@@ -237,7 +237,7 @@ def test_symlinked_parent_is_skipped_and_project_does_not_raise(tmp_path):
     real = tmp_path / "real"
     real.mkdir()
     (tmp_path / "link").symlink_to(real)
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("link/inside.txt"), b"x")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("link/inside.txt"), data=b"x")])
 
     projection = project(make_ws(tmp_path), plugins_of(("a", mod)))
 
@@ -250,7 +250,7 @@ def test_symlinked_parent_is_skipped_and_project_does_not_raise(tmp_path):
 
 
 def test_absent_file_is_written_with_mode_and_locked(tmp_path):
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("script.sh"), b"#!/bin/sh\n", mode=0o755)])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("script.sh"), data=b"#!/bin/sh\n", mode=0o755)])
 
     projection, written = refresh(make_ws(tmp_path), plugins_of(("a", mod)))
 
@@ -266,7 +266,7 @@ def test_identical_file_is_adopted_without_a_write_but_locked(tmp_path):
     target = tmp_path / "test.txt"
     target.write_bytes(b"content")
     before = target.stat().st_mtime_ns
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"content")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"content")])
 
     projection, written = refresh(make_ws(tmp_path), plugins_of(("a", mod)))
 
@@ -280,7 +280,7 @@ def test_outdated_file_is_rewritten(tmp_path):
     target = tmp_path / "test.txt"
     target.write_bytes(b"old")
     write_lock(tmp_path, {"test.txt": _sha256_bytes(b"old")})
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"new")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"new")])
 
     _, written = refresh(make_ws(tmp_path), plugins_of(("a", mod)))
 
@@ -293,7 +293,7 @@ def test_yours_file_is_never_rewritten_and_keeps_its_lock(tmp_path):
     target = tmp_path / "test.txt"
     target.write_bytes(b"user edit")
     write_lock(tmp_path, {"test.txt": _sha256_bytes(b"ow's")})
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"ow's")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"ow's")])
 
     _, written = refresh(make_ws(tmp_path), plugins_of(("a", mod)))
 
@@ -307,8 +307,8 @@ def test_symlinked_parent_is_skipped_but_siblings_are_written(tmp_path):
     real.mkdir()
     (tmp_path / "link").symlink_to(real)
     mod = plugin("a", files=[
-        GeneratedFile(PurePosixPath("link/inside.txt"), b"x"),
-        GeneratedFile(PurePosixPath("ok.txt"), b"y"),
+        GeneratedFile(path=PurePosixPath("link/inside.txt"), data=b"x"),
+        GeneratedFile(path=PurePosixPath("ok.txt"), data=b"y"),
     ])
 
     _, written = refresh(make_ws(tmp_path), plugins_of(("a", mod)))
@@ -321,7 +321,7 @@ def test_symlinked_parent_is_skipped_but_siblings_are_written(tmp_path):
 def test_unproduced_path_loses_its_lock_entry_but_keeps_the_file(tmp_path):
     (tmp_path / "old.txt").write_bytes(b"old")
     write_lock(tmp_path, {"old.txt": _sha256_bytes(b"old")})
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("new.txt"), b"new")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("new.txt"), data=b"new")])
 
     projection, written = refresh(make_ws(tmp_path), plugins_of(("a", mod)))
 
@@ -331,8 +331,8 @@ def test_unproduced_path_loses_its_lock_entry_but_keeps_the_file(tmp_path):
 
 
 def test_disabled_plugin_outputs_become_stale(tmp_path):
-    a = plugin("a", files=[GeneratedFile(PurePosixPath("a.txt"), b"a")])
-    b = plugin("b", files=[GeneratedFile(PurePosixPath("b.txt"), b"b")])
+    a = plugin("a", files=[GeneratedFile(path=PurePosixPath("a.txt"), data=b"a")])
+    b = plugin("b", files=[GeneratedFile(path=PurePosixPath("b.txt"), data=b"b")])
     plugins = plugins_of(("a", a), ("b", b))
 
     refresh(make_ws(tmp_path), plugins)
@@ -352,8 +352,8 @@ def test_disabled_plugin_outputs_become_stale(tmp_path):
 def test_error_diagnostic_blocks_every_write(tmp_path):
     mod = plugin(
         "a",
-        diagnostics=[Diagnostic("error", "boom")],
-        files=[GeneratedFile(PurePosixPath("test.txt"), b"x")],
+        diagnostics=[Diagnostic(level="error", text="boom")],
+        files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"x")],
     )
 
     projection, written = refresh(make_ws(tmp_path), plugins_of(("a", mod)))
@@ -365,7 +365,7 @@ def test_error_diagnostic_blocks_every_write(tmp_path):
 
 
 def test_lock_is_not_rewritten_when_its_bytes_do_not_change(tmp_path):
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"x")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"x")])
     plugins = plugins_of(("a", mod))
 
     refresh(make_ws(tmp_path), plugins)
@@ -388,9 +388,9 @@ def test_refreshed_hook_receives_written_and_up_to_date_not_yours(tmp_path):
     mod = plugin(
         "a",
         files=[
-            GeneratedFile(PurePosixPath("w.txt"), b"w"),
-            GeneratedFile(PurePosixPath("u.txt"), b"u"),
-            GeneratedFile(PurePosixPath("y.txt"), b"ow-y"),
+            GeneratedFile(path=PurePosixPath("w.txt"), data=b"w"),
+            GeneratedFile(path=PurePosixPath("u.txt"), data=b"u"),
+            GeneratedFile(path=PurePosixPath("y.txt"), data=b"ow-y"),
         ],
         refreshed=seen.append,
     )
@@ -407,7 +407,7 @@ def test_refreshed_hook_failure_propagates_after_the_writes(tmp_path):
 
     mod = plugin(
         "a",
-        files=[GeneratedFile(PurePosixPath("test.txt"), b"x")],
+        files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"x")],
         refreshed=boom,
     )
 
@@ -431,19 +431,19 @@ def test_raising_hook_aborts_before_any_write_or_lock(tmp_path):
 
 
 def test_write_error_stops_and_locks_what_was_written(tmp_path, monkeypatch):
-    import ow.core.refresh as refresh_mod
+    from ow.core import fs
 
-    real = refresh_mod._atomic_write
+    real = fs.atomic_write
 
-    def flaky(dest, data, mode):
+    def flaky(dest, data, **kwargs):
         if dest.name == "two.txt":
             raise OSError("disk full")
-        return real(dest, data, mode)
+        return real(dest, data, **kwargs)
 
-    monkeypatch.setattr(refresh_mod, "_atomic_write", flaky)
+    monkeypatch.setattr(fs, "atomic_write", flaky)
     mod = plugin("a", files=[
-        GeneratedFile(PurePosixPath("one.txt"), b"1"),
-        GeneratedFile(PurePosixPath("two.txt"), b"2"),
+        GeneratedFile(path=PurePosixPath("one.txt"), data=b"1"),
+        GeneratedFile(path=PurePosixPath("two.txt"), data=b"2"),
     ])
 
     with pytest.raises(OwError) as exc:
@@ -462,7 +462,7 @@ def test_hand_edit_between_projection_and_write_is_never_overwritten(tmp_path, m
     target = tmp_path / "test.txt"
     target.write_bytes(b"old")
     write_lock(tmp_path, {"test.txt": _sha256_bytes(b"old")})
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"ow's")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"ow's")])
 
     real_project = refresh_mod.project
 
@@ -488,7 +488,7 @@ def test_hand_created_file_between_projection_and_write_is_not_locked(tmp_path, 
     import ow.core.refresh as refresh_mod
 
     target = tmp_path / "test.txt"
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"ow's")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"ow's")])
 
     real_project = refresh_mod.project
 
@@ -516,7 +516,7 @@ def test_hand_created_file_between_projection_and_write_is_not_locked(tmp_path, 
 def test_malformed_lock_is_empty_with_a_core_warning(tmp_path):
     (tmp_path / ".ow").mkdir()
     (tmp_path / LOCK_REL).write_bytes(b"not = valid = toml\n")
-    mod = plugin("a", files=[GeneratedFile(PurePosixPath("test.txt"), b"x")])
+    mod = plugin("a", files=[GeneratedFile(path=PurePosixPath("test.txt"), data=b"x")])
     plugins = plugins_of(("a", mod))
 
     projection = project(make_ws(tmp_path), plugins)
@@ -547,7 +547,7 @@ def test_report_prints_writes_yours_skipped_and_blocked(tmp_path, monkeypatch):
             FileStatus(PurePosixPath("s.txt"), "a", "skipped", b"p", None, "link is a symlink"),
         ),
         stale_lock=(),
-        diagnostics=(("a", Diagnostic("warning", "w")), ("a", Diagnostic("error", "e"))),
+        diagnostics=(("a", Diagnostic(level="warning", text="w")), ("a", Diagnostic(level="error", text="e"))),
         blocked=True,
     )
 

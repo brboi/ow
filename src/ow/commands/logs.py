@@ -2,44 +2,19 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ow import term
-from ow.core import runtime, stacks
-from ow.core.plugins import RunCommand
-from ow.core.session import open_session
+from ow.commands._runtime import Target, open_target, plugin_running
+from ow.core import runtime
 from ow.core.workspace import resolve_target_root
-from ow.errors import UsageError
+from ow.errors import OwError, UsageError
 
 if TYPE_CHECKING:
     from ow.core.plugins import Plugins
-    from ow.core.workspace import Workspace
 
-
-def _exec_logs_command(cmd: RunCommand) -> int:
-    env = dict(os.environ)
-    env.update(cmd.env)
-    try:
-        proc = subprocess.run(cmd.argv, cwd=cmd.cwd, env=env)
-    except KeyboardInterrupt:
-        return 0
-    except OSError as exc:
-        raise UsageError(f"failed to execute {cmd.argv[0]!r}: {exc}") from exc
-    if proc.returncode < 0:
-        return 128 + abs(proc.returncode)
-    return proc.returncode
-
-
-def _open_ws(path: Path, plugins: Plugins) -> tuple[Workspace, Plugins]:
-    session = open_session(str(path), need_workspace=True, plugins=plugins, cwd=path)
-    for warning in session.warnings:
-        term.warn(warning)
-    assert session.workspace is not None
-    return session.workspace, session.plugins
+_NOTHING = "no logs found; start the workspace with `ow run -d` first"
 
 
 def _coerce_log_entries(answer: object) -> list[tuple[str, Path]] | None:
@@ -54,73 +29,82 @@ def _coerce_log_entries(answer: object) -> list[tuple[str, Path]] | None:
     return entries
 
 
+def _any_running(targets: Sequence[Target]) -> Callable[[], bool]:
+    """Whether any followed workspace still has a detached process or a plugin-reported one.
+
+    Polled while following, so a failing `ow_running` is warned about on the first poll only.
+    """
+    first_poll = True
+
+    def running() -> bool:
+        nonlocal first_poll
+        report, first_poll = first_poll, False
+        for target in targets:
+            if target.multi is not None and runtime.list_running(target.multi.root):
+                return True
+            for ws in target.workspaces:
+                if runtime.running_for_workspace(ws) is not None:
+                    return True
+                if plugin_running(ws, target.plugins, report=report):
+                    return True
+        return False
+
+    return running
+
+
 def run(
     plugins: Plugins,
     *,
-    targets: Sequence[str] = (),
-    workspace: str | None = None,
+    ws_names: Sequence[str] = (),
     follow: bool = False,
     lines: int = 50,
     cwd: Path | None = None,
 ) -> int:
-    """Display or follow logs for one or more workspaces/stacks."""
-    if targets and workspace is not None:
-        raise UsageError("pass either TARGET(s) or -w/--workspace, not both")
+    """Display or follow logs for one or more workspaces/stacks.
+
+    Following ends when nothing followed is running any more. Exits 1 when there is nothing to show.
+    """
     if lines < 1:
         raise UsageError("--lines must be at least 1")
 
     base_cwd = (cwd or Path.cwd()).resolve()
-    raw_targets: list[str | None] = list(targets) if targets else [workspace]
+    raw_names: list[str | None] = list(ws_names) or [None]
+    opened: list[Target] = []
     entries: list[tuple[str, Path]] = []
 
-    for raw in raw_targets:
+    for raw in raw_names:
         root, kind = resolve_target_root(raw, cwd=base_cwd)
-        if kind == "workspace":
-            ws, eff_plugins = _open_ws(root, plugins)
-            if len(raw_targets) == 1:
-                hit = eff_plugins.first_with_name("ow_logs", ws=ws, follow=follow, lines=lines)
-                if hit is not None:
-                    if isinstance(hit[1], RunCommand):
-                        return _exec_logs_command(hit[1])
-                    plugin_entries = _coerce_log_entries(hit[1])
-                    if plugin_entries is not None:
-                        if not plugin_entries:
-                            raise UsageError("no logs found; start the workspace with `ow run -d` first")
-                        return runtime.follow_files(plugin_entries, lines=lines, follow=follow)
+        target = open_target(root, kind, plugins)
+        opened.append(target)
+
+        if len(raw_names) == 1:
+            if target.multi is None:
+                hit = target.plugins.first_with_name("ow_logs", ws=target.workspace)
+            else:
+                hit = target.plugins.first_with_name(
+                    "ow_multi_logs", ws=target.multi.stacks[0], multi=target.multi
+                )
+            plugin_entries = _coerce_log_entries(hit[1]) if hit is not None else None
+            if plugin_entries:  # None or [] mean "nothing from this plugin": use `.ow/logs`
+                return runtime.follow_files(
+                    plugin_entries, lines=lines, follow=follow, running=_any_running(opened)
+                )
+
+        if target.multi is None:
+            ws = target.workspace
             lpath = runtime.log_file(runtime.runtime_root(ws), ws.name)
             if lpath.is_file():
                 entries.append((ws.name, lpath))
         else:
-            loaded = stacks.load_multi_workspace(root, plugins)
-            if loaded is None:
-                raise UsageError(f"no valid stacks found in {root}")
-            multi, sessions = loaded
-            eff_plugins = sessions[0].plugins if sessions else plugins
-            for sess in sessions:
-                for warning in sess.warnings:
-                    term.warn(warning)
-            if len(raw_targets) == 1:
-                ws_ctx = multi.stacks[0] if multi.stacks else None
-                hit = eff_plugins.first_with_name(
-                    "ow_multi_logs", ws=ws_ctx, multi=multi, follow=follow, lines=lines
-                )
-                if hit is not None:
-                    if isinstance(hit[1], RunCommand):
-                        return _exec_logs_command(hit[1])
-                    plugin_entries = _coerce_log_entries(hit[1])
-                    if plugin_entries is not None:
-                        if not plugin_entries:
-                            raise UsageError("no logs found; start the workspace with `ow run -d` first")
-                        return runtime.follow_files(plugin_entries, lines=lines, follow=follow)
-            for ws in multi.stacks:
-                lpath = runtime.log_file(multi.root, ws.name)
+            for ws in target.multi.stacks:
+                lpath = runtime.log_file(target.multi.root, ws.name)
                 if lpath.is_file():
                     entries.append((ws.name, lpath))
-            multi_log = runtime.log_file(multi.root, multi.name)
+            multi_log = runtime.log_file(target.multi.root, target.multi.name)
             if multi_log.is_file() and all(p != multi_log for _lbl, p in entries):
-                entries.append((multi.name, multi_log))
+                entries.append((target.multi.name, multi_log))
 
     if not entries:
-        raise UsageError("no logs found; start the workspace with `ow run -d` first")
+        raise OwError(_NOTHING)
 
-    return runtime.follow_files(entries, lines=lines, follow=follow)
+    return runtime.follow_files(entries, lines=lines, follow=follow, running=_any_running(opened))

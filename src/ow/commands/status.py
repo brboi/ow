@@ -1,9 +1,8 @@
-"""`ow status` — workspace, multi-stack workspace, or external target status (plain table or `--json`).
+"""`ow status` — workspace, multi-stack workspace, or external spec status (plain table).
 
 One tab-separated line per repo when piped; when stdout is a TTY, aligned columns with header.
-When enabled plugins (`github`, `runbot`) contribute external status, those are shown inline
-(or in structured form under `--json`), with `--offline` to skip network calls and `--fetch`
-to run a parallel surgical fetch first.
+When enabled plugins (`github`, `runbot`) contribute external status, those are shown inline,
+with `--offline` to skip network calls and `--fetch` to run a parallel surgical fetch first.
 """
 
 from __future__ import annotations
@@ -15,14 +14,13 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from ow import term
+from ow.commands._runtime import open_target
 from ow.commands._shared import known_repo_catalog
 from ow.commands._workspace import stack_info
-from ow.core import git, refresh, runtime, stacks
+from ow.core import git, runtime
 from ow.core.facts import RepoFacts, gather_all
-from ow.core.json_schema import envelope
 from ow.core.plugins import Plugins, StatusInfo
 from ow.core.session import Session, global_settings
 from ow.errors import UsageError
@@ -30,117 +28,54 @@ from ow.recipes.fetch import fetch_then_gather
 
 
 def run(
-    session: Session | None,
+    session: Session,
     *,
-    plugins: Plugins | None = None,
-    target: str | None = None,
-    multi_root: Path | None = None,
     only: Sequence[str] = (),
     fetch: bool = False,
     offline: bool = False,
-    json_output: bool = False,
 ) -> int:
-    """Inspect mono-stack workspace, multi-stack workspace, or external target."""
-    active_plugins = (session.plugins if session is not None else None) or plugins
-    assert active_plugins is not None
+    """Print the status of the session's mono-stack workspace or stack."""
+    if session.workspace is None:
+        raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
 
-    with term.json_mode(json_output):
-        if target is not None:
-            return _run_external_target(
-                active_plugins, target=target, offline=offline, json_output=json_output
-            )
+    exit_code = 0
+    if fetch:
+        _root, facts, failures = fetch_then_gather(session, only, no_fetch=False, hint=None)
+        if any(err is not None for err in failures.values()):
+            exit_code = 1
+    else:
+        locations = tuple(loc for loc in session.locations if not only or loc.name in only)
+        facts = gather_all(locations)
 
-        if multi_root is not None:
-            return _run_multi(
-                active_plugins,
-                multi_root=multi_root,
-                fetch=fetch,
-                offline=offline,
-                json_output=json_output,
-            )
-
-        if session is None or session.workspace is None:
-            raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
-
-        exit_code = 0
-        fetch_failures: list[str] = []
-        if fetch:
-            _root, facts, failures = fetch_then_gather(session, only, no_fetch=False, hint=None)
-            fetch_failures = [name for name, err in failures.items() if err is not None]
-            if fetch_failures:
-                exit_code = 1
-        else:
-            locations = tuple(
-                loc for loc in session.locations if not only or loc.name in only
-            )
-            facts = gather_all(locations)
-
-        infos = _collect_plugin_status(
-            active_plugins, ws=session.workspace, facts=facts, target=None, offline=offline
-        )
-
-        if json_output:
-            payload = _workspace_json(
-                session, facts, infos, active_plugins, fetch_failures=fetch_failures
-            )
-            term.emit_json(envelope(payload))
-        else:
-            print_table(session, facts, infos)
-        return exit_code
+    infos = _collect_plugin_status(
+        session.plugins, ws=session.workspace, facts=facts, spec=None, offline=offline
+    )
+    print_table(session, facts, infos)
+    return exit_code
 
 
-def _run_external_target(
-    plugins: Plugins, *, target: str, offline: bool, json_output: bool
-) -> int:
-    infos = _collect_plugin_status(plugins, ws=None, facts=(), target=target, offline=offline)
-    if json_output:
-        term.emit_json(
-            envelope(
-                {
-                    "target": target,
-                    "offline": offline,
-                    "results": [
-                        {
-                            "plugin": info.plugin,
-                            "scope": info.scope,
-                            "target": info.target,
-                            "summary": info.summary,
-                            "data": dict(info.data),
-                        }
-                        for info in infos
-                    ],
-                }
-            )
-        )
-        return 0 if infos else 1
-
+def run_spec(session: Session, *, spec: str, offline: bool) -> int:
+    """Print what the plugins say about an external SPEC (`enterprise#12345`, a Runbot URL)."""
+    infos = _collect_plugin_status(session.plugins, ws=None, facts=(), spec=spec, offline=offline)
     if not infos:
-        term.error(f"no plugin could inspect status for target {target!r}")
+        if offline:
+            term.error(f"offline mode prevents inspecting {spec!r}; drop --offline to look it up")
+        else:
+            term.error(f"no plugin could inspect status for {spec!r}")
         return 1
     for info in infos:
-        _line(f"{info.plugin}\t{info.target}\t{info.summary}")
+        term.out(f"{info.plugin}\t{info.subject}\t{info.summary}")
     return 0
 
 
-def _code_workspace_path(multi: stacks.MultiWorkspace) -> str | None:
-    """Locate an existing `.code-workspace` file owned by `multi` (or in `multi.root`)."""
-    for path in refresh.owned_files(multi.root):
-        if path.suffix == ".code-workspace":
-            return str(path)
-    fallback = multi.root / f"{multi.name}.code-workspace"
-    if fallback.exists():
-        return str(fallback)
-    return None
-
-
 def _dedupe_services(infos: Sequence[StatusInfo]) -> list[StatusInfo]:
-    """Keep one StatusInfo per `(plugin, target)` among `scope == 'service'` entries."""
+    """Keep one StatusInfo per `(plugin, subject)` among `scope == 'service'` entries."""
     seen: set[tuple[str, str]] = set()
     result: list[StatusInfo] = []
     for info in infos:
         if info.scope != "service":
             continue
-        key = (info.plugin, info.target)
+        key = (info.plugin, info.subject)
         if key not in seen:
             seen.add(key)
             result.append(info)
@@ -157,81 +92,43 @@ def _stack_note_with_runtime(ws, plugins: Plugins) -> str | None:
     return f"{note} · {running_tag}" if note else running_tag
 
 
-def _run_multi(
+def run_multi(
     plugins: Plugins,
     *,
     multi_root: Path,
-    fetch: bool,
-    offline: bool,
-    json_output: bool,
+    fetch: bool = False,
+    offline: bool = False,
 ) -> int:
-    loaded = stacks.load_multi_workspace(multi_root, plugins)
-    if loaded is None:
-        raise UsageError(f"no valid stacks found in {multi_root}")
-    multi, sessions = loaded
-    eff_plugins = sessions[0].plugins if sessions else plugins
+    """Print every stack of the multi-stack workspace `multi_root`, then its services and plugins."""
+    target = open_target(multi_root, "multi", plugins)
+    multi = target.multi
+    assert multi is not None
+    eff_plugins = target.plugins
 
     exit_code = 0
-    stack_payloads: list[dict[str, Any]] = []
     gathered: list[tuple[Session, tuple[RepoFacts, ...], list[StatusInfo], str | None]] = []
     all_services: list[StatusInfo] = []
 
-    for sess in sessions:
+    for sess in target.sessions:
         assert sess.workspace is not None
         ws = sess.workspace
-        for warning in sess.warnings:
-            term.warn(warning)
-        fetch_failures: list[str] = []
         if fetch:
             _root, facts, failures = fetch_then_gather(sess, (), no_fetch=False, hint=None)
-            fetch_failures = [name for name, err in failures.items() if err is not None]
-            if fetch_failures:
+            if any(err is not None for err in failures.values()):
                 exit_code = 1
         else:
             facts = gather_all(sess.locations)
-        infos = _collect_plugin_status(eff_plugins, ws=ws, facts=facts, target=None, offline=offline)
+        infos = _collect_plugin_status(eff_plugins, ws=ws, facts=facts, spec=None, offline=offline)
         all_services.extend(i for i in infos if i.scope == "service")
         non_service = [i for i in infos if i.scope != "service"]
-        if json_output:
-            stack_payloads.append(
-                _workspace_entry_json(sess, facts, non_service, fetch_failures=fetch_failures)
-            )
-        else:
-            note = _stack_note_with_runtime(ws, eff_plugins)
-            gathered.append((sess, facts, non_service, note))
+        gathered.append((sess, facts, non_service, _stack_note_with_runtime(ws, eff_plugins)))
 
     services = _dedupe_services(all_services)
     external_plugins = eff_plugins.external_plugins
 
-    if json_output:
-        ws_payload: dict[str, Any] = {
-            "name": multi.name,
-            "root": str(multi.root),
-            "multi_stack": True,
-            "code_workspace": _code_workspace_path(multi),
-            "stacks": stack_payloads,
-        }
-        if services:
-            ws_payload["services"] = {
-                svc.plugin: {"summary": svc.summary, "data": dict(svc.data)}
-                for svc in services
-            }
-        if external_plugins:
-            ws_payload["external_plugins"] = [
-                {"name": name, "path": str(path)} for name, path in external_plugins
-            ]
-        term.emit_json(envelope({"workspace": ws_payload}))
-        return exit_code
-
     if sys.stdout.isatty():
         sections = [
-            _build_tty_section(
-                sess.workspace.name,
-                note,
-                sess,
-                facts,
-                non_service,
-            )
+            _build_tty_section(sess.workspace.name, note, sess, facts, non_service)
             for sess, facts, non_service, note in gathered
             if sess.workspace is not None
         ]
@@ -260,17 +157,17 @@ def _collect_plugin_status(
     *,
     ws,
     facts: Sequence[RepoFacts],
-    target: str | None,
+    spec: str | None,
     offline: bool,
 ) -> list[StatusInfo]:
-    catalog = known_repo_catalog(plugins) if target is not None else {}
-    settings = global_settings(plugins) if target is not None else (ws.settings if ws is not None else {})
+    catalog = known_repo_catalog(plugins) if spec is not None else {}
+    settings = global_settings(plugins) if spec is not None else (ws.settings if ws is not None else {})
     infos: list[StatusInfo] = []
     for plugin_name, answer in plugins.call(
         "ow_status",
         ws=ws,
         facts=facts,
-        target=target,
+        spec=spec,
         offline=offline,
         known_repos=catalog,
         settings=settings,
@@ -282,115 +179,6 @@ def _collect_plugin_status(
         if isinstance(answer, list):
             infos.extend(item for item in answer if isinstance(item, StatusInfo))
     return infos
-
-
-def _workspace_entry_json(
-    session: Session,
-    facts: Sequence[RepoFacts],
-    infos: Sequence[StatusInfo],
-    *,
-    fetch_failures: Sequence[str] = (),
-) -> dict[str, Any]:
-    assert session.workspace is not None
-    ws = session.workspace
-    base_counts_cache = _compute_base_counts_parallel(facts)
-    repo_plugins: dict[str, dict[str, Any]] = {}
-    ws_plugins: dict[str, Any] = {}
-    for info in infos:
-        if info.scope == "repo":
-            repo_plugins.setdefault(info.target, {})[info.plugin] = {
-                "summary": info.summary,
-                "data": dict(info.data),
-            }
-        else:
-            ws_plugins[info.plugin] = {
-                "summary": info.summary,
-                "data": dict(info.data),
-            }
-
-    repos_data = []
-    for i, f in enumerate(facts):
-        entry: dict[str, Any] = {
-            "name": f.name,
-            "path": str(f.path),
-            "branch": f.branch,
-            "head": f.head,
-            "base": f.base,
-            "upstream": f.upstream,
-            "upstream_ab": list(f.upstream_ab) if f.upstream_ab is not None else None,
-            "base_counts": base_counts_cache.get(i, "(?)"),
-            "modified": list(f.modified),
-            "untracked": list(f.untracked),
-            "dirty": bool(f.modified or f.untracked),
-            "operation": f.operation,
-            "problem": f.problem,
-        }
-        if f.name in repo_plugins:
-            entry["plugins"] = repo_plugins[f.name]
-        repos_data.append(entry)
-
-    out: dict[str, Any] = {
-        "name": ws.name,
-        "root": str(ws.root),
-        "is_stack": ws.is_stack,
-        "ports": dict(stack_info(ws, session.plugins).ports),
-        "repos": repos_data,
-        "diagnostics": [
-            {"plugin": p, "level": d.level, "text": d.text}
-            for p, d in session.diagnostics
-        ],
-    }
-    if fetch_failures:
-        out["fetch_failures"] = list(fetch_failures)
-    proc = runtime.running_for_workspace(ws)
-    if proc is not None:
-        out["running"] = {"pid": proc.pid, "log": str(proc.log_path), "started_at": proc.started_at}
-    if ws_plugins:
-        out["plugins"] = ws_plugins
-    return out
-
-
-def _workspace_json(
-    session: Session,
-    facts: Sequence[RepoFacts],
-    infos: Sequence[StatusInfo],
-    plugins: Plugins,
-    *,
-    fetch_failures: Sequence[str] = (),
-) -> dict[str, Any]:
-    assert session.workspace is not None
-    ws = session.workspace
-    ws_entry = _workspace_entry_json(session, facts, infos, fetch_failures=fetch_failures)
-    if plugins.external_plugins:
-        ws_entry["external_plugins"] = [
-            {"name": name, "path": str(path)} for name, path in plugins.external_plugins
-        ]
-    payload: dict[str, Any] = {"workspace": ws_entry}
-    if ws.is_stack:
-        parent_root = stacks.parent_multi_workspace(ws.root)
-        if parent_root is not None:
-            loaded = stacks.load_multi_workspace(parent_root, plugins)
-            if loaded is not None:
-                multi = loaded[0]
-                payload["parent_workspace"] = {
-                    "name": multi.name,
-                    "root": str(multi.root),
-                    "code_workspace": _code_workspace_path(multi),
-                    "siblings": [
-                        {
-                            "name": sibling.name,
-                            "root": str(sibling.root),
-                            "ports": dict(stack_info(sibling, plugins).ports),
-                            "repos": [
-                                {"name": r.name, "branch": r.branch, "base": r.base}
-                                for r in sibling.repos
-                            ],
-                        }
-                        for sibling in multi.stacks
-                        if sibling.root != ws.root
-                    ],
-                }
-    return payload
 
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -432,18 +220,31 @@ class _TtySection:
     diagnostics: tuple[tuple[str, str], ...]
 
 
+def _arrows(ahead: int, behind: int) -> str:
+    """`↑2 ↓1` in green and yellow, omitting a zero side."""
+    parts: list[str] = []
+    if ahead:
+        parts.append(_ansi(f"↑{ahead}", "32"))
+    if behind:
+        parts.append(_ansi(f"↓{behind}", "33"))
+    return " ".join(parts)
+
+
+def _external_by_repo(infos: Sequence[StatusInfo]) -> dict[str, list[str]]:
+    """The `scope == 'repo'` summaries, grouped by repo name."""
+    result: dict[str, list[str]] = {}
+    for info in infos:
+        if info.scope == "repo":
+            result.setdefault(info.subject, []).append(info.summary)
+    return result
+
+
 def _format_tty_delta(raw: str) -> str:
     if raw == "(even)":
         return _ansi("=", "2")
     match = _AHEAD_BEHIND_RE.match(raw)
     if match:
-        ahead, behind = int(match.group(1)), int(match.group(2))
-        parts: list[str] = []
-        if ahead:
-            parts.append(_ansi(f"↑{ahead}", "32"))
-        if behind:
-            parts.append(_ansi(f"↓{behind}", "33"))
-        return " ".join(parts) if parts else _ansi("=", "2")
+        return _arrows(int(match.group(1)), int(match.group(2))) or _ansi("=", "2")
     if raw == "(?)":
         return _ansi("?", "2")
     return _ansi(raw, "2")
@@ -455,14 +256,8 @@ def _format_tty_upstream(facts: RepoFacts) -> str:
         return ""
     if facts.upstream_ab is None:
         return _ansi(upstream, "36")
-    ahead, behind = facts.upstream_ab
-    parts: list[str] = []
-    if ahead:
-        parts.append(_ansi(f"↑{ahead}", "32"))
-    if behind:
-        parts.append(_ansi(f"↓{behind}", "33"))
-    suffix = f" {' '.join(parts)}" if parts else ""
-    return f"{_ansi(upstream, '36')}{suffix}"
+    suffix = _arrows(*facts.upstream_ab)
+    return f"{_ansi(upstream, '36')} {suffix}" if suffix else _ansi(upstream, "36")
 
 
 def _format_tty_external(entries: Sequence[str]) -> str:
@@ -508,17 +303,12 @@ def _build_tty_section(
     facts: Sequence[RepoFacts],
     infos: Sequence[StatusInfo],
 ) -> _TtySection:
-    base_counts_cache = _compute_base_counts_parallel(facts)
-    extra_by_repo: dict[str, list[str]] = {}
-    ws_notes: list[StatusInfo] = []
-    for info in infos:
-        if info.scope == "repo":
-            extra_by_repo.setdefault(info.target, []).append(info.summary)
-        elif info.scope != "service":
-            ws_notes.append(info)
+    counts = _compute_base_counts_parallel(facts)
+    external = _external_by_repo(infos)
+    ws_notes = [info for info in infos if info.scope not in ("repo", "service")]
 
     rows: list[dict[str, str]] = []
-    for i, f in enumerate(facts):
+    for f, delta in zip(facts, counts, strict=True):
         if f.problem:
             state_cell = _ansi(f"({f.problem} worktree)", "31")
         elif f.branch:
@@ -542,10 +332,10 @@ def _build_tty_section(
                 "state": state_cell,
                 "base": base_cell,
                 "upstream": _format_tty_upstream(f),
-                "delta": _format_tty_delta(base_counts_cache.get(i, "(?)")),
+                "delta": _format_tty_delta(delta),
                 "dirty": _ansi(f"{dirty_count} dirty", "33") if dirty_count else "",
                 "operation": _ansi(f.operation, "31") if f.operation else "",
-                "external": _format_tty_external(extra_by_repo.get(f.name, ())),
+                "external": _format_tty_external(external.get(f.name, ())),
             }
         )
 
@@ -585,18 +375,18 @@ def _print_tty_sections(
     first_block = True
     if header is not None:
         name, path_display = header
-        _line(f"{_ansi(name, '1')}  {_ansi(path_display, '2')}")
+        term.out(f"{_ansi(name, '1')}  {_ansi(path_display, '2')}")
         first_block = False
 
     for sec in sections:
         if not first_block:
-            _line("")
+            term.out("")
         first_block = False
         if sec.title:
             title_line = _ansi(sec.title, "1")
             if sec.note:
                 title_line += f"  {_ansi(sec.note, '2')}"
-            _line(title_line)
+            term.out(title_line)
         indent = "  " if sec.title else ""
         for row in sec.rows:
             last_non_empty = len(columns) - 1
@@ -606,32 +396,30 @@ def _print_tty_sections(
             for idx in range(last_non_empty + 1):
                 val = row.get(columns[idx], "")
                 parts.append(_pad(val, widths[columns[idx]]) if idx < last_non_empty else val)
-            _line(f"{indent}{'  '.join(parts)}")
+            term.out(f"{indent}{'  '.join(parts)}")
         for info in sec.notes:
-            _line(
-                f"{indent}{_ansi(info.plugin + ':', '2')} {_format_tty_note_summary(info.summary)}"
-            )
+            term.out(f"{indent}{_ansi(info.plugin + ':', '2')} {_format_tty_note_summary(info.summary)}")
         for plugin, text in sec.diagnostics:
-            _line(f"{indent}{_ansi(plugin + ':', '2')} {text}")
+            term.out(f"{indent}{_ansi(plugin + ':', '2')} {text}")
 
     if services:
         if not first_block:
-            _line("")
+            term.out("")
         first_block = False
-        _line(_ansi("services", "1"))
+        term.out(_ansi("services", "1"))
         svc_width = max(len(svc.plugin) for svc in services)
         for svc in services:
             label = _ansi(svc.plugin.ljust(svc_width), "36")
-            _line(f"  {label}  {svc.summary}")
+            term.out(f"  {label}  {svc.summary}")
 
     if external_plugins:
         if not first_block:
-            _line("")
-        _line(_ansi("plugins", "1"))
+            term.out("")
+        term.out(_ansi("plugins", "1"))
         plug_width = max(len(name) for name, _p in external_plugins)
         for name, path in external_plugins:
             label = _ansi(name.ljust(plug_width), "36")
-            _line(f"  {label}  {_ansi(_display_path(path), '2')}")
+            term.out(f"  {label}  {_ansi(_display_path(path), '2')}")
 
 
 def print_table(
@@ -653,15 +441,10 @@ def print_table(
         _print_tty_sections([section], services, external_plugins=external_plugins)
         return
 
-    base_counts_cache = _compute_base_counts_parallel(facts)
-    extra_by_repo: dict[str, list[str]] = {}
-    for info in infos:
-        if info.scope == "repo":
-            extra_by_repo.setdefault(info.target, []).append(info.summary)
-
-    rows = [_row(f, base_counts_cache, i, extra_by_repo.get(f.name, ())) for i, f in enumerate(facts)]
-    for row in rows:
-        _line(row)
+    counts = _compute_base_counts_parallel(facts)
+    external = _external_by_repo(infos)
+    for f, delta in zip(facts, counts, strict=True):
+        term.out(_row(f, delta, external.get(f.name, ())))
 
     if session.workspace is not None:
         proc = runtime.running_for_workspace(session.workspace)
@@ -680,22 +463,10 @@ def print_table(
         term.out(f"# plugin: {name} ({_display_path(path)})")
 
 
-def _compute_base_counts_parallel(facts: Sequence[RepoFacts]) -> dict[int, str]:
-    """Compute base counts for all repos in parallel using ThreadPoolExecutor."""
-    cache_map: dict[int, str] = {}
-    if not facts:
-        return cache_map
-
+def _compute_base_counts_parallel(facts: Sequence[RepoFacts]) -> list[str]:
+    """The base counts of every repo, computed in parallel, in order."""
     with ThreadPoolExecutor() as executor:
-        futures = {
-            executor.submit(_compute_base_counts_for_fact, fact): i
-            for i, fact in enumerate(facts)
-        }
-        for future in futures:
-            i = futures[future]
-            cache_map[i] = future.result()
-
-    return cache_map
+        return list(executor.map(_compute_base_counts_for_fact, facts))
 
 
 def _compute_base_counts_for_fact(facts: RepoFacts) -> str:
@@ -729,47 +500,9 @@ def _compute_base_counts_for_fact(facts: RepoFacts) -> str:
     return f"ahead {ahead}, behind {behind}"
 
 
-def _print_aligned(headers: Sequence[str], rows: Sequence[str]) -> None:
-    """Print aligned columns for TTY output."""
-    if not rows:
-        return
-
-    parsed_rows = [row.split("\t") for row in rows]
-    col_widths = []
-    for i in range(len(headers)):
-        max_width = len(headers[i])
-        for parsed_row in parsed_rows:
-            if i < len(parsed_row):
-                max_width = max(max_width, len(parsed_row[i]))
-        col_widths.append(max_width)
-
-    header_line = "  ".join(headers[i].ljust(col_widths[i]) for i in range(len(headers)))
-    _line(header_line)
-
-    for parsed_row in parsed_rows:
-        padded_fields = []
-        for i, field_val in enumerate(parsed_row):
-            if i < len(col_widths) - 1:
-                padded_fields.append(field_val.ljust(col_widths[i]))
-            else:
-                padded_fields.append(field_val)
-        _line("  ".join(padded_fields))
-
-
-def _row(
-    facts: RepoFacts,
-    base_counts_cache: dict[int, str],
-    index: int,
-    external: Sequence[str] = (),
-) -> str:
+def _row(facts: RepoFacts, delta: str, external: Sequence[str] = ()) -> str:
     """One repo's fields, tab-separated."""
-    fields = [
-        facts.name,
-        _state(facts),
-        _base(facts),
-        _upstream(facts),
-        base_counts_cache.get(index, "(??)"),
-    ]
+    fields = [facts.name, _state(facts), _base(facts), _upstream(facts), delta]
     dirty = len(facts.modified) + len(facts.untracked)
     has_ext = bool(external)
     if dirty:
@@ -811,7 +544,3 @@ def _upstream(facts: RepoFacts) -> str:
         return upstream
     ahead, behind = facts.upstream_ab
     return f"{upstream} (ahead {ahead}, behind {behind})"
-
-
-def _line(text: str) -> None:
-    sys.stdout.write(f"{text}\n")

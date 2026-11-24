@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING
 
 import pytest
 from pytest import MonkeyPatch
@@ -15,7 +16,7 @@ from ow.core.index import add as index_add
 from ow.core.paths import index_file, repos_dir
 from ow.core.plugins import GeneratedFile, load_plugins
 from ow.core.workspace import Repo, Workspace
-from tests.lab import file_url, git, git_ok
+from tests.lab import file_url, git, git_ok  # noqa: F401  (re-exported to the tests)
 
 if TYPE_CHECKING:
     from tests.lab import Lab
@@ -94,6 +95,7 @@ def hermetic(tmp_path: Path, monkeypatch: MonkeyPatch) -> Iterator[None]:
 
     # Keep Runbot completely offline/hermetic unless a test calls `lab.fake_runbot(...)`.
     import urllib.error
+
     from ow.plugins import runbot as runbot_plugin
 
     def _blocked_urlopen(req, timeout=8):
@@ -230,6 +232,24 @@ def add_repo(
     return remote
 
 
+def setup_pr_repo(
+    lab: Lab,
+    name: str,
+    base: str,
+    base_files: dict[str, str],
+    pr_num: int,
+    pr_branch: str,
+    pr_files: dict[str, str],
+) -> Path:
+    """The `name` remote on `base`, registered, with PR `pr_num` published from `pr_branch`."""
+    remote = add_repo(lab, name, {base: base_files}, base=base)
+    collab = lab.collaborator(f"author-{name}-{pr_num}", of=remote)
+    collab.commit(pr_files, message=f"PR #{pr_num}", branch=pr_branch)
+    collab.push(pr_branch)
+    lab.publish_pr(remote, pr_num, pr_branch)
+    return remote
+
+
 def init_workspace(
     lab: Lab,
     *names: str,
@@ -282,13 +302,19 @@ def resolved_workspace(
     """A workspace whose settings come from `resolve_settings` over empty layers."""
     declared = {setting.key: setting for setting in load_plugins().settings()}
     empty = Workspace(root=root, name=root.name, repos=repos, settings=MappingProxyType({}))
-    values, _ = resolve_settings(
+    values, origins = resolve_settings(
         declared,
         Layer(values={}, unknown={}, wrong_type=()),
         Layer(values=dict(overrides or {}), unknown={}, wrong_type=()),
         empty,
     )
-    return Workspace(root=root, name=root.name, repos=repos, settings=MappingProxyType(values))
+    return Workspace(
+        root=root,
+        name=root.name,
+        repos=repos,
+        settings=MappingProxyType(values),
+        origins=MappingProxyType({k: v for k, v in origins.items() if v != "default"}),
+    )
 
 
 def files_of(result: list) -> list[GeneratedFile]:

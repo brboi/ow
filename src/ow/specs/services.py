@@ -17,19 +17,28 @@ if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class DatabaseService:
-    """Database connection details contributed by a database plugin."""
+    """Database connection details contributed by a database plugin.
+
+    `user`/`password` is the role applications connect with (not a superuser).
+    `admin_user`/`admin_password` is the superuser, for plugins that need to create
+    roles or databases; do not assume its password equals `password`.
+    Both default to empty when a provider has no superuser to expose.
+    `web_url` is the database's web UI (e.g. pgweb), when one runs.
+    """
 
     host: str
     port: int
     user: str
     password: str
-    admin_url: str | None = None
+    web_url: str | None = None
     drop: Callable[[str], None] | None = None
+    admin_user: str = ""
+    admin_password: str = ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class SmtpService:
     """SMTP server details contributed by a mail-capture plugin."""
 

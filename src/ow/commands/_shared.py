@@ -10,7 +10,7 @@ import tomli_w
 
 from ow import term
 from ow.core.git import remotes_of
-from ow.core.plan import Batch, GitStep, RepoPlan, Step, run_batch
+from ow.core.plan import Batch, RepoPlan, Step, run_batch
 from ow.core.refresh import refresh_after, refresh_workspace
 from ow.errors import PluginError
 
@@ -30,7 +30,7 @@ __all__ = [
 ]
 
 
-def prepare_services(workspaces: Sequence["Workspace"], plugins: "Plugins") -> None:
+def prepare_services(workspaces: Sequence[Workspace], plugins: Plugins) -> None:
     """Invoke `ow_before_run` once across enabled plugins; failures warn without blocking."""
     if not workspaces:
         return
@@ -49,9 +49,9 @@ def prepare_services(workspaces: Sequence["Workspace"], plugins: "Plugins") -> N
                     term.out(f"# {line}")
 
 
-def known_repo_catalog(plugins: "Plugins", ws: "Workspace | None" = None) -> dict[str, "KnownRepo"]:
+def known_repo_catalog(plugins: Plugins, ws: Workspace | None = None) -> dict[str, KnownRepo]:
     """Canonical repo name -> KnownRepo from every `ow_known_repos` answer of plugins enabled for `ws`."""
-    catalog: dict[str, "KnownRepo"] = {}
+    catalog: dict[str, KnownRepo] = {}
     for _plugin, answer in plugins.call("ow_known_repos", ws=ws):
         for repo in answer or ():
             catalog[repo.name] = repo
@@ -75,12 +75,12 @@ def print_dropped(dropped: Mapping[str, object]) -> None:
         term.warn(f"dropped {key} = {render_value(value)}")
 
 
-def run_steps(name: str, steps: Sequence[Step], root: Path | None = None) -> int:
-    """Print each step as it runs, one after the other; 1 when one failed."""
+def run_steps(name: str, steps: Sequence[Step], root: Path | None = None, *, dry_run: bool = False) -> int:
+    """Print each step as it runs (or, with `dry_run`, only as planned), one after the other; 1 when one failed."""
     outcome = run_batch(
         Batch(root=root, repos=(RepoPlan(repo=name, steps=tuple(steps)),)),
         prompt=False,
-        dry_run=False,
+        dry_run=dry_run,
         yes=True,
     )
     return outcome.exit_code

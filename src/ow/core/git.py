@@ -8,8 +8,8 @@ import re
 import shlex
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from ow import term
 from ow.errors import OwError, UsageError
@@ -112,7 +112,7 @@ def check_version() -> None:
     # Examples: "git version 2.45.4", "2.39.5 (Apple Git-154)", "2.45.0.windows.1"
     match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", output)
     if not match:
-        raise UsageError(f"Could not parse git version: {output}")
+        raise UsageError(f"could not parse git version: {output}")
 
     major = int(match.group(1))
     minor = int(match.group(2))

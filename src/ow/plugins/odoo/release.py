@@ -166,10 +166,7 @@ def get_core(ws: Workspace) -> tuple[Repo | None, list[Diagnostic]]:
     if len(cores) > 1:
         names = ", ".join(repo.name for repo in cores)
         return None, [
-            Diagnostic(
-                "warning",
-                f"Multiple Odoo cores found: {names}; keep exactly one and remove the rest",
-            )
+            Diagnostic(level="warning", text=f"Multiple Odoo cores found: {names}; keep exactly one and remove the rest")
         ]
 
     if not cores:
@@ -178,18 +175,12 @@ def get_core(ws: Workspace) -> tuple[Repo | None, list[Diagnostic]]:
     core = cores[0]
     if read_python_bounds(core.path) is None:
         return None, [
-            Diagnostic(
-                "warning",
-                f"{core.name}: cannot read Python version bounds from odoo/release.py;"
-                " restore or fix the file",
-            )
+            Diagnostic(level="warning", text=f"{core.name}: cannot read Python version bounds from odoo/release.py;"
+            " restore or fix the file")
         ]
     if read_demo_capability(core.path) is None:
         return None, [
-            Diagnostic(
-                "warning",
-                f"{core.name}: cannot parse odoo/tools/config.py; restore or fix the file",
-            )
+            Diagnostic(level="warning", text=f"{core.name}: cannot parse odoo/tools/config.py; restore or fix the file")
         ]
 
     return core, []

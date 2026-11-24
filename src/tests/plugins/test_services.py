@@ -3,111 +3,31 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 from pathlib import Path
 
+from ow.core import paths
 from ow.core.workspace import Workspace
 from ow.plugins import _containers as containers
 from ow.plugins import mailsink, postgres
 from tests.conftest import add_repo, init_workspace
-
-
-def _make_fake_engine(
-    monkeypatch,
-    *,
-    running: dict[str, dict[int, int]] | None = None,
-    running_ips: dict[str, dict[int, str]] | None = None,
-    stopped: set[str] | None = None,
-):
-    """Stub container CLI calls in `_containers` and record every command run."""
-    running_map = dict(running or {})
-    ip_map = {k: dict(v) for k, v in (running_ips or {}).items()}
-    stopped_set = set(stopped or set())
-    networks: set[str] = set()
-    calls: list[list[str]] = []
-
-    monkeypatch.setattr(containers, "detect_engine", lambda: "docker")
-    containers.engine_ready.cache_clear()
-    monkeypatch.setattr(containers, "engine_ready", lambda engine: True)
-    monkeypatch.setattr(containers, "wait_for_tcp", lambda host, port, timeout=15.0: True)
-    monkeypatch.setattr(containers, "wait_for_exec", lambda engine, name, cmd, timeout=30.0: True)
-
-    real_run = subprocess.run
-
-    def fake_run(argv, **kwargs):
-        if not argv or argv[0] not in ("docker", "podman"):
-            return real_run(argv, **kwargs)
-        calls.append(list(argv))
-        cmd = argv[1:]
-        if cmd[:2] == ["network", "inspect"]:
-            rc = 0 if cmd[2] in networks else 1
-            return subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
-        if cmd[:2] == ["network", "create"]:
-            networks.add(cmd[2])
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        if cmd[0] == "inspect":
-            name = cmd[1]
-            if name in running_map:
-                default_ip = "0.0.0.0" if name == "ow-postgres" else "127.0.0.1"
-                ports = {
-                    f"{c}/tcp": [{"HostIp": ip_map.get(name, {}).get(c, default_ip), "HostPort": str(h)}]
-                    for c, h in running_map[name].items()
-                }
-                payload = [{"State": {"Running": True}, "NetworkSettings": {"Ports": ports}}]
-                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
-            if name in stopped_set:
-                payload = [{"State": {"Running": False}, "NetworkSettings": {"Ports": {}}}]
-                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
-            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such object")
-        if cmd[0] == "start":
-            name = cmd[1]
-            stopped_set.discard(name)
-            running_map.setdefault(name, {})
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        if cmd[0] == "stop":
-            name = cmd[1]
-            if name in running_map:
-                stopped_set.add(name)
-                running_map.pop(name, None)
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        if cmd[0] == "rm":
-            name = cmd[1]
-            running_map.pop(name, None)
-            ip_map.pop(name, None)
-            stopped_set.discard(name)
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        if cmd[0] == "run":
-            name = cmd[cmd.index("--name") + 1]
-            ports: dict[int, int] = {}
-            ips: dict[int, str] = {}
-            for i, tok in enumerate(cmd):
-                if tok == "-p" and i + 1 < len(cmd):
-                    parts = cmd[i + 1].split(":")
-                    host_p, cont_p = int(parts[-2]), int(parts[-1])
-                    ports[cont_p] = host_p
-                    ips[cont_p] = parts[0] if len(parts) == 3 else "0.0.0.0"
-            running_map[name] = ports
-            ip_map[name] = ips
-            return subprocess.CompletedProcess(argv, 0, stdout="cid\n", stderr="")
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(containers.subprocess, "run", fake_run)
-    return calls, running_map
+from tests.lab import make_fake_engine
 
 
 def test_postgres_auto_port_falls_back_to_5433_when_5432_is_busy(monkeypatch):
-    _make_fake_engine(monkeypatch)
+    make_fake_engine(monkeypatch)
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": port != 5432)
 
     ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={"postgres.port": 0})
     svc = postgres.database_service(ws)
     assert svc is not None
     assert svc.port == 5433
-    assert svc.admin_url == "http://localhost:8081"
+    assert svc.web_url == "http://localhost:8081"
 
 
 def test_postgres_before_run_creates_network_postgres_and_pgweb(monkeypatch):
-    calls, running = _make_fake_engine(monkeypatch)
+    calls, running = make_fake_engine(monkeypatch)
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
 
     ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={})
@@ -126,7 +46,7 @@ def test_postgres_before_run_creates_network_postgres_and_pgweb(monkeypatch):
 
 
 def test_postgres_before_run_migrates_legacy_superuser_odoo_role(monkeypatch):
-    calls, _running = _make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
+    calls, _running = make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
 
     migrated = False
@@ -170,7 +90,7 @@ def test_postgres_before_run_migrates_legacy_superuser_odoo_role(monkeypatch):
 
 
 def test_postgres_respects_pgweb_disabled(monkeypatch):
-    _calls, running = _make_fake_engine(monkeypatch)
+    _calls, running = make_fake_engine(monkeypatch)
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
 
     ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={"postgres.pgweb": False})
@@ -181,7 +101,7 @@ def test_postgres_respects_pgweb_disabled(monkeypatch):
 
 
 def test_mailsink_before_run_and_status(monkeypatch):
-    _calls, running = _make_fake_engine(monkeypatch)
+    _calls, running = make_fake_engine(monkeypatch)
     ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={})
 
     notes = mailsink.ow_before_run(ws, (ws,))
@@ -195,7 +115,7 @@ def test_mailsink_before_run_and_status(monkeypatch):
 
 
 def test_odoorc_picks_up_postgres_and_mailsink_ports_unless_overridden(lab, monkeypatch):
-    _make_fake_engine(monkeypatch)
+    make_fake_engine(monkeypatch)
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": port != 5432)
 
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
@@ -210,6 +130,12 @@ def test_odoorc_picks_up_postgres_and_mailsink_ports_unless_overridden(lab, monk
     odoorc2 = (ws / "odoorc").read_text()
     assert "db_port = 5499" in odoorc2
     assert "smtp_port = 1025" in odoorc2
+
+    # An explicit value equal to the default is still explicit: it wins over the service.
+    assert lab.ow("config", "set", "odoo.db_port", "5432", cwd=ws).exit_code == 0
+    odoorc3 = (ws / "odoorc").read_text()
+    assert "db_port = 5432" in odoorc3
+    assert "smtp_port = 1025" in odoorc3
 
 
 def test_before_run_warns_without_blocking_when_engine_missing(monkeypatch, capsys):
@@ -292,11 +218,9 @@ def test_stopped_postgres_container_recreated_on_fallback_port_when_5432_is_busy
 
 def test_running_postgres_container_recreated_when_bind_address_changes(monkeypatch):
     """When running `ow-postgres` is bound to 127.0.0.1, switching to 0.0.0.0 stops, removes, and recreates it."""
-    calls, running = _make_fake_engine(
-        monkeypatch,
-        running={"ow-postgres": {5432: 5433}},
-        running_ips={"ow-postgres": {5432: "127.0.0.1"}},
-    )
+    calls, running = make_fake_engine(monkeypatch,
+    running={"ow-postgres": {5432: 5433}},
+    running_ips={"ow-postgres": {5432: "127.0.0.1"}},)
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": port != 5432)
 
     ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={"postgres.pgweb": False})
@@ -308,3 +232,83 @@ def test_running_postgres_container_recreated_when_bind_address_changes(monkeypa
     assert "0.0.0.0:5433:5432" in pg_run
     assert "ow-postgres-data:/var/lib/postgresql/data" in pg_run
     assert running["ow-postgres"] == {5432: 5433}
+
+
+def _state_password() -> str:
+    return paths.postgres_admin_password_file().read_text(encoding="utf-8").strip()
+
+
+def test_new_postgres_container_gets_random_superuser_password_from_state(monkeypatch):
+    calls, _running = make_fake_engine(monkeypatch)
+    monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
+    ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={"postgres.pgweb": False})
+
+    postgres.ow_before_run(ws, (ws,))
+
+    state_file = paths.postgres_admin_password_file()
+    secret = _state_password()
+    assert len(secret) >= 32
+    assert secret != "odoo"
+    assert stat.S_IMODE(state_file.stat().st_mode) == 0o600
+    pg_run = next(c for c in calls if c[:2] == ["docker", "run"] and "ow-postgres" in c)
+    assert f"POSTGRES_PASSWORD={secret}" in pg_run
+    # The password is generated once: a later start reuses it.
+    postgres.ow_before_run(ws, (ws,))
+    assert _state_password() == secret
+
+
+def test_existing_postgres_container_gets_alter_role_with_state_password(monkeypatch):
+    calls, _running = make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
+    monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
+    ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={"postgres.pgweb": False})
+
+    postgres.ow_before_run(ws, (ws,))
+
+    secret = _state_password()
+    assert not any(c[:2] == ["docker", "run"] and "ow-postgres" in c for c in calls)
+    alters = [
+        c
+        for c in calls
+        if c[:3] == ["docker", "exec", "ow-postgres"]
+        and c[c.index("-U") + 1] == "postgres"
+        and c[-1] == f"ALTER ROLE \"postgres\" WITH PASSWORD '{secret}';"
+    ]
+    assert len(alters) == 1
+    # The Odoo role keeps `postgres.password`.
+    assert any("CREATE ROLE \"odoo\"" in c[-1] and "PASSWORD 'odoo'" in c[-1] for c in calls if "psql" in c)
+
+
+def test_database_service_exposes_admin_credentials(monkeypatch):
+    make_fake_engine(monkeypatch)
+    monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
+    ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={"postgres.password": "role-pw"})
+
+    svc = postgres.database_service(ws)
+
+    assert svc is not None
+    assert (svc.user, svc.password) == ("odoo", "role-pw")
+    assert svc.admin_user == "postgres"
+    assert svc.admin_password == _state_password()
+    assert svc.admin_password != svc.password
+
+
+def test_detect_container_engine_names_the_engine_even_when_configured_with_a_path(monkeypatch, tmp_path):
+    fake = tmp_path / "engines" / "podman"
+    fake.parent.mkdir()
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("OW_CONTAINER_ENGINE", str(fake))
+
+    # The binary to invoke stays the configured one; the public name is `podman`.
+    assert containers.detect_engine() == str(fake)
+    assert containers.detect_container_engine() == "podman"
+
+    monkeypatch.setenv("OW_CONTAINER_ENGINE", "not-installed-anywhere")
+    assert containers.detect_engine() is None
+    assert containers.detect_container_engine() is None
+
+
+def test_plugin_api_exposes_the_normalized_engine_name():
+    from ow import plugin_api
+
+    assert plugin_api.detect_container_engine is containers.detect_container_engine

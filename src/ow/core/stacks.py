@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import re
-import tomllib
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,7 +43,7 @@ def validate_name(name: str, *, kind: str = "stack") -> str:
     return cleaned
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class MultiWorkspace:
     """A multi-stack workspace whose direct subdirectories are named stacks."""
 
@@ -65,10 +64,6 @@ def is_stack_dir(path: Path) -> bool:
         return False
 
 
-# Alias kept for concise readability
-is_stack_config = is_stack_dir
-
-
 def detect_multi_workspace(path: Path) -> tuple[Path, ...] | None:
     """Return sorted child stack paths if `path` is a multi-stack workspace root, else None.
 
@@ -79,10 +74,7 @@ def detect_multi_workspace(path: Path) -> tuple[Path, ...] | None:
         resolved = path.resolve()
         if not resolved.is_dir():
             return None
-        cfg = resolved / ".ow" / "config.toml"
-        if not config.is_multi_config(cfg):
-            return None
-        names = config.stack_names_in_config(cfg)
+        names = config.stack_names_in_config(resolved / ".ow" / "config.toml")
         stacks = [
             (resolved / name).resolve()
             for name in names
@@ -183,11 +175,13 @@ def workspace_flock(root: Path) -> Iterator[None]:
 
 def project_multi_workspace_files(multi: MultiWorkspace, plugins: Plugins) -> refresh.Projection:
     """Inspect the multi-stack root's generated files (e.g. `<name>.code-workspace`) against `<root>/.ow/rendered.lock.toml`."""
-    answers = plugins.answers(multi.stacks[0]) if multi.stacks else (lambda _hook: [])
-    files_by_plugin, extra_diags = refresh.collect_contributions(
-        "ow_multi_workspace_files",
-        plugins.call("ow_multi_workspace_files", multi=multi, answers=answers),
+    # `answers` is bound to the first stack (see `CoreSpec.ow_multi_workspace_files`); with no stack there is nothing to bind and no plugin is asked.
+    answered = (
+        plugins.call("ow_multi_workspace_files", multi=multi, answers=plugins.answers(multi.stacks[0]))
+        if multi.stacks
+        else []
     )
+    files_by_plugin, extra_diags = refresh.collect_contributions("ow_multi_workspace_files", answered)
     files, diagnostics = refresh.flatten_contributions(plugins, {}, files_by_plugin, extra_diags)
     stack_prefixes = tuple(f"{s.name}/" for s in multi.stacks)
     return refresh.project_files(

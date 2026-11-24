@@ -6,7 +6,6 @@ import json
 import tomllib
 
 from ow.core.paths import venvs_dir
-from ow.core.plugins import load_plugins
 from ow.core.refresh import read_lock
 from tests.conftest import add_repo
 
@@ -120,20 +119,6 @@ def test_multi_stack_refresh_never_deletes_a_file_no_plugin_produces_any_more(la
     assert "a/odoorc" in read_lock(ws_dir)
 
 
-def test_to_json_value_serializes_workspace_with_mapping_proxy(lab):
-    from ow.core.json_schema import to_json_value
-    from ow.core.session import open_session
-
-    add_repo(lab, "community", {"18.0": lab.odoo_files()})
-    ws_dir = lab.home / "ws-json"
-    ws_dir.mkdir(parents=True)
-    assert lab.ow("init", "community@18.0", cwd=ws_dir).exit_code == 0
-    sess = open_session(str(ws_dir), need_workspace=True, plugins=load_plugins())
-    serialized = to_json_value(sess.workspace)
-    assert serialized["name"] == "ws-json"
-    assert isinstance(serialized["settings"], dict)
-
-
 GLOBAL_PORTS = {"odoo.http_port": 8069, "odoo.gevent_port": 8072}
 
 
@@ -217,13 +202,6 @@ def test_files_command_inspects_multi_stack_root(lab):
     ls_res = lab.ow("files", cwd=ws_dir)
     assert ls_res.exit_code == 0, ls_res.stderr
     assert ls_res.stdout.splitlines() == ["files-multi.code-workspace\tup to date"]
-
-    json_res = lab.ow("files", "--json", cwd=ws_dir)
-    assert json_res.exit_code == 0, json_res.stderr
-    payload = json.loads(json_res.stdout)
-    assert payload["multi_stack"] is True
-    assert payload["files"][0]["path"] == "files-multi.code-workspace"
-    assert payload["files"][0]["state"] == "up to date"
 
     code_ws = ws_dir / "files-multi.code-workspace"
     code_ws.write_text('{"folders": []}\n')

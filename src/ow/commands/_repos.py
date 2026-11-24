@@ -46,11 +46,6 @@ def origin_head(bare: Path) -> str | None:
     return None
 
 
-def parse_base_for(value: str, name: str) -> str:
-    """`parse_base` a value, with `name`'s bare remotes as the known set."""
-    return bases.parse_base_for(value, name)
-
-
 def resolve_base(
     name: str,
     base: str | None,
@@ -63,7 +58,7 @@ def resolve_base(
         return origin_has(bare, branch)
 
     if base is not None:
-        return parse_base_for(base, name), "--base"
+        return bases.parse_base_for(base, name), "--base"
     inferred = bases.infer_default_base(others, has, origin_head(bare))
     if inferred is None:
         raise UsageError(f"no default base for {name}; pass --base")
@@ -73,7 +68,7 @@ def resolve_base(
 def base_for(name: str, base: str | None, recorded: str | None, others: Mapping[str, str]) -> str:
     """The base to add `name` at: `--base`, its recorded value, or the inferred default."""
     if base is not None:
-        return parse_base_for(base, name)
+        return bases.parse_base_for(base, name)
     if recorded is not None:
         return recorded
     resolved, source = resolve_base(name, None, others)

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath
-
 import tomllib
+from pathlib import Path, PurePosixPath
 
 from ow.plugins import mise
 from ow.specs.python_env import PythonEnvironment as MiseEnvironment
 from tests.conftest import diagnostics_of, files_of, resolved_workspace
+from tests.lab import make_executable
 
 _FRAGMENT = "mise/conf.d/00-ow.toml"
 
@@ -141,7 +141,7 @@ def _fake_mise(tmp_path: Path, version: str) -> tuple[Path, Path]:
         f'echo "$@" >> "{log}"\n'
         f'if [ "$1" = "--version" ]; then echo "{version}"; fi\n'
     )
-    script.chmod(0o755)
+    make_executable(script)
     return script, log
 
 

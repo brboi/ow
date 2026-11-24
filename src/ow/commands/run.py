@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
@@ -15,20 +16,28 @@ from typing import TYPE_CHECKING
 
 from ow import term
 from ow.commands._repos import pr_local_ref
+from ow.commands._runtime import (
+    Target,
+    combined_plugins,
+    exit_status,
+    open_target,
+    plugin_running,
+    run_command,
+)
 from ow.commands._shared import known_repo_catalog, prepare_services
-from ow.commands._targets import deduplicate_name, parse_unit_spec
+from ow.commands._specs import deduplicate_name, parse_unit_spec
 from ow.commands._workspace import (
     UnitMode,
     create_workspace_unit,
-    resolve_required_target,
+    resolve_required_spec,
     stack_info,
 )
 from ow.core import git, refresh, runtime, stacks
 from ow.core.paths import repos_dir
-from ow.core.plugins import ResolvedTarget, RunCommand
+from ow.core.plugins import ResolvedSpec, RunCommand
 from ow.core.session import global_settings, open_session
 from ow.core.workspace import resolve_target_root
-from ow.errors import OwError, PluginError, UsageError
+from ow.errors import OwError, UsageError
 from ow.recipes.removal import pr_ref_of
 
 if TYPE_CHECKING:
@@ -59,7 +68,7 @@ def _cleanup_ephemeral(
     root: Path,
     plugins: Plugins,
     *,
-    resolved: ResolvedTarget | None = None,
+    resolved: ResolvedSpec | None = None,
 ) -> None:
     """Remove worktrees, orphan ephemeral PR refs, and the temporary workspace directory."""
     try:
@@ -117,15 +126,6 @@ def _select_runner(
     return hit
 
 
-def _plugin_running(ws: Workspace, plugins: Plugins) -> list[str]:
-    """Return running process/service descriptions reported by plugins for `ws`."""
-    found: list[str] = []
-    for _name, answer in plugins.call("ow_running", ws=ws, errors="collect"):
-        if isinstance(answer, list):
-            found.extend(str(item) for item in answer if isinstance(item, str) and item)
-    return found
-
-
 def _ensure_not_running(workspaces: Sequence[Workspace], plugins: Plugins) -> None:
     """Refuse to start a workspace/stack that already has live background processes."""
     for ws in workspaces:
@@ -134,7 +134,7 @@ def _ensure_not_running(workspaces: Sequence[Workspace], plugins: Plugins) -> No
             raise UsageError(
                 f"{ws.name} is already running (pid {proc.pid}); run `ow stop` or `ow logs -f`"
             )
-        plugin_procs = _plugin_running(ws, plugins)
+        plugin_procs = plugin_running(ws, plugins)
         if plugin_procs:
             detail = ", ".join(plugin_procs)
             raise UsageError(
@@ -152,50 +152,51 @@ def _announce_plugin_runner(target_name: str, plugin_name: str, plugins: Plugins
         term.out(f"# starting {target_name} (plugin {plugin_name})")
 
 
-def _run_single(cmd: RunCommand) -> int:
-    """Execute one runner with direct inherited TTY (preserves pdb, shell, signals)."""
-    env = dict(os.environ)
-    env.update(cmd.env)
+def _signal_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
     try:
-        proc = subprocess.run(cmd.argv, cwd=cmd.cwd, env=env)
-    except KeyboardInterrupt:
-        return 130
-    except OSError as exc:
-        raise UsageError(f"failed to execute {cmd.argv[0]!r}: {exc}") from exc
-    if proc.returncode < 0:
-        return 128 + abs(proc.returncode)
-    return proc.returncode
+        os.killpg(proc.pid, sig)
+    except OSError:
+        try:
+            proc.send_signal(sig)
+        except OSError:
+            pass
 
 
-def _terminate_all(procs: Sequence[tuple[str, subprocess.Popen[str]]]) -> None:
-    """Gracefully terminate all live child process groups (SIGINT -> SIGTERM -> SIGKILL)."""
-    for sig, timeout in ((signal.SIGINT, 2.0), (signal.SIGTERM, 2.0)):
-        alive = [(label, p) for label, p in procs if p.poll() is None]
+def _terminate_all(
+    procs: Sequence[tuple[str, subprocess.Popen[str]]],
+    signals: Sequence[signal.Signals] = (signal.SIGINT, signal.SIGTERM),
+) -> None:
+    """Terminate all live child process groups: each of `signals` with 2 s grace, then SIGKILL."""
+    for sig in signals:
+        alive = [p for _label, p in procs if p.poll() is None]
         if not alive:
             return
-        for _label, proc in alive:
+        for proc in alive:
+            _signal_group(proc, sig)
+        for proc in alive:
             try:
-                os.killpg(proc.pid, sig)
-            except (ProcessLookupError, PermissionError, OSError):
-                try:
-                    proc.send_signal(sig)
-                except OSError:
-                    pass
-        for _label, proc in alive:
-            try:
-                proc.wait(timeout=timeout)
+                proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
                 pass
     for _label, proc in procs:
         if proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
+            _signal_group(proc, signal.SIGKILL)
             try:
                 proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 pass
+
+
+def _interrupt_all(procs: Sequence[tuple[str, subprocess.Popen[str]]]) -> None:
+    """Ctrl+C: SIGINT every child group and wait for them; one more Ctrl+C terminates them."""
+    for _label, proc in procs:
+        _signal_group(proc, signal.SIGINT)
+    term.warn("interrupted; waiting for the processes to exit (Ctrl+C again to terminate them)")
+    try:
+        for _label, proc in procs:
+            proc.wait()
+    except KeyboardInterrupt:
+        _terminate_all(procs, (signal.SIGTERM,))
 
 
 def _run_multi(
@@ -223,9 +224,7 @@ def _run_multi(
                 pass
 
     def _wait_proc(label: str, proc: subprocess.Popen[str]) -> None:
-        rc = proc.wait()
-        if rc < 0:
-            rc = 128 + abs(rc)
+        rc = exit_status(proc.wait())
         with done_cond:
             results[label] = rc
             done_cond.notify_all()
@@ -273,7 +272,7 @@ def _run_multi(
                 done_cond.wait(timeout=0.5)
     except KeyboardInterrupt:
         interrupted = True
-        _terminate_all(procs)
+        _interrupt_all(procs)
     finally:
         for t in stream_threads:
             t.join(timeout=2.0)
@@ -294,6 +293,37 @@ def _run_multi(
         summary = ", ".join(f"{label}: exit {results.get(label, 1)}" for label, _p in procs)
         term.out(f"# summary: {summary}")
     return exit_code
+
+
+def _confirm_reset(workspaces: Sequence[Workspace], plugins: Plugins, *, yes: bool) -> None:
+    """Print what `--reset` will drop, as plugins preview it, and ask; no TTY and no `-y` refuses.
+
+    A plugin that implements `ow_reset_run` but no `ow_reset_preview` is listed as `<plugin>: local
+    state`, so the user is still asked. Nothing to drop (no plugin resets anything) means nothing
+    to confirm. A preview that raises aborts the run (`ow_reset_preview` propagates) instead of
+    asking without the full list.
+    """
+    lines: list[str] = []
+    for ws in workspaces:
+        for _name, answer in plugins.call("ow_reset_preview", ws=ws, answers=plugins.answers(ws)):
+            if isinstance(answer, list):
+                lines.extend(item for item in answer if isinstance(item, str) and item)
+        previewing = set(plugins.implementers("ow_reset_preview", ws))
+        for name in plugins.implementers("ow_reset_run", ws):
+            line = f"{name}: local state"
+            if name not in previewing and line not in lines:
+                lines.append(line)
+    if not lines:
+        return
+    term.out("# --reset will drop:")
+    for line in lines:
+        term.out(f"#   {line}")
+    if yes:
+        return
+    if not term.interactive():
+        raise UsageError("no terminal to confirm --reset; re-run with -y")
+    if not term.confirm("Drop it?"):
+        raise UsageError("aborted")
 
 
 def _reset_workspaces(workspaces: Sequence[Workspace], plugins: Plugins) -> None:
@@ -333,16 +363,40 @@ def _run_workspaces(
     *,
     fail_fast: bool = False,
     reset: bool = False,
+    yes: bool = False,
     detach: bool = False,
     multi: stacks.MultiWorkspace | None = None,
 ) -> int:
-    """Run one workspace directly (TTY) or multiple workspaces in parallel (or detached with `-d`)."""
+    """Run one workspace directly (TTY) or several in parallel; `-d` detaches them under a launch lock."""
+    guard = (
+        runtime.launch_lock(runtime.runtime_root(ws) for _label, ws, _args in items)
+        if detach
+        else contextlib.nullcontext()
+    )
+    with guard:
+        return _launch(
+            items, plugins, fail_fast=fail_fast, reset=reset, yes=yes, detach=detach, multi=multi
+        )
+
+
+def _launch(
+    items: Sequence[tuple[str, Workspace, tuple[str, ...]]],
+    plugins: Plugins,
+    *,
+    fail_fast: bool,
+    reset: bool,
+    yes: bool,
+    detach: bool,
+    multi: stacks.MultiWorkspace | None,
+) -> int:
     if len(items) == 1:
         _label, ws, args = items[0]
         # Verify a runner exists before starting services, then re-resolve after syncing generated files.
         _select_runner(ws, plugins, args, detach=detach)
         if not args or detach:
             _ensure_not_running((ws,), plugins)
+        if reset:
+            _confirm_reset((ws,), plugins, yes=yes)
         prepare_services((ws,), plugins)
         _refresh_before_run((ws,), plugins, multi=multi)
         plugin_name, cmd = _select_runner(ws, plugins, args, detach=detach)
@@ -354,7 +408,7 @@ def _run_workspaces(
             proc = runtime.start_detached(root, ws.name, cmd.argv, cwd=cmd.cwd, env=cmd.env)
             term.out(f"# started {ws.name} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
             return 0
-        return _run_single(cmd)
+        return run_command(cmd)
 
     runnable_items: list[tuple[str, Workspace, tuple[str, ...]]] = []
     for label, ws, args in items:
@@ -369,6 +423,8 @@ def _run_workspaces(
 
     runnable_ws = [ws for _label, ws, _args in runnable_items]
     _ensure_not_running(runnable_ws, plugins)
+    if reset:
+        _confirm_reset(runnable_ws, plugins, yes=yes)
     prepare_services(runnable_ws, plugins)
     _refresh_before_run(runnable_ws, plugins, multi=multi)
 
@@ -390,7 +446,7 @@ def _run_workspaces(
         try:
             for label, ws, _note, cmd in runnable:
                 if cmd.self_detaching:
-                    rc = _run_single(cmd)
+                    rc = run_command(cmd)
                     if rc != 0:
                         raise UsageError(f"{label} failed to start (exit {rc})")
                     continue
@@ -405,17 +461,9 @@ def _run_workspaces(
         return 0
 
     if len(runnable) == 1:
-        return _run_single(runnable[0][3])
+        return run_command(runnable[0][3])
 
     return _run_multi([(label, note, cmd) for label, _ws, note, cmd in runnable], fail_fast=fail_fast)
-
-
-def _open_ws(path: Path, plugins: Plugins) -> tuple[Workspace, Plugins]:
-    session = open_session(str(path), need_workspace=True, plugins=plugins, cwd=path)
-    for warning in session.warnings:
-        term.warn(warning)
-    assert session.workspace is not None
-    return session.workspace, session.plugins
 
 
 def _find_multi_runner(
@@ -431,30 +479,35 @@ def _find_multi_runner(
 
 def _exec_multi_runner(
     multi: stacks.MultiWorkspace,
-    eff_plugins: Plugins,
+    plugins: Plugins,
     args: tuple[str, ...],
     *,
     reset: bool,
+    yes: bool,
     detach: bool,
 ) -> int:
     """Prepare services, sync stale files, and run a plugin's `ow_multi_runner` (foreground or detached)."""
-    if not args or detach:
-        _ensure_not_running(multi.stacks, eff_plugins)
-    prepare_services(multi.stacks, eff_plugins)
-    _refresh_before_run(multi.stacks, eff_plugins, multi=multi)
-    multi_hit = _find_multi_runner(multi, eff_plugins, args, detach=detach)
-    assert multi_hit is not None
-    plugin_name, multi_cmd = multi_hit
-    if reset:
-        _reset_workspaces(multi.stacks, eff_plugins)
-    _announce_plugin_runner(multi.name, plugin_name, eff_plugins, always=True)
-    if detach and not multi_cmd.self_detaching:
-        proc = runtime.start_detached(
-            multi.root, multi.name, multi_cmd.argv, cwd=multi_cmd.cwd, env=multi_cmd.env
-        )
-        term.out(f"# started {multi.name} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
-        return 0
-    return _run_single(multi_cmd)
+    guard = runtime.launch_lock((multi.root,)) if detach else contextlib.nullcontext()
+    with guard:
+        if not args or detach:
+            _ensure_not_running(multi.stacks, plugins)
+        if reset:
+            _confirm_reset(multi.stacks, plugins, yes=yes)
+        prepare_services(multi.stacks, plugins)
+        _refresh_before_run(multi.stacks, plugins, multi=multi)
+        multi_hit = _find_multi_runner(multi, plugins, args, detach=detach)
+        assert multi_hit is not None
+        plugin_name, multi_cmd = multi_hit
+        if reset:
+            _reset_workspaces(multi.stacks, plugins)
+        _announce_plugin_runner(multi.name, plugin_name, plugins, always=True)
+        if detach and not multi_cmd.self_detaching:
+            proc = runtime.start_detached(
+                multi.root, multi.name, multi_cmd.argv, cwd=multi_cmd.cwd, env=multi_cmd.env
+            )
+            term.out(f"# started {multi.name} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
+            return 0
+        return run_command(multi_cmd)
 
 
 def _looks_like_target_spec(token: str) -> bool:
@@ -464,44 +517,52 @@ def _looks_like_target_spec(token: str) -> bool:
 def run(
     plugins: Plugins,
     *,
-    targets: Sequence[str] = (),
+    items: Sequence[str] = (),
     workspace: str | None = None,
     tmp: bool = False,
     fail_fast: bool = False,
     reset: bool = False,
+    yes: bool = False,
     detach: bool = False,
     extra_args: Sequence[str] = (),
     cwd: Path | None = None,
 ) -> int:
-    """Run a workspace or multi-stack workspace (or create temporary stack(s) with `--tmp`)."""
-    if targets and workspace is not None:
-        raise UsageError("pass either TARGET(s) or -w/--workspace, not both")
+    """Run a workspace or multi-stack workspace (or create temporary stack(s) with `--tmp`).
+
+    `plugins` is the built-in set; every workspace opened here brings its own in-repo plugins
+    and the run then goes through that one set.
+    """
+    if items and workspace is not None:
+        raise UsageError("pass either WS or -w/--workspace, not both")
     if tmp and detach:
         raise UsageError("cannot combine -d/--detach with --tmp")
-    if tmp and not targets:
-        raise UsageError("--tmp requires at least one TARGET (e.g. `ow run --tmp enterprise#12345`)")
-    if len(targets) > 1 and extra_args:
+    if tmp and not items:
+        raise UsageError("--tmp requires at least one SPEC (e.g. `ow run --tmp enterprise#12345`)")
+    if len(items) > 1 and extra_args:
         raise UsageError(
-            'cannot combine `-- ARGS` with multiple targets; pass per-stack arguments as SPEC:"ARGS"'
+            'cannot combine `-- ARGS` with more than one WS or SPEC; pass per-stack arguments as WS:"ARGS"'
         )
+    if reset and not yes and not term.interactive():
+        raise UsageError("no terminal to confirm --reset; re-run with -y")
 
     base_cwd = (cwd or Path.cwd()).resolve()
     passthrough = tuple(extra_args)
 
-    # Mode 1: Ephemeral `--tmp` run (1 or more targets, optional names, non-colliding ports)
+    # Mode 1: Ephemeral `--tmp` run (1 or more specs, optional names, non-colliding ports)
     if tmp:
         catalog = known_repo_catalog(plugins)
         settings = global_settings(plugins)
         ephemeral_parent = Path(tempfile.mkdtemp(prefix="ow-run-"))
-        created_ephemerals: list[tuple[Path, ResolvedTarget]] = []
+        created_ephemerals: list[tuple[Path, ResolvedSpec]] = []
         try:
             taken: set[str] = set()
             pending: list[dict[str, object]] = []
+            opened: list[Target] = []
             to_run: list[tuple[str, Workspace, tuple[str, ...]]] = []
 
-            for raw in targets:
+            for raw in items:
                 unit = parse_unit_spec(raw, allow_run_args=True)
-                resolved = resolve_required_target(unit.spec, plugins, catalog, settings)
+                resolved = resolve_required_spec(unit.spec, plugins, catalog, settings)
                 if unit.name is not None:
                     if unit.name in taken:
                         raise UsageError(f"duplicate stack name {unit.name!r}")
@@ -516,19 +577,26 @@ def run(
                     root=unit_root,
                     resolved=resolved,
                     mode=UnitMode.ephemeral(
-                        is_stack=len(targets) > 1,
-                        parent_multi_root=ephemeral_parent if len(targets) > 1 else None,
+                        is_stack=len(items) > 1,
+                        parent_multi_root=ephemeral_parent if len(items) > 1 else None,
                     ),
-                    pending=pending if len(targets) > 1 else None,
+                    pending=pending if len(items) > 1 else None,
                 )
                 created_ephemerals.append((created.root, resolved))
                 if code != 0:
                     return code
-                ws, _ws_plugins = _open_ws(created.root, plugins)
-                combined_args = unit.extra_args + (passthrough if len(targets) == 1 else ())
-                to_run.append((label, ws, combined_args))
+                target = open_target(created.root, "workspace", plugins)
+                opened.append(target)
+                combined_args = unit.extra_args + (passthrough if len(items) == 1 else ())
+                to_run.append((label, target.workspace, combined_args))
 
-            return _run_workspaces(to_run, plugins, fail_fast=fail_fast, reset=reset)
+            return _run_workspaces(
+                to_run,
+                combined_plugins(plugins, opened),
+                fail_fast=fail_fast,
+                reset=reset,
+                yes=yes,
+            )
         finally:
             try:
                 for root, resolved in reversed(created_ephemerals):
@@ -537,32 +605,31 @@ def run(
                 if ephemeral_parent.exists():
                     shutil.rmtree(ephemeral_parent, ignore_errors=True)
 
-    # Mode 2: No positional targets (`ow run` or `ow run -w WS`)
-    if not targets:
+    # Mode 2: No positional items (`ow run` or `ow run -w WS`)
+    if not items:
         root, kind = resolve_target_root(workspace, cwd=base_cwd)
-        if kind == "workspace":
-            ws, eff_plugins = _open_ws(root, plugins)
+        target = open_target(root, kind, plugins)
+        if target.multi is None:
+            ws = target.workspace
             return _run_workspaces(
                 [(ws.name, ws, passthrough)],
-                eff_plugins,
+                target.plugins,
                 fail_fast=fail_fast,
                 reset=reset,
+                yes=yes,
                 detach=detach,
             )
 
-        loaded = stacks.load_multi_workspace(root, plugins)
-        if loaded is None:
-            raise UsageError(f"no valid stacks found in {root}")
-        multi, sessions = loaded
-        eff_plugins = sessions[0].plugins if sessions else plugins
-        for sess in sessions:
-            for warning in sess.warnings:
-                term.warn(warning)
-        if _find_multi_runner(multi, eff_plugins, passthrough, detach=detach) is not None:
-            return _exec_multi_runner(multi, eff_plugins, passthrough, reset=reset, detach=detach)
+        multi = target.multi
+        if _find_multi_runner(multi, target.plugins, passthrough, detach=detach) is not None:
+            return _exec_multi_runner(
+                multi, target.plugins, passthrough, reset=reset, yes=yes, detach=detach
+            )
         if passthrough:
             runnable_ws = [
-                ws for ws in multi.stacks if _find_runner(ws, eff_plugins, passthrough, detach=detach) is not None
+                ws
+                for ws in multi.stacks
+                if _find_runner(ws, target.plugins, passthrough, detach=detach) is not None
             ]
             if len(runnable_ws) > 1:
                 names = ", ".join(ws.name for ws in runnable_ws)
@@ -571,12 +638,20 @@ def run(
                     'specify a stack with `ow run <stack> -- ...` or `ow run <stack>:"..."`'
                 )
         items = [(ws.name, ws, passthrough) for ws in multi.stacks]
-        return _run_workspaces(items, eff_plugins, fail_fast=fail_fast, reset=reset, detach=detach, multi=multi)
+        return _run_workspaces(
+            items,
+            target.plugins,
+            fail_fast=fail_fast,
+            reset=reset,
+            yes=yes,
+            detach=detach,
+            multi=multi,
+        )
 
-    # Mode 3: Positional targets without `--tmp` -> existing workspace(s) or stack(s) only
+    # Mode 3: Positional workspaces without `--tmp` -> existing workspace(s) or stack(s) only
     to_run = []
-    run_plugins = plugins
-    for raw in targets:
+    opened = []
+    for raw in items:
         unit = parse_unit_spec(raw, allow_run_args=True)
         lookup = unit.name if unit.name is not None else unit.spec
         if unit.name is not None:
@@ -597,29 +672,30 @@ def run(
                 "or initialize a workspace with `ow init` first"
             ) from exc
 
-        combined_args = unit.extra_args + (passthrough if len(targets) == 1 else ())
-        if kind == "workspace":
-            ws, eff_plugins = _open_ws(root, plugins)
-            run_plugins = eff_plugins
-            to_run.append((ws.name, ws, combined_args))
-        else:
-            loaded = stacks.load_multi_workspace(root, plugins)
-            if loaded is None:
-                raise UsageError(f"no valid stacks found in {root}")
-            multi, sessions = loaded
-            eff_plugins = sessions[0].plugins if sessions else plugins
-            run_plugins = eff_plugins
-            if len(targets) == 1:
-                if _find_multi_runner(multi, eff_plugins, combined_args, detach=detach) is not None:
-                    for sess in sessions:
-                        for warning in sess.warnings:
-                            term.warn(warning)
-                    return _exec_multi_runner(multi, eff_plugins, combined_args, reset=reset, detach=detach)
-            if combined_args:
-                raise UsageError(
-                    f"{root.name!r} is a multi-stack workspace; pass arguments to individual stacks"
-                )
-            for ws in multi.stacks:
-                to_run.append((ws.name, ws, ()))
+        combined_args = unit.extra_args + (passthrough if len(items) == 1 else ())
+        target = open_target(root, kind, plugins)
+        opened.append(target)
+        if target.multi is None:
+            to_run.append((target.workspace.name, target.workspace, combined_args))
+            continue
+        if len(items) == 1 and _find_multi_runner(
+            target.multi, target.plugins, combined_args, detach=detach
+        ) is not None:
+            return _exec_multi_runner(
+                target.multi, target.plugins, combined_args, reset=reset, yes=yes, detach=detach
+            )
+        if combined_args:
+            raise UsageError(
+                f"{root.name!r} is a multi-stack workspace; pass arguments to individual stacks"
+            )
+        for ws in target.multi.stacks:
+            to_run.append((ws.name, ws, ()))
 
-    return _run_workspaces(to_run, run_plugins, fail_fast=fail_fast, reset=reset, detach=detach)
+    return _run_workspaces(
+        to_run,
+        combined_plugins(plugins, opened),
+        fail_fast=fail_fast,
+        reset=reset,
+        yes=yes,
+        detach=detach,
+    )

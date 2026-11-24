@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +13,7 @@ from typer.testing import CliRunner
 
 from ow.cli import build_app
 from ow.core.plugins import load_plugins
+from ow.plugins import _containers as containers
 
 
 def git(path: Path, *args: str) -> str:
@@ -34,7 +34,100 @@ def file_url(path: Path) -> str:
     return f"file://{path}"
 
 
-def _write_files(root: Path, files: dict[str, str | bytes]) -> None:
+def make_executable(path: Path) -> None:
+    """Make a fake script the test just wrote runnable."""
+    path.chmod(0o755)
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    """The records of a JSON-lines log a fake script appended to."""
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def make_fake_engine(
+    monkeypatch: MonkeyPatch,
+    *,
+    running: dict[str, dict[int, int]] | None = None,
+    running_ips: dict[str, dict[int, str]] | None = None,
+    stopped: set[str] | None = None,
+):
+    """Stub container CLI calls in `_containers` and record every command run."""
+    running_map = dict(running or {})
+    ip_map = {k: dict(v) for k, v in (running_ips or {}).items()}
+    stopped_set = set(stopped or set())
+    networks: set[str] = set()
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(containers, "detect_engine", lambda: "docker")
+    containers.engine_ready.cache_clear()
+    monkeypatch.setattr(containers, "engine_ready", lambda engine: True)
+    monkeypatch.setattr(containers, "wait_for_tcp", lambda host, port, timeout=15.0: True)
+    monkeypatch.setattr(containers, "wait_for_exec", lambda engine, name, cmd, timeout=30.0: True)
+
+    real_run = subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if not argv or argv[0] not in ("docker", "podman"):
+            return real_run(argv, **kwargs)
+        calls.append(list(argv))
+        cmd = argv[1:]
+        if cmd[:2] == ["network", "inspect"]:
+            rc = 0 if cmd[2] in networks else 1
+            return subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
+        if cmd[:2] == ["network", "create"]:
+            networks.add(cmd[2])
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if cmd[0] == "inspect":
+            name = cmd[1]
+            if name in running_map:
+                default_ip = "0.0.0.0" if name == "ow-postgres" else "127.0.0.1"
+                ports = {
+                    f"{c}/tcp": [{"HostIp": ip_map.get(name, {}).get(c, default_ip), "HostPort": str(h)}]
+                    for c, h in running_map[name].items()
+                }
+                payload = [{"State": {"Running": True}, "NetworkSettings": {"Ports": ports}}]
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+            if name in stopped_set:
+                payload = [{"State": {"Running": False}, "NetworkSettings": {"Ports": {}}}]
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such object")
+        if cmd[0] == "start":
+            name = cmd[1]
+            stopped_set.discard(name)
+            running_map.setdefault(name, {})
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if cmd[0] == "stop":
+            name = cmd[1]
+            if name in running_map:
+                stopped_set.add(name)
+                running_map.pop(name, None)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if cmd[0] == "rm":
+            name = cmd[1]
+            running_map.pop(name, None)
+            ip_map.pop(name, None)
+            stopped_set.discard(name)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if cmd[0] == "run":
+            name = cmd[cmd.index("--name") + 1]
+            ports: dict[int, int] = {}
+            ips: dict[int, str] = {}
+            for i, tok in enumerate(cmd):
+                if tok == "-p" and i + 1 < len(cmd):
+                    parts = cmd[i + 1].split(":")
+                    host_p, cont_p = int(parts[-2]), int(parts[-1])
+                    ports[cont_p] = host_p
+                    ips[cont_p] = parts[0] if len(parts) == 3 else "0.0.0.0"
+            running_map[name] = ports
+            ip_map[name] = ips
+            return subprocess.CompletedProcess(argv, 0, stdout="cid\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(containers.subprocess, "run", fake_run)
+    return calls, running_map
+
+
+def write_files(root: Path, files: dict[str, str | bytes]) -> None:
     """Materialise `files` (relative path -> content) under `root`."""
     for file_path, content in files.items():
         full_path = root / file_path
@@ -56,7 +149,7 @@ class Collaborator:
         """Commit files to the repository; returns the new HEAD's sha."""
         if branch:
             git(self.path, "checkout", "-b", branch)
-        _write_files(self.path, files)
+        write_files(self.path, files)
         git(self.path, "add", *files)
         git(self.path, "commit", "-m", message)
         return git(self.path, "rev-parse", "HEAD")
@@ -64,11 +157,6 @@ class Collaborator:
     def push(self, branch: str) -> None:
         """Push a branch to the remote."""
         git(self.path, "push", "origin", branch)
-
-    def force_push(self, branch: str, onto: str) -> None:
-        """Force push a branch after resetting it."""
-        git(self.path, "reset", "--hard", onto)
-        git(self.path, "push", "--force", "origin", branch)
 
     def git(self, *args: str) -> str:
         """Run git command in the clone and return stdout."""
@@ -130,7 +218,7 @@ class Lab:
                 git(temp_path, "checkout", branch_name)
             else:
                 git(temp_path, "checkout", "-b", branch_name)
-            _write_files(temp_path, files)
+            write_files(temp_path, files)
             git(temp_path, "add", *files)
             git(temp_path, "commit", "-m", f"Add files for {branch_name}")
             git(temp_path, "push", "-u", "origin", branch_name)
@@ -243,7 +331,7 @@ class Lab:
             "sys.exit(2)\n",
             encoding="utf-8",
         )
-        shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        make_executable(shim)
         return log_path
 
     def fake_runbot(
@@ -260,6 +348,7 @@ class Lab:
         import io
         import urllib.error
         import urllib.parse
+
         from ow.plugins import runbot as runbot_plugin
 
         calls: list[str] = []

@@ -1,24 +1,33 @@
 """Stable, versioned public API for external and in-repo ow plugins.
 
-Every external plugin must declare ``OW_API_VERSION = 1`` (matching ``PLUGIN_API_VERSION``)
-and import hooks, data records, and helpers exclusively from this module rather than
-internal ``ow.core.*`` or ``ow.plugins._*`` modules.
+A plugin declares ``OW_API_VERSION = 1`` and imports hooks, data records, errors and helpers
+exclusively from this module, never from internal ``ow.core.*``, ``ow.specs.*`` or
+``ow.plugins.*`` modules. ow loads a plugin whose ``OW_API_VERSION`` lies within
+``SUPPORTED_API_RANGE`` (currently ``(1, 1)``) and skips the others with a warning.
+
+Compatibility policy: API v1 is frozen through every 3.x release. 3.x only *adds* to it
+(new hooks, new optional fields, new exports); anything slated for removal first emits a
+deprecation warning and is removed in 4.0, which raises ``OW_API_VERSION``.
+
+Which hooks abort a command when they raise and which only warn is documented per hook in
+``ow.core.plugins.CoreSpec``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from ow.core.facts import RepoFacts
 from ow.core.plugins import (
     PLUGIN_API_VERSION,
     SUPPORTED_API_RANGE,
+    Answers,
     Diagnostic,
     GeneratedFile,
     KnownRepo,
     PruneCandidate,
     ResolvedRepo,
-    ResolvedTarget,
+    ResolvedSpec,
     RunCommand,
     SandboxMounts,
     Setting,
@@ -29,38 +38,28 @@ from ow.core.plugins import (
 from ow.core.runtime import follow_files as follow_log_files
 from ow.core.stacks import MultiWorkspace
 from ow.core.workspace import Repo, Workspace
-from ow.plugins._containers import detect_engine as detect_container_engine
-from ow.plugins._containers import is_port_free
+from ow.errors import PluginError, UsageError
+from ow.plugins._containers import detect_container_engine, is_port_free
 from ow.specs.editors import DebugLaunch, EditorContribution
-from ow.specs.python_env import PythonEnvironment, WorkspaceVenv, merge, workspace_venv
+from ow.specs.python_env import PythonEnvironment, WorkspaceVenv, resolve_workspace_python, workspace_venv
 from ow.specs.services import DatabaseService, SmtpService
 
-if TYPE_CHECKING:
-    from ow.core.plugins import Plugins
 
+def resolve_stack_python(ws: Workspace, answers: Answers) -> Path | None:
+    """Return the Python executable of `ws` (its shared or local venv), or None when it has none.
 
-def resolve_stack_python(ws: Workspace, plugins: Plugins | None = None) -> Path | None:
-    """Return the resolved Python executable path for `ws` (e.g. its shared or local venv)."""
-    merged: PythonEnvironment | None = None
-    if plugins is not None:
-        merged = merge(plugins.answers(ws)("python_environment"))
-    else:
-        from ow.plugins.odoo.files import python_environment as odoo_python_env
-        from ow.plugins.odoo.release import get_core
-
-        core, diags = get_core(ws)
-        if core is not None and not diags:
-            merged = odoo_python_env(core)
-
-    if merged is None and not ws.settings.get("mise.python"):
-        return None
-    venv = workspace_venv(ws, merged)
-    return venv.path / "bin" / "python"
+    `answers` is the callable ow hands to hooks such as `ow_generated_files`; the python
+    environment is whatever the plugins enabled for `ws` answer to `python_environment`, so `ws`
+    may be a sibling stack of the workspace the hook runs for.
+    """
+    resolved = resolve_workspace_python(ws, answers.for_workspace(ws))
+    return resolved[1].path / "bin" / "python" if resolved is not None else None
 
 
 __all__ = [
     "PLUGIN_API_VERSION",
     "SUPPORTED_API_RANGE",
+    "Answers",
     "DatabaseService",
     "DebugLaunch",
     "Diagnostic",
@@ -68,17 +67,20 @@ __all__ = [
     "GeneratedFile",
     "KnownRepo",
     "MultiWorkspace",
+    "PluginError",
     "PruneCandidate",
     "PythonEnvironment",
     "Repo",
+    "RepoFacts",
     "ResolvedRepo",
-    "ResolvedTarget",
+    "ResolvedSpec",
     "RunCommand",
     "SandboxMounts",
     "Setting",
     "SmtpService",
     "StackInfo",
     "StatusInfo",
+    "UsageError",
     "Workspace",
     "WorkspaceVenv",
     "detect_container_engine",

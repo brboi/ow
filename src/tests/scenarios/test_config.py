@@ -45,9 +45,9 @@ LISTING = [
     "postgres.enabled = true (default) # Enable or disable the postgres plugin",
     'postgres.image = "pgvector/pgvector:pg17" (default) # PostgreSQL container image (PG 17 + pgvector, compatible with Odoo 18/19/20.0)',
     "postgres.port = 0 (default) # Host port for PostgreSQL (0 = auto: 5432 if free, else 5433)",
-    'postgres.bind_address = "0.0.0.0" (default) # Host address to bind PostgreSQL on (0.0.0.0 allows containers via host.docker.internal; use 127.0.0.1 for loopback only)',
+    'postgres.bind_address = "0.0.0.0" (default) # Host address to bind PostgreSQL on. The default 0.0.0.0 exposes the server to the whole LAN (needed so containers reach it via host.docker.internal; the `postgres` superuser password is random, but the Odoo role uses postgres.password); use 127.0.0.1 for loopback only',
     'postgres.user = "odoo" (default) # PostgreSQL role name for Odoo (NOSUPERUSER CREATEDB)',
-    'postgres.password = "odoo" (default) # PostgreSQL role password',
+    'postgres.password = "odoo" (default) # PostgreSQL role password for the Odoo role (not the superuser, whose password is random)',
     "postgres.pgweb = true (default) # Run pgweb alongside PostgreSQL",
     'postgres.pgweb_image = "sosedoff/pgweb" (default) # pgweb container image',
     "postgres.pgweb_port = 8081 (default) # Host port for pgweb",
@@ -56,7 +56,7 @@ LISTING = [
     "mailsink.smtp_port = 1025 (default) # Host SMTP port for mailsink",
     "mailsink.web_port = 8025 (default) # Host Web UI port for mailsink",
     "github.enabled = true (default) # Enable or disable the github plugin",
-    'github.default_org = "odoo" (default) # Default GitHub org for short PR targets (e.g. enterprise#12345)',
+    'github.default_org = "odoo" (default) # Default GitHub org for short PR specs (e.g. enterprise#12345)',
     "github.cache_ttl = 120 (default) # Cache TTL in seconds for GitHub PR status lookups",
     "runbot.enabled = true (default) # Enable or disable the runbot plugin",
     'runbot.url = "https://runbot.odoo.com" (default) # Base URL of the Odoo Runbot instance',
@@ -94,9 +94,9 @@ LISTING_OUTSIDE = [
     "postgres.enabled = true (default) # Enable or disable the postgres plugin",
     'postgres.image = "pgvector/pgvector:pg17" (default) # PostgreSQL container image (PG 17 + pgvector, compatible with Odoo 18/19/20.0)',
     "postgres.port = 0 (default) # Host port for PostgreSQL (0 = auto: 5432 if free, else 5433)",
-    'postgres.bind_address = "0.0.0.0" (default) # Host address to bind PostgreSQL on (0.0.0.0 allows containers via host.docker.internal; use 127.0.0.1 for loopback only)',
+    'postgres.bind_address = "0.0.0.0" (default) # Host address to bind PostgreSQL on. The default 0.0.0.0 exposes the server to the whole LAN (needed so containers reach it via host.docker.internal; the `postgres` superuser password is random, but the Odoo role uses postgres.password); use 127.0.0.1 for loopback only',
     'postgres.user = "odoo" (default) # PostgreSQL role name for Odoo (NOSUPERUSER CREATEDB)',
-    'postgres.password = "odoo" (default) # PostgreSQL role password',
+    'postgres.password = "odoo" (default) # PostgreSQL role password for the Odoo role (not the superuser, whose password is random)',
     "postgres.pgweb = true (default) # Run pgweb alongside PostgreSQL",
     'postgres.pgweb_image = "sosedoff/pgweb" (default) # pgweb container image',
     "postgres.pgweb_port = 8081 (default) # Host port for pgweb",
@@ -105,7 +105,7 @@ LISTING_OUTSIDE = [
     "mailsink.smtp_port = 1025 (default) # Host SMTP port for mailsink",
     "mailsink.web_port = 8025 (default) # Host Web UI port for mailsink",
     "github.enabled = true (default) # Enable or disable the github plugin",
-    'github.default_org = "odoo" (default) # Default GitHub org for short PR targets (e.g. enterprise#12345)',
+    'github.default_org = "odoo" (default) # Default GitHub org for short PR specs (e.g. enterprise#12345)',
     "github.cache_ttl = 120 (default) # Cache TTL in seconds for GitHub PR status lookups",
     "runbot.enabled = true (default) # Enable or disable the runbot plugin",
     'runbot.url = "https://runbot.odoo.com" (default) # Base URL of the Odoo Runbot instance',
@@ -121,12 +121,8 @@ LISTING_OUTSIDE = [
 ]
 
 
-def test_config_rejects_json_on_set_unset_and_rejects_unsetting_workspace_task(lab):
+def test_config_rejects_unsetting_workspace_task(lab):
     root = workspace(lab, branches={BASE: {"README.md": "hi\n"}})
-
-    bad_set = lab.ow("config", "--json", "set", "odoo.http_port", "8070", cwd=root)
-    assert bad_set.exit_code == 2
-    assert bad_set.stdout == ""
 
     bad_unset = lab.ow("config", "unset", "stacks.foo", cwd=root)
     assert bad_unset.exit_code == 2
@@ -197,7 +193,7 @@ def test_config_set_workspace_key_refreshes(lab):
     before = config_path.read_bytes()
     bad = lab.ow("config", "set", "odoo.http_port", "notanint", cwd=root)
     assert bad.exit_code == 2
-    assert "error: Expected an integer for odoo.http_port, got 'notanint'" in bad.stderr
+    assert "error: expected an integer for odoo.http_port, got 'notanint'" in bad.stderr
     assert config_path.read_bytes() == before
 
     # An unknown key is rejected with the closest declared one.
@@ -325,7 +321,7 @@ def test_config_set_parses_bools_and_empty_lists(lab):
 
     bad = lab.ow("config", "set", "vscode.enabled", "1", cwd=root)
     assert bad.exit_code == 2
-    assert "error: Expected 'true' or 'false' for vscode.enabled, got '1'" in bad.stderr
+    assert "error: expected 'true' or 'false' for vscode.enabled, got '1'" in bad.stderr
 
 
 def test_config_set_drops_a_wrong_type_key(lab):

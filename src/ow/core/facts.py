@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 from ow.core import git
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RepoFacts:
     """Facts about a repository gathered from git."""
 

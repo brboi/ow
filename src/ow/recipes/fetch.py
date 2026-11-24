@@ -18,7 +18,7 @@ FETCH_FAILED = "fetch failed; pass --no-fetch to work on cached refs"
 
 
 def fetch_then_gather(
-    session: "Session",
+    session: Session,
     only: Sequence[str],
     *,
     no_fetch: bool,

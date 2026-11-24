@@ -1,7 +1,8 @@
-"""`ow trust` — trust, untrust, or list in-repo plugin files."""
+"""`ow trust` — trust, untrust, or list plugin locations (plugin files or directories)."""
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,63 @@ def _discover_workspace_plugins(
     return root, kind, trust.discover_repo_plugins(repo_dirs)
 
 
+def _list() -> None:
+    for entry in trust.list_trusted():
+        shown = git.display_path(entry)
+        term.out(f"{shown}/" if entry.is_dir() else shown)
+
+
+def _untrust(path: Path) -> None:
+    """Revoke `path`'s own entry and say so when a trusted directory still covers it."""
+    resolved, removed = trust.untrust_path(path)
+    verb = "untrusted" if removed else "was not trusted"
+    term.out(f"{verb} {git.display_path(resolved)}")
+    covering = trust.trusted_by(resolved)
+    if covering is not None:
+        term.warn(
+            f"{git.display_path(resolved)} is still trusted through "
+            f"{git.display_path(covering)}; run `ow trust --untrust {covering}` to revoke it"
+        )
+
+
+def _trust(path: Path) -> None:
+    resolved = trust.trust_path(path)
+    term.out(f"trusted {git.display_path(resolved)}")
+
+
+def _choose_locations(
+    root: Path, discovered: tuple[trust.DiscoveredPlugin, ...]
+) -> tuple[Path, ...]:
+    """Ask what to trust: the plugin files found, the workspace root, or its parent directory."""
+    choices: list[tuple[str, tuple[Path, ...]]] = []
+    if discovered:
+        files = tuple(item.path for item in discovered)
+        listing = ", ".join(git.display_path(p) for p in files)
+        choices.append((f"only the plugin file(s) found: {listing}", files))
+    choices.append((f"everything in the workspace root: {git.display_path(root)}", (root,)))
+    parent = root.parent
+    choices.append(
+        (f"everything in the workspace's parent directory: {git.display_path(parent)}", (parent,))
+    )
+
+    term.out("Trust runs the plugin code found at a location, including code that arrives later")
+    term.out("(for example a PR checked out with `ow add`). What do you want to trust?")
+    for number, (label, _paths) in enumerate(choices, start=1):
+        term.out(f"  {number}) {label}")
+    default = "1" if discovered else None
+    hint = ", default 1" if default else ""
+    sys.stdout.write(f"Choice [1-{len(choices)}{hint}]: ")
+    sys.stdout.flush()
+    answer = sys.stdin.readline()
+    if answer == "":
+        sys.stdout.write("\n")
+        raise UsageError("no choice made; nothing trusted")
+    answer = answer.strip() or default or ""
+    if not answer.isdigit() or not 1 <= int(answer) <= len(choices):
+        raise UsageError(f"invalid choice {answer!r}; nothing trusted")
+    return choices[int(answer) - 1][1]
+
+
 def run(
     plugins: Plugins,
     *,
@@ -53,12 +111,16 @@ def run(
     list_all: bool = False,
     cwd: Path | None = None,
 ) -> int:
-    """Trust, untrust, or list in-repo plugin files."""
+    """Trust, untrust, or list plugin locations: plugin files or whole directories.
+
+    With no PATH, `untrust` revokes the workspace's plugin files; trusting asks what to trust
+    on a terminal (the plugin files, the workspace root or its parent directory) and trusts the
+    plugin files found otherwise, then refreshes the workspace so they take effect.
+    """
     if list_all:
         if path is not None or untrust:
             raise UsageError("--list cannot be combined with PATH or --untrust")
-        for entry in trust.list_trusted():
-            term.out(git.display_path(entry))
+        _list()
         return 0
 
     base_cwd = (cwd or Path.cwd()).resolve()
@@ -70,31 +132,32 @@ def run(
         if not target.is_absolute():
             target = base_cwd / target
         if untrust:
-            resolved, removed = trust.untrust_path(target)
-            verb = "untrusted" if removed else "was not trusted"
-            term.out(f"{verb} {git.display_path(resolved)}")
-            return 0
-        resolved = trust.trust_path(target)
-        term.out(f"trusted {git.display_path(resolved)}")
+            _untrust(target)
+        else:
+            _trust(target)
         return 0
 
     root, kind, discovered = _discover_workspace_plugins(workspace, cwd=base_cwd)
-    if not discovered:
-        term.out("no in-repo plugins found in this workspace")
-        return 0
-
-    for item in discovered:
-        if untrust:
-            resolved, removed = trust.untrust_path(item.path)
-            verb = "untrusted" if removed else "was not trusted"
-            term.out(f"{verb} {git.display_path(resolved)}")
-        else:
-            resolved = trust.trust_path(item.path)
-            term.out(f"trusted {git.display_path(resolved)}")
 
     if untrust:
+        if not discovered:
+            term.out("no in-repo plugins found in this workspace")
+        for item in discovered:
+            _untrust(item.path)
         return 0
 
+    if term.interactive():
+        locations = _choose_locations(root, discovered)
+    elif discovered:
+        locations = tuple(item.path for item in discovered)
+    else:
+        term.out("no in-repo plugins found in this workspace")
+        return 0
+    for location in locations:
+        _trust(location)
+
+    if not discovered:
+        return 0
     if kind == "multi":
         return refresh_cmd.run_multi(root, plugins)
     session = open_session(str(root), need_workspace=True, plugins=plugins, cwd=root)

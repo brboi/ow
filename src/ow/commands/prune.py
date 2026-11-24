@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ow import term
-from ow.core import config, git, index, refresh, stacks
+from ow.commands._runtime import remove_workspace_root, running_refusals
+from ow.core import git, index, stacks
 from ow.core.facts import gather_all
-from ow.core.json_schema import envelope
 from ow.core.paths import repos_dir
 from ow.core.plan import Batch, GitStep, OwStep, RepoPlan, Step, run_batch
 from ow.core.plugins import PruneCandidate
@@ -28,167 +27,96 @@ if TYPE_CHECKING:
 
 def run(
     *,
-    plugins: "Plugins | None" = None,
+    plugins: Plugins,
     offline: bool = False,
     dry_run: bool,
     yes: bool,
-    json_output: bool = False,
 ) -> int:
-    """Survey every bare, the index, and plugin prune candidates, then run the machine-wide batch."""
-    with term.json_mode(json_output):
-        plans: list[RepoPlan] = []
-        planned_workspaces: list[dict[str, Any]] = []
-        removed_roots: set[Path] = set()
-        skipped_candidates: list[dict[str, Any]] = []
-        after: list[Step] = []
+    """Survey every bare, the index, and plugin prune candidates, then run the machine-wide batch.
 
-        # 1. Plugin-recommended workspace/stack removals (e.g. merged/closed GitHub PRs)
-        if plugins is not None:
-            live_sessions = _load_live_sessions(plugins)
-            live_workspaces = tuple(
-                sess.workspace for sess in live_sessions.values() if sess.workspace is not None
+    `plugins` is the built-in set, used to open each indexed workspace; a workspace's prune
+    candidates come from the plugin set its own session carries.
+    """
+    plans: list[RepoPlan] = []
+    after: list[Step] = []
+
+    # 1. Plugin-recommended workspace/stack removals (e.g. merged/closed GitHub PRs)
+    live_sessions = _load_live_sessions(plugins)
+    candidates = _collect_candidates(live_sessions, offline=offline)
+
+    for candidate in candidates:
+        sess = live_sessions.get(candidate.workspace.resolve())
+        if sess is None or sess.workspace is None:
+            continue
+        ws = sess.workspace
+        facts = gather_all(sess.locations)
+        refusals = [
+            *workspace_refusals(facts, ws.root, sess.locations),
+            *running_refusals(ws, sess.plugins),
+        ]
+        if refusals:
+            reasons = "; ".join(f"{n}: {r}" for n, r in refusals)
+            term.out(f"# skip pruning {ws.name} ({candidate.reason}): {reasons}")
+            continue
+
+        term.out(f"# prune workspace {ws.name}: {candidate.reason}")
+        outside = outside_entries(ws.root, tuple(rf.path for rf in facts))
+        if outside:
+            term.out(f"# {ws.name}: {outside}")
+
+        ws_steps: list[Step] = []
+        ws_notes: list[str] = []
+        for rf in facts:
+            rp = repo_removal_plan(rf)
+            ws_steps.extend(rp.steps)
+            ws_notes.extend(rp.notes)
+
+        ws_steps.append(
+            OwStep(
+                shown=git.show(("rm", "-rf", str(ws.root))) + f"  # {candidate.reason}",
+                run=lambda ws=ws, plugins=sess.plugins: remove_workspace_root(ws, plugins),
             )
-            candidates = _collect_candidates(plugins, live_workspaces, offline=offline)
-
-            for candidate in candidates:
-                sess = live_sessions.get(candidate.workspace.resolve())
-                if sess is None or sess.workspace is None:
-                    continue
-                ws = sess.workspace
-                facts = gather_all(sess.locations)
-                refusals = workspace_refusals(facts, ws.root, sess.locations)
-                if refusals:
-                    reasons = "; ".join(f"{n}: {r}" for n, r in refusals)
-                    term.out(
-                        f"# skip pruning {ws.name} ({candidate.reason}): {reasons}"
-                    )
-                    skipped_candidates.append(
-                        {
-                            "workspace": ws.name,
-                            "root": str(ws.root),
-                            "reason": candidate.reason,
-                            "refusals": [{"repo": n, "reason": r} for n, r in refusals],
-                        }
-                    )
-                    continue
-
-                term.out(f"# prune workspace {ws.name}: {candidate.reason}")
-                outside = outside_entries(ws.root, tuple(rf.path for rf in facts))
-                if outside:
-                    term.out(f"# {ws.name}: {outside}")
-
-                ws_steps: list[Step] = []
-                ws_notes: list[str] = []
-                for rf in facts:
-                    rp = repo_removal_plan(rf)
-                    ws_steps.extend(rp.steps)
-                    ws_notes.extend(rp.notes)
-
-                ws_root = ws.root
-                ws_is_stack = ws.is_stack
-                parent_multi = stacks.parent_multi_workspace(ws_root) if ws_is_stack else None
-
-                def _cleanup_ws(
-                    root: Path = ws_root,
-                    parent: Path | None = parent_multi,
-                    stack_name: str = ws.name,
-                ) -> None:
-                    shutil.rmtree(root)
-                    removed_roots.add(root)
-                    if parent is not None and plugins is not None:
-                        config.remove_stack(parent / ".ow" / "config.toml", stack_name)
-                        refresh.remove_lock_prefix(parent, stack_name)
-                        remaining = stacks.load_multi_workspace(parent, plugins)
-                        if remaining is None:
-                            refresh.remove_owned_files(parent)
-                            index.remove(parent)
-                            if parent.exists():
-                                try:
-                                    if not any(parent.iterdir()):
-                                        parent.rmdir()
-                                except OSError:
-                                    pass
-                        else:
-                            stacks.sync_multi_workspace_files(remaining[0], plugins)
-                    else:
-                        index.remove(root)
-
-                ws_steps.append(
-                    OwStep(
-                        shown=git.show(("rm", "-rf", str(ws_root)))
-                        + f"  # {candidate.reason}",
-                        run=_cleanup_ws,
-                    )
-                )
-                plans.append(
-                    RepoPlan(
-                        repo=f"workspace:{ws.name}",
-                        steps=tuple(ws_steps),
-                        notes=tuple(ws_notes),
-                    )
-                )
-                planned_workspaces.append(
-                    {"workspace": ws.name, "root": str(ws_root), "reason": candidate.reason}
-                )
-
-        # 2. Bare repo worktree prune + orphan pushed local branches
-        for bare in _bares():
-            plan, hints = _survey(bare)
-            for line in hints:
-                term.out(line)
-            if plan is not None:
-                plans.append(plan)
-
-        # 3. Dead index entries
-        dead = _dead_entries()
-        for path in dead:
-            after.append(
-                OwStep(
-                    shown=f"# drop {git.display_path(path)} from the index",
-                    run=lambda entry=path: index.remove(entry),
-                )
-            )
-
-        outcome = run_batch(
-            Batch(root=None, repos=tuple(plans), after=tuple(after)),
-            prompt=True,
-            dry_run=dry_run,
-            yes=yes,
+        )
+        plans.append(
+            RepoPlan(repo=f"workspace:{ws.name}", steps=tuple(ws_steps), notes=tuple(ws_notes))
         )
 
-        pruned_workspaces = [
-            entry for entry in planned_workspaces if Path(entry["root"]) in removed_roots
-        ]
+    # 2. Bare repo worktree prune + orphan pushed local branches
+    for bare in _bares():
+        plan, hints = _survey(bare)
+        for line in hints:
+            term.out(line)
+        if plan is not None:
+            plans.append(plan)
 
-        if json_output:
-            term.emit_json(
-                envelope(
-                    {
-                        "dry_run": dry_run,
-                        "ok": list(outcome.ok),
-                        "failed": list(outcome.failed),
-                        "refused": list(outcome.refused),
-                        "dead_index_entries": [str(p) for p in dead],
-                        "planned_workspaces": planned_workspaces,
-                        "pruned_workspaces": pruned_workspaces,
-                        "skipped_workspaces": skipped_candidates,
-                        "exit_code": outcome.exit_code,
-                    }
-                )
+    # 3. Dead index entries
+    for path in _dead_entries():
+        after.append(
+            OwStep(
+                shown=f"# drop {git.display_path(path)} from the index",
+                run=lambda entry=path: index.remove(entry),
             )
-        return outcome.exit_code
+        )
+
+    outcome = run_batch(
+        Batch(root=None, repos=tuple(plans), after=tuple(after)),
+        prompt=True,
+        dry_run=dry_run,
+        yes=yes,
+    )
+    return outcome.exit_code
 
 
-def _load_live_sessions(plugins: "Plugins") -> dict[Path, Session]:
+def _load_live_sessions(plugins: Plugins) -> dict[Path, Session]:
+    """One session per indexed workspace or stack, keyed by its root; a multi-stack root shares one plugin set."""
     result: dict[Path, Session] = {}
     for path in index.read():
-        stack_paths = stacks.detect_multi_workspace(path)
-        if stack_paths:
-            for sp in stack_paths:
-                try:
-                    sess = open_session(str(sp), need_workspace=False, plugins=plugins)
-                except Exception:
-                    continue
+        if stacks.detect_multi_workspace(path):
+            try:
+                loaded = stacks.load_multi_workspace(path, plugins)
+            except Exception:
+                continue
+            for sess in loaded[1] if loaded is not None else ():
                 if sess.workspace is not None:
                     result[sess.workspace.root.resolve()] = sess
             continue
@@ -203,24 +131,31 @@ def _load_live_sessions(plugins: "Plugins") -> dict[Path, Session]:
 
 
 def _collect_candidates(
-    plugins: "Plugins", workspaces: tuple["Workspace", ...], *, offline: bool
+    sessions: dict[Path, Session], *, offline: bool
 ) -> list[PruneCandidate]:
+    """Ask each distinct plugin set for its workspaces' candidates; sessions sharing a set are asked once."""
+    by_set: dict[int, tuple[Plugins, list[Workspace]]] = {}
+    for sess in sessions.values():
+        if sess.workspace is not None:
+            by_set.setdefault(id(sess.plugins), (sess.plugins, []))[1].append(sess.workspace)
+
     found: list[PruneCandidate] = []
     seen: set[Path] = set()
-    for plugin_name, answer in plugins.call(
-        "ow_prune_candidates",
-        workspaces=workspaces,
-        offline=offline,
-        errors="collect",
-    ):
-        if isinstance(answer, Exception):
-            term.warn(f"{plugin_name}: {answer}")
-            continue
-        if isinstance(answer, list):
-            for item in answer:
-                if isinstance(item, PruneCandidate) and item.workspace not in seen:
-                    seen.add(item.workspace)
-                    found.append(item)
+    for plugins, workspaces in by_set.values():
+        for plugin_name, answer in plugins.call(
+            "ow_prune_candidates",
+            workspaces=tuple(workspaces),
+            offline=offline,
+            errors="collect",
+        ):
+            if isinstance(answer, Exception):
+                term.warn(f"{plugin_name}: {answer}")
+                continue
+            if isinstance(answer, list):
+                for item in answer:
+                    if isinstance(item, PruneCandidate) and item.workspace not in seen:
+                        seen.add(item.workspace)
+                        found.append(item)
     return found
 
 

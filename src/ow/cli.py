@@ -5,19 +5,18 @@ Every Typer signature lives here (a `commands/` module never imports `ow.cli`).
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, Sequence
+from typing import TYPE_CHECKING, Any, NoReturn
 
-import click
 import typer
 from typer.core import TyperCommand, TyperGroup
 
-from . import __version__
-from . import errors, term
+from . import __version__, errors, term
 from .core import git, stacks
 from .core.index import read as read_index
 from .core.paths import repos_dir
-from .core.session import Session, open_session
+from .core.session import Session, open_session, workspace_plugins
 from .core.workspace import resolve_target_root
 
 if TYPE_CHECKING:
@@ -25,21 +24,20 @@ if TYPE_CHECKING:
 
 
 WORKSPACE_HELP = (
-    "Workspace or stack to act on, by name or path (default: current directory's workspace)"
+    "Workspace or stack (WS[/STACK]) to act on, by name or path (default: current directory's workspace)"
 )
 ONLY_HELP = "Limit the command to this repo (repeatable; default: every repo)"
 DRY_RUN_HELP = "Print the commands without running them"
 YES_HELP = "Skip the confirmation prompt"
-JSON_HELP = "Emit machine-readable JSON on stdout"
 
 # Registers the vendored click's shell-completion classes, which `shell-init` reads.
 typer.completion.completion_init()
 
 
 class _RunCommand(TyperCommand):
-    """Capture everything after `--` as passthrough args before Click parses TARGET/options."""
+    """Capture everything after `--` as passthrough args before Click parses WS/options."""
 
-    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+    def parse_args(self, ctx: typer.Context, args: list[str]) -> list[str]:
         if "--" in args:
             idx = args.index("--")
             ctx.meta["ow_run_passthrough"] = tuple(args[idx + 1 :])
@@ -52,7 +50,7 @@ class _RunCommand(TyperCommand):
 class OwGroup(TyperGroup):
     """Custom Typer group that handles no_args_is_help with exit 0 and OwError exceptions."""
 
-    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+    def parse_args(self, ctx: typer.Context, args: list[str]) -> list[str]:
         """Override to handle bare 'ow' (no args) by printing help and exiting with 0.
 
         A completion request parses with empty args too, so fall through when parsing.
@@ -62,7 +60,7 @@ class OwGroup(TyperGroup):
             ctx.exit(0)
         return super().parse_args(ctx, args)
 
-    def invoke(self, ctx: click.Context) -> None:
+    def invoke(self, ctx: typer.Context) -> None:
         """Override to turn an OwError into its exit code."""
         try:
             super().invoke(ctx)
@@ -142,13 +140,32 @@ def build_app(plugins: Plugins) -> typer.Typer:
                     f"unknown repo {repo!r} in --only; this workspace has: {valid}"
                 )
 
-    def _checked(workspace: str | None, only: list[str] | None = None) -> Session:
-        """The session a git command starts from: opened, announced, version-checked, --only checked."""
+    def _opened(workspace: str | None) -> Session:
+        """The session of `workspace`, opened and with its warnings announced."""
         session = _open(workspace)
         _announce(session)
+        return session
+
+    def _checked(workspace: str | None, only: list[str] | None = None) -> Session:
+        """The session a git command starts from: opened, announced, version-checked, --only checked."""
+        session = _opened(workspace)
         git.check_version()
         _validate_only(session, only)
         return session
+
+    def _single_root(workspace: str | None, on_multi: Callable[[Path], int]) -> str:
+        """The root of the workspace or stack `workspace` names; a multi-stack root goes to `on_multi` and exits."""
+        root, kind = resolve_target_root(workspace)
+        if kind == "multi":
+            _exit(on_multi(root))
+        return str(root)
+
+    def _targets(names: str | Sequence[str] | None, workspace: str | None) -> tuple[str, ...]:
+        """The WS argument(s) and `-w` as one list of targets (empty: the current workspace)."""
+        named = (names,) if isinstance(names, str) else tuple(names or ())
+        if named and workspace is not None:
+            raise errors.UsageError("pass either WS or -w/--workspace, not both")
+        return named or (() if workspace is None else (workspace,))
 
     def _exit(result: int | None) -> NoReturn:
         """Commands return their exit code; the lifecycle ones return nothing (exit 0)."""
@@ -234,7 +251,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         specs: list[str] = typer.Argument(
             None,
             metavar="SPEC",
-            help="Target spec(s): @18.0, enterprise#12345, a=community#1,enterprise#2, voip",
+            help="Spec(s): @18.0, enterprise#12345, a=community#1,enterprise#2, voip",
         ),
         branch: str = typer.Option(
             None, "--branch", metavar="BRANCH", help="Create or check out this branch in every added repo"
@@ -242,12 +259,11 @@ def build_app(plugins: Plugins) -> typer.Typer:
         as_name: str = typer.Option(
             None,
             "--as",
-            metavar="NAME",
+            metavar="STACK",
             help="Stack name for the existing workspace when promoting it to multi-stack",
         ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Initialize, compose, adopt, or repair the current directory."""
         git.check_version()
@@ -259,7 +275,6 @@ def build_app(plugins: Plugins) -> typer.Typer:
                 as_name=as_name,
                 dry_run=dry_run,
                 yes=yes,
-                json_output=json_output,
             )
         )
 
@@ -267,7 +282,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     @app.command("add")
     def add_cmd(
-        targets: list[str] = typer.Argument(
+        specs: list[str] = typer.Argument(
             ...,
             metavar="SPEC",
             help="Repo, PR, or named stack spec to add inside the current workspace",
@@ -278,24 +293,22 @@ def build_app(plugins: Plugins) -> typer.Typer:
         as_name: str = typer.Option(
             None,
             "--as",
-            metavar="NAME",
+            metavar="STACK",
             help="Stack name for the existing workspace when promoting it to multi-stack",
         ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Add repos, attach PRs, or add stacks to the current workspace."""
         git.check_version()
         _exit(
             _command_module("add").run(
                 plugins,
-                tuple(targets),
+                tuple(specs),
                 branch=branch,
                 as_name=as_name,
                 dry_run=dry_run,
                 yes=yes,
-                json_output=json_output,
             )
         )
 
@@ -308,16 +321,16 @@ def build_app(plugins: Plugins) -> typer.Typer:
     )
     def run_cmd(
         ctx: typer.Context,
-        targets: list[str] = typer.Argument(
+        items: list[str] = typer.Argument(
             None,
-            metavar="TARGET",
-            help='Workspace/stack name(s) or --tmp spec(s), optionally with :"ARGS"',
+            metavar="WS",
+            help='Workspace or stack name(s) (WS[/STACK]), or SPEC(s) with --tmp, optionally with :"ARGS"',
         ),
         tmp: bool = typer.Option(
             False,
             "--tmp",
             "--ephemeral",
-            help="Create temporary stack(s) from TARGET specs and remove them on exit",
+            help="Create temporary stack(s) from SPEC arguments and remove them on exit",
         ),
         fail_fast: bool = typer.Option(
             False,
@@ -327,8 +340,9 @@ def build_app(plugins: Plugins) -> typer.Typer:
         reset: bool = typer.Option(
             False,
             "--reset",
-            help="Drop each launched stack's database and local filestore before starting",
+            help="Drop each launched stack's database and local filestore before starting (asks first)",
         ),
+        yes: bool = typer.Option(False, "-y", "--yes", help="Do not ask before --reset drops anything"),
         detach: bool = typer.Option(
             False,
             "-d",
@@ -344,11 +358,12 @@ def build_app(plugins: Plugins) -> typer.Typer:
         _exit(
             _command_module("run").run(
                 plugins,
-                targets=tuple(targets or ()),
+                items=tuple(items or ()),
                 workspace=workspace,
                 tmp=tmp,
                 fail_fast=fail_fast,
                 reset=reset,
+                yes=yes,
                 detach=detach,
                 extra_args=tuple(extra_args),
             )
@@ -358,10 +373,10 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     @app.command("stop")
     def stop_cmd(
-        targets: list[str] = typer.Argument(
+        ws_names: list[str] = typer.Argument(
             None,
-            metavar="TARGET",
-            help="Workspace or stack name(s) to stop (default: current workspace)",
+            metavar="WS",
+            help="Workspace or stack name(s) (WS[/STACK]) to stop (default: current workspace)",
         ),
         services: bool = typer.Option(
             False,
@@ -379,8 +394,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         _exit(
             _command_module("stop").run(
                 plugins,
-                targets=tuple(targets or ()),
-                workspace=workspace,
+                ws_names=_targets(ws_names, workspace),
                 services=services,
                 all_workspaces=all_workspaces,
             )
@@ -390,16 +404,16 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     @app.command("logs")
     def logs_cmd(
-        targets: list[str] = typer.Argument(
+        ws_names: list[str] = typer.Argument(
             None,
-            metavar="TARGET",
-            help="Workspace or stack name(s) whose logs to show (default: current workspace)",
+            metavar="WS",
+            help="Workspace or stack name(s) (WS[/STACK]) whose logs to show (default: current workspace)",
         ),
         follow: bool = typer.Option(
             False,
             "-f",
             "--follow",
-            help="Follow log output continuously (Ctrl+C to stop)",
+            help="Follow log output until the process stops (or Ctrl+C)",
         ),
         lines: int = typer.Option(
             50,
@@ -413,8 +427,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         _exit(
             _command_module("logs").run(
                 plugins,
-                targets=tuple(targets or ()),
-                workspace=workspace,
+                ws_names=_targets(ws_names, workspace),
                 follow=follow,
                 lines=lines,
             )
@@ -429,10 +442,10 @@ def build_app(plugins: Plugins) -> typer.Typer:
     )
     def exec_cmd(
         ctx: typer.Context,
-        target: str = typer.Argument(
+        ws_name: str = typer.Argument(
             None,
             metavar="WS",
-            help="Workspace or stack to enter (default: current directory)",
+            help="Workspace or stack (WS[/STACK]) to enter (default: current directory)",
             autocompletion=complete_workspace,
         ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
@@ -440,17 +453,17 @@ def build_app(plugins: Plugins) -> typer.Typer:
         """Run a command or shell in a stack's virtualenv."""
         git.check_version()
         if ctx.args:
-            hint_tokens = ([target] if target is not None else []) + list(ctx.args)
+            hint_tokens = ([ws_name] if ws_name is not None else []) + list(ctx.args)
             hint = " ".join(hint_tokens)
             raise errors.UsageError(
                 f"unexpected arguments before `--`; pass commands after `--` (e.g. `ow exec -- {hint}`)"
             )
         command = tuple(ctx.meta.get("ow_run_passthrough", ()))
+        target = _targets(ws_name, workspace)
         _exit(
             _command_module("exec").run(
                 plugins,
-                target=target,
-                workspace=workspace,
+                ws_name=target[0] if target else None,
                 command=command,
             )
         )
@@ -579,14 +592,13 @@ def build_app(plugins: Plugins) -> typer.Typer:
     )
 
     def _config_context(
-        ctx: typer.Context, workspace: str | None, global_: bool, json_output: bool
-    ) -> tuple[str | None, bool, bool]:
-        """Merge a verb's own -w/--global/--json with the ones given before it."""
+        ctx: typer.Context, workspace: str | None, global_: bool
+    ) -> tuple[str | None, bool]:
+        """Merge a verb's own -w/--global with the ones given before it."""
         parent = ctx.obj if isinstance(ctx.obj, dict) else {}
         return (
             workspace or parent.get("workspace"),
             global_ or bool(parent.get("global_")),
-            json_output or bool(parent.get("json_output")),
         )
 
     def _open_for_config(
@@ -611,8 +623,8 @@ def build_app(plugins: Plugins) -> typer.Typer:
                 None,
             )
         if kind == "multi":
-            loaded = stacks.load_multi_workspace(root, plugins)
-            eff_plugins = loaded[1][0].plugins if loaded and loaded[1] else plugins
+            stack_paths = stacks.detect_multi_workspace(root)
+            eff_plugins = workspace_plugins(stack_paths[0], plugins)[0] if stack_paths else plugins
             sess = open_session(
                 None,
                 need_workspace=False,
@@ -637,18 +649,15 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ctx: typer.Context,
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
         global_: bool = typer.Option(False, "--global", help="Read or write the global config"),
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Show every setting with its effective value, its origin and its help."""
-        ctx.obj = {"workspace": workspace, "global_": global_, "json_output": json_output}
+        ctx.obj = {"workspace": workspace, "global_": global_}
         if ctx.invoked_subcommand is not None:
             return
         session, multi_root = _open_for_config(workspace)
         _announce(session)
         _exit(
-            _command_module("config").show_all(
-                session, global_=global_, multi_root=multi_root, json_output=json_output
-            )
+            _command_module("config").show_all(session, global_=global_, multi_root=multi_root)
         )
 
     @config_app.command("get")
@@ -659,16 +668,13 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
         global_: bool = typer.Option(False, "--global", help="Read the global layer"),
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Print one setting's effective value."""
-        workspace, _global_, _json = _config_context(ctx, workspace, global_, json_output)
+        workspace, global_ = _config_context(ctx, workspace, global_)
         session, multi_root = _open_for_config(workspace)
         _announce(session)
         _exit(
-            _command_module("config").get(
-                session, key, global_=_global_, multi_root=multi_root, json_output=_json
-            )
+            _command_module("config").get(session, key, global_=global_, multi_root=multi_root)
         )
 
     @config_app.command("set")
@@ -688,9 +694,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ),
     ) -> None:
         """Set a key, writing the workspace config unless --global is given."""
-        workspace, global_, _json = _config_context(ctx, workspace, global_, False)
-        if _json:
-            raise errors.UsageError("--json is not supported on `ow config set`")
+        workspace, global_ = _config_context(ctx, workspace, global_)
         session, multi_root = _open_for_config(workspace)
         _announce(session)
         _exit(
@@ -711,9 +715,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ),
     ) -> None:
         """Unset a key, writing the workspace config unless --global is given."""
-        workspace, global_, _json = _config_context(ctx, workspace, global_, False)
-        if _json:
-            raise errors.UsageError("--json is not supported on `ow config unset`")
+        workspace, global_ = _config_context(ctx, workspace, global_)
         session, multi_root = _open_for_config(
             workspace,
             ignore_global=(key,) if global_ else (),
@@ -732,10 +734,10 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     @app.command("status")
     def status_cmd(
-        target: str = typer.Argument(
+        spec: str = typer.Argument(
             None,
-            metavar="TARGET",
-            help="Optional external target (e.g. enterprise#12345 or Runbot URL)",
+            metavar="SPEC",
+            help="Optional external spec (e.g. enterprise#12345 or Runbot URL)",
         ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
         only: list[str] = typer.Option(None, "--only", **only_option),
@@ -745,54 +747,27 @@ def build_app(plugins: Plugins) -> typer.Typer:
         offline: bool = typer.Option(
             False, "--offline", help="Skip external network lookups (GitHub/Runbot)"
         ),
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
-        """Show workspace, stack, or external target status."""
-        if target is not None and workspace is not None:
-            raise errors.UsageError("pass either TARGET or -w/--workspace, not both")
-        if target is not None and (only or fetch):
-            raise errors.UsageError("--only and --fetch cannot be used with an external TARGET")
+        """Show workspace, stack, or external spec status."""
+        if spec is not None and workspace is not None:
+            raise errors.UsageError("pass either SPEC or -w/--workspace, not both")
+        if spec is not None and (only or fetch):
+            raise errors.UsageError("--only and --fetch cannot be used with an external SPEC")
 
-        if target is not None:
+        status = _command_module("status")
+        if spec is not None:
             git.check_version()
-            _exit(
-                _command_module("status").run(
-                    None,
-                    plugins=plugins,
-                    target=target,
-                    fetch=fetch,
-                    offline=offline,
-                    json_output=json_output,
-                )
-            )
+            session = _open(None, need_workspace=False)
+            _exit(status.run_spec(session, spec=spec, offline=offline))
 
-        root, kind = resolve_target_root(workspace)
-        if kind == "multi":
+        def status_multi(multi_root: Path) -> int:
             if only:
                 raise errors.UsageError("--only cannot be used on a multi-stack workspace; pass -w <stack>")
             git.check_version()
-            _exit(
-                _command_module("status").run(
-                    None,
-                    plugins=plugins,
-                    multi_root=root,
-                    fetch=fetch,
-                    offline=offline,
-                    json_output=json_output,
-                )
-            )
+            return status.run_multi(plugins, multi_root=multi_root, fetch=fetch, offline=offline)
 
-        session = _checked(str(root), only)
-        _exit(
-            _command_module("status").run(
-                session,
-                plugins=plugins,
-                only=_only(only),
-                fetch=fetch,
-                offline=offline,
-                json_output=json_output,
-            )
-        )
+        root = _single_root(workspace, status_multi)
+        _exit(status.run(_checked(root, only), only=_only(only), fetch=fetch, offline=offline))
 
     # -- retarget --------------------------------------------------------
 
@@ -818,7 +793,6 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
         """Guarded replay of each repo onto its base (or a new base ref)."""
@@ -834,7 +808,6 @@ def build_app(plugins: Plugins) -> typer.Typer:
                 no_fetch=no_fetch,
                 dry_run=dry_run,
                 yes=yes,
-                json_output=json_output,
             )
         )
 
@@ -845,12 +818,9 @@ def build_app(plugins: Plugins) -> typer.Typer:
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
         """Rewrite the generated files."""
-        root, kind = resolve_target_root(workspace)
-        if kind == "multi":
-            _exit(_command_module("refresh").run_multi(root, plugins))
-        session = _open(str(root))
-        _announce(session)
-        _exit(_command_module("refresh").run(session))
+        refresh = _command_module("refresh")
+        root = _single_root(workspace, lambda multi_root: refresh.run_multi(multi_root, plugins))
+        _exit(refresh.run(_opened(root)))
 
     @app.command("files")
     def files_cmd(
@@ -860,36 +830,37 @@ def build_app(plugins: Plugins) -> typer.Typer:
             "--diff",
             help="Show the diff of every file that differs instead of the states",
         ),
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Show the generated files and their state."""
-        root, kind = resolve_target_root(workspace)
-        if kind == "multi":
-            _exit(
-                _command_module("files").run_multi(
-                    root, plugins, diff=diff, json_output=json_output
-                )
-            )
-        session = _open(str(root))
-        _announce(session)
-        _exit(_command_module("files").run(session, diff=diff, json_output=json_output))
+        files = _command_module("files")
+        root = _single_root(
+            workspace, lambda multi_root: files.run_multi(multi_root, plugins, diff=diff)
+        )
+        _exit(files.run(_opened(root), diff=diff))
 
     @app.command("trust")
     def trust_cmd(
         path: str = typer.Argument(
             None,
             metavar="PATH",
-            help="Specific plugin file to trust or untrust (default: all in-repo plugins in the workspace)",
+            help="Plugin file or directory to trust or untrust (default: this workspace's in-repo plugins)",
         ),
         untrust: bool = typer.Option(
-            False, "--untrust", help="Revoke trust for the plugin file(s)"
+            False, "--untrust", help="Revoke trust for PATH, or for the workspace's plugin files"
         ),
         list_all: bool = typer.Option(
-            False, "--list", help="List all trusted plugin file paths"
+            False, "--list", help="List every trusted plugin file and directory"
         ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
-        """Trust, untrust, or list in-repo plugins."""
+        """Trust, untrust, or list where in-repo plugins may run from.
+
+        Trust is by location, like an editor's workspace trust: a trusted plugin file or a
+        trusted directory runs whatever code sits there, including code that arrives later
+        (e.g. a PR checked out with `ow add`). Without PATH on a terminal, asks whether to
+        trust the plugin files found, the workspace root, or its parent directory; without a
+        terminal, trusts the plugin files found. Then refreshes the workspace.
+        """
         _exit(
             _command_module("trust").run(
                 plugins,
@@ -903,19 +874,17 @@ def build_app(plugins: Plugins) -> typer.Typer:
     # -- fleet: ls, cd, shell-init, rm, prune ----------------------------
 
     @app.command("ls")
-    def ls_cmd(
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
-    ) -> None:
+    def ls_cmd() -> None:
         """List the known workspaces and their repos or stacks."""
         git.check_version()
-        _exit(_command_module("ls").run(plugins, json_output=json_output))
+        _exit(_command_module("ls").run(plugins))
 
     @app.command("cd")
     def cd_cmd(
         ws: str = typer.Argument(
             None,
             metavar="WS",
-            help="Workspace or stack to print, by name or path (default: current directory)",
+            help="Workspace or stack (WS[/STACK]) to print, by name or path (default: current directory)",
             autocompletion=complete_workspace,
         ),
     ) -> None:
@@ -939,28 +908,19 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ws: str = typer.Argument(
             ...,
             metavar="WS",
-            help="Workspace or stack to remove (e.g. my-ws, review, review/iap)",
+            help="Workspace or stack (WS[/STACK]) to remove (e.g. my-ws, review, review/iap)",
             autocompletion=complete_workspace,
         ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Remove a workspace (or stack) and its worktrees."""
         git.check_version()
         root, kind = resolve_target_root(ws)
         if kind == "multi":
-            _exit(
-                _command_module("rm").run_multi(
-                    plugins, root, dry_run=dry_run, yes=yes, json_output=json_output
-                )
-            )
+            _exit(_command_module("rm").run_multi(plugins, root, dry_run=dry_run, yes=yes))
         session = _checked(str(root))
-        _exit(
-            _command_module("rm").run(
-                session, dry_run=dry_run, yes=yes, json_output=json_output
-            )
-        )
+        _exit(_command_module("rm").run(session, dry_run=dry_run, yes=yes))
 
     @app.command("prune")
     def prune_cmd(
@@ -969,17 +929,12 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
-        json_output: bool = typer.Option(False, "--json", help=JSON_HELP),
     ) -> None:
         """Clean up stale state and merged-PR workspaces."""
         git.check_version()
         _exit(
             _command_module("prune").run(
-                plugins=plugins,
-                offline=offline,
-                dry_run=dry_run,
-                yes=yes,
-                json_output=json_output,
+                plugins=plugins, offline=offline, dry_run=dry_run, yes=yes
             )
         )
 

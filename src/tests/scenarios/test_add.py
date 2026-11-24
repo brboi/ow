@@ -6,16 +6,7 @@ import json
 import tomllib
 
 from ow.core.paths import repos_dir
-from tests.conftest import add_repo, file_url
-
-
-def _setup_pr_repo(lab, name: str, base: str, base_files: dict[str, str], pr_num: int, pr_branch: str, pr_files: dict[str, str]):
-    remote = add_repo(lab, name, {base: base_files}, base=base)
-    collab = lab.collaborator(f"author-{name}-{pr_num}", of=remote)
-    collab.commit(pr_files, message=f"PR #{pr_num}", branch=pr_branch)
-    collab.push(pr_branch)
-    lab.publish_pr(remote, pr_num, pr_branch)
-    return remote
+from tests.conftest import add_repo, file_url, setup_pr_repo
 
 
 def test_add_outside_workspace_refuses_with_init_hint(lab):
@@ -28,15 +19,13 @@ def test_add_outside_workspace_refuses_with_init_hint(lab):
 def test_add_repo_and_attach_pr_onto_existing_detached_worktree(lab):
     """Inside a 1-level workspace on `@18.0`, `ow add upgrade` adds upgrade and `ow add enterprise#99999` attaches the PR."""
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
-    _setup_pr_repo(
-        lab,
-        "enterprise",
-        "18.0",
-        {"sale_ent/__manifest__.py": "{}"},
-        99999,
-        "18.0-late-pr",
-        {"sale_ent/late.py": "late = True\n"},
-    )
+    setup_pr_repo(lab,
+    "enterprise",
+    "18.0",
+    {"sale_ent/__manifest__.py": "{}"},
+    99999,
+    "18.0-late-pr",
+    {"sale_ent/late.py": "late = True\n"},)
     add_repo(lab, "upgrade", {"master": {"migrations/u.py": "u = 1\n"}}, base="master")
     lab.fake_gh(
         [
@@ -213,15 +202,13 @@ def test_add_in_multi_stack_updates_existing_stack_or_adds_new_stack(lab):
 
 def test_add_dry_run_non_promotion_leaves_workspace_untouched(lab):
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
-    _setup_pr_repo(
-        lab,
-        "enterprise",
-        "18.0",
-        {"sale_ent/__manifest__.py": "{}"},
-        99999,
-        "18.0-late-pr",
-        {"sale_ent/late.py": "late = True\n"},
-    )
+    setup_pr_repo(lab,
+    "enterprise",
+    "18.0",
+    {"sale_ent/__manifest__.py": "{}"},
+    99999,
+    "18.0-late-pr",
+    {"sale_ent/late.py": "late = True\n"},)
     add_repo(lab, "upgrade", {"master": {"migrations/u.py": "u = 1\n"}}, base="master")
     lab.fake_gh(
         [
@@ -262,7 +249,33 @@ def test_add_dry_run_non_promotion_leaves_workspace_untouched(lab):
     assert "stack-b" not in (multi / "dry-add-multi.code-workspace").read_text()
 
 
-def test_add_validates_as_before_resolving_targets(lab):
+def test_add_dry_run_reports_each_worktree_state_like_a_real_add(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    add_repo(lab, "upgrade", {"master": {"migrations/u.py": "u = 1\n"}}, base="master")
+    ws = lab.home / "dry-states"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "@18.0", cwd=ws).exit_code == 0
+
+    healthy = lab.ow("add", "-n", "community", cwd=ws)
+    assert healthy.exit_code == 0, healthy.stderr
+    assert "# community: already exists" in healthy.stdout
+    assert "worktree add" not in healthy.stdout
+
+    (ws / "upgrade").mkdir()  # an empty directory: an interrupted worktree
+    broken = lab.ow("add", "-n", "upgrade", cwd=ws)
+    assert broken.exit_code == 0, broken.stderr
+    assert "would clean up incomplete worktree" in broken.stdout
+    assert "worktree add" in broken.stdout
+    assert list((ws / "upgrade").iterdir()) == []
+
+    (ws / "upgrade" / "stray.txt").write_text("not a worktree\n")
+    foreign = lab.ow("add", "-n", "upgrade", cwd=ws)
+    assert foreign.exit_code == 2
+    assert "not a worktree of upgrade" in foreign.stderr
+
+
+def test_add_validates_as_before_resolving_specs(lab):
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
     add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
     gh_log = lab.fake_gh([])
@@ -290,7 +303,7 @@ def test_add_attach_without_branch_raises_usage_error_not_assert(lab):
     import pytest
 
     from ow.commands._workspace import UnitMode, create_workspace_unit
-    from ow.core.plugins import ResolvedRepo, ResolvedTarget, load_plugins
+    from ow.core.plugins import ResolvedRepo, ResolvedSpec, load_plugins
     from ow.errors import UsageError
 
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
@@ -299,7 +312,7 @@ def test_add_attach_without_branch_raises_usage_error_not_assert(lab):
     assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
 
     plugins = load_plugins()
-    target = ResolvedTarget(
+    target = ResolvedSpec(
         name="community",
         repos=(
             ResolvedRepo(
@@ -322,7 +335,7 @@ def test_add_attach_without_branch_raises_usage_error_not_assert(lab):
 
 def test_add_healthy_worktree_warns_on_runbot_commit_mismatch(lab, capsys):
     from ow.commands._workspace import add_into_workspace
-    from ow.core.plugins import ResolvedRepo, ResolvedTarget, load_plugins
+    from ow.core.plugins import ResolvedRepo, ResolvedSpec, load_plugins
 
     remote = add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
     bare = repos_dir() / "community.git"
@@ -338,7 +351,7 @@ def test_add_healthy_worktree_warns_on_runbot_commit_mismatch(lab, capsys):
     assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
     capsys.readouterr()
 
-    target = ResolvedTarget(
+    target = ResolvedSpec(
         name="community",
         repos=(ResolvedRepo(name="community", base="origin/18.0", branch=None, commit=sha_old),),
         source="runbot:bundle:1",
@@ -378,4 +391,34 @@ def test_add_honours_workspace_plugin_enablement(lab):
 
     res = lab.ow("add", "@18.0", cwd=ws)
     assert res.exit_code == 2
-    assert "no enabled plugin handles @<base> targets" in res.stderr
+    assert "no enabled plugin handles @<base> specs" in res.stderr
+
+
+def test_add_honours_an_in_repo_plugins_known_repos(lab):
+    """A trusted in-repo plugin's `ow_known_repos` is part of the catalog `ow add` resolves names with."""
+    extra = lab.remote("extra", {"main": {"README.md": "extra\n"}}, head="main")
+    plugin = (
+        "from ow.plugin_api import KnownRepo, hookimpl\n"
+        "OW_API_VERSION = 1\n"
+        'PLUGIN_NAME = "demo_known"\n'
+        "@hookimpl\n"
+        "def ow_known_repos():\n"
+        f'    return [KnownRepo(name="extra", url="{file_url(extra)}")]\n'
+    )
+    add_repo(
+        lab,
+        "demo",
+        {"main": {"pyproject.toml": '[tool.ow]\nplugin = "ow_plugin.py"\n', "ow_plugin.py": plugin}},
+        base="main",
+    )
+    ws = lab.home / "demo-ws"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "demo@main", cwd=ws).exit_code == 0
+    assert lab.ow("trust", cwd=ws).exit_code == 0
+    assert not (repos_dir() / "extra.git").exists()
+
+    res = lab.ow("add", "extra@main", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert (ws / "extra" / "README.md").is_file()
+    assert (repos_dir() / "extra.git").is_dir()

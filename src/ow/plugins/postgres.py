@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import secrets
 import subprocess
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from ow import term
-from ow.core import config
+from ow.core import config, paths
+from ow.core.fs import atomic_write, sidecar_lock
 from ow.core.plugins import Setting, StatusInfo, hookimpl
 from ow.errors import UsageError
 from ow.plugins import _containers as containers
@@ -22,85 +25,113 @@ _PG_CONTAINER = "ow-postgres"
 _PGWEB_CONTAINER = "ow-pgweb"
 _PG_VOLUME = "ow-postgres-data"
 _NETWORK = "ow-net"
-_DEFAULT_IMAGE = "pgvector/pgvector:pg17"
-_DEFAULT_PGWEB_IMAGE = "sosedoff/pgweb"
-_DEFAULT_BIND_ADDRESS = "0.0.0.0"
+
+_SETTINGS = (
+    Setting(
+        key="postgres.image",
+        type=str,
+        default="pgvector/pgvector:pg17",
+        help="PostgreSQL container image (PG 17 + pgvector, compatible with Odoo 18/19/20.0)",
+    ),
+    Setting(
+        key="postgres.port",
+        type=int,
+        default=0,
+        help="Host port for PostgreSQL (0 = auto: 5432 if free, else 5433)",
+    ),
+    Setting(
+        key="postgres.bind_address",
+        type=str,
+        default="0.0.0.0",
+        help=(
+            "Host address to bind PostgreSQL on. The default 0.0.0.0 exposes the server to the whole LAN "
+            "(needed so containers reach it via host.docker.internal; the `postgres` superuser password is "
+            "random, but the Odoo role uses postgres.password); use 127.0.0.1 for loopback only"
+        ),
+    ),
+    Setting(
+        key="postgres.user",
+        type=str,
+        default="odoo",
+        help="PostgreSQL role name for Odoo (NOSUPERUSER CREATEDB)",
+    ),
+    Setting(
+        key="postgres.password",
+        type=str,
+        default="odoo",
+        help="PostgreSQL role password for the Odoo role (not the superuser, whose password is random)",
+    ),
+    Setting(
+        key="postgres.pgweb",
+        type=bool,
+        default=True,
+        help="Run pgweb alongside PostgreSQL",
+    ),
+    Setting(
+        key="postgres.pgweb_image",
+        type=str,
+        default="sosedoff/pgweb",
+        help="pgweb container image",
+    ),
+    Setting(
+        key="postgres.pgweb_port",
+        type=int,
+        default=8081,
+        help="Host port for pgweb",
+    ),
+)
+_DEFAULTS = {setting.key: setting.default for setting in _SETTINGS}
 
 
 @hookimpl
 def ow_settings() -> list[Setting]:
     """Provide PostgreSQL and pgweb settings."""
-    return [
-        Setting(
-            key="postgres.image",
-            type=str,
-            default=_DEFAULT_IMAGE,
-            help="PostgreSQL container image (PG 17 + pgvector, compatible with Odoo 18/19/20.0)",
-        ),
-        Setting(
-            key="postgres.port",
-            type=int,
-            default=0,
-            help="Host port for PostgreSQL (0 = auto: 5432 if free, else 5433)",
-        ),
-        Setting(
-            key="postgres.bind_address",
-            type=str,
-            default=_DEFAULT_BIND_ADDRESS,
-            help="Host address to bind PostgreSQL on (0.0.0.0 allows containers via host.docker.internal; use 127.0.0.1 for loopback only)",
-        ),
-        Setting(
-            key="postgres.user",
-            type=str,
-            default="odoo",
-            help="PostgreSQL role name for Odoo (NOSUPERUSER CREATEDB)",
-        ),
-        Setting(
-            key="postgres.password",
-            type=str,
-            default="odoo",
-            help="PostgreSQL role password",
-        ),
-        Setting(
-            key="postgres.pgweb",
-            type=bool,
-            default=True,
-            help="Run pgweb alongside PostgreSQL",
-        ),
-        Setting(
-            key="postgres.pgweb_image",
-            type=str,
-            default=_DEFAULT_PGWEB_IMAGE,
-            help="pgweb container image",
-        ),
-        Setting(
-            key="postgres.pgweb_port",
-            type=int,
-            default=8081,
-            help="Host port for pgweb",
-        ),
-    ]
+    return list(_SETTINGS)
 
 
-def _cfg(settings: Mapping[str, object]) -> tuple[str, int, str, str, str, bool, str, int]:
-    image = str(settings.get("postgres.image") or _DEFAULT_IMAGE)
+@dataclass(frozen=True)
+class _Config:
+    """The effective PostgreSQL and pgweb settings: a bad value falls back to the declared default."""
+
+    image: str
+    port: int
+    bind_address: str
+    user: str
+    password: str
+    pgweb: bool
+    pgweb_image: str
+    pgweb_port: int
+
+
+def _cfg(settings: Mapping[str, object]) -> _Config:
+    def text(key: str) -> str:
+        return str(settings.get(key) or _DEFAULTS[key])
+
     raw_port = config.as_int(settings.get("postgres.port"))
-    port = raw_port if raw_port is not None and 0 <= raw_port <= 65535 else 0
-    bind_address = str(settings.get("postgres.bind_address") or _DEFAULT_BIND_ADDRESS).strip() or _DEFAULT_BIND_ADDRESS
-    user = str(settings.get("postgres.user") or "odoo")
-    password = str(settings.get("postgres.password") or "odoo")
-    pgweb = bool(settings.get("postgres.pgweb", True))
-    pgweb_image = str(settings.get("postgres.pgweb_image") or _DEFAULT_PGWEB_IMAGE)
     raw_pgweb_port = config.as_int(settings.get("postgres.pgweb_port"))
-    pgweb_port = raw_pgweb_port if raw_pgweb_port is not None and 1 <= raw_pgweb_port <= 65535 else 8081
-    return image, port, bind_address, user, password, pgweb, pgweb_image, pgweb_port
+    return _Config(
+        image=text("postgres.image"),
+        port=raw_port if raw_port is not None and 0 <= raw_port <= 65535 else 0,
+        bind_address=text("postgres.bind_address").strip() or str(_DEFAULTS["postgres.bind_address"]),
+        user=text("postgres.user"),
+        password=text("postgres.password"),
+        pgweb=bool(settings.get("postgres.pgweb", _DEFAULTS["postgres.pgweb"])),
+        pgweb_image=text("postgres.pgweb_image"),
+        pgweb_port=(
+            raw_pgweb_port
+            if raw_pgweb_port is not None and 1 <= raw_pgweb_port <= 65535
+            else int(_DEFAULTS["postgres.pgweb_port"])
+        ),
+    )
 
 
 def _effective_port(settings: Mapping[str, object], engine: str | None) -> int:
-    _image, port, bind_address, _user, _password, _pgweb, _pgweb_image, _pgweb_port = _cfg(settings)
-    if port > 0:
-        return port
-    return containers.resolve_host_port(engine, _PG_CONTAINER, 5432, 5432, 5433, bind_address=bind_address)
+    cfg = _cfg(settings)
+    if cfg.port > 0:
+        return cfg.port
+    return containers.resolve_host_port(
+        engine, _PG_CONTAINER, 5432, 5432, 5433, bind_address=cfg.bind_address
+    )
 
 
 @hookimpl
@@ -109,15 +140,16 @@ def database_service(ws: Workspace) -> DatabaseService | None:
     engine = containers.detect_engine()
     if engine is None or not containers.engine_ready(engine):
         return None
-    _image, _port, _bind_address, user, password, pgweb, _pgweb_image, pgweb_port = _cfg(ws.settings)
-    port = _effective_port(ws.settings, engine)
+    cfg = _cfg(ws.settings)
     return DatabaseService(
         host="localhost",
-        port=port,
-        user=user,
-        password=password,
-        admin_url=f"http://localhost:{pgweb_port}" if pgweb else None,
+        port=_effective_port(ws.settings, engine),
+        user=cfg.user,
+        password=cfg.password,
+        web_url=f"http://localhost:{cfg.pgweb_port}" if cfg.pgweb else None,
         drop=lambda db_name, _eng=engine: drop_database(_eng, db_name),
+        admin_user=_PG_ADMIN_USER,
+        admin_password=_admin_password(),
     )
 
 
@@ -138,6 +170,39 @@ _PG_ADMIN_USER = "postgres"
 _PG_MIGRATOR_USER = "ow_migrator"
 
 
+def _admin_password() -> str:
+    """The random `postgres` superuser password, generated on first use and kept in ow's state (0600)."""
+    path = paths.postgres_admin_password_file()
+
+    def read() -> str:
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return ""
+
+    if existing := read():
+        return existing
+    with sidecar_lock(path):
+        if existing := read():
+            return existing
+        generated = secrets.token_urlsafe(32)
+        atomic_write(path, (generated + "\n").encode("utf-8"), mode=0o600)
+        return generated
+
+
+def _apply_admin_password(engine: str, admin_password: str) -> None:
+    """Set the `postgres` role's password in the running container (idempotent; socket auth is trust)."""
+    res = _psql(
+        engine,
+        _PG_ADMIN_USER,
+        "postgres",
+        f"ALTER ROLE {_sql_ident(_PG_ADMIN_USER)} WITH PASSWORD {_sql_literal(admin_password)};",
+    )
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout).strip()
+        raise RuntimeError(f"failed to set the {_PG_ADMIN_USER!r} password: {detail}")
+
+
 def _sql_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
@@ -156,7 +221,6 @@ def _psql(engine: str, role: str, db: str, sql: str, *, tuples_only: bool = Fals
 
 def _transfer_db_ownership(engine: str, db: str, user: str) -> None:
     """Transfer ownership of a migrated database and its OID-10 public-schema objects to `user`."""
-    role_ident = _sql_ident(user)
     role_lit = _sql_literal(user)
     db_res = _psql(
         engine,
@@ -242,12 +306,13 @@ def _transfer_legacy_databases(engine: str, user: str) -> None:
         _transfer_db_ownership(engine, db_name, user)
 
 
-def _migrate_bootstrap_role(engine: str, user: str, password: str) -> None:
+def _migrate_bootstrap_role(engine: str, user: str, password: str, admin_password: str) -> None:
     """Rename legacy bootstrap superuser `user` (OID 10) to `postgres` and recreate `user` non-superuser."""
     role_ident = _sql_ident(user)
     admin_ident = _sql_ident(_PG_ADMIN_USER)
     mig_ident = _sql_ident(_PG_MIGRATOR_USER)
     pw_lit = _sql_literal(password)
+    admin_pw_lit = _sql_literal(admin_password)
 
     # PostgreSQL forbids removing SUPERUSER from OID 10 and forbids renaming current_user,
     # so we create a short-lived superuser to rename OID 10 -> postgres and recreate `user`.
@@ -268,7 +333,7 @@ def _migrate_bootstrap_role(engine: str, user: str, password: str) -> None:
     rename_sql = (
         f"DROP ROLE IF EXISTS {admin_ident}; "
         f"ALTER ROLE {role_ident} RENAME TO {admin_ident}; "
-        f"ALTER ROLE {admin_ident} WITH PASSWORD {pw_lit}; "
+        f"ALTER ROLE {admin_ident} WITH PASSWORD {admin_pw_lit}; "
         f"CREATE ROLE {role_ident} WITH LOGIN NOSUPERUSER CREATEDB PASSWORD {pw_lit};"
     )
     renamed = _psql(engine, _PG_MIGRATOR_USER, "postgres", rename_sql)
@@ -286,7 +351,7 @@ def _migrate_bootstrap_role(engine: str, user: str, password: str) -> None:
     )
 
 
-def _ensure_odoo_role(engine: str, user: str, password: str) -> None:
+def _ensure_odoo_role(engine: str, user: str, password: str, admin_password: str) -> None:
     """Ensure `user` exists as a non-superuser role with CREATEDB (required by Odoo).
 
     Also migrates pre-existing `ow-postgres` containers created with `POSTGRES_USER=odoo`
@@ -311,7 +376,7 @@ def _ensure_odoo_role(engine: str, user: str, password: str) -> None:
         tuples_only=True,
     )
     if probe.returncode != 0 or probe.stdout.strip() == "10":
-        _migrate_bootstrap_role(engine, user, password)
+        _migrate_bootstrap_role(engine, user, password, admin_password)
         return
 
     ensure_sql = (
@@ -338,59 +403,61 @@ def ow_before_run(ws: Workspace, workspaces: Sequence[Workspace]) -> list[str] |
         term.warn("postgres: docker/podman unavailable; skipping container startup")
         return None
 
-    image, _raw_port, bind_address, user, password, pgweb, pgweb_image, pgweb_port = _cfg(ws.settings)
+    cfg = _cfg(ws.settings)
+    admin_password = _admin_password()
     port = _effective_port(ws.settings, engine)
 
     try:
         containers.ensure_network(engine, _NETWORK)
         pg_state = containers.inspect_container(engine, _PG_CONTAINER)
         if pg_state is None or pg_state.status != "running":
-            term.out(f"# postgres: starting {_PG_CONTAINER} ({image})...")
-        elif pg_state.bind_addresses.get(5432) not in (None, bind_address) or pg_state.ports.get(5432) not in (
+            term.out(f"# postgres: starting {_PG_CONTAINER} ({cfg.image})...")
+        elif pg_state.bind_addresses.get(5432) not in (None, cfg.bind_address) or pg_state.ports.get(5432) not in (
             None,
             port,
         ):
-            term.out(f"# postgres: recreating {_PG_CONTAINER} ({image}) on {bind_address}:{port}...")
+            term.out(f"# postgres: recreating {_PG_CONTAINER} ({cfg.image}) on {cfg.bind_address}:{port}...")
         action = containers.ensure_container(
             engine,
             _PG_CONTAINER,
-            image=image,
+            image=cfg.image,
             ports=((port, 5432),),
             env={
                 "POSTGRES_USER": _PG_ADMIN_USER,
-                "POSTGRES_PASSWORD": password,
+                "POSTGRES_PASSWORD": admin_password,
                 "POSTGRES_DB": "postgres",
             },
             volumes=((_PG_VOLUME, "/var/lib/postgresql/data"),),
             network=_NETWORK,
-            bind_address=bind_address,
+            bind_address=cfg.bind_address,
         )
         if action != "running":
             containers.wait_for_exec(engine, _PG_CONTAINER, ("pg_isready",), timeout=30.0)
             containers.wait_for_tcp("127.0.0.1", port, timeout=15.0)
-        _ensure_odoo_role(engine, user, password)
+        _ensure_odoo_role(engine, cfg.user, cfg.password, admin_password)
+        _apply_admin_password(engine, admin_password)
     except RuntimeError as exc:
         term.warn(f"postgres: {exc}")
         return None
 
     note = f"postgres: localhost:{port}"
-    if pgweb:
-        safe_user = quote(user, safe="")
-        safe_password = quote(password, safe="")
+    if cfg.pgweb:
+        safe_user = quote(cfg.user, safe="")
+        safe_password = quote(cfg.password, safe="")
         db_url = f"postgres://{safe_user}:{safe_password}@{_PG_CONTAINER}:5432/postgres?sslmode=disable"
         try:
             pgweb_state = containers.inspect_container(engine, _PGWEB_CONTAINER)
             if pgweb_state is None or pgweb_state.status != "running":
-                term.out(f"# postgres: starting {_PGWEB_CONTAINER} ({pgweb_image})...")
+                term.out(f"# postgres: starting {_PGWEB_CONTAINER} ({cfg.pgweb_image})...")
             containers.ensure_container(
                 engine,
                 _PGWEB_CONTAINER,
-                image=pgweb_image,
-                ports=((pgweb_port, 8081),),
+                image=cfg.pgweb_image,
+                ports=((cfg.pgweb_port, 8081),),
                 env={"PGWEB_DATABASE_URL": db_url},
                 network=_NETWORK,
             )
-            note += f" (pgweb: http://localhost:{pgweb_port})"
+            note += f" (pgweb: http://localhost:{cfg.pgweb_port})"
         except RuntimeError as exc:
             term.warn(f"postgres: pgweb failed to start: {exc}")
 
@@ -417,12 +484,12 @@ def ow_stop_services(ws: Workspace | None) -> list[str] | None:
 def ow_status(
     ws: Workspace | None,
     facts: Sequence[RepoFacts],
-    target: str | None,
+    spec: str | None,
     offline: bool,
     settings: Mapping[str, object],
 ) -> list[StatusInfo]:
     """Report shared PostgreSQL and pgweb status in `ow status`."""
-    if target is not None or ws is None:
+    if spec is not None or ws is None:
         return []
     engine = containers.detect_engine()
     if engine is None or not containers.engine_ready(engine):
@@ -432,25 +499,22 @@ def ow_status(
     if pg_state is None:
         return []
 
-    _image, _raw_port, _bind_address, _user, _password, pgweb, _pgweb_image, pgweb_port = _cfg(ws.settings)
+    cfg = _cfg(ws.settings)
     port = pg_state.ports.get(5432) or _effective_port(ws.settings, engine)
-    data: dict[str, object] = {"status": pg_state.status, "host": "localhost", "port": port}
     summary = f"{pg_state.status} on localhost:{port}"
 
-    if pgweb:
+    if cfg.pgweb:
         pgweb_state = containers.inspect_container(engine, _PGWEB_CONTAINER)
         if pgweb_state is not None and pgweb_state.status == "running":
-            web_port = pgweb_state.ports.get(8081, pgweb_port)
+            web_port = pgweb_state.ports.get(8081, cfg.pgweb_port)
             url = f"http://localhost:{web_port}"
-            data["pgweb_url"] = url
             summary += f" (pgweb: {url})"
 
     return [
         StatusInfo(
             plugin="postgres",
             scope="service",
-            target="postgres",
+            subject="postgres",
             summary=summary,
-            data=data,
         )
     ]

@@ -12,7 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 _REQ_STAMP = ".ow-requirements.sha256"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class PythonEnvironment:
     """Python environment contribution; every path is relative to the workspace root."""
 
@@ -115,10 +115,7 @@ def select_python_version(
     match = re.fullmatch(r"(\d+)\.(\d+)", python_value)
     if not match:
         diagnostics.append(
-            Diagnostic(
-                "warning",
-                f"{setting_name} {python_value!r} malformed (expected 3.MINOR), using range max",
-            )
+            Diagnostic(level="warning", text=f"{setting_name} {python_value!r} malformed (expected 3.MINOR), using range max")
         )
         return f"{python_max[0]}.{python_max[1]}", diagnostics
 
@@ -126,11 +123,8 @@ def select_python_version(
     if requested < python_min or requested > python_max:
         clamped = max(python_min, min(requested, python_max))
         diagnostics.append(
-            Diagnostic(
-                "info",
-                f"{setting_name} {python_value} clamped to range "
-                f"{python_min[0]}.{python_min[1]}-{python_max[1]}",
-            )
+            Diagnostic(level="info", text=f"{setting_name} {python_value} clamped to range "
+            f"{python_min[0]}.{python_min[1]}-{python_max[1]}")
         )
         return f"{clamped[0]}.{clamped[1]}", diagnostics
 
@@ -158,7 +152,7 @@ def resolve_venv_path(
     return ws.root / ".venv"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class WorkspaceVenv:
     """Resolved Python version and virtualenv location of a workspace."""
 
@@ -186,7 +180,24 @@ def workspace_venv(ws: Workspace, env: PythonEnvironment | None) -> WorkspaceVen
     )
     venv_key = env.venv_key if env is not None else None
     path = resolve_venv_path(ws, python_version, venv_key, shared=shared)
-    return WorkspaceVenv(python_version, path, tuple(diagnostics))
+    return WorkspaceVenv(python_version=python_version, path=path, diagnostics=tuple(diagnostics))
+
+
+def resolve_workspace_python(
+    ws: Workspace, answers: Callable[[str], list]
+) -> tuple[PythonEnvironment | None, WorkspaceVenv] | None:
+    """The one place a workspace's Python environment and virtualenv are computed.
+
+    Merges every enabled plugin's `python_environment` answer (`answers` is the callable ow
+    hands to hooks) and resolves the venv from the merged result, so the generated files,
+    the runner, `ow exec` and the environment backend (`mise`) can never disagree. Returns
+    None when no plugin answers and `mise.python` is unset (the workspace has no Python
+    environment).
+    """
+    merged = merge(answers("python_environment"))
+    if merged is None and not ws.settings.get("mise.python"):
+        return None
+    return merged, workspace_venv(ws, merged)
 
 
 def _requirements_hash(files: Sequence[Path]) -> str:

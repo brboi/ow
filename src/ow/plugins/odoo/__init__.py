@@ -15,7 +15,7 @@ from ow.core.plugins import (
     GeneratedFile,
     KnownRepo,
     ResolvedRepo,
-    ResolvedTarget,
+    ResolvedSpec,
     RunCommand,
     SandboxMounts,
     Setting,
@@ -59,7 +59,7 @@ def ow_generated_files(
     core, _ = get_core(ws)
     if core is None:
         return []
-    return files.generated_files(ws, core, answers=answers)
+    return files.generated_files(ws, core, answers)
 
 
 @hookimpl
@@ -72,22 +72,22 @@ def python_environment(ws: Workspace) -> PythonEnvironment | None:
 
 
 @hookimpl
-def editors_contribution(ws: Workspace) -> EditorContribution | None:
+def editors_contribution(ws: Workspace, answers: Callable[[str], list]) -> EditorContribution | None:
     """Contribute debug launches and settings for editors."""
     core, core_diagnostics = get_core(ws)
     if core_diagnostics or not core:
         return None
-    return files.editor_contribution(ws, core)
+    return files.editor_contribution(ws, core, answers)
 
 
 @hookimpl
-def ow_resolve_target(
-    target: str,
+def ow_resolve_spec(
+    spec: str,
     known_repos: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
-) -> ResolvedTarget | None:
+) -> ResolvedSpec | None:
     """Resolve `@<base>` into `odoo.default_repos` detached on `<base>`."""
-    return targets.resolve_target(target, known_repos, settings)
+    return targets.resolve_spec(spec, known_repos, settings)
 
 
 @hookimpl
@@ -140,12 +140,12 @@ def ow_stack_info(ws: Workspace) -> StackInfo | None:
 
 
 @hookimpl
-def ow_runner(ws: Workspace, args: tuple[str, ...]) -> RunCommand | None:
+def ow_runner(ws: Workspace, args: tuple[str, ...], answers: Callable[[str], list]) -> RunCommand | None:
     """Run Odoo locally using the workspace's resolved Python virtualenv (or `mise exec`)."""
     core, core_diagnostics = get_core(ws)
     if core_diagnostics or core is None:
         return None
-    return runner.run_command(ws, core, args)
+    return runner.run_command(ws, core, args, answers)
 
 
 @hookimpl
@@ -158,18 +158,27 @@ def ow_reset_run(ws: Workspace, answers: Callable[[str], list]) -> list[str] | N
 
 
 @hookimpl
+def ow_reset_preview(ws: Workspace, answers: Callable[[str], list]) -> list[str] | None:
+    """Describe the Odoo database and filestore `ow run --reset` would remove."""
+    core, core_diagnostics = get_core(ws)
+    if core_diagnostics or core is None:
+        return None
+    return runner.reset_preview(ws, answers)
+
+
+@hookimpl
 def ow_known_repos() -> list[KnownRepo]:
     """Provide known Odoo repositories."""
     return [KnownRepo(name=repo.name, url=repo.clone_url) for repo in ODOO_REPOS]
 
 
 @hookimpl
-def ow_sandbox_mounts(ws: Workspace) -> SandboxMounts | None:
+def ow_sandbox_mounts(ws: Workspace, answers: Callable[[str], list]) -> SandboxMounts | None:
     """Expose Odoo's shared Python virtualenv read-only and forward `ODOO_RC`."""
     core, core_diagnostics = get_core(ws)
     if core_diagnostics or core is None:
         return None
-    venv = files.odoo_venv(ws, core)
+    venv = files.odoo_venv(ws, answers)
     ro_paths = (venv.path,) if (not venv.is_local(ws) and venv.path.exists()) else ()
     return SandboxMounts(
         ro_paths=ro_paths,

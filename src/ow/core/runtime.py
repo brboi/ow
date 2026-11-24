@@ -16,9 +16,9 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 _ANSI_COLORS = ("\033[36m", "\033[33m", "\033[35m", "\033[32m", "\033[34m", "\033[96m")
 _ANSI_RESET = "\033[0m"
 _LINE_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:[.,](\d{1,6}))?")
+_TAIL_BLOCK = 8192
+_LIVENESS_INTERVAL = 0.5
 
 
 @dataclass(frozen=True)
@@ -185,15 +187,41 @@ def running_for_workspace(ws: Workspace) -> RunningProcess | None:
     return read_running(runtime_root(ws), ws.name)
 
 
+@contextlib.contextmanager
+def launch_lock(roots: Iterable[Path]) -> Iterator[None]:
+    """Serialize `ow run -d` on every runtime root in `roots`, so check-then-spawn is atomic.
+
+    Hold it from the "already running?" check until `start_detached` has recorded the
+    process; a second launch for the same root then waits and finds it running.
+    """
+    with contextlib.ExitStack() as stack:
+        for root in sorted(set(roots)):
+            stack.enter_context(fs.sidecar_lock(run_dir(root) / "launch"))
+        yield
+
+
 def tail_lines(path: Path, n: int) -> list[str]:
-    """Return the last `n` lines of `path` (without trailing newlines), or `[]` if unreadable."""
-    if n <= 0 or not path.is_file():
+    """Return the last `n` lines of `path` (without trailing newlines), or `[]` if unreadable.
+
+    Reads backwards from the end of the file, so a long log costs only what is shown.
+    """
+    if n <= 0:
         return []
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with open(path, "rb") as handle:
+            pos = handle.seek(0, os.SEEK_END)
+            data = b""
+            while pos > 0 and data.count(b"\n") <= n:
+                step = min(_TAIL_BLOCK, pos)
+                pos -= step
+                handle.seek(pos)
+                data = handle.read(step) + data
     except OSError:
         return []
-    return text.splitlines()[-n:]
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if pos > 0:
+        lines = lines[1:]  # the block boundary cut the first line
+    return lines[-n:]
 
 
 def start_detached(
@@ -239,7 +267,7 @@ def start_detached(
         time.sleep(0.05)
 
     starttime = process_starttime(child.pid)
-    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    started_at = datetime.now(UTC).isoformat(timespec="seconds")
     record = RunningProcess(
         label=label,
         pid=child.pid,
@@ -322,7 +350,7 @@ def _file_mtime_key(path: Path) -> str:
         mtime = path.stat().st_mtime
     except OSError:
         return "0000-00-00 00:00:00.000000"
-    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+    return datetime.fromtimestamp(mtime, tz=UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def _build_prefixes(entries: Sequence[tuple[str, Path]]) -> dict[str, str]:
@@ -347,8 +375,13 @@ def follow_files(
     *,
     lines: int = 50,
     follow: bool = False,
+    running: Callable[[], bool] | None = None,
 ) -> int:
-    """Interleave the last `lines` of each log file chronologically with a prefix per line, then optionally follow."""
+    """Interleave the last `lines` of each log file chronologically with a prefix per line, then optionally follow.
+
+    Following ends when `running()` turns false (after one last read of what the process wrote
+    on its way out) or on Ctrl+C (130). Without `running` it follows until interrupted.
+    """
     prefixes = _build_prefixes(entries)
     offsets: dict[str, int] = {}
     partials: dict[str, str] = {}
@@ -377,20 +410,20 @@ def follow_files(
     if not follow:
         return 0
 
-    try:
-        while True:
-            wrote = False
-            for label, path in entries:
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    continue
-                pos = offsets.get(label, 0)
-                if size < pos:
-                    pos = 0
-                    partials[label] = ""
-                if size == pos:
-                    continue
+    def drain(*, flush_partials: bool) -> None:
+        wrote = False
+        for label, path in entries:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            pos = offsets.get(label, 0)
+            if size < pos:
+                pos = 0
+                partials[label] = ""
+                offsets[label] = 0
+            chunk = b""
+            if size != pos:
                 try:
                     with open(path, "rb") as handle:
                         handle.seek(pos)
@@ -398,19 +431,33 @@ def follow_files(
                         offsets[label] = handle.tell()
                 except OSError:
                     continue
-                if chunk:
-                    buf = partials.get(label, "") + chunk.decode("utf-8", errors="replace")
-                    prefix = prefixes[label]
-                    lines_out = buf.splitlines(keepends=True)
-                    if lines_out and not lines_out[-1].endswith(("\n", "\r")):
-                        partials[label] = lines_out.pop()
-                    else:
-                        partials[label] = ""
-                    for out_line in lines_out:
-                        sys.stdout.write(f"{prefix}{out_line}")
-                        wrote = True
-            if wrote:
-                sys.stdout.flush()
+            buf = partials.get(label, "") + chunk.decode("utf-8", errors="replace")
+            prefix = prefixes[label]
+            lines_out = buf.splitlines(keepends=True)
+            partials[label] = ""
+            if lines_out and not lines_out[-1].endswith(("\n", "\r")):
+                tail = lines_out.pop()
+                if flush_partials:
+                    lines_out.append(f"{tail}\n")
+                else:
+                    partials[label] = tail
+            for out_line in lines_out:
+                sys.stdout.write(f"{prefix}{out_line}")
+                wrote = True
+        if wrote:
+            sys.stdout.flush()
+
+    next_check = 0.0
+    try:
+        while True:
+            alive = True
+            now = time.monotonic()
+            if running is not None and now >= next_check:
+                alive = running()
+                next_check = now + _LIVENESS_INTERVAL
+            drain(flush_partials=not alive)
+            if not alive:
+                return 0
             time.sleep(0.1)
     except KeyboardInterrupt:
-        return 0
+        return 130

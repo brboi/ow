@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
 
+from ow import term
 from ow.core import facts, git
 from ow.errors import OwError, UsageError
-from ow import term
 from ow.term import error, out, warn
 
 _FORCED_UPDATE = re.compile(r"->\s*(\S+)\s+\(forced update\)")

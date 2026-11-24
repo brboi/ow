@@ -5,11 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ow import term
 from ow.commands._shared import print_dropped
 from ow.core import bases, config, git
 from ow.core.facts import RepoFacts, gather_all
-from ow.core.json_schema import envelope
 from ow.core.plan import Batch, Outcome, RepoPlan, run_batch
 from ow.core.refresh import refresh_after
 from ow.core.session import Session
@@ -175,33 +173,18 @@ def run(
     no_fetch: bool,
     dry_run: bool,
     yes: bool,
-    json_output: bool,
 ) -> int:
     """CLI entrypoint for `ow retarget`."""
-    with term.json_mode(json_output):
-        outcome, code = execute(
-            session,
-            only=only,
-            base=base,
-            autostash=autostash,
-            no_fetch=no_fetch,
-            dry_run=dry_run,
-            yes=yes,
-        )
-        if json_output:
-            term.emit_json(
-                envelope(
-                    {
-                        "ok": list(outcome.ok),
-                        "failed": list(outcome.failed),
-                        "refused": list(outcome.refused),
-                        "mutated": outcome.mutated,
-                        "dry_run": dry_run,
-                        "exit_code": code,
-                    }
-                )
-            )
-        return code
+    _outcome, code = execute(
+        session,
+        only=only,
+        base=base,
+        autostash=autostash,
+        no_fetch=no_fetch,
+        dry_run=dry_run,
+        yes=yes,
+    )
+    return code
 
 
 def _new_base(session: Session, only: Sequence[str], base: str | None) -> str | None:

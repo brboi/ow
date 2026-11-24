@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import tomli_w
 
@@ -17,7 +18,7 @@ from ow.core.plugins import (
     Setting,
     hookimpl,
 )
-from ow.specs.python_env import merge, workspace_venv
+from ow.specs.python_env import resolve_workspace_python
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
@@ -62,12 +63,10 @@ def ow_generated_files(
     ws: Workspace, answers: Callable[[str], list]
 ) -> list[GeneratedFile | Diagnostic]:
     """Generate mise/conf.d/00-ow.toml when needed."""
-    merged = merge(answers("python_environment"))
-
-    if merged is None and not ws.settings.get("mise.python"):
+    resolved = resolve_workspace_python(ws, answers)
+    if resolved is None:
         return []
-
-    venv = workspace_venv(ws, merged)
+    merged, venv = resolved
     fragment: dict[str, object] = {}
 
     if venv.python_version:

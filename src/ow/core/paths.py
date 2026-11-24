@@ -74,3 +74,12 @@ def trusted_plugins_file() -> Path:
     """
     base = _base("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
     return Path(base) / "ow" / "trusted-plugins.toml"
+
+
+def postgres_admin_password_file() -> Path:
+    """Return the file holding the random superuser password of the shared PostgreSQL.
+
+    $XDG_STATE_HOME/ow/postgres-admin-password, or ~/.local/state/ow/postgres-admin-password.
+    """
+    base = _base("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+    return Path(base) / "ow" / "postgres-admin-password"

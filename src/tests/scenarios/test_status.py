@@ -108,36 +108,6 @@ def test_status_during_a_rebase(lab):
     ]
 
 
-def test_status_tty_output_is_aligned(monkeypatch):
-    """When stdout is a TTY, columns are aligned with header."""
-    from io import StringIO
-    from ow.commands.status import _print_aligned
-    
-    # Create test output
-    output = StringIO()
-    monkeypatch.setattr("sys.stdout", output)
-    
-    headers = ["name", "state", "base", "counts"]
-    rows = [
-        "repo1\tbranch\torigin/1.0\tahead 1, behind 0",
-        "repo2\tdetached\tno base\t(?)",
-    ]
-    
-    _print_aligned(headers, rows)
-    
-    result = output.getvalue()
-    lines = result.splitlines()
-    
-    # Header should be present
-    assert "name" in lines[0]
-    assert "state" in lines[0]
-    # Columns should be separated by at least 2 spaces
-    assert "  " in lines[0]
-    # Data rows should also be padded
-    for line in lines[1:]:
-        assert "  " in line or len(line) == 0
-
-
 def test_status_writes_nothing(lab):
     """`status` leaves the tree, the lock, the index and the refs byte-identical."""
     ws, _remote = _init(lab, branch="18.0-voip")
@@ -198,7 +168,7 @@ def test_status_multi_stack_tty_dedupes_services_hides_non_odoo_port_and_aligns_
     assert piped.exit_code == 0, piped.stderr
     assert "== odoo (" in piped.stdout and "[port 8069]" in piped.stdout
     assert "== voipstack (" in piped.stdout
-    voip_header = next(l for l in piped.stdout.splitlines() if l.startswith("== voipstack "))
+    voip_header = next(line for line in piped.stdout.splitlines() if line.startswith("== voipstack "))
     assert "[port " not in voip_header
 
     # TTY mode with synthetic global service infos: printed ONCE in `services` block
@@ -212,13 +182,13 @@ def test_status_multi_stack_tty_dedupes_services_hides_non_odoo_port_and_aligns_
     monkeypatch.setattr(
         status_cmd,
         "_collect_plugin_status",
-        lambda plugins, *, ws, facts, target, offline: [
-            StatusInfo("postgres", "service", "postgres", "running on localhost:5432"),
-            StatusInfo("mailsink", "service", "mailsink", "running on smtp://localhost:1025"),
+        lambda plugins, *, ws, facts, spec, offline: [
+            StatusInfo(plugin="postgres", scope="service", subject="postgres", summary="running on localhost:5432"),
+            StatusInfo(plugin="mailsink", scope="service", subject="mailsink", summary="running on smtp://localhost:1025"),
         ],
     )
 
-    rc = status_cmd.run(None, plugins=load_plugins(), multi_root=ws, offline=True)
+    rc = status_cmd.run_multi(load_plugins(), multi_root=ws, offline=True)
     assert rc == 0
     out = fake_out.getvalue()
     assert out.startswith("porting  ")

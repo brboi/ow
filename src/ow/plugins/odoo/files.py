@@ -15,10 +15,9 @@ from ow.core.fs import json_text
 from ow.core.plugins import Diagnostic, GeneratedFile
 from ow.plugins.odoo.addons import workspace_addon_paths
 from ow.plugins.odoo.release import read_odoo_series, read_python_bounds
-from ow.plugins.odoo.settings import get_setting
+from ow.plugins.odoo.settings import database_target, get_setting, smtp_target
 from ow.specs.editors import DebugLaunch, EditorContribution
-from ow.specs.python_env import PythonEnvironment, WorkspaceVenv, workspace_venv
-from ow.specs.services import DatabaseService, SmtpService
+from ow.specs.python_env import PythonEnvironment, WorkspaceVenv, resolve_workspace_python
 
 if TYPE_CHECKING:
     from ow.core.workspace import Repo, Workspace
@@ -36,16 +35,17 @@ def python_environment(core: Repo) -> PythonEnvironment:
     )
 
 
-def odoo_venv(ws: Workspace, core: Repo) -> WorkspaceVenv:
-    """Virtualenv of an Odoo workspace."""
-    return workspace_venv(ws, python_environment(core))
+def odoo_venv(ws: Workspace, answers: Callable[[str], list]) -> WorkspaceVenv:
+    """Virtualenv of an Odoo workspace: the one every plugin's `python_environment` answer yields."""
+    resolved = resolve_workspace_python(ws, answers)
+    assert resolved is not None, "the odoo plugin answers python_environment for an Odoo workspace"
+    return resolved[1]
 
 
 def generated_files(
     ws: Workspace,
     core: Repo,
-    *,
-    answers: Callable[[str], list] | None = None,
+    answers: Callable[[str], list],
 ) -> list[GeneratedFile | Diagnostic]:
     """`odoorc`, `odools.toml`, `pyrightconfig.json` and `requirements-dev.txt` for `ws`."""
     diagnostics: list[Diagnostic] = []
@@ -58,7 +58,7 @@ def generated_files(
         text = path.as_posix()
         if "," in text or "\n" in text or "\r" in text:
             diagnostics.append(
-                Diagnostic("warning", f"addon path cannot be represented in addons_path: {text}")
+                Diagnostic(level="warning", text=f"addon path cannot be represented in addons_path: {text}")
             )
             continue
         addon_paths.append(path)
@@ -68,33 +68,9 @@ def generated_files(
     http_port, _ = get_setting("odoo.http_port", settings, ws)
     gevent_port, _ = get_setting("odoo.gevent_port", settings, ws)
     db_name, _ = get_setting("odoo.db_name", settings, ws)
-    db_host, _ = get_setting("odoo.db_host", settings, ws)
-    db_port, _ = get_setting("odoo.db_port", settings, ws)
-    db_user, _ = get_setting("odoo.db_user", settings, ws)
-    db_password, _ = get_setting("odoo.db_password", settings, ws)
     admin_passwd, _ = get_setting("odoo.admin_passwd", settings, ws)
-    smtp_server, _ = get_setting("odoo.smtp_server", settings, ws)
-    smtp_port, _ = get_setting("odoo.smtp_port", settings, ws)
-
-    if answers is not None:
-        db_services = [a for a in answers("database_service") if isinstance(a, DatabaseService)]
-        if db_services:
-            svc = db_services[0]
-            if db_host == "localhost":
-                db_host = svc.host
-            if db_port == 5432:
-                db_port = svc.port
-            if db_user == "odoo":
-                db_user = svc.user
-            if db_password == "odoo":
-                db_password = svc.password
-        smtp_services = [a for a in answers("smtp_service") if isinstance(a, SmtpService)]
-        if smtp_services:
-            svc_smtp = smtp_services[0]
-            if smtp_server == "localhost":
-                smtp_server = svc_smtp.host
-            if smtp_port == 25:
-                smtp_port = svc_smtp.port
+    db = database_target(ws, answers)
+    smtp_server, smtp_port = smtp_target(ws, answers)
 
     parser = ConfigParser(interpolation=None)
     parser["options"] = {
@@ -105,11 +81,11 @@ def generated_files(
         "admin_passwd": str(admin_passwd),
         "db_name": str(db_name),
         "dbfilter": f"^{re.escape(str(db_name))}$",
-        "db_host": str(db_host),
-        "db_port": str(db_port),
-        "db_user": str(db_user),
-        "db_password": str(db_password),
-        "smtp_server": str(smtp_server),
+        "db_host": db.host,
+        "db_port": str(db.port),
+        "db_user": db.user,
+        "db_password": db.password,
+        "smtp_server": smtp_server,
         "smtp_port": str(smtp_port),
     }
     buf = StringIO()
@@ -124,7 +100,7 @@ def generated_files(
         )
     )
 
-    venv = odoo_venv(ws, core)
+    venv = odoo_venv(ws, answers)
     is_local_venv = venv.is_local(ws)
     python_path_str = ".venv/bin/python" if is_local_venv else str(venv.path / "bin" / "python")
 
@@ -169,12 +145,12 @@ def generated_files(
     return files + diagnostics
 
 
-def editor_contribution(ws: Workspace, core: Repo) -> EditorContribution:
+def editor_contribution(ws: Workspace, core: Repo, answers: Callable[[str], list]) -> EditorContribution:
     """Debug launches and settings for editors."""
     settings = ws.settings
     debug_args, _ = get_setting("odoo.debug_args", settings, ws)
     debug_test_args, _ = get_setting("odoo.debug_test_args", settings, ws)
-    venv = odoo_venv(ws, core)
+    venv = odoo_venv(ws, answers)
 
     core_path = core.path
     program = core_path / "odoo-bin"

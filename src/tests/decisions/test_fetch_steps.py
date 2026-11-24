@@ -9,6 +9,7 @@ from ow.core.facts import RepoFacts
 from ow.core.plan import GitStep
 from ow.recipes.fetch import fetch_steps
 
+
 @pytest.fixture
 def facts():
     """A healthy repo with a base; override fields with dataclasses.replace()."""

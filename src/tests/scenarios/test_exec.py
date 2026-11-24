@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import sys
 from pathlib import Path
 
 from ow.core.paths import venvs_dir
 from tests.conftest import add_repo, init_workspace
+from tests.lab import make_executable, read_jsonl
 
 
 def _make_recording_script(path: Path, log_path: Path, *, exit_code: int = 0) -> Path:
@@ -32,17 +32,13 @@ def _make_recording_script(path: Path, log_path: Path, *, exit_code: int = 0) ->
         f"sys.exit({exit_code})\n",
         encoding="utf-8",
     )
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(path)
     return path
 
 
 def _install_fake_venv(venv_dir: Path, log_path: Path, *, exit_code: int = 0) -> None:
     _make_recording_script(venv_dir / "bin" / "python", log_path, exit_code=exit_code)
     _make_recording_script(venv_dir / "bin" / "pip", log_path, exit_code=exit_code)
-
-
-def _read_records(log_path: Path) -> list[dict]:
-    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
 
 def test_exec_runs_command_in_venv_with_plugin_env_cwd_and_exit_code(lab, monkeypatch):
@@ -61,7 +57,7 @@ def test_exec_runs_command_in_venv_with_plugin_env_cwd_and_exit_code(lab, monkey
     assert r1.stdout == ""
     assert r1.stderr == ""
 
-    records = _read_records(log_path)
+    records = read_jsonl(log_path)
     assert len(records) == 1
     rec = records[0]
     assert Path(rec["exe"]).resolve() == (venv_dir / "bin" / "pip").resolve()
@@ -77,7 +73,7 @@ def test_exec_runs_command_in_venv_with_plugin_env_cwd_and_exit_code(lab, monkey
     # 2. From outside the workspace with positional WS: switches cwd to ws.root
     r2 = lab.ow("exec", "my-ws", "--", "python", "-c", "pass", cwd=lab.home)
     assert r2.exit_code == 0, r2.stderr
-    rec2 = _read_records(log_path)[1]
+    rec2 = read_jsonl(log_path)[1]
     assert Path(rec2["cwd"]).resolve() == ws.resolve()
     assert rec2["argv"] == ["-c", "pass"]
 
@@ -102,7 +98,7 @@ def test_exec_without_command_opens_interactive_shell_and_announces_venv_on_stde
     assert res.stdout == ""
     assert f"# shell-ws: venv {venv_dir} (shared)" in res.stderr
 
-    records = _read_records(log_path)
+    records = read_jsonl(log_path)
     assert len(records) == 1
     assert Path(records[0]["exe"]).resolve() == fake_shell.resolve()
     assert records[0]["virtual_env"] == str(venv_dir)
@@ -131,7 +127,7 @@ def test_exec_multi_stack_auto_selects_single_python_stack_and_disambiguates_mul
 
     r_auto = lab.ow("exec", "--", "pip", "list", cwd=single_py)
     assert r_auto.exit_code == 0, r_auto.stderr
-    rec = _read_records(log_path)[0]
+    rec = read_jsonl(log_path)[0]
     assert rec["ow_workspace"] == "odoo"
     assert rec["odoo_rc"] == str(single_py / "odoo" / "odoorc")
     assert Path(rec["cwd"]).resolve() == (single_py / "odoo").resolve()
@@ -149,14 +145,14 @@ def test_exec_multi_stack_auto_selects_single_python_stack_and_disambiguates_mul
     # Positional stack target from root
     r_iap = lab.ow("exec", "iap", "--", "pip", "install", "phonenumbers", cwd=two_py)
     assert r_iap.exit_code == 0, r_iap.stderr
-    rec_iap = _read_records(log_path)[-1]
+    rec_iap = read_jsonl(log_path)[-1]
     assert rec_iap["ow_workspace"] == "iap"
     assert rec_iap["odoo_rc"] == str(two_py / "iap" / "odoorc")
 
     # Qualified <ws>/<stack> from outside
     r_qual = lab.ow("exec", "two-py/odoo", "--", "pip", "list", cwd=lab.home)
     assert r_qual.exit_code == 0, r_qual.stderr
-    assert _read_records(log_path)[-1]["ow_workspace"] == "odoo"
+    assert read_jsonl(log_path)[-1]["ow_workspace"] == "odoo"
 
 
 def test_exec_refuses_non_python_stack_missing_venv_and_syntax_errors(lab):
@@ -172,7 +168,7 @@ def test_exec_refuses_non_python_stack_missing_venv_and_syntax_errors(lab):
     tool = _make_recording_script(lab.root / "bin" / "mytool", log_path)
     r_voip = lab.ow("exec", "voip", "--", str(tool), "status", cwd=multi)
     assert r_voip.exit_code == 0, r_voip.stderr
-    rec = _read_records(log_path)[0]
+    rec = read_jsonl(log_path)[0]
     assert rec["ow_workspace"] == "voip"
     assert Path(rec["cwd"]).resolve() == (multi / "voip").resolve()
     assert rec["argv"] == ["status"]
@@ -241,7 +237,7 @@ def test_exec_bootstraps_venv_via_mise_and_stamps_requirements_on_stderr(lab):
         "sys.exit(0)\n",
         encoding="utf-8",
     )
-    fake_mise.chmod(fake_mise.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(fake_mise)
 
     r1 = lab.ow("exec", "--", "python", "-c", "import phonenumbers", cwd=ws)
     assert r1.exit_code == 0, r1.stderr + r1.stdout
@@ -283,7 +279,7 @@ def test_exec_works_with_mise_python_without_odoo_and_skips_services(lab, monkey
 
     res = lab.ow("exec", "--", "pip", "install", "httpx", cwd=ws)
     assert res.exit_code == 0, res.stderr
-    rec = _read_records(log_path)[0]
+    rec = read_jsonl(log_path)[0]
     assert rec["virtual_env"] == str(local_venv)
     assert rec["odoo_rc"] is None
     assert rec["argv"] == ["install", "httpx"]

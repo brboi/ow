@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Mapping
 from types import ModuleType
 
 from ow.core.plugins import hookimpl, load_plugins

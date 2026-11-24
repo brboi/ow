@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 from ow.core.fs import json_text
 from ow.core.plugins import GeneratedFile, hookimpl
-from ow.specs.editors import BASE_EXCLUDES, debugpy_fields, default_python, merge as merge_editors
+from ow.specs.editors import BASE_EXCLUDES, debugpy_fields, default_python
+from ow.specs.editors import merge as merge_editors
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace

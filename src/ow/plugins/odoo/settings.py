@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, TypeVar
 
 from ow.core import config
 from ow.core.plugins import Diagnostic, Setting
 from ow.plugins.odoo.release import get_core, read_demo_capability
+from ow.specs.services import DatabaseService, SmtpService
 
 if TYPE_CHECKING:
     from ow.core.workspace import Workspace
+
+_T = TypeVar("_T")
 
 _PORT_KEYS = ("odoo.http_port", "odoo.gevent_port", "odoo.db_port", "odoo.smtp_port")
 _PLAIN_KEYS = ("odoo.db_name", "odoo.db_host", "odoo.db_user", "odoo.smtp_server")
@@ -54,6 +58,7 @@ def declarations() -> list[Setting]:
             type=str,
             default=lambda ws: ws.name,
             help="Database name (defaults to workspace name)",
+            unique=True,
         ),
         Setting(
             key="odoo.db_host",
@@ -150,7 +155,7 @@ def get_setting(
         port = config.as_int(val)
         if port is not None:
             if not 1 <= port <= 65535:
-                return default, Diagnostic("warning", f"{key} must be 1-65535, using default")
+                return default, Diagnostic(level="warning", text=f"{key} must be 1-65535, using default")
             return port, None
         return default, None
 
@@ -159,14 +164,73 @@ def get_setting(
             return default, None
         cleaned = _clean_args(val)
         if cleaned is None:
-            return default, Diagnostic("warning", f"{key} contains invalid item, using default")
+            return default, Diagnostic(level="warning", text=f"{key} contains invalid item, using default")
         return cleaned, None
 
     if not isinstance(val, str):
         return default, None
     if "\n" in val or "\r" in val or "\x00" in val or (key in _PLAIN_KEYS and not val):
-        return default, Diagnostic("warning", f"{key} invalid, using default")
+        return default, Diagnostic(level="warning", text=f"{key} invalid, using default")
     return val, None
+
+
+@dataclass(frozen=True)
+class DatabaseTarget:
+    """The PostgreSQL server Odoo connects to, as the generated `odoorc` states it."""
+
+    host: str
+    port: int
+    user: str
+    password: str
+    service: DatabaseService | None = None
+
+    @property
+    def managed_drop(self) -> Callable[[str], None] | None:
+        """The service's drop function when this is the server the service manages, else None."""
+        svc = self.service
+        if svc is not None and (self.host, self.port) == (svc.host, svc.port):
+            return svc.drop
+        return None
+
+
+def _first(answers: Callable[[str], list] | None, hook: str, kind: type[_T]) -> _T | None:
+    """The first `kind` answer to `hook`, or None."""
+    if answers is None:
+        return None
+    return next((a for a in answers(hook) if isinstance(a, kind)), None)
+
+
+def database_target(ws: Workspace, answers: Callable[[str], list] | None) -> DatabaseTarget:
+    """The database connection of `ws`: a running database service fills the values the user
+    left at their default; a value set in any config layer wins, even when it equals the default."""
+    host, _ = get_setting("odoo.db_host", ws.settings, ws)
+    port, _ = get_setting("odoo.db_port", ws.settings, ws)
+    user, _ = get_setting("odoo.db_user", ws.settings, ws)
+    password, _ = get_setting("odoo.db_password", ws.settings, ws)
+    svc = _first(answers, "database_service", DatabaseService)
+    if svc is not None:
+        if not ws.is_explicit("odoo.db_host"):
+            host = svc.host
+        if not ws.is_explicit("odoo.db_port"):
+            port = svc.port
+        if not ws.is_explicit("odoo.db_user"):
+            user = svc.user
+        if not ws.is_explicit("odoo.db_password"):
+            password = svc.password
+    return DatabaseTarget(str(host), int(port), str(user), str(password), svc)
+
+
+def smtp_target(ws: Workspace, answers: Callable[[str], list] | None) -> tuple[str, int]:
+    """The SMTP `(server, port)` of `ws`, resolved like `database_target`."""
+    server, _ = get_setting("odoo.smtp_server", ws.settings, ws)
+    port, _ = get_setting("odoo.smtp_port", ws.settings, ws)
+    svc = _first(answers, "smtp_service", SmtpService)
+    if svc is not None:
+        if not ws.is_explicit("odoo.smtp_server"):
+            server = svc.host
+        if not ws.is_explicit("odoo.smtp_port"):
+            port = svc.port
+    return str(server), int(port)
 
 
 def validate_settings(ws: Workspace) -> list[Diagnostic]:
