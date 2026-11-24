@@ -15,7 +15,7 @@ odoorc = "4bbae601dedf2efc38cdd231f885c4bc3f166b21c87c763191bd1e7679ae7f1a"
 
 A flat path → hash map with a one-line header, sorted, keys quoted only when TOML needs it. ow rewrites it only when its bytes change. Do not edit it by hand. A malformed lock is reported (`malformed lock at .ow/rendered.lock.toml; files that differ from ow's are treated as yours`) and treated as empty.
 
-A multi-stack workspace root has its own lock, `<root>/.ow/rendered.lock.toml`, which follows the same rules for `<workspace>.code-workspace`.
+A multi-stack workspace has a single lock, at the root: `<root>/.ow/rendered.lock.toml`. It records `<workspace>.code-workspace` and, for each stack, that stack's files under a `<stack>/` prefix (`"odoo/odoorc"`, `"voip/.vscode/settings.json"`); stacks carry no lock of their own. Removing a stack drops its prefix from the lock.
 
 ## States
 
@@ -41,7 +41,6 @@ A `yours` file that is a directory gets a different hint: `move it away and run 
 ```sh
 ow files            # path <tab> state
 ow files --diff     # unified diff of every file that differs
-ow files --json     # machine-readable JSON on stdout
 ow files -w myws
 ```
 
@@ -91,6 +90,8 @@ If any plugin reports an `error` diagnostic, the errors are printed and `ow file
 | zed | `.zed/debug.json` | a plugin contributes a launch config |
 
 `odoorc` holds the `[options]` Odoo loads: `http_port`, `gevent_port`, database settings, `addons_path`, and `data_dir` pointing at `.odoo/`. When `mise.enabled` and `mise.shared_venv` are `true` (default), `mise/conf.d/00-ow.toml`, `odools.toml`, `pyrightconfig.json`, `.vscode/settings.json`, `.vscode/launch.json`, and `.zed/debug.json` all point at the shared virtualenv under `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`. A workspace with no Odoo core and no `mise.python` gets nothing.
+
+Any other plugin, including a [trusted in-repo plugin](plugins.md), can contribute files through `ow_generated_files`; they follow the same lock and ownership rules.
 
 The local plugin is different: instead of generating files, it copies the regular files under `~/.config/ow/local` into `.local/` when the workspace is created, and only where nothing is there yet. Those copies are not tracked in the lock. Addons under `.local/` come first in `addons_path`, so they shadow the same-named modules in the repos.
 

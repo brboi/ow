@@ -2,7 +2,7 @@
 
 A CLI that keeps several git repos side by side as worktrees of shared bare repos, grouped into
 workspaces. The core is plain git: Odoo, GitHub and Runbot knowledge lives in plugins, along with
-mise and editor support.
+mise, editor support, shared services and sandboxing.
 
 ## Language
 
@@ -13,11 +13,15 @@ A directory initialized with `ow init` and tracked in the workspace index. A mon
 _Avoid_: project, environment, task
 
 **Stack**:
-A named subdirectory inside a multi-stack workspace (e.g. `odoo/`, `iap/`, `voip/`) declared under `[stacks.<name>]` in the workspace root's `.ow/config.toml` (stacks hold no `.ow/` directory of their own). Each stack owns its own worktrees, ports and editor config, plus an `odoorc` when it holds an Odoo core; address it from anywhere as `<workspace>/<stack>` or locally as `<stack>`.
+A named subdirectory inside a multi-stack workspace (e.g. `odoo/`, `iap/`, `voip/`) declared under `[stacks.<stack>]` in the workspace root's `.ow/config.toml` (stacks hold no `.ow/` directory of their own). Each stack owns its own worktrees, ports and editor config, plus an `odoorc` when it holds an Odoo core. A mono-stack workspace has no stack name.
 _Avoid_: sub-workspace, task
 
+**WS**:
+How a command names the workspace or stack it acts on, by name or path: `WS` is a workspace, `WS/STACK` (`review/iap`) one of its stacks, and inside a multi-stack workspace a bare `iap` is its stack. Where a stack is accepted the help shows `WS[/STACK]`; `-w/--workspace` takes the same.
+_Avoid_: target (for a workspace)
+
 **Promotion**:
-Turning a mono-stack workspace into a multi-stack one when `ow add` or `ow init` gets a named spec (`<name>=<spec>`): the existing worktrees move into a stack subdirectory whose name ow infers unless `--as NAME` gives it.
+Turning a mono-stack workspace into a multi-stack one when `ow add` or `ow init` gets a named spec (`<stack>=<spec>`): the existing worktrees move into a stack subdirectory whose name ow infers unless `--as STACK` gives it.
 _Avoid_: upgrade, migration, conversion
 
 **Repo**:
@@ -71,7 +75,7 @@ _Avoid_: lost commits, dangling commits
 ### Commands
 
 **Spec**:
-The grammar `ow init`, `ow add` and `ow run --tmp` accept: `[<name>=]<item>[,<item>...]`, where `<name>` names the stack and each item is a PR (`enterprise#12345`), a Runbot URL, `<repo>@<ref>`, `@<base>` (e.g. `@18.0`) or a bare `<repo>`. Plugins resolve PRs and URLs.
+What `ow init`, `ow add`, `ow run --tmp` and `ow status` take to say what to check out or look up: `[<stack>=]<item>[,<item>...]`, where `<stack>` names the stack and each item is a PR (`enterprise#12345`), a Runbot URL, `<repo>@<ref>`, `@<base>` (e.g. `@18.0`) or a bare `<repo>`. Plugins resolve PRs and URLs.
 _Avoid_: target, target DSL
 
 **Sister PR**:
@@ -86,23 +90,43 @@ _Avoid_: preview, dry run
 The command `ow run` executes for a workspace or stack, supplied by a plugin's `ow_runner` hook, such as `odoo-bin -c odoorc` from the Odoo plugin; a stack without one is skipped.
 _Avoid_: task, launcher
 
+**Detached run**:
+A runner started in the background by `ow run -d`, in its own session: ow records its PID under `<root>/.ow/run/` and its output under `<root>/.ow/logs/`, which `ow logs` shows and `ow stop` ends. A plugin's runner may detach itself instead.
+_Avoid_: daemon, background job
+
+**Shared service**:
+A container started by `ow run` or `ow sandbox` for every workspace on the machine, not for one: `ow-postgres` and `ow-pgweb` from the `postgres` plugin, `ow-mailsink` from `mailsink`. They outlive the run until `ow stop --services`; plugins reach them through the `database_service` and `smtp_service` hooks.
+_Avoid_: stack service, compose stack
+
 ### Extension
 
 **Plugin**:
-A unit outside the core that contributes settings, generated files, spec resolution, status, runners, known repos and diagnostics, and reacts to what happens in a workspace.
+A unit outside the core that contributes settings, generated files, spec resolution, status, runners, known repos and diagnostics, and reacts to what happens in a workspace. Ten are built in.
 _Avoid_: extension, module, template
+
+**In-repo plugin**:
+A plugin shipped inside one of a workspace's repos (`[tool.ow] plugin` in its `pyproject.toml`, else `ow_plugin.py` at its root), loaded after the built-ins once trusted. It is not installed with pip.
+_Avoid_: external plugin, addon
+
+**Trust**:
+Permission, given with `ow trust`, for in-repo plugin code to run, granted to a location, not to content: a plugin file, or a directory and everything beneath it, including code that arrives later.
+_Avoid_: approval, allowlist, signature
 
 **Generated file**:
 A file a plugin contributes to a workspace and ow writes, rewritten only while nobody has edited it since ow last wrote it.
 _Avoid_: rendered file, template output
 
 **Setting**:
-A named, typed value a plugin declares, such as `odoo.http_port`, whose effective value each workspace resolves from its default, then the user's global choice, then the workspace's own.
+A named, typed value a plugin declares under its own prefix, such as `odoo.http_port`, whose effective value each workspace resolves from its default, then the user's global choice, then the workspace's own, then its stack's. Its origin says which layer supplied it; a value with any origin but default is explicit and never overridden by a service. A **unique** setting (`odoo.db_name`) must differ across workspaces.
 _Avoid_: option, override
 
 **Refresh**:
 Recomputing every generated file of a workspace (and `<workspace>.code-workspace` for a multi-stack workspace) from its current state and settings, then writing the ones ow still owns.
 _Avoid_: render, regenerate
+
+**Sandbox profile**:
+What `ow sandbox` mounts and forwards for one AI agent harness (`claude`, `opencode`, `codex`, `pi`, `omp`) besides the workspace: that harness's own state, config and binary paths, and its API variables. `auto` picks it from the command, `none` mounts nothing extra.
+_Avoid_: sandbox config, policy
 
 ### Odoo
 
@@ -113,4 +137,3 @@ _Avoid_: core (alone, which means ow's own core), main repo, community
 **Series**:
 An Odoo release line named by its branch: `18.0`, `saas-18.2` or `master`. Series branches are checked out detached, and a feature branch such as `18.0-fix` takes `origin/18.0` as its base.
 _Avoid_: version, release branch
-
