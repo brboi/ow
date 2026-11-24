@@ -2,14 +2,15 @@
 
 ow keeps Odoo's repos on one machine and gives each workspace its own git worktrees. The bare repos
 are shared, so Odoo is cloned once and every fetch is visible to every workspace; a worktree is a
-cheap checkout, so a new branch costs seconds, not gigabytes. The core is plain git; `odoo`, `github`
-(`gh`), `runbot`, `mise`, `vscode`, `zed`, and `local` are built-in plugins.
+cheap checkout, so a new branch costs seconds, not gigabytes. The core is plain git; `odoo`, `postgres`,
+`mailsink`, `github` (`gh`), `runbot`, `mise`, `vscode`, `zed`, `local` and `sandbox` are built-in
+plugins, and a repo can ship its own ([writing a plugin](docs/plugins.md)).
 
 ## Install
 
 ```sh
-pipx install odoo-workspaces   # recommended
-pip install odoo-workspaces    # or, inside a venv
+pipx install --pip-args=--pre odoo-workspaces   # 3.0 is in beta: a plain install gets 2.x
+pip install --pre odoo-workspaces               # or, inside a venv
 ```
 
 `ow` needs git ≥ 2.45 and an SSH key with access to the Odoo repos. GitHub CLI (`gh`) is used by
@@ -18,7 +19,9 @@ merged-PR pruning. The built-in `runbot` plugin queries Runbot's public JSON API
 repos (`community`) to the exact Runbot `base_match` commit, resolve direct Runbot bundle/batch
 URLs, and display build status (printing a fallback note when Runbot is unreachable). mise
 (≥ 2026.8.13) is optional; with it, ow writes a mise fragment pointing at a shared Python
-virtualenv per `(python, odoo-series)` under `~/.local/share/ow/venvs/`.
+virtualenv per `(python, odoo-series)` under `~/.local/share/ow/venvs/`. Docker or Podman is optional;
+with it, `ow run` also starts a shared PostgreSQL, pgweb and Mailpit for every workspace
+([Services](docs/migrating-to-3.0.md#services)).
 
 ## Quick start
 
@@ -77,7 +80,7 @@ ow retarget 19.0                # replay commits & retarget detached repos onto 
 
 ```sh
 ow status                       # workspace or multi-stack status (with cached PR + Runbot info)
-ow status --json                # machine-readable JSON for UIs & coding harnesses
+ow status --fetch               # fetch tracked refs in parallel first
 ow ls                           # list all indexed workspaces and their repos or stacks
 ow rm voip-review/iap           # remove a single stack (or `ow rm voip-review` for the whole workspace)
 ow prune                        # clean up stale state and merged/closed-PR workspaces & stacks
@@ -85,7 +88,9 @@ ow prune                        # clean up stale state and merged/closed-PR work
 
 ## Documentation
 
-- [Commands](docs/commands.md) — every command, specs, flags, `--json` contract, exit codes and confirmation rules
+- [Commands](docs/commands.md) — every command, specs, flags, exit codes and confirmation rules
 - [Configuration](docs/configuration.md) — settings, precedence, and `ow config`
 - [Generated files](docs/files.md) — the fixed outputs, ownership, file states and the refresh model
-- [Migrating to 3.0](docs/migrating-to-3.0.md) — what changed since ow 2 and what to delete
+- [Plugins](docs/plugins.md) — writing, trusting and shipping a plugin; the hook reference
+- [Migrating to 3.0](docs/migrating-to-3.0.md) — what changed since ow 2, the shared services, and what to delete
+- [Changelog](CHANGELOG.md)
