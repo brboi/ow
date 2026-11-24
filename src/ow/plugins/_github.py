@@ -1,4 +1,4 @@
-"""GitHub support shared by plugins: slug and PR-target parsing, bare-repository catalog.
+"""GitHub support shared by plugins: slug and PR-spec parsing, bare-repository catalog.
 
 Support module, not a plugin: nothing here is a hook implementation.
 """
@@ -6,9 +6,10 @@ Support module, not a plugin: nothing here is a hook implementation.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING
 
 from ow.core import git
 from ow.core.paths import repos_dir
@@ -60,9 +61,9 @@ def parse_git_slug(url: str | None) -> tuple[str, str] | None:
     return match.group("owner").lower(), match.group("repo").lower()
 
 
-def parse_pr_target(target: str) -> tuple[str | None, str, int] | None:
+def parse_pr_spec(spec: str) -> tuple[str | None, str, int] | None:
     """Parse `<repo>#<num>`, `<owner>/<repo>#<num>`, `<owner>/<repo>/pull/<num>`, or a GitHub PR URL."""
-    text = target.strip()
+    text = spec.strip()
     match = _PR_URL_RE.match(text) or _PR_PATH_RE.match(text) or _PR_SHORT_RE.match(text)
     if not match:
         return None
@@ -304,7 +305,7 @@ class BareCatalog:
         known_repos: Mapping[str, KnownRepo],
         default_org: str,
     ) -> tuple[str, str, str, str]:
-        """Resolve `(local_name, gh_owner, gh_repo, clone_url)` from a parsed PR target."""
+        """Resolve `(local_name, gh_owner, gh_repo, clone_url)` from a parsed PR spec."""
         if owner is not None:
             return self.resolve_by_slug(owner, repo, known_repos)
 

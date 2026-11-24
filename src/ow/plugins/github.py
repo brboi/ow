@@ -1,13 +1,14 @@
-"""GitHub CLI (`gh`) plugin: PR target resolution, sister-PR discovery, PR status & prune."""
+"""GitHub CLI (`gh`) plugin: PR spec resolution, sister-PR discovery, PR status & prune."""
 
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ow.core import bases, cache, config, git, stacks
 from ow.core.paths import repos_dir
@@ -15,7 +16,7 @@ from ow.core.plugins import (
     KnownRepo,
     PruneCandidate,
     ResolvedRepo,
-    ResolvedTarget,
+    ResolvedSpec,
     Setting,
     StatusInfo,
     hookimpl,
@@ -25,7 +26,7 @@ from ow.plugins._github import (
     BareCatalog,
     bare_gh_info,
     parse_gh_slug,
-    parse_pr_target,
+    parse_pr_spec,
     pr_identity,
     recorded_branch_pr,
 )
@@ -52,7 +53,7 @@ def ow_settings() -> list[Setting]:
             key="github.default_org",
             type=str,
             default="odoo",
-            help="Default GitHub org for short PR targets (e.g. enterprise#12345)",
+            help="Default GitHub org for short PR specs (e.g. enterprise#12345)",
         ),
         Setting(
             key="github.cache_ttl",
@@ -201,13 +202,13 @@ def _find_sister_pr(
 
 
 @hookimpl
-def ow_resolve_target(
-    target: str,
+def ow_resolve_spec(
+    spec: str,
     known_repos: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
-) -> ResolvedTarget | None:
-    """Resolve a GitHub PR target (short form or URL) into a workspace creation plan."""
-    parsed = parse_pr_target(target)
+) -> ResolvedSpec | None:
+    """Resolve a GitHub PR spec (short form or URL) into a workspace creation plan."""
+    parsed = parse_pr_spec(spec)
     if parsed is None:
         return None
 
@@ -285,7 +286,7 @@ def ow_resolve_target(
                     sisters.append(found)
 
     ws_name = stacks.sanitize_slug(head_ref, "pr")
-    return ResolvedTarget(
+    return ResolvedSpec(
         name=ws_name,
         repos=(primary, *sisters),
         source=f"github:{gh_slug}#{number}",
@@ -420,14 +421,14 @@ def _format_pr_summary(pr: Mapping[str, Any]) -> str:
 def ow_status(
     ws: Workspace | None,
     facts: Sequence[RepoFacts],
-    target: str | None,
+    spec: str | None,
     offline: bool,
     known_repos: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
 ) -> list[StatusInfo]:
-    """Contribute GitHub PR status for each repo branch (or an explicit PR target)."""
-    if target is not None:
-        parsed = parse_pr_target(target)
+    """Contribute GitHub PR status for each repo branch (or an explicit PR spec)."""
+    if spec is not None:
+        parsed = parse_pr_spec(spec)
         if parsed is None:
             return []
         owner, repo, number = parsed
@@ -446,9 +447,8 @@ def ow_status(
             StatusInfo(
                 plugin="github",
                 scope="external",
-                target=f"{gh_slug}#{number}",
+                subject=f"{gh_slug}#{number}",
                 summary=_format_pr_summary(pr),
-                data=pr,
             )
         ]
 
@@ -480,9 +480,8 @@ def ow_status(
                     StatusInfo(
                         plugin="github",
                         scope="repo",
-                        target=name,
+                        subject=name,
                         summary=_format_pr_summary(pr),
-                        data=pr,
                     )
                 )
     return infos
@@ -558,7 +557,6 @@ def ow_prune_candidates(
                 PruneCandidate(
                     workspace=ws.root,
                     reason=f"PR {labels}",
-                    data={"prs": prs},
                 )
             )
     return candidates

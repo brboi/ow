@@ -6,16 +6,7 @@ import json
 import shutil
 
 from ow.core.paths import repos_dir
-from tests.conftest import add_repo, file_url
-
-
-def _setup_pr_repo(lab, name: str, base: str, base_files: dict[str, str], pr_num: int, pr_branch: str, pr_files: dict[str, str]):
-    remote = add_repo(lab, name, {base: base_files}, base=base)
-    collab = lab.collaborator(f"author-{name}-{pr_num}", of=remote)
-    collab.commit(pr_files, message=f"PR #{pr_num}", branch=pr_branch)
-    collab.push(pr_branch)
-    lab.publish_pr(remote, pr_num, pr_branch)
-    return remote
+from tests.conftest import add_repo, file_url, setup_pr_repo
 
 
 def test_init_empty_creates_empty_workspace(lab):
@@ -31,15 +22,13 @@ def test_init_empty_creates_empty_workspace(lab):
 
 def test_init_single_pr_creates_mono_stack_workspace_and_auto_expands_community(lab):
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
-    _setup_pr_repo(
-        lab,
-        "enterprise",
-        "18.0",
-        {"sale_ent/__manifest__.py": "{'name': 'Sale Ent'}"},
-        12345,
-        "18.0-fix-invoice-mic",
-        {"sale_ent/fix.py": "fixed = True\n"},
-    )
+    setup_pr_repo(lab,
+    "enterprise",
+    "18.0",
+    {"sale_ent/__manifest__.py": "{'name': 'Sale Ent'}"},
+    12345,
+    "18.0-fix-invoice-mic",
+    {"sale_ent/fix.py": "fixed = True\n"},)
     lab.fake_gh(
         [
             {
@@ -71,24 +60,20 @@ def test_init_single_pr_creates_mono_stack_workspace_and_auto_expands_community(
 
 
 def test_init_pr_discovers_sister_pr_on_community(lab):
-    _setup_pr_repo(
-        lab,
-        "community",
-        "18.0",
-        lab.odoo_files(series="18.0"),
-        9001,
-        "18.0-sister-fix",
-        {"addons/web/sister.py": "community_fix = True\n"},
-    )
-    _setup_pr_repo(
-        lab,
-        "enterprise",
-        "18.0",
-        {"ent/__manifest__.py": "{}"},
-        9002,
-        "18.0-sister-fix",
-        {"ent/sister.py": "ent_fix = True\n"},
-    )
+    setup_pr_repo(lab,
+    "community",
+    "18.0",
+    lab.odoo_files(series="18.0"),
+    9001,
+    "18.0-sister-fix",
+    {"addons/web/sister.py": "community_fix = True\n"},)
+    setup_pr_repo(lab,
+    "enterprise",
+    "18.0",
+    {"ent/__manifest__.py": "{}"},
+    9002,
+    "18.0-sister-fix",
+    {"ent/sister.py": "ent_fix = True\n"},)
     lab.fake_gh(
         [
             {
@@ -139,33 +124,27 @@ def test_init_multi_stack_named_and_composite_comma(lab):
     comm_collab.push("master-voip-pr")
     lab.publish_pr(lab._tmp_root / "remotes" / "community.git", 56789, "master-voip-pr")
 
-    _setup_pr_repo(
-        lab,
-        "enterprise",
-        "master",
-        {"voip_ent/__manifest__.py": "{}"},
-        12345,
-        "master-voip-pr",
-        {"voip_ent/ent.py": "ent = 1\n"},
-    )
-    _setup_pr_repo(
-        lab,
-        "upgrade",
-        "master",
-        {"migrations/base.py": "base = 1\n"},
-        2345,
-        "master-voip-pr",
-        {"migrations/upg.py": "upg = 1\n"},
-    )
-    _setup_pr_repo(
-        lab,
-        "iap",
-        "18.0",
-        {"iap_mod/__manifest__.py": "{}"},
-        4321,
-        "18.0-iap-pr",
-        {"iap_mod/iap.py": "iap = 1\n"},
-    )
+    setup_pr_repo(lab,
+    "enterprise",
+    "master",
+    {"voip_ent/__manifest__.py": "{}"},
+    12345,
+    "master-voip-pr",
+    {"voip_ent/ent.py": "ent = 1\n"},)
+    setup_pr_repo(lab,
+    "upgrade",
+    "master",
+    {"migrations/base.py": "base = 1\n"},
+    2345,
+    "master-voip-pr",
+    {"migrations/upg.py": "upg = 1\n"},)
+    setup_pr_repo(lab,
+    "iap",
+    "18.0",
+    {"iap_mod/__manifest__.py": "{}"},
+    4321,
+    "18.0-iap-pr",
+    {"iap_mod/iap.py": "iap = 1\n"},)
     lab.git(repos_dir() / "iap.git", "config", "ow.github-repo", "odoo/iap-apps")
     add_repo(lab, "voip", {"master": {"server.py": "voip = 1\n"}}, base="master")
 
@@ -341,15 +320,13 @@ def test_init_branch_target_discovers_remote_and_infers_odoo_base(lab):
 
 def test_init_resumes_interrupted_workspace_with_broken_worktree(lab):
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
-    _setup_pr_repo(
-        lab,
-        "enterprise",
-        "18.0",
-        {"sale_ent/__manifest__.py": "{}"},
-        135585,
-        "18.0-port-in-numbers",
-        {"sale_ent/port.py": "port = True\n"},
-    )
+    setup_pr_repo(lab,
+    "enterprise",
+    "18.0",
+    {"sale_ent/__manifest__.py": "{}"},
+    135585,
+    "18.0-port-in-numbers",
+    {"sale_ent/port.py": "port = True\n"},)
     lab.fake_gh(
         [
             {
@@ -454,16 +431,11 @@ def test_init_dry_run_never_mutates_disk_or_index(lab):
 
     multi_dir = lab.home / "dry-multi"
     multi_dir.mkdir(parents=True)
-    r_multi = lab.ow("init", "-n", "a=@18.0", "b=@18.0", "--json", cwd=multi_dir)
+    r_multi = lab.ow("init", "-n", "a=@18.0", "b=@18.0", cwd=multi_dir)
     assert r_multi.exit_code == 0, r_multi.stderr
-    payload = json.loads(r_multi.stdout)
-    assert payload["result"]["dry_run"] is True
-    assert payload["result"]["multi_stack"] is True
-    assert [w["action"] for w in payload["result"]["workspaces"]] == ["planned", "planned"]
-    assert [w["ports"] for w in payload["result"]["workspaces"]] == [
-        {"http": 8069, "gevent": 8072},
-        {"http": 8070, "gevent": 8073},
-    ]
+    planned = [line for line in r_multi.stdout.splitlines() if line.startswith("planned ")]
+    assert [line.split()[1] for line in planned] == ["a", "b"]
+    assert "(port 8069)" in planned[0] and "(port 8070)" in planned[1]
     assert list(multi_dir.iterdir()) == []
     assert index.read() == ()
 
@@ -483,3 +455,23 @@ def test_init_does_not_treat_empty_dot_ow_dir_as_resumable_workspace(lab):
     assert (ws / ".ow" / "config.toml").is_file()
     assert (ws / "community" / "odoo-bin").is_file()
     assert is_resumable_workspace(ws) is True
+
+
+def test_init_suffixes_the_db_name_when_another_workspace_resolves_to_the_same_one(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    first = lab.home / "one" / "voip"
+    second = lab.home / "two" / "voip"
+    third = lab.home / "three" / "voip"
+    for path in (first, second, third):
+        path.mkdir(parents=True)
+
+    assert lab.ow("init", "community@18.0", cwd=first).exit_code == 0
+    assert lab.ow("init", "community@18.0", cwd=second).exit_code == 0
+    assert lab.ow("init", "community@18.0", cwd=third).exit_code == 0
+
+    assert "db_name" not in (first / ".ow" / "config.toml").read_text()
+    assert lab.ow("config", "get", "odoo.db_name", cwd=first).stdout.strip() == "voip"
+    assert lab.ow("config", "get", "odoo.db_name", cwd=second).stdout.strip() == "voip-2"
+    assert lab.ow("config", "get", "odoo.db_name", cwd=third).stdout.strip() == "voip-3"
+    assert 'db_name = "voip-2"' in (second / ".ow" / "config.toml").read_text()
+    assert "db_name = voip-2" in (second / "odoorc").read_text()

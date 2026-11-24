@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Mapping
+from typing import TYPE_CHECKING, Literal
 
 from ow.core import git, stacks
 from ow.core.config import (
@@ -18,14 +18,14 @@ from ow.core.config import (
 from ow.core.paths import global_config, repos_dir
 from ow.core.plugins import Diagnostic, Plugins, load_plugins
 from ow.core.workspace import (
-    Workspace,
     RepoLocation,
-    derive_repos,
+    Workspace,
     build_workspace,
+    derive_repos,
     resolve_root,
     stray_checkouts,
 )
-from ow.errors import PluginError, UsageError
+from ow.errors import UsageError
 
 if TYPE_CHECKING:
     from ow.core.plugins import Setting
@@ -94,6 +94,15 @@ def _workspace_repo_dirs(root: Path, *, is_stack: bool) -> list[tuple[str, Path]
         for loc in derive_repos(scan_root):
             found.append((loc.name, loc.path))
     return found
+
+
+def workspace_plugins(root: Path, plugins: Plugins) -> tuple[Plugins, tuple[str, ...]]:
+    """`plugins` plus the trusted in-repo plugins of the workspace at `root` (every sibling stack for a stack).
+
+    The set every session on `root` goes through; the warnings name untrusted or broken plugins.
+    """
+    repo_dirs = _workspace_repo_dirs(root, is_stack=stacks.is_stack_dir(root))
+    return plugins.with_repo_plugins(repo_dirs)
 
 
 def open_session(
@@ -168,8 +177,7 @@ def open_session(
     is_stack = stacks.is_stack_dir(root)
     repo_plugin_warnings: tuple[str, ...] = ()
     if discover_repo_plugins:
-        repo_dirs = _workspace_repo_dirs(root, is_stack=is_stack)
-        plugins, repo_plugin_warnings = plugins.with_repo_plugins(repo_dirs)
+        plugins, repo_plugin_warnings = workspace_plugins(root, plugins)
 
     declared_list = plugins.settings()
     declared = {s.key: s for s in declared_list}
@@ -225,7 +233,7 @@ def open_session(
         stack_layer=stack_layer if is_stack else None,
     )
 
-    workspace = build_workspace(root, locations, values, is_stack=is_stack)
+    workspace = build_workspace(root, locations, values, is_stack=is_stack, origins=origins)
 
     warnings = repo_plugin_warnings + _collect_warnings(
         global_layer,
@@ -340,23 +348,13 @@ def _call_diagnostics(
     plugins: Plugins,
     workspace: Workspace | None,
 ) -> tuple[tuple[str, ...], tuple[tuple[str, Diagnostic], ...]]:
-    """Call ow_diagnostics on every plugin; a raise becomes a warning, never an abort."""
+    """Collect ow_diagnostics from every plugin; a failing plugin becomes a warning, never an abort."""
     if workspace is None:
         return (), ()
 
-    warnings = []
-    diagnostics = []
-
-    results = plugins.call("ow_diagnostics", ws=workspace, errors="collect")
-
-    for plugin_name, result in results:
-        if isinstance(result, PluginError):
-            warnings.append(f"{plugin_name}: ow_diagnostics failed: {result.cause}")
-        elif isinstance(result, list):
-            for diag in result:
-                if isinstance(diag, Diagnostic):
-                    diagnostics.append((plugin_name, diag))
-                    if diag.level == "warning":
-                        warnings.append(f"{plugin_name}: {diag.text}")
-
-    return tuple(warnings), tuple(diagnostics)
+    found, warnings = plugins.diagnostics(workspace)
+    diagnostics = tuple((name, diag) for name, diags in found for diag in diags)
+    return (
+        warnings + tuple(f"{name}: {diag.text}" for name, diag in diagnostics if diag.level == "warning"),
+        diagnostics,
+    )

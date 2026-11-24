@@ -59,8 +59,7 @@ def _plan() -> list[str]:
         f"git -C {BARE}/community.git worktree remove ~/ws/voip/community",
         f"git -C {BARE}/community.git branch -D b-pushed",
         f"git -C {BARE}/enterprise.git worktree remove ~/ws/voip/enterprise",
-        "rm -rf ~/ws/voip",
-        "# drop ~/ws/voip from the index",
+        "rm -rf ~/ws/voip  # and drop it from the index",
     ]
 
 

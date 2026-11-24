@@ -16,41 +16,30 @@ if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
 _CONTAINER = "ow-mailsink"
-_DEFAULT_IMAGE = "axllent/mailpit"
+
+_SETTINGS = (
+    Setting(key="mailsink.image", type=str, default="axllent/mailpit", help="Mailpit container image"),
+    Setting(key="mailsink.smtp_port", type=int, default=1025, help="Host SMTP port for mailsink"),
+    Setting(key="mailsink.web_port", type=int, default=8025, help="Host Web UI port for mailsink"),
+)
+_DEFAULTS = {setting.key: setting.default for setting in _SETTINGS}
 
 
 @hookimpl
 def ow_settings() -> list[Setting]:
     """Provide mailsink (Mailpit) settings."""
-    return [
-        Setting(
-            key="mailsink.image",
-            type=str,
-            default=_DEFAULT_IMAGE,
-            help="Mailpit container image",
-        ),
-        Setting(
-            key="mailsink.smtp_port",
-            type=int,
-            default=1025,
-            help="Host SMTP port for mailsink",
-        ),
-        Setting(
-            key="mailsink.web_port",
-            type=int,
-            default=8025,
-            help="Host Web UI port for mailsink",
-        ),
-    ]
+    return list(_SETTINGS)
+
+
+def _port(settings: Mapping[str, object], key: str) -> int:
+    """The port setting `key`, or its declared default when it is not a valid port."""
+    raw = config.as_int(settings.get(key))
+    return raw if raw is not None and 1 <= raw <= 65535 else int(_DEFAULTS[key])
 
 
 def _cfg(settings: Mapping[str, object]) -> tuple[str, int, int]:
-    image = str(settings.get("mailsink.image") or _DEFAULT_IMAGE)
-    raw_smtp = config.as_int(settings.get("mailsink.smtp_port"))
-    smtp_port = raw_smtp if raw_smtp is not None and 1 <= raw_smtp <= 65535 else 1025
-    raw_web = config.as_int(settings.get("mailsink.web_port"))
-    web_port = raw_web if raw_web is not None and 1 <= raw_web <= 65535 else 8025
-    return image, smtp_port, web_port
+    image = str(settings.get("mailsink.image") or _DEFAULTS["mailsink.image"])
+    return image, _port(settings, "mailsink.smtp_port"), _port(settings, "mailsink.web_port")
 
 
 @hookimpl
@@ -111,12 +100,12 @@ def ow_stop_services(ws: Workspace | None) -> list[str] | None:
 def ow_status(
     ws: Workspace | None,
     facts: Sequence[RepoFacts],
-    target: str | None,
+    spec: str | None,
     offline: bool,
     settings: Mapping[str, object],
 ) -> list[StatusInfo]:
     """Report shared Mailpit container status in `ow status`."""
-    if target is not None or ws is None:
+    if spec is not None or ws is None:
         return []
     engine = containers.detect_engine()
     if engine is None or not containers.engine_ready(engine):
@@ -134,12 +123,7 @@ def ow_status(
         StatusInfo(
             plugin="mailsink",
             scope="service",
-            target="mailsink",
+            subject="mailsink",
             summary=f"{state.status} on smtp://localhost:{effective_smtp} (ui: {url})",
-            data={
-                "status": state.status,
-                "smtp_port": effective_smtp,
-                "web_url": url,
-            },
         )
     ]

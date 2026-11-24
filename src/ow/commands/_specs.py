@@ -1,4 +1,4 @@
-"""Unified target DSL parsing, resolution, and repo expansion shared by `ow init`, `ow add`, and `ow run`."""
+"""Unified spec DSL parsing, resolution, and repo expansion shared by `ow init`, `ow add`, and `ow run`."""
 
 from __future__ import annotations
 
@@ -13,19 +13,19 @@ from typing import TYPE_CHECKING
 from ow.commands._repos import origin_has, origin_head
 from ow.core import bases, git, stacks
 from ow.core.paths import repos_dir
-from ow.core.plugins import KnownRepo, ResolvedRepo, ResolvedTarget
+from ow.core.plugins import KnownRepo, ResolvedRepo, ResolvedSpec
 from ow.errors import UsageError
 
 if TYPE_CHECKING:
     from ow.core.plugins import Plugins
     from ow.core.workspace import Workspace
 
-TARGET_USAGE_HINT = (
+SPEC_USAGE_HINT = (
     "pass a PR (enterprise#12345), base (@18.0), repo@branch, known repo (voip), "
     "Runbot URL, or register with `ow repo add <name> <url>`"
 )
 
-_BRANCH_TARGET_RE = re.compile(r"^(?P<repo>[A-Za-z0-9_.-]+)@(?P<ref>.+)$")
+_BRANCH_SPEC_RE = re.compile(r"^(?P<repo>[A-Za-z0-9_.-]+)@(?P<ref>.+)$")
 _NAME_PREFIX_RE = re.compile(r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)=(?P<spec>.+)$")
 _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _SSH_SCP_RE = re.compile(r"^git@[A-Za-z0-9._-]+:")
@@ -35,7 +35,7 @@ _HOST_PORT_AFTER_RE = re.compile(r"^\d+/")
 
 @dataclass(frozen=True)
 class UnitSpec:
-    """A parsed CLI target token: `[<name>=]<spec>[:<args>]`."""
+    """A parsed CLI spec token: `[<name>=]<spec>[:<args>]`."""
 
     name: str | None
     spec: str
@@ -54,7 +54,7 @@ def split_name_prefix(raw: str) -> tuple[str | None, str]:
     name = stacks.validate_name(match.group("name"), kind="stack")
     spec = match.group("spec").strip()
     if not spec:
-        raise UsageError(f"missing target after '{name}=' in {raw!r}")
+        raise UsageError(f"missing spec after '{name}=' in {raw!r}")
     return name, spec
 
 
@@ -77,17 +77,17 @@ def split_run_args(raw: str) -> tuple[str, tuple[str, ...]]:
             if _HOST_PORT_BEFORE_RE.search(text[:i]) and _HOST_PORT_AFTER_RE.match(text[i + 1 :]):
                 i += 1
                 continue
-            target_part = text[:i].strip()
+            spec_part = text[:i].strip()
             args_part = text[i + 1 :].strip()
-            if not target_part:
-                raise UsageError(f"missing target before ':' in {raw!r}")
+            if not spec_part:
+                raise UsageError(f"missing spec before ':' in {raw!r}")
             if not args_part:
-                return target_part, ()
+                return spec_part, ()
             try:
                 parsed_args = tuple(shlex.split(args_part))
             except ValueError as exc:
                 raise UsageError(f"invalid arguments in {raw!r}: {exc}") from exc
-            return target_part, parsed_args
+            return spec_part, parsed_args
         i += 1
     return text, ()
 
@@ -95,10 +95,10 @@ def split_run_args(raw: str) -> tuple[str, tuple[str, ...]]:
 def parse_unit_spec(raw: str, *, allow_run_args: bool = False) -> UnitSpec:
     """Parse a raw CLI spec token into a `UnitSpec`."""
     if allow_run_args:
-        target_part, extra_args = split_run_args(raw)
+        spec_part, extra_args = split_run_args(raw)
     else:
-        target_part, extra_args = raw.strip(), ()
-    name, spec = split_name_prefix(target_part)
+        spec_part, extra_args = raw.strip(), ()
+    name, spec = split_name_prefix(spec_part)
     return UnitSpec(name=name, spec=spec, raw=raw, extra_args=extra_args)
 
 
@@ -149,19 +149,19 @@ def _is_upstream_base_branch(
     return False
 
 
-def _resolve_branch_target(
+def _resolve_branch_spec(
     part: str,
     catalog: Mapping[str, KnownRepo],
     plugins: Plugins,
     ws: Workspace | None,
-) -> ResolvedTarget | None:
+) -> ResolvedSpec | None:
     """Resolve `<repo>@<ref>` (or `<repo>@<remote>/<ref>`) across configured remotes.
 
     Upstream base/series branches (`master`, `main`, plugin base series, `origin/HEAD`)
     resolve detached (`branch=None, base=origin/<ref>`) to prevent cross-worktree branch
     collisions; feature branches resolve as local tracking branches.
     """
-    match = _BRANCH_TARGET_RE.match(part.strip())
+    match = _BRANCH_SPEC_RE.match(part.strip())
     if not match:
         return None
 
@@ -260,7 +260,7 @@ def _resolve_branch_target(
             explicit=True,
         )
 
-    return ResolvedTarget(
+    return ResolvedSpec(
         name=stacks.sanitize_slug(branch, repo),
         repos=(resolved_repo,),
         source=source,
@@ -273,25 +273,25 @@ def _resolve_single_part(
     catalog: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
     ws: Workspace | None,
-) -> ResolvedTarget | None:
+) -> ResolvedSpec | None:
     """Ask plugins to resolve `part` (PRs, Runbot URLs, `@<base>`), then handle `<repo>@<ref>`."""
     answer = plugins.first(
-        "ow_resolve_target",
+        "ow_resolve_spec",
         ws=ws,
-        target=part,
+        spec=part,
         known_repos=catalog,
         settings=settings,
     )
-    if isinstance(answer, ResolvedTarget):
+    if isinstance(answer, ResolvedSpec):
         return answer
     text = part.strip()
     if text.startswith("@"):
         raw_base = text[1:].strip() or "<base>"
         raise UsageError(
-            f"cannot expand {text!r}: no enabled plugin handles @<base> targets "
+            f"cannot expand {text!r}: no enabled plugin handles @<base> specs "
             f"(enable odoo plugin or specify <repo>@{raw_base})"
         )
-    return _resolve_branch_target(part, catalog, plugins, ws)
+    return _resolve_branch_spec(part, catalog, plugins, ws)
 
 
 def expand_repos(
@@ -330,14 +330,14 @@ def _shared_base_applies(repo_name: str, shared_base: str | None) -> str | None:
     return None
 
 
-def resolve_composite_target(
+def resolve_composite_spec(
     spec: str,
     plugins: Plugins,
     catalog: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
     ws: Workspace | None = None,
-) -> ResolvedTarget | None:
-    """Resolve a target or `,`-joined composite target.
+) -> ResolvedSpec | None:
+    """Resolve a spec or `,`-joined composite spec.
 
     Supports:
     - PRs (`enterprise#12345`, `odoo/iap-apps#42`, `enterprise/pull/12345`, PR URL)
@@ -350,10 +350,10 @@ def resolve_composite_target(
     if any(not p for p in raw_parts):
         if len(raw_parts) == 1:
             return None
-        raise UsageError(f"empty item in composite target {spec!r}")
+        raise UsageError(f"empty item in composite spec {spec!r}")
     parts = raw_parts
 
-    resolved_parts: list[ResolvedTarget] = []
+    resolved_parts: list[ResolvedSpec] = []
     extra_repo_names: list[str] = []
     unknown_parts: list[str] = []
 
@@ -369,13 +369,13 @@ def resolve_composite_target(
     if unknown_parts:
         if len(parts) == 1:
             return None
-        raise UsageError(f"unknown target or repo {unknown_parts[0]!r} in {spec!r}")
+        raise UsageError(f"unknown spec or repo {unknown_parts[0]!r} in {spec!r}")
 
     if not resolved_parts and not extra_repo_names:
         return None
 
-    # Merge repos: explicit targets (`repo.explicit=True`) override auto-discovered companions/sisters
-    # (`repo.explicit=False`); reject two explicit targets pointing at the same repo.
+    # Merge repos: explicit specs (`repo.explicit=True`) override auto-discovered companions/sisters
+    # (`repo.explicit=False`); reject two explicit specs pointing at the same repo.
     merged_repos: dict[str, ResolvedRepo] = {}
     primary_repos: set[str] = set()
     sources: list[str] = []
@@ -392,7 +392,7 @@ def resolve_composite_target(
                 continue
             if primary.name in primary_repos:
                 raise UsageError(
-                    f"composite target {spec!r} specifies repo {primary.name!r} more than once"
+                    f"composite spec {spec!r} specifies repo {primary.name!r} more than once"
                 )
             primary_repos.add(primary.name)
             merged_repos[primary.name] = primary
@@ -401,7 +401,7 @@ def resolve_composite_target(
     for name in extra_repo_names:
         if name in primary_repos:
             raise UsageError(
-                f"composite target {spec!r} specifies repo {name!r} more than once"
+                f"composite spec {spec!r} specifies repo {name!r} more than once"
             )
         if name not in merged_repos:
             known = catalog.get(name)
@@ -422,7 +422,7 @@ def resolve_composite_target(
     else:
         default_name = extra_repo_names[0]
 
-    return ResolvedTarget(
+    return ResolvedSpec(
         name=default_name,
         repos=repos_tuple,
         source=",".join(sources),

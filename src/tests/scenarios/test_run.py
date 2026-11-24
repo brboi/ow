@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import stat
 import sys
 from pathlib import Path
 
 from ow.core import index
 from ow.core.paths import repos_dir, venvs_dir
 from tests.conftest import add_repo, init_workspace
+from tests.lab import make_executable, make_fake_engine, read_jsonl
 
 
 def _install_fake_venv_python(venv_dir: Path, log_path: Path) -> Path:
@@ -23,12 +23,8 @@ def _install_fake_venv_python(venv_dir: Path, log_path: Path) -> Path:
         "    f.write(json.dumps({'odoo_rc': os.environ.get('ODOO_RC'), 'argv': sys.argv[1:]}) + '\\n')\n",
         encoding="utf-8",
     )
-    py.chmod(py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(py)
     return py
-
-
-def _read_runs(log_path: Path) -> list[dict]:
-    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
 
 def test_run_installs_requirements_once_for_real_venv_with_pyvenv_cfg(lab):
@@ -53,7 +49,7 @@ def test_run_installs_requirements_once_for_real_venv_with_pyvenv_cfg(lab):
         "    f.write(json.dumps(args) + '\\n')\n",
         encoding="utf-8",
     )
-    py.chmod(py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(py)
 
     r1 = lab.ow("run", cwd=ws)
     assert r1.exit_code == 0, r1.stderr + r1.stdout
@@ -77,7 +73,7 @@ def test_run_inside_workspace_passes_args_and_odoorc(lab):
     result = lab.ow("run", "--", "-i", "sale", "--stop-after-init", cwd=ws)
 
     assert result.exit_code == 0, result.stderr
-    runs = _read_runs(log_path)
+    runs = read_jsonl(log_path)
     assert len(runs) == 1
     assert runs[0]["odoo_rc"] == str(ws / "odoorc")
     assert runs[0]["argv"] == [
@@ -116,7 +112,7 @@ def test_run_multi_stack_root_launches_all_runnable_stacks_and_skips_voip(lab):
     assert "[odoo] hello from fake odoo" in res.stdout
     assert "[iap] hello from fake odoo" in res.stdout
 
-    runs = _read_runs(log_path)
+    runs = read_jsonl(log_path)
     assert len(runs) == 2
     rcs = {r["odoo_rc"] for r in runs}
     assert rcs == {str(ws / "odoo" / "odoorc"), str(ws / "iap" / "odoorc")}
@@ -135,7 +131,7 @@ def test_run_multi_stack_per_stack_colon_args(lab):
     res = lab.ow("run", 'odoo:-d plop -i voip_hr', 'iap:-i phone_service', cwd=ws)
     assert res.exit_code == 0, res.stderr + res.stdout
 
-    runs = _read_runs(log_path)
+    runs = read_jsonl(log_path)
     by_rc = {r["odoo_rc"]: r["argv"] for r in runs}
     assert by_rc[str(ws / "odoo" / "odoorc")][-4:] == ["-d", "plop", "-i", "voip_hr"]
     assert by_rc[str(ws / "iap" / "odoorc")][-2:] == ["-i", "phone_service"]
@@ -198,7 +194,7 @@ def test_run_tmp_multi_pr_with_optional_names_colon_args_distinct_ports_and_clea
     assert "[18.0-voip-tmp]" in result.stdout
     assert "[18.0-iap-tmp]" in result.stdout
 
-    runs = _read_runs(log_path)
+    runs = read_jsonl(log_path)
     assert len(runs) == 2
     argvs = [r["argv"] for r in runs]
     assert any(a[-4:] == ["-d", "plop", "-i", "voip_hr"] for a in argvs)
@@ -228,14 +224,14 @@ def test_run_forwards_positional_subcommand_after_double_dash(lab):
     r2 = lab.ow("run", "-w", "my-ws", "--", "shell", "--no-http", cwd=lab.home)
     assert r2.exit_code == 0, r2.stderr
 
-    runs = _read_runs(log_path)
+    runs = read_jsonl(log_path)
     assert len(runs) == 2
     assert runs[0]["argv"][-2:] == ["shell", "--no-http"]
     assert runs[1]["argv"][-2:] == ["shell", "--no-http"]
 
 
 def test_split_run_args_handles_host_port_urls():
-    from ow.commands._targets import split_run_args
+    from ow.commands._specs import split_run_args
 
     assert split_run_args("https://my.runbot:8069/runbot/bundle/1") == (
         "https://my.runbot:8069/runbot/bundle/1",
@@ -275,7 +271,7 @@ def test_run_multi_fail_fast_terminates_siblings_and_prints_summary(lab):
         "time.sleep(30)\n",
         encoding="utf-8",
     )
-    venv_py.chmod(venv_py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(venv_py)
 
     t0 = time.monotonic()
     res = lab.ow("run", "--fail-fast", "fast:--fail", "slow:--sleep", cwd=ws)
@@ -307,9 +303,8 @@ def test_run_named_spec_without_tmp_suggests_tmp_command(lab):
 
 def test_run_reset_drops_database_and_filestore_via_postgres_container(lab, monkeypatch):
     from ow.plugins import _containers as containers
-    from tests.plugins.test_services import _make_fake_engine
 
-    calls, _running = _make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
+    calls, _running = make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
 
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
@@ -321,7 +316,7 @@ def test_run_reset_drops_database_and_filestore_via_postgres_container(lab, monk
     log_path = lab.root / "runs.jsonl"
     _install_fake_venv_python(venvs_dir() / "py3.12-18.0", log_path)
 
-    res = lab.ow("run", "--reset", cwd=ws)
+    res = lab.ow("run", "--reset", "-y", cwd=ws)
     assert res.exit_code == 0, res.stderr + res.stdout
     assert not filestore.exists()
     assert "# reset-ws: dropped database 'reset-ws' and filestore" in res.stdout
@@ -330,11 +325,12 @@ def test_run_reset_drops_database_and_filestore_via_postgres_container(lab, monk
         and 'DROP DATABASE IF EXISTS "reset-ws" WITH (FORCE);' in c[-1]
         for c in calls
     )
-    assert len(_read_runs(log_path)) == 1
+    assert len(read_jsonl(log_path)) == 1
 
 
 def test_run_reset_falls_back_to_host_psql_and_refuses_system_db(lab, monkeypatch):
     import os
+
     from ow.plugins import _containers as containers
 
     monkeypatch.setattr(containers, "detect_engine", lambda: None)
@@ -354,9 +350,9 @@ def test_run_reset_falls_back_to_host_psql_and_refuses_system_db(lab, monkeypatc
         "    json.dump({'argv': sys.argv[1:], 'pgpassword': os.environ.get('PGPASSWORD')}, f)\n",
         encoding="utf-8",
     )
-    fake_psql.chmod(fake_psql.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(fake_psql)
 
-    res = lab.ow("run", "--reset", cwd=ws)
+    res = lab.ow("run", "--reset", "-y", cwd=ws)
     assert res.exit_code == 0, res.stderr + res.stdout
     assert "# host-reset: dropped database 'host-reset'" in res.stdout
     psql_call = json.loads(psql_log.read_text(encoding="utf-8"))
@@ -365,16 +361,60 @@ def test_run_reset_falls_back_to_host_psql_and_refuses_system_db(lab, monkeypatc
 
     # Safety guard: refusing to drop system DB `postgres`
     assert lab.ow("config", "set", "odoo.db_name", "postgres", cwd=ws).exit_code == 0
-    refused = lab.ow("run", "--reset", cwd=ws)
+    refused = lab.ow("run", "--reset", "-y", cwd=ws)
     assert refused.exit_code == 2
     assert "refusing to drop database 'postgres'" in refused.stderr
 
 
+def test_run_reset_without_terminal_and_without_yes_is_a_usage_error(lab, monkeypatch):
+    from ow.plugins import _containers as containers
+
+    calls, _running = make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
+    monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = init_workspace(lab, "community", name="no-tty-reset")
+    log_path = lab.root / "runs.jsonl"
+    _install_fake_venv_python(venvs_dir() / "py3.12-18.0", log_path)
+
+    res = lab.ow("run", "--reset", cwd=ws)
+
+    assert res.exit_code == 2
+    assert "re-run with -y" in res.stderr
+    assert not any("DROP DATABASE" in c[-1] for c in calls)
+    assert not log_path.exists()
+
+
+def test_run_reset_shows_host_port_db_and_asks_before_dropping(lab, monkeypatch):
+    from ow import term
+    from ow.plugins import _containers as containers
+
+    calls, _running = make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
+    monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
+    monkeypatch.setattr(term, "interactive", lambda: True)
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = init_workspace(lab, "community", name="ask-reset")
+    log_path = lab.root / "runs.jsonl"
+    _install_fake_venv_python(venvs_dir() / "py3.12-18.0", log_path)
+
+    declined = lab.ow("run", "--reset", cwd=ws, input="n\n")
+    assert declined.exit_code == 2
+    assert "#   database odoo@localhost:5432/ask-reset" in declined.stdout
+    assert "aborted" in declined.stderr
+    assert not any("DROP DATABASE" in c[-1] for c in calls)
+    assert not log_path.exists()
+
+    accepted = lab.ow("run", "--reset", cwd=ws, input="y\n")
+    assert accepted.exit_code == 0, accepted.stderr + accepted.stdout
+    assert any('DROP DATABASE IF EXISTS "ask-reset" WITH (FORCE);' in c[-1] for c in calls)
+    assert len(read_jsonl(log_path)) == 1
+
+
 def test_run_reset_multi_stack_only_resets_targeted_stack(lab, monkeypatch):
     from ow.plugins import _containers as containers
-    from tests.plugins.test_services import _make_fake_engine
 
-    calls, _running = _make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
+    calls, _running = make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
 
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
@@ -390,7 +430,7 @@ def test_run_reset_multi_stack_only_resets_targeted_stack(lab, monkeypatch):
     log_path = lab.root / "runs.jsonl"
     _install_fake_venv_python(venvs_dir() / "py3.12-18.0", log_path)
 
-    res = lab.ow("run", "--reset", "odoo", cwd=multi)
+    res = lab.ow("run", "--reset", "-y", "odoo", cwd=multi)
     assert res.exit_code == 0, res.stderr + res.stdout
     assert not (multi / "odoo" / ".odoo" / "filestore" / "odoo").exists()
     assert (multi / "iap" / ".odoo" / "filestore" / "iap").exists()
@@ -402,9 +442,8 @@ def test_run_reset_multi_stack_only_resets_targeted_stack(lab, monkeypatch):
 def test_run_refreshes_stale_generated_files_when_postgres_port_changes(lab, monkeypatch):
     """When ow-postgres moves from 5432 to 5433 after init, `ow run` refreshes odoorc before launching."""
     from ow.plugins import _containers as containers
-    from tests.plugins.test_services import _make_fake_engine
 
-    _calls, running = _make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
+    _calls, running = make_fake_engine(monkeypatch, running={"ow-postgres": {5432: 5432}})
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
 
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
@@ -422,7 +461,7 @@ def test_run_refreshes_stale_generated_files_when_postgres_port_changes(lab, mon
     assert res.exit_code == 0, res.stderr + res.stdout
     assert "# refreshed odoorc" in res.stdout
     assert "db_port = 5433" in (ws / "odoorc").read_text()
-    assert len(_read_runs(log_path)) == 1
+    assert len(read_jsonl(log_path)) == 1
 
     # A second `ow run` with the same port does not rewrite or print `# refreshed`.
     res2 = lab.ow("run", cwd=ws)

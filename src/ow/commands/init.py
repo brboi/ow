@@ -11,20 +11,21 @@ from ow import term
 from ow.commands import add as add_cmd
 from ow.commands._repos import resolve_base
 from ow.commands._shared import known_repo_catalog, print_dropped, refresh_workspace, remotes_of
-from ow.commands._targets import deduplicate_name, parse_unit_spec
+from ow.commands._specs import deduplicate_name, parse_unit_spec
 from ow.commands._workspace import (
     AddResult,
     UnitMode,
     UnitResult,
     create_workspace_unit,
     report_result,
-    resolve_required_target,
+    resolve_required_spec,
     stack_info,
     sync_multi_files,
+    unique_setting_values,
 )
 from ow.core import config, git, index, stacks
-from ow.core.plugins import ResolvedTarget
-from ow.core.session import global_settings, open_session
+from ow.core.plugins import ResolvedSpec
+from ow.core.session import global_settings, open_session, workspace_plugins
 from ow.core.workspace import build_workspace, derive_repos, find_root
 from ow.errors import UsageError
 
@@ -39,6 +40,7 @@ def _repair_and_adopt_single(
     dry_run: bool = False,
 ) -> tuple[UnitResult, int]:
     """Repair prunable worktrees, adopt any missing `[repos]` entries, re-index, and refresh."""
+    plugins = workspace_plugins(root, plugins)[0]
     declared = {s.key: s for s in plugins.settings()}
     is_stack = stacks.is_stack_dir(root)
     config_path = (root.parent / ".ow" / "config.toml") if is_stack else (root / ".ow" / "config.toml")
@@ -84,9 +86,7 @@ def _repair_and_adopt_single(
                 name=root.name,
                 root=root,
                 is_stack=is_stack,
-                repos=tuple(loc.name for loc in initial_locations),
                 action="planned",
-                ports=info.ports,
                 note=info.note,
             ),
             0,
@@ -122,7 +122,7 @@ def _repair_and_adopt_single(
             except UsageError as exc:
                 term.warn(f"{loc.name}: {exc}")
 
-    if changed:
+    def write_config() -> None:
         if is_stack:
             dropped = config.write_stack(
                 config_path,
@@ -142,6 +142,9 @@ def _repair_and_adopt_single(
             )
         print_dropped(dropped)
 
+    if changed:
+        write_config()
+
     if not is_stack:
         index.add(root)
     else:
@@ -149,21 +152,27 @@ def _repair_and_adopt_single(
 
     session = open_session(str(root), need_workspace=True, plugins=plugins, cwd=root)
     assert session.workspace is not None
+    if is_new_config:
+        unique_values = unique_setting_values(session, plugins)
+        if unique_values:
+            declared.update(session.declared)  # the keys of in-repo plugins, or writing the config drops them
+            ws_values.update(unique_values)
+            write_config()
+            changed = True
+            session = session.reload()
     for warning in session.warnings:
         term.warn(warning)
     if is_new_config:
-        plugins.call("ow_workspace_created", ws=session.workspace)
+        session.plugins.call("ow_workspace_created", ws=session.workspace)
     code = refresh_workspace(session)
 
-    info = stack_info(session.workspace, plugins)
+    info = stack_info(session.workspace, session.plugins)
     action = "created" if is_new_config else ("updated" if (changed or repaired_any) else "unchanged")
     unit = UnitResult(
         name=session.workspace.name,
         root=root,
         is_stack=is_stack,
-        repos=tuple(r.name for r in session.workspace.repos),
         action=action,
-        ports=info.ports,
         note=info.note,
     )
     return unit, code
@@ -191,22 +200,19 @@ def run(
     dry_run: bool = False,
     yes: bool = False,
     cwd: Path | None = None,
-    json_output: bool = False,
 ) -> int:
     """Initialize, compose, adopt, or repair the current directory as an ow workspace."""
     target_dir = (cwd or Path.cwd()).resolve()
-
-    with term.json_mode(json_output):
-        result = _execute(
-            plugins,
-            target_dir,
-            specs,
-            branch=branch,
-            as_name=as_name,
-            dry_run=dry_run,
-            yes=yes,
-        )
-        return report_result(result, json_output=json_output, create_verb="initialized")
+    result = _execute(
+        plugins,
+        target_dir,
+        specs,
+        branch=branch,
+        as_name=as_name,
+        dry_run=dry_run,
+        yes=yes,
+    )
+    return report_result(result, create_verb="initialized")
 
 
 def _execute(
@@ -249,17 +255,12 @@ def _execute(
             )
             return replace(
                 add_res,
-                workspace_root=target_dir,
-                multi_stack=True,
                 workspace_files=add_res.workspace_files or ws_files,
                 exit_code=max(exit_code, add_res.exit_code),
             )
         return AddResult(
             workspaces=tuple(repaired_list),
-            workspace_root=target_dir,
-            multi_stack=True,
             workspace_files=ws_files,
-            dry_run=dry_run,
             exit_code=exit_code,
         )
 
@@ -276,14 +277,7 @@ def _execute(
             ws_files = ()
             if not dry_run and repaired.is_stack:
                 ws_files = sync_multi_files(target_dir.parent.resolve(), plugins)
-            return AddResult(
-                workspaces=(repaired,),
-                workspace_root=target_dir,
-                multi_stack=False,
-                workspace_files=ws_files,
-                dry_run=dry_run,
-                exit_code=code,
-            )
+            return AddResult(workspaces=(repaired,), workspace_files=ws_files, exit_code=code)
 
         # Interrupted `ow init` (worktrees present, no config.toml yet) with 1 unnamed spec:
         # resume directly so broken `initializing` worktrees are cleaned up before refresh.
@@ -294,23 +288,18 @@ def _execute(
                     raise UsageError(
                         "--as is only used when promoting a mono-stack workspace with <name>=<spec>"
                     )
-                catalog = known_repo_catalog(plugins)
-                settings = global_settings(plugins)
-                resolved = resolve_required_target(unit.spec, plugins, catalog, settings)
+                resume_plugins = workspace_plugins(target_dir, plugins)[0]
+                catalog = known_repo_catalog(resume_plugins)
+                settings = global_settings(resume_plugins)
+                resolved = resolve_required_spec(unit.spec, resume_plugins, catalog, settings)
                 created, code = create_workspace_unit(
-                    plugins,
+                    resume_plugins,
                     root=target_dir,
                     resolved=resolved,
                     mode=UnitMode.mono(allow_existing_dir=True, allow_attach=True, dry_run=dry_run),
                     branch=branch,
                 )
-                return AddResult(
-                    workspaces=(created,),
-                    workspace_root=target_dir,
-                    multi_stack=False,
-                    dry_run=dry_run,
-                    exit_code=code,
-                )
+                return AddResult(workspaces=(created,), exit_code=code)
 
         _repaired, code = _repair_and_adopt_single(target_dir, plugins, dry_run=dry_run)
         add_res = add_cmd.apply_specs_to_existing(
@@ -347,13 +336,7 @@ def _execute(
     # 3. Fresh directory: 0 specs -> empty mono-stack workspace (like `git init`)
     if not specs:
         created, code = _repair_and_adopt_single(target_dir, plugins, dry_run=dry_run)
-        return AddResult(
-            workspaces=(created,),
-            workspace_root=target_dir,
-            multi_stack=False,
-            dry_run=dry_run,
-            exit_code=code,
-        )
+        return AddResult(workspaces=(created,), exit_code=code)
 
     # Parse all specs before resolving targets, and resolve targets before mutating disk
     units = [parse_unit_spec(raw, allow_run_args=False) for raw in specs]
@@ -367,8 +350,8 @@ def _execute(
 
     catalog = known_repo_catalog(plugins)
     settings = global_settings(plugins)
-    parsed: list[tuple[str | None, ResolvedTarget]] = [
-        (unit.name, resolve_required_target(unit.spec, plugins, catalog, settings))
+    parsed: list[tuple[str | None, ResolvedSpec]] = [
+        (unit.name, resolve_required_spec(unit.spec, plugins, catalog, settings))
         for unit in units
     ]
 
@@ -382,17 +365,11 @@ def _execute(
             mode=UnitMode.mono(allow_existing_dir=True, dry_run=dry_run),
             branch=branch,
         )
-        return AddResult(
-            workspaces=(created,),
-            workspace_root=target_dir,
-            multi_stack=False,
-            dry_run=dry_run,
-            exit_code=code,
-        )
+        return AddResult(workspaces=(created,), exit_code=code)
 
     # 5. Multi-stack workspace: 1+ named specs or 2+ specs
     taken: set[str] = set()
-    planned: list[tuple[str, ResolvedTarget]] = []
+    planned: list[tuple[str, ResolvedSpec]] = []
     for explicit_name, resolved in parsed:
         if explicit_name is not None:
             taken.add(explicit_name)
@@ -423,9 +400,6 @@ def _execute(
 
     return AddResult(
         workspaces=tuple(created_list),
-        workspace_root=target_dir,
-        multi_stack=True,
         workspace_files=ws_files,
-        dry_run=dry_run,
         exit_code=exit_code,
     )

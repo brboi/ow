@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
-import stat
 import sys
 import time
 from pathlib import Path
 
 from ow.core.paths import venvs_dir
 from tests.conftest import add_repo, init_workspace
+from tests.lab import make_executable, make_fake_engine
 
 
 def _install_fake_server_python(venv_dir: Path, *, marker: str = "SERVER_READY") -> None:
@@ -30,7 +29,7 @@ def _install_fake_server_python(venv_dir: Path, *, marker: str = "SERVER_READY")
         "print('SERVER_STOPPED', flush=True)\n",
         encoding="utf-8",
     )
-    py.chmod(py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(py)
 
 
 def test_run_detach_logs_status_refuse_duplicate_refuse_rm_and_stop(lab):
@@ -59,12 +58,6 @@ def test_run_detach_logs_status_refuse_duplicate_refuse_rm_and_stop(lab):
         st_plain = lab.ow("status", cwd=ws)
         assert st_plain.exit_code == 0
         assert "# running: pid " in st_plain.stdout
-
-        st_json = lab.ow("status", "--json", cwd=ws)
-        assert st_json.exit_code == 0
-        payload = json.loads(st_json.stdout)
-        assert "running" in payload["workspace"]
-        assert isinstance(payload["workspace"]["running"]["pid"], int)
 
         # Duplicate `ow run` and `ow run -d` must refuse while running.
         dup_fg = lab.ow("run", cwd=ws)
@@ -108,16 +101,13 @@ def test_run_detach_rejects_tmp(lab):
 
 def test_multi_stack_detach_logs_stop_services_and_stop_all(lab, monkeypatch):
     from ow.plugins import _containers as containers
-    from tests.plugins.test_services import _make_fake_engine
 
-    calls, running_containers = _make_fake_engine(
-        monkeypatch,
-        running={
-            "ow-postgres": {5432: 5432},
-            "ow-pgweb": {8081: 8081},
-            "ow-mailsink": {1025: 1025, 8025: 8025},
-        },
-    )
+    calls, running_containers = make_fake_engine(monkeypatch,
+    running={
+        "ow-postgres": {5432: 5432},
+        "ow-pgweb": {8081: 8081},
+        "ow-mailsink": {1025: 1025, 8025: 8025},
+    },)
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
 
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
@@ -208,19 +198,16 @@ def ow_multi_stop(multi):
     return RunCommand(argv=(sys.executable, "-c", code), cwd=multi.root)
 
 @hookimpl
-def ow_multi_logs(multi, follow=False, lines=50):
-    return RunCommand(
-        argv=(sys.executable, "-c", f"print('PLUGIN_LOGS', {follow!r}, {lines!r})"),
-        cwd=multi.root,
-    )
+def ow_multi_logs(multi):
+    return [("demo", multi.root / ".demo.log")]
 
 @hookimpl
-def ow_status(ws, target):
-    if target is not None or ws is None:
+def ow_status(ws, spec):
+    if spec is not None or ws is None:
         return []
     root = ws.root.parent if ws.is_stack else ws.root
     if _state_file(root).is_file():
-        return [StatusInfo(plugin=PLUGIN_NAME, scope="workspace", target=ws.name, summary="running (demo-svc)")]
+        return [StatusInfo(plugin=PLUGIN_NAME, scope="workspace", subject=ws.name, summary="running (demo-svc)")]
     return []
 """
     add_repo(
@@ -260,10 +247,11 @@ def ow_status(ws, target):
     assert rm_refused.exit_code == 1
     assert "running (demo-svc)" in rm_refused.stdout
 
-    # `ow logs` delegates to `ow_multi_logs`.
-    logs = lab.ow("logs", "-n", "12", cwd=multi)
+    # `ow logs` shows the files `ow_multi_logs` returns.
+    (multi / ".demo.log").write_text("PLUGIN_LOGS\n")
+    logs = lab.ow("logs", cwd=multi)
     assert logs.exit_code == 0
-    assert "PLUGIN_LOGS False 12" in capfd.readouterr().out
+    assert "PLUGIN_LOGS" in logs.stdout
 
     # `ow stop` delegates to `ow_multi_stop`.
     stopped = lab.ow("stop", cwd=multi)
@@ -301,3 +289,142 @@ def test_follow_files_interleaves_chronologically_keeping_multiline_tracebacks(t
         "[client]   ValueError: bad",
         "[iap] 2026-11-23 12:00:04,000 INFO last",
     ]
+
+
+def test_logs_with_nothing_to_show_exits_one(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = init_workspace(lab, "community", name="never-ran")
+
+    res = lab.ow("logs", cwd=ws)
+
+    assert res.exit_code == 1
+    assert "no logs found" in res.stderr
+
+
+def test_run_detach_starts_a_fresh_log_each_time(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = init_workspace(lab, "community", name="fresh-log")
+    _install_fake_server_python(venvs_dir() / "py3.12-18.0", marker="BOOT")
+    log = ws / ".ow" / "logs" / "fresh-log.log"
+
+    assert lab.ow("run", "-d", cwd=ws).exit_code == 0
+    try:
+        _wait_for(log, "BOOT")
+    finally:
+        assert lab.ow("stop", cwd=ws).exit_code == 0
+    first = log.read_text(encoding="utf-8")
+
+    assert lab.ow("run", "-d", cwd=ws).exit_code == 0
+    try:
+        _wait_for(log, "BOOT")
+        assert log.read_text(encoding="utf-8").count("BOOT") == first.count("BOOT")
+    finally:
+        assert lab.ow("stop", cwd=ws).exit_code == 0
+
+
+def test_logs_follow_returns_when_the_followed_process_dies(lab):
+    import threading
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = init_workspace(lab, "community", name="follow-ws")
+    _install_fake_server_python(venvs_dir() / "py3.12-18.0", marker="FOLLOWED")
+    log = ws / ".ow" / "logs" / "follow-ws.log"
+    assert lab.ow("run", "-d", cwd=ws).exit_code == 0
+    try:
+        _wait_for(log, "FOLLOWED")
+        results = []
+        follower = threading.Thread(
+            target=lambda: results.append(lab.ow("logs", "-f", cwd=ws)), daemon=True
+        )
+        follower.start()
+        follower.join(timeout=1.5)
+        assert follower.is_alive()  # still running: it follows
+
+        assert lab.ow("stop", cwd=ws).exit_code == 0
+        follower.join(timeout=10)
+        assert not follower.is_alive()
+    finally:
+        lab.ow("stop", cwd=ws)
+
+    assert results[0].exit_code == 0
+    assert "FOLLOWED" in results[0].stdout
+
+
+def test_tail_lines_reads_only_the_end_of_a_long_file(tmp_path):
+    from ow.core.runtime import tail_lines
+
+    log = tmp_path / "big.log"
+    log.write_text("".join(f"line {i}\n" for i in range(5000)) + "no newline", encoding="utf-8")
+
+    assert tail_lines(log, 3) == ["line 4998", "line 4999", "no newline"]
+    assert tail_lines(log, 6000)[0] == "line 0"
+    assert len(tail_lines(log, 6000)) == 5001
+    assert tail_lines(tmp_path / "missing.log", 3) == []
+
+
+def test_launch_lock_serializes_detached_launches_of_one_root(tmp_path):
+    import threading
+
+    from ow.core import runtime
+
+    order: list[str] = []
+    holding = threading.Event()
+
+    def first() -> None:
+        with runtime.launch_lock([tmp_path]):
+            holding.set()
+            time.sleep(0.3)
+            order.append("first done")
+
+    def second() -> None:
+        holding.wait()
+        with runtime.launch_lock([tmp_path]):
+            order.append("second ran")
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert order == ["first done", "second ran"]
+
+
+def _wait_for(path: Path, text: str, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file() and text in path.read_text(encoding="utf-8"):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{text!r} never appeared in {path}")
+
+
+def test_an_empty_plugin_log_list_falls_back_to_the_ow_logs_files(lab):
+    plugin_code = """
+from ow.plugin_api import hookimpl
+
+OW_API_VERSION = 1
+PLUGIN_NAME = "nologs"
+
+@hookimpl
+def ow_logs(ws):
+    return []
+"""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(
+        lab,
+        "demo",
+        {"main": {"pyproject.toml": '[tool.ow]\nplugin = "ow_plugin.py"\n', "ow_plugin.py": plugin_code}},
+        base="main",
+    )
+    ws = lab.ws("quiet")
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0,demo@main", cwd=ws).exit_code == 0
+    assert lab.ow("trust", cwd=ws).exit_code == 0
+    (ws / ".ow" / "logs").mkdir(parents=True, exist_ok=True)
+    (ws / ".ow" / "logs" / "quiet.log").write_text("FROM_OW_LOGS\n", encoding="utf-8")
+
+    res = lab.ow("logs", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "FROM_OW_LOGS" in res.stdout

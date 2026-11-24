@@ -1,4 +1,4 @@
-"""In-repo plugin discovery and path-based trust registry (`ow trust`)."""
+"""In-repo plugin discovery and location-based trust registry (`ow trust`)."""
 
 from __future__ import annotations
 
@@ -19,16 +19,7 @@ class DiscoveredPlugin:
     """An in-repo plugin file found inside a git worktree."""
 
     repo_name: str
-    repo_root: Path
     path: Path  # resolved canonical path to the .py file
-
-
-def _is_within(child: Path, parent: Path) -> bool:
-    try:
-        child.relative_to(parent)
-        return True
-    except ValueError:
-        return False
 
 
 def discover_repo_plugin(repo_dir: Path, *, repo_name: str | None = None) -> DiscoveredPlugin | None:
@@ -59,7 +50,7 @@ def discover_repo_plugin(repo_dir: Path, *, repo_name: str | None = None) -> Dis
                 raw = Path(rel.strip())
                 if not raw.is_absolute():
                     resolved_cand = (resolved_repo / raw).resolve()
-                    if _is_within(resolved_cand, resolved_repo) and resolved_cand.is_file():
+                    if resolved_cand.is_relative_to(resolved_repo) and resolved_cand.is_file():
                         candidate = resolved_cand
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             pass
@@ -69,14 +60,14 @@ def discover_repo_plugin(repo_dir: Path, *, repo_name: str | None = None) -> Dis
         if fallback.is_file():
             try:
                 resolved_fb = fallback.resolve()
-                if _is_within(resolved_fb, resolved_repo) and resolved_fb.is_file():
+                if resolved_fb.is_relative_to(resolved_repo) and resolved_fb.is_file():
                     candidate = resolved_fb
             except OSError:
                 pass
 
     if candidate is None:
         return None
-    return DiscoveredPlugin(repo_name=name, repo_root=resolved_repo, path=candidate)
+    return DiscoveredPlugin(repo_name=name, path=candidate)
 
 
 def discover_repo_plugins(
@@ -122,24 +113,39 @@ def _write_trusted_set(registry: Path, paths: set[str]) -> None:
 
 
 def list_trusted() -> tuple[Path, ...]:
-    """Return all currently trusted plugin file paths, sorted."""
+    """Return every trusted location (plugin files and directories), sorted."""
     return tuple(Path(p) for p in sorted(_read_trusted_set(trusted_plugins_file())))
 
 
-def is_trusted(path: Path) -> bool:
-    """Whether `path`'s canonical location is recorded in the trust registry."""
+def trusted_by(path: Path) -> Path | None:
+    """Return the trusted location covering `path`: `path` itself or its nearest trusted ancestor directory."""
     try:
-        canonical = str(path.resolve())
+        canonical = path.resolve()
     except OSError:
-        return False
-    return canonical in _read_trusted_set(trusted_plugins_file())
+        return None
+    trusted = _read_trusted_set(trusted_plugins_file())
+    for candidate in (canonical, *canonical.parents):
+        if str(candidate) in trusted:
+            return candidate
+    return None
+
+
+def is_trusted(path: Path) -> bool:
+    """Whether `path` is trusted: recorded itself, or beneath a trusted directory.
+
+    Trust is by location only: whatever sits at a trusted location, now or later, is trusted.
+    """
+    return trusted_by(path) is not None
 
 
 def trust_path(path: Path) -> Path:
-    """Record `path`'s canonical location as trusted; raises UsageError if not an existing file."""
+    """Record the canonical location of an existing file or directory as trusted.
+
+    A trusted directory covers every plugin beneath it. Raises UsageError if `path` does not exist.
+    """
     resolved = path.resolve()
-    if not resolved.is_file():
-        raise UsageError(f"plugin file not found: {resolved}")
+    if not resolved.exists():
+        raise UsageError(f"path not found: {resolved}")
     registry = trusted_plugins_file()
     with sidecar_lock(registry):
         trusted = _read_trusted_set(registry)
@@ -149,7 +155,11 @@ def trust_path(path: Path) -> Path:
 
 
 def untrust_path(path: Path) -> tuple[Path, bool]:
-    """Remove `path`'s canonical location from the trust registry; returns `(resolved, removed)`."""
+    """Remove the canonical location of `path` (file or directory) from the trust registry.
+
+    Returns `(resolved, removed)`. Only the exact recorded location is removed: a file that a
+    trusted directory still covers stays trusted (see `trusted_by`).
+    """
     resolved = path.resolve()
     registry = trusted_plugins_file()
     with sidecar_lock(registry):

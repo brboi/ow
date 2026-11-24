@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.lab import make_executable
+
 ZSH = shutil.which("zsh") or next(
     (p for p in ("/usr/bin/zsh", "/bin/zsh", "/usr/local/bin/zsh") if Path(p).exists()),
     None,
@@ -30,7 +32,7 @@ def test_bash_snippet_cds_and_completes(lab, tmp_path):
     # the real binary refusing a bogus workspace.
     stub = Path(os.environ["PATH"]) / "ow"
     stub.write_text(f'#!/bin/sh\nif [ "$1" = cd ]; then printf "%s\\n" "{ws}"; exit 0; fi\nexit 1\n')
-    stub.chmod(0o755)
+    make_executable(stub)
 
     script = tmp_path / "ow-shell-init.sh"
     script.write_text(
@@ -86,7 +88,7 @@ def test_bash_snippet_handles_nounset_and_cd_help(lab, tmp_path):
         '#!/bin/sh\nif [ "$1" = cd ] && [ "$2" = --help ]; then printf "Usage: ow cd\\n"; exit 0; fi\n'
         'if [ "$#" -eq 0 ]; then printf "Usage: ow\\n"; exit 0; fi\nexit 1\n'
     )
-    stub.chmod(0o755)
+    make_executable(stub)
 
     script = tmp_path / "ow-nounset.sh"
     script.write_text(

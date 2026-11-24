@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ow import term
-from ow.commands._repos import add_worktree, base_for, ensure_bare, parse_base_for, repair_bare
+from ow.commands._repos import add_worktree, base_for, ensure_bare, repair_bare
 from ow.commands._shared import (
     known_repo_catalog,
     print_dropped,
@@ -15,7 +15,7 @@ from ow.commands._shared import (
     remotes_of,
     run_steps,
 )
-from ow.core import config, git
+from ow.core import bases, config, git
 from ow.core.facts import RepoFacts, gather_facts
 from ow.core.paths import repos_dir
 from ow.core.plan import Batch, GitStep, OwStep, RepoPlan, Step, run_batch
@@ -33,7 +33,7 @@ def add(session: Session, name: str, url: str | None, *, base: str | None) -> in
     bare = repos_dir() / f"{name}.git"
     url = _url_for(session, name, url, registered=bare.is_dir())
     if base is not None:
-        parse_base_for(base, name)
+        bases.parse_base_for(base, name)
     if bare.is_dir() and url:
         registered = _origin_url(bare)
         if registered is not None and registered != url:

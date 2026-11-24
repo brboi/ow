@@ -6,7 +6,6 @@ import os
 import pwd
 import shlex
 import shutil
-import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -14,10 +13,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ow import term
+from ow.commands._runtime import default_shell, open_target, run_foreground
 from ow.commands._shared import prepare_services
-from ow.core import stacks
 from ow.core.plugins import SandboxMounts
-from ow.core.session import Session, global_settings, open_session
+from ow.core.session import global_settings
 from ow.core.workspace import RepoLocation, Workspace, resolve_target_root
 from ow.errors import UsageError
 
@@ -242,26 +241,6 @@ def _expand_user_path(raw: str, home: Path, base: Path) -> Path:
     return p
 
 
-def _is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
-
-
-def _default_shell(host_env: Mapping[str, str]) -> str:
-    """Pick an executable interactive shell for bare `ow sandbox`."""
-    candidates = [host_env.get("SHELL", "").strip(), "/bin/bash", "/usr/bin/bash", "/bin/sh"]
-    for cand in candidates:
-        if not cand:
-            continue
-        p = Path(cand)
-        if p.is_absolute() and p.exists() and os.access(p, os.X_OK):
-            return cand
-    return "/bin/sh"
-
-
 def resolve_profile(
     command: Sequence[str],
     *,
@@ -394,7 +373,7 @@ def _append_system_mounts(args: list[str]) -> None:
             real_resolv = resolv.resolve()
         except OSError:
             real_resolv = None
-        if real_resolv is not None and real_resolv.exists() and _is_within(real_resolv, Path("/run")):
+        if real_resolv is not None and real_resolv.exists() and real_resolv.is_relative_to("/run"):
             parent = real_resolv.parent
             args.extend(["--ro-bind", str(parent), str(parent)])
 
@@ -402,7 +381,7 @@ def _append_system_mounts(args: list[str]) -> None:
         if Path(optional_ro).is_dir():
             args.extend(["--ro-bind", optional_ro, optional_ro])
 
-    # Local PostgreSQL Unix socket (when Postgres runs locally on host rather than TCP container).
+    # Host PostgreSQL Unix socket (a host Postgres, i.e. `postgres.enabled = false`, is reachable only through it).
     if Path("/var/run/postgresql").is_dir():
         args.extend(["--ro-bind", "/var/run/postgresql", "/var/run/postgresql"])
 
@@ -501,9 +480,9 @@ def build_sandbox_plan(
     home = _host_home(env_source)
     resolved_root = target_root.resolve()
     base_cwd = (cwd or resolved_root).resolve()
-    chdir = base_cwd if _is_within(base_cwd, resolved_root) else resolved_root
+    chdir = base_cwd if base_cwd.is_relative_to(resolved_root) else resolved_root
 
-    shell = _default_shell(env_source)
+    shell = default_shell(env_source)
     effective_cmd = tuple(command) if command else (shell,)
 
     config_profile: str | None = None
@@ -573,7 +552,7 @@ def build_sandbox_plan(
     cmd_bin = shutil.which(effective_cmd[0], path=env_source.get("PATH"))
     if cmd_bin:
         cmd_path = Path(cmd_bin)
-        if _is_within(cmd_path, home) or _is_within(cmd_path.resolve(), home):
+        if cmd_path.is_relative_to(home) or cmd_path.resolve().is_relative_to(home):
             _append_ro_path(args, cmd_path, seen_before_ws)
 
     # 6. Workspace root (RW) + RO overlays for `.ow/` and `<repo>/.git`
@@ -707,40 +686,33 @@ def format_dry_run(plan: SandboxPlan) -> str:
 
 def _load_target(
     workspace: str | None, plugins: Plugins, cwd: Path
-) -> tuple[Path, str, tuple[Workspace, ...], tuple[RepoLocation, ...], list[Mapping[str, object]]]:
-    """Resolve mono-stack workspace, stack, or multi-stack root into workspaces & locations."""
+) -> tuple[
+    Plugins,
+    Path,
+    str,
+    tuple[Workspace, ...],
+    tuple[RepoLocation, ...],
+    list[Mapping[str, object]],
+]:
+    """Resolve mono-stack workspace, stack, or multi-stack root into plugins, workspaces & locations."""
     root, kind = resolve_target_root(workspace, cwd=cwd)
-    if kind == "workspace":
-        session = open_session(str(root), need_workspace=True, plugins=plugins, cwd=root)
-        for warning in session.warnings:
-            term.warn(warning)
-        assert session.workspace is not None
-        settings_layers: list[Mapping[str, object]] = []
-        if plugins.is_enabled("sandbox", session.workspace):
-            settings_layers.append(session.workspace.settings)
-        return (
-            session.workspace.root,
-            session.workspace.name,
-            (session.workspace,),
-            session.locations,
-            settings_layers,
-        )
+    target = open_target(root, kind, plugins)
+    eff = target.plugins
+    settings_layers: list[Mapping[str, object]] = []
+    if target.multi is None:
+        ws = target.workspace
+        if eff.is_enabled("sandbox", ws):
+            settings_layers.append(ws.settings)
+        return eff, ws.root, ws.name, (ws,), target.sessions[0].locations, settings_layers
 
-    loaded = stacks.load_multi_workspace(root, plugins)
-    if loaded is None:
-        raise UsageError(f"no valid stacks found in {root}")
-    multi, sessions = loaded
+    if eff.is_enabled("sandbox", None):
+        settings_layers.append(global_settings(eff))
     locations: list[RepoLocation] = []
-    settings_layers = []
-    if plugins.is_enabled("sandbox", None):
-        settings_layers.append(global_settings(plugins))
-    for sess in sessions:
-        for warning in sess.warnings:
-            term.warn(warning)
+    for sess in target.sessions:
         locations.extend(sess.locations)
-        if sess.workspace is not None and plugins.is_enabled("sandbox", sess.workspace):
+        if sess.workspace is not None and eff.is_enabled("sandbox", sess.workspace):
             settings_layers.append(sess.workspace.settings)
-    return multi.root, multi.name, multi.stacks, tuple(locations), settings_layers
+    return eff, target.multi.root, target.multi.name, target.multi.stacks, tuple(locations), settings_layers
 
 
 def run(
@@ -771,7 +743,7 @@ def run(
             )
 
     base_cwd = (cwd or Path.cwd()).resolve()
-    target_root, target_name, workspaces, locations, settings_layers = _load_target(
+    plugins, target_root, target_name, workspaces, locations, settings_layers = _load_target(
         workspace, plugins, base_cwd
     )
 
@@ -803,13 +775,4 @@ def run(
 
     prepare_services(workspaces, plugins)
 
-    try:
-        proc = subprocess.run(plan.bwrap_argv, cwd=plan.chdir)
-    except KeyboardInterrupt:
-        return 130
-    except OSError as exc:
-        raise UsageError(f"failed to execute {plan.bwrap_argv[0]!r}: {exc}") from exc
-
-    if proc.returncode < 0:
-        return 128 + abs(proc.returncode)
-    return proc.returncode
+    return run_foreground(plan.bwrap_argv, cwd=plan.chdir, interactive=not command)

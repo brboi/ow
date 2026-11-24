@@ -6,24 +6,27 @@ import os
 import shutil
 import subprocess
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ow.core.plugins import RunCommand
 from ow.errors import UsageError
-from ow.plugins.odoo.files import odoo_venv, python_environment
-from ow.plugins.odoo.settings import get_setting
-from ow.specs.python_env import ensure_venv_ready
-from ow.specs.services import DatabaseService
+from ow.plugins.odoo.settings import DatabaseTarget, database_target, get_setting
+from ow.specs.python_env import ensure_venv_ready, resolve_workspace_python
 
 if TYPE_CHECKING:
     from ow.core.workspace import Repo, Workspace
 
 
-def run_command(ws: Workspace, core: Repo, args: tuple[str, ...]) -> RunCommand:
+def run_command(
+    ws: Workspace, core: Repo, args: tuple[str, ...], answers: Callable[[str], list]
+) -> RunCommand:
     """Run Odoo using the workspace's resolved Python virtualenv (or `mise exec`)."""
-    py_env = python_environment(core)
-    venv_path = odoo_venv(ws, core).path
-    ensure_venv_ready(ws, venv_path, requirements=py_env.requirements)
+    resolved = resolve_workspace_python(ws, answers)
+    assert resolved is not None, "the odoo plugin answers python_environment for an Odoo workspace"
+    merged, venv = resolved
+    venv_path = venv.path
+    ensure_venv_ready(ws, venv_path, requirements=merged.requirements if merged else ())
     venv_python = venv_path / "bin" / "python"
     odoorc = ws.root / "odoorc"
     odoo_bin = core.path / "odoo-bin"
@@ -93,48 +96,49 @@ def _drop_host_database(
         raise UsageError(f"failed to drop database {db_name!r}: {detail}")
 
 
-def reset_workspace(
-    ws: Workspace, answers: Callable[[str], list]
-) -> list[str]:
-    """Drop the workspace's Odoo database and remove its local filestore."""
+def _reset_target(ws: Workspace, answers: Callable[[str], list]) -> tuple[str, DatabaseTarget, Path | None]:
+    """The `(db_name, database, filestore_dir)` that `--reset` removes for `ws`.
+
+    The database is the one the generated `odoorc` points at (`database_target`); the
+    filestore is None when there is none to remove.
+    """
     db_name_val, _ = get_setting("odoo.db_name", ws.settings, ws)
     db_name = str(db_name_val)
     if not db_name or db_name in _SYSTEM_DBS:
         raise UsageError(f"refusing to drop database {db_name!r} for workspace {ws.name!r}")
-
-    db_host_val, _ = get_setting("odoo.db_host", ws.settings, ws)
-    db_port_val, _ = get_setting("odoo.db_port", ws.settings, ws)
-    db_user_val, _ = get_setting("odoo.db_user", ws.settings, ws)
-    db_password_val, _ = get_setting("odoo.db_password", ws.settings, ws)
-    db_host = str(db_host_val)
-    db_port = int(db_port_val)
-    db_user = str(db_user_val)
-    db_password = str(db_password_val)
-
-    db_services = [a for a in answers("database_service") if isinstance(a, DatabaseService)]
-    used_managed_drop = False
-    if db_services and db_host == "localhost" and db_port == 5432:
-        svc = db_services[0]
-        if svc.drop is not None:
-            svc.drop(db_name)
-            used_managed_drop = True
-
-    if not used_managed_drop:
-        _drop_host_database(
-            db_name,
-            host=db_host,
-            port=db_port,
-            user=db_user,
-            password=db_password,
-        )
-
     filestore_root = (ws.root / ".odoo" / "filestore").resolve()
     filestore_dir = (filestore_root / db_name).resolve()
-    removed_filestore = False
-    if filestore_dir.parent == filestore_root and filestore_dir.exists():
-        shutil.rmtree(filestore_dir)
-        removed_filestore = True
+    present = filestore_dir.parent == filestore_root and filestore_dir.exists()
+    return db_name, database_target(ws, answers), filestore_dir if present else None
 
-    if removed_filestore:
+
+def reset_preview(ws: Workspace, answers: Callable[[str], list]) -> list[str]:
+    """One line per thing `reset_workspace` would remove: the database, then the filestore if present."""
+    db_name, db, filestore_dir = _reset_target(ws, answers)
+    lines = [f"database {db.user}@{db.host}:{db.port}/{db_name}"]
+    if filestore_dir is not None:
+        lines.append(f"filestore {filestore_dir}")
+    return lines
+
+
+def reset_workspace(
+    ws: Workspace, answers: Callable[[str], list]
+) -> list[str]:
+    """Drop the workspace's Odoo database and remove its local filestore."""
+    db_name, db, filestore_dir = _reset_target(ws, answers)
+
+    if (drop := db.managed_drop) is not None:
+        drop(db_name)
+    else:
+        _drop_host_database(
+            db_name,
+            host=db.host,
+            port=db.port,
+            user=db.user,
+            password=db.password,
+        )
+
+    if filestore_dir is not None:
+        shutil.rmtree(filestore_dir)
         return [f"{ws.name}: dropped database {db_name!r} and filestore"]
     return [f"{ws.name}: dropped database {db_name!r}"]

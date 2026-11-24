@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 
-from ow.core.git import remotes_of, run as git_run
+from ow.core.git import remotes_of
+from ow.core.git import run as git_run
 from ow.errors import UsageError
 
 _SHA = re.compile(r"[0-9a-f]{7,40}")
@@ -37,7 +38,9 @@ def parse_base(ref: str, remotes: Callable[[str], bool] | None = None) -> str:
     Raises BaseError if the ref is not a valid remote-tracking branch.
     """
     if remotes is None:
-        remotes = lambda r: r == "origin"
+
+        def remotes(r: str) -> bool:
+            return r == "origin"
 
     ref = ref.strip()
     if not ref:
@@ -85,11 +88,6 @@ def is_base_branch_name(branch: str, base: str | None = None) -> bool:
         if branch == base_branch:
             return True
     return False
-
-
-def is_upstream_base(upstream: str | None, base: str | None) -> bool:
-    """Whether both are set and equal."""
-    return upstream is not None and base is not None and upstream == base
 
 
 def infer_default_base(

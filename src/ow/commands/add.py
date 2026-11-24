@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from ow import term
 from ow.commands._promote import infer_existing_stack_name, promote_to_multi_workspace
 from ow.commands._shared import known_repo_catalog
-from ow.commands._targets import UnitSpec, deduplicate_name, parse_unit_spec
+from ow.commands._specs import UnitSpec, deduplicate_name, parse_unit_spec
 from ow.commands._workspace import (
     AddResult,
     UnitMode,
@@ -17,13 +17,13 @@ from ow.commands._workspace import (
     add_into_workspace,
     create_workspace_unit,
     report_result,
-    resolve_required_target,
+    resolve_required_spec,
     sync_multi_files,
     upsert_stack,
 )
 from ow.core import index, stacks
-from ow.core.plugins import ResolvedTarget
-from ow.core.session import Session, global_settings, open_session
+from ow.core.plugins import ResolvedSpec
+from ow.core.session import Session, global_settings, open_session, workspace_plugins
 from ow.core.workspace import Workspace, find_root
 from ow.errors import UsageError
 
@@ -32,7 +32,10 @@ if TYPE_CHECKING:
 
 
 def _open_workspace_session(plugins: Plugins, root: Path) -> Session:
-    session = open_session(str(root), need_workspace=True, plugins=plugins, cwd=root)
+    """Open `root` with `plugins`, already extended with its in-repo plugins by the caller."""
+    session = open_session(
+        str(root), need_workspace=True, plugins=plugins, cwd=root, discover_repo_plugins=False
+    )
     for warning in session.warnings:
         term.warn(warning)
     assert session.workspace is not None
@@ -45,18 +48,18 @@ def _resolve_units(
     *,
     unnamed_ws: Workspace | None,
     named_ws: Workspace | None,
-) -> list[tuple[UnitSpec, ResolvedTarget]]:
+) -> list[tuple[UnitSpec, ResolvedSpec]]:
     """Resolve each unit with its workspace's settings and plugin enablement.
 
     `unnamed_ws` serves units added into an existing workspace, `named_ws` the `<name>=<spec>`
     stack units; a `None` workspace means global settings.
     """
-    resolved: list[tuple[UnitSpec, ResolvedTarget]] = []
+    resolved: list[tuple[UnitSpec, ResolvedSpec]] = []
     for unit in units:
         ws = named_ws if unit.name is not None else unnamed_ws
         catalog = known_repo_catalog(plugins, ws)
         settings = ws.settings if ws is not None else global_settings(plugins)
-        resolved.append((unit, resolve_required_target(unit.spec, plugins, catalog, settings, ws)))
+        resolved.append((unit, resolve_required_spec(unit.spec, plugins, catalog, settings, ws)))
     return resolved
 
 
@@ -86,7 +89,7 @@ def _apply_mono_specs(
     has_unnamed = any(u.name is None for u in units)
     if has_named and has_unnamed:
         raise UsageError(
-            "cannot mix named stacks (<name>=<spec>) and unnamed repo targets in a single command"
+            "cannot mix named stacks (<name>=<spec>) and unnamed repo specs in a single command"
         )
 
     if not has_named:
@@ -106,13 +109,7 @@ def _apply_mono_specs(
             )
             created_list.append(created)
             exit_code = max(exit_code, code)
-        return AddResult(
-            workspaces=tuple(created_list),
-            workspace_root=ws_root,
-            multi_stack=False,
-            dry_run=dry_run,
-            exit_code=exit_code,
-        )
+        return AddResult(workspaces=tuple(created_list), exit_code=exit_code)
 
     # Named stack(s) inside a mono-stack workspace -> convert empty workspace or promote to multi-stack.
     new_names: list[str] = []
@@ -137,7 +134,6 @@ def _apply_mono_specs(
     )
 
     pending: list[dict[str, object]] = []
-    existing_name: str | None = None
     if not empty_mono:
         existing_name = infer_existing_stack_name(session, seen_new, explicit=as_name)
         moved_root, promo_code = promote_to_multi_workspace(
@@ -149,13 +145,7 @@ def _apply_mono_specs(
             pending=pending,
         )
         if promo_code != 0 or (not dry_run and moved_root is None):
-            return AddResult(
-                workspaces=(),
-                workspace_root=ws_root,
-                multi_stack=False,
-                dry_run=dry_run,
-                exit_code=promo_code,
-            )
+            return AddResult(workspaces=(), exit_code=promo_code)
 
     created_list = []
     exit_code = 0
@@ -181,11 +171,7 @@ def _apply_mono_specs(
 
     return AddResult(
         workspaces=tuple(created_list),
-        workspace_root=ws_root,
-        multi_stack=True,
         workspace_files=ws_files,
-        promoted_from=existing_name if (not dry_run and existing_name is not None) else None,
-        dry_run=dry_run,
         exit_code=exit_code,
     )
 
@@ -253,10 +239,7 @@ def _apply_multi_specs(
 
     return AddResult(
         workspaces=tuple(created_list),
-        workspace_root=multi_root,
-        multi_stack=True,
         workspace_files=ws_files,
-        dry_run=dry_run,
         exit_code=exit_code,
     )
 
@@ -271,18 +254,26 @@ def apply_specs_to_existing(
     dry_run: bool = False,
     yes: bool = False,
 ) -> AddResult:
-    """Apply `specs` inside an existing mono-stack or multi-stack workspace."""
+    """Apply `specs` inside an existing mono-stack or multi-stack workspace.
+
+    `plugins` is the built-in set; every hook below goes through it extended with the
+    workspace's trusted in-repo plugins.
+    """
     ws_root = find_root(cwd)
     multi_stacks = stacks.detect_multi_workspace(cwd) if ws_root is None else None
     if ws_root is None and multi_stacks is None:
         raise UsageError(
             "not inside an ow workspace; run `ow init` first (or `ow run --tmp` for an ephemeral run)"
         )
+    anchor = ws_root if ws_root is not None else multi_stacks[0]
+    plugins, plugin_warnings = workspace_plugins(anchor, plugins)
+    for warning in plugin_warnings:
+        term.warn(warning)
 
     units = [parse_unit_spec(raw, allow_run_args=False) for raw in specs]
 
     # Context 1: Mono-stack workspace (1 level)
-    if ws_root is not None and not stacks.is_stack_config(ws_root):
+    if ws_root is not None and not stacks.is_stack_dir(ws_root):
         return _apply_mono_specs(
             plugins,
             ws_root,
@@ -297,7 +288,7 @@ def apply_specs_to_existing(
         raise UsageError("--as is only used when promoting a mono-stack workspace to multi-stack")
 
     # Context 2: Inside a stack of a multi-stack workspace
-    if ws_root is not None and stacks.is_stack_config(ws_root):
+    if ws_root is not None and stacks.is_stack_dir(ws_root):
         multi_root = ws_root.parent.resolve()
         existing = stacks.detect_multi_workspace(multi_root) or ()
         return _apply_multi_specs(
@@ -325,28 +316,26 @@ def apply_specs_to_existing(
 
 def run(
     plugins: Plugins,
-    targets: Sequence[str],
+    specs: Sequence[str],
     *,
     branch: str | None = None,
     as_name: str | None = None,
     dry_run: bool = False,
     yes: bool = False,
     cwd: Path | None = None,
-    json_output: bool = False,
 ) -> int:
     """Add repos, attach PRs, or add stacks inside an existing workspace."""
-    if not targets:
-        raise UsageError("pass at least one target (e.g. upgrade, enterprise#12345, iap=iap#4321)")
+    if not specs:
+        raise UsageError("pass at least one SPEC (e.g. upgrade, enterprise#12345, iap=iap#4321)")
 
     base_cwd = (cwd or Path.cwd()).resolve()
-    with term.json_mode(json_output):
-        result = apply_specs_to_existing(
-            plugins,
-            targets,
-            cwd=base_cwd,
-            branch=branch,
-            as_name=as_name,
-            dry_run=dry_run,
-            yes=yes,
-        )
-        return report_result(result, json_output=json_output, create_verb="ready")
+    result = apply_specs_to_existing(
+        plugins,
+        specs,
+        cwd=base_cwd,
+        branch=branch,
+        as_name=as_name,
+        dry_run=dry_run,
+        yes=yes,
+    )
+    return report_result(result, create_verb="ready")

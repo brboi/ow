@@ -119,3 +119,69 @@ def test_prune_on_a_clean_machine_prints_nothing_and_asks_nothing(lab):
 
     assert result.exit_code == 0
     assert result.stdout == ""
+
+
+DEMO_PLUGIN = '''
+from ow.plugin_api import PruneCandidate, hookimpl
+
+OW_API_VERSION = 1
+PLUGIN_NAME = "demo_prune"
+
+
+@hookimpl
+def ow_prune_candidates(workspaces, offline):
+    return [PruneCandidate(workspace=ws.root, reason="demo says so") for ws in workspaces]
+
+
+@hookimpl
+def ow_running(ws):
+    return ["demo-svc"] if (ws.root / ".up").exists() else None
+'''
+
+
+def _demo_workspace(lab, name: str):
+    """A workspace whose own repo carries a trusted in-repo plugin proposing itself for pruning."""
+    add_repo(
+        lab,
+        "demo",
+        {
+            "main": {
+                "pyproject.toml": '[tool.ow]\nplugin = "tools/ow_plugin.py"\n',
+                "tools/ow_plugin.py": DEMO_PLUGIN,
+            }
+        },
+        base="main",
+    )
+    ws = init_workspace(lab, "demo", base="main", name=name)
+    assert lab.ow("trust", cwd=ws).exit_code == 0
+    return ws
+
+
+def test_prune_honours_an_in_repo_plugins_candidates(lab):
+    ws = _demo_workspace(lab, "old")
+
+    dry = lab.ow("prune", "-n")
+
+    assert dry.exit_code == 0, dry.stderr + dry.stdout
+    assert "# prune workspace old: demo says so" in dry.stdout.splitlines()
+
+    done = lab.ow("prune", "-y")
+
+    assert done.exit_code == 0, done.stderr + done.stdout
+    assert not ws.exists()
+    assert str(ws) not in index_lines()
+
+
+def test_prune_skips_a_candidate_workspace_with_something_running(lab):
+    ws = _demo_workspace(lab, "busy")
+    (ws / ".up").write_text("up")
+
+    result = lab.ow("prune", "-y")
+
+    assert result.exit_code == 0, result.stderr + result.stdout
+    assert (
+        "# skip pruning busy (demo says so): runtime: running (demo-svc); run `ow stop` first"
+        in result.stdout.splitlines()
+    )
+    assert ws.exists()
+    assert str(ws) in index_lines()

@@ -22,7 +22,6 @@ from ow.core.config import (
     update_stack,
     update_workspace,
 )
-from ow.core.json_schema import envelope
 from ow.core.paths import global_config
 from ow.core.session import Session
 from ow.errors import UsageError
@@ -32,39 +31,15 @@ _REPOS_KEY = "`[repos]` is not a setting; remove a repo with `ow repo rm <name>`
 _STACKS_KEY = "`[stacks]` is workspace layout metadata, not a plugin setting"
 
 
-def show_all(
-    session: Session,
-    *,
-    global_: bool,
-    multi_root: Path | None = None,
-    json_output: bool = False,
-) -> int:
-    """Print every declared key: `<key> = <value> (<origin>) # <help>`, or `--json`.
+def show_all(session: Session, *, global_: bool, multi_root: Path | None = None) -> int:
+    """Print every declared key: `<key> = <value> (<origin>) # <help>`.
 
     With `global_`, the workspace layer is ignored and built-in defaults fill the rest.
     """
-    with term.json_mode(json_output):
-        values, origins = _values_and_origins(session, global_=global_, multi_root=multi_root)
-        if json_output:
-            term.emit_json(
-                envelope(
-                    {
-                        "scope": "global" if global_ else "effective",
-                        "settings": {
-                            key: {
-                                "value": values.get(key),
-                                "origin": origins[key],
-                                "help": setting.help,
-                            }
-                            for key, setting in session.declared.items()
-                        },
-                    }
-                )
-            )
-            return 0
-        for key, setting in session.declared.items():
-            term.out(f"{key} = {render_value(values.get(key))} ({origins[key]}) # {setting.help}")
-        return 0
+    values, origins = _values_and_origins(session, global_=global_, multi_root=multi_root)
+    for key, setting in session.declared.items():
+        term.out(f"{key} = {render_value(values.get(key))} ({origins[key]}) # {setting.help}")
+    return 0
 
 
 def get(
@@ -73,28 +48,23 @@ def get(
     *,
     global_: bool = False,
     multi_root: Path | None = None,
-    json_output: bool = False,
 ) -> int:
     """Print one key's value, or nothing when unset; an unknown key is a usage error.
 
     `global_` reads the global layer alone, otherwise the effective value.
     """
-    with term.json_mode(json_output):
-        setting = session.declared.get(key)
-        if setting is None:
-            raise _unknown_key(key, session.declared)
-        if global_:
-            value = session.global_layer.values.get(key)
-        else:
-            value = _values_and_origins(session, global_=False, multi_root=multi_root)[0].get(key)
-        if json_output:
-            term.emit_json(envelope({"key": key, "value": value}))
-            return 0
-        if value is None:
-            return 0
-        # A string is printed raw, so `$(ow config get key)` has no TOML quotes.
-        term.out(value if isinstance(value, str) else render_value(value))
+    setting = session.declared.get(key)
+    if setting is None:
+        raise _unknown_key(key, session.declared)
+    if global_:
+        value = session.global_layer.values.get(key)
+    else:
+        value = _values_and_origins(session, global_=False, multi_root=multi_root)[0].get(key)
+    if value is None:
         return 0
+    # A string is printed raw, so `$(ow config get key)` has no TOML quotes.
+    term.out(value if isinstance(value, str) else render_value(value))
+    return 0
 
 
 def set_(
@@ -233,7 +203,9 @@ def _update(
     if code == 0 and reloaded.workspace is not None and reloaded.workspace.is_stack:
         parent = stacks.parent_multi_workspace(reloaded.workspace.root)
         if parent is not None:
-            loaded = stacks.load_multi_workspace(parent, reloaded.plugins)
+            loaded = stacks.load_multi_workspace(
+                parent, reloaded.plugins, discover_repo_plugins=False
+            )
             if loaded is not None:
                 stacks.sync_multi_workspace_files(loaded[0], reloaded.plugins)
     return code
@@ -247,7 +219,7 @@ def _sets_key(path: Path, key: str, *, stack_name: str | None = None) -> bool:
     except FileNotFoundError:
         return False
     except tomllib.TOMLDecodeError as exc:
-        raise UsageError(f"Invalid TOML in {path}: {exc}") from exc
+        raise UsageError(f"invalid TOML in {path}: {exc}") from exc
     except (UnicodeDecodeError, OSError) as exc:
         raise UsageError(f"cannot read {path}: {exc}") from exc
     current: object = data

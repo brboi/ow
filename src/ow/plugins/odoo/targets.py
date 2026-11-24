@@ -9,7 +9,7 @@ from typing import cast
 
 from ow.core import bases, git, stacks
 from ow.core.paths import repos_dir
-from ow.core.plugins import KnownRepo, ResolvedRepo, ResolvedTarget
+from ow.core.plugins import KnownRepo, ResolvedRepo, ResolvedSpec
 from ow.errors import UsageError
 from ow.plugins._github import bare_gh_info, parse_git_slug, parse_pr_identity
 from ow.plugins._odoo_repos import (
@@ -55,13 +55,13 @@ def _infer_odoo_base(repo: ResolvedRepo) -> str | None:
     return None
 
 
-def resolve_target(
-    target: str,
+def resolve_spec(
+    spec: str,
     known_repos: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
-) -> ResolvedTarget | None:
+) -> ResolvedSpec | None:
     """Resolve `@<base>` into `odoo.default_repos` detached on `<base>`."""
-    part = target.strip()
+    part = spec.strip()
     if not part.startswith("@"):
         return None
     raw_base = part[1:].strip()
@@ -91,7 +91,7 @@ def resolve_target(
             )
         )
     short_name = raw_base.split("/", 1)[-1]
-    return ResolvedTarget(
+    return ResolvedSpec(
         name=stacks.sanitize_slug(short_name, "workspace"),
         repos=tuple(resolved_repos),
         source=f"base:{raw_base}",

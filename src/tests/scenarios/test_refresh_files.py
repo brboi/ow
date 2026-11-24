@@ -153,7 +153,7 @@ def test_files_names_the_error_that_blocks_it(lab, monkeypatch, capsys):
     blocked = Projection(
         files=(),
         stale_lock=(),
-        diagnostics=(("odoo", Diagnostic("error", "bad setting")),),
+        diagnostics=(("odoo", Diagnostic(level="error", text="bad setting")),),
         blocked=True,
     )
     monkeypatch.setattr(files_cmd.refresh, "project", lambda ws, plugins: blocked)

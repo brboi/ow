@@ -1,4 +1,4 @@
-"""Odoo Runbot plugin: companion commit pinning, Runbot bundle/batch targets, and build status.
+"""Odoo Runbot plugin: companion commit pinning, Runbot bundle/batch specs, and build status.
 
 Uses Runbot 19.0's public unauthenticated JSON API (`/runbot/api/bundle` and `/runbot/api/batch`).
 Network or lookup failures fall back cleanly during implicit expansion/status so offline
@@ -12,8 +12,9 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ow import term
 from ow.core import bases, cache, config, git, stacks
@@ -21,7 +22,7 @@ from ow.core.paths import repos_dir
 from ow.core.plugins import (
     KnownRepo,
     ResolvedRepo,
-    ResolvedTarget,
+    ResolvedSpec,
     Setting,
     StatusInfo,
     hookimpl,
@@ -32,7 +33,7 @@ from ow.plugins._github import (
     bare_gh_info,
     parse_gh_slug,
     parse_pr_identity,
-    parse_pr_target,
+    parse_pr_spec,
     recorded_branch_pr,
 )
 from ow.plugins._odoo_repos import (
@@ -94,9 +95,9 @@ def _host_of(url: str) -> str:
     return (parsed.netloc or "").lower()
 
 
-def parse_runbot_target(target: str, *, base_url: str = _DEFAULT_RUNBOT_URL) -> tuple[str, str] | None:
+def parse_runbot_spec(spec: str, *, base_url: str = _DEFAULT_RUNBOT_URL) -> tuple[str, str] | None:
     """Parse a Runbot bundle/batch URL into `('bundle'|'batch', ident)`, or None."""
-    match = _RUNBOT_URL_RE.match(target.strip())
+    match = _RUNBOT_URL_RE.match(spec.strip())
     if not match:
         return None
     host = match.group("host").lower()
@@ -303,14 +304,14 @@ def _bare_has_origin_branch(local_name: str, branch: str) -> bool:
 
 
 @hookimpl
-def ow_resolve_target(
-    target: str,
+def ow_resolve_spec(
+    spec: str,
     known_repos: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
-) -> ResolvedTarget | None:
+) -> ResolvedSpec | None:
     """Resolve a Runbot bundle or batch URL into exact detached commits."""
     base_url = _base_url_from(settings)
-    parsed = parse_runbot_target(target, base_url=base_url)
+    parsed = parse_runbot_spec(spec, base_url=base_url)
     if parsed is None:
         return None
     kind, ident = parsed
@@ -388,7 +389,7 @@ def ow_resolve_target(
     )
     ws_name = stacks.sanitize_slug(str(bundle_name), f"{kind}-{ident}")
 
-    return ResolvedTarget(
+    return ResolvedSpec(
         name=ws_name,
         repos=tuple(resolved_repos),
         source=f"runbot:{kind}:{ident}",
@@ -553,9 +554,8 @@ def _status_for_runbot_url(
             StatusInfo(
                 plugin="runbot",
                 scope="external",
-                target=f"bundle#{bundle.get('id', ident)}",
+                subject=f"bundle#{bundle.get('id', ident)}",
                 summary=_format_bundle_summary(bundle),
-                data=bundle,
             )
         ]
     if ident.isdigit():
@@ -570,9 +570,8 @@ def _status_for_runbot_url(
             StatusInfo(
                 plugin="runbot",
                 scope="external",
-                target=f"batch#{batch.get('id', ident)}",
+                subject=f"batch#{batch.get('id', ident)}",
                 summary=summary,
-                data=batch,
             )
         ]
     return []
@@ -580,14 +579,14 @@ def _status_for_runbot_url(
 
 def _status_for_pr(
     base_url: str,
-    target: str,
+    spec: str,
     *,
     known_repos: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
     ttl: int,
     offline: bool,
 ) -> list[StatusInfo]:
-    parsed_pr = parse_pr_target(target)
+    parsed_pr = parse_pr_spec(spec)
     if parsed_pr is None:
         return []
     owner, repo, num = parsed_pr
@@ -606,9 +605,8 @@ def _status_for_pr(
         StatusInfo(
             plugin="runbot",
             scope="external",
-            target=f"bundle#{bundle.get('id')}",
+            subject=f"bundle#{bundle.get('id')}",
             summary=_format_bundle_summary(bundle),
-            data=bundle,
         )
     ]
 
@@ -633,9 +631,8 @@ def _status_for_workspace(
         StatusInfo(
             plugin="runbot",
             scope="workspace",
-            target=ws.name,
+            subject=ws.name,
             summary=_format_bundle_summary(bundle),
-            data=bundle,
         )
     ]
 
@@ -644,22 +641,22 @@ def _status_for_workspace(
 def ow_status(
     ws: Workspace | None,
     facts: Sequence[RepoFacts],
-    target: str | None,
+    spec: str | None,
     offline: bool,
     known_repos: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
 ) -> list[StatusInfo]:
-    """Contribute Runbot build status for workspaces, PR targets, or Runbot URLs."""
+    """Contribute Runbot build status for workspaces, PR specs, or Runbot URLs."""
     base_url = _base_url_from(settings)
     ttl = cast(int, settings["runbot.cache_ttl"])
 
-    if target is not None:
-        rb = parse_runbot_target(target, base_url=base_url)
+    if spec is not None:
+        rb = parse_runbot_spec(spec, base_url=base_url)
         if rb is not None:
             return _status_for_runbot_url(base_url, rb[0], rb[1], ttl=ttl, offline=offline)
         return _status_for_pr(
             base_url,
-            target,
+            spec,
             known_repos=known_repos,
             settings=settings,
             ttl=ttl,

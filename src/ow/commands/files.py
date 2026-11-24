@@ -6,13 +6,12 @@ Read-only: it projects, it never writes. An `error` diagnostic exits 1 for the s
 from __future__ import annotations
 
 import difflib
-import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ow import term
+from ow.commands._runtime import open_target
 from ow.core import refresh, stacks
-from ow.core.json_schema import envelope
 from ow.core.refresh import Projection
 from ow.core.session import Session
 from ow.errors import UsageError
@@ -21,38 +20,7 @@ if TYPE_CHECKING:
     from ow.core.plugins import Plugins
 
 
-def _emit_projection(
-    *,
-    name: str,
-    projection: Projection,
-    diff: bool,
-    json_output: bool,
-    multi_stack: bool = False,
-) -> int:
-    if json_output:
-        payload: dict[str, Any] = {
-            "workspace": name,
-            "blocked": projection.blocked,
-            "files": [
-                {
-                    "path": st.path.as_posix(),
-                    "owner": st.owner,
-                    "state": st.state,
-                    "reason": st.reason,
-                }
-                for st in projection.files
-            ],
-            "stale_lock": list(projection.stale_lock),
-            "diagnostics": [
-                {"plugin": p, "level": d.level, "text": d.text}
-                for p, d in projection.diagnostics
-            ],
-        }
-        if multi_stack:
-            payload["multi_stack"] = True
-        term.emit_json(envelope(payload))
-        return 1 if projection.blocked else 0
-
+def _emit_projection(projection: Projection, *, diff: bool) -> int:
     if diff:
         _print_diffs(projection)
     else:
@@ -66,55 +34,33 @@ def _emit_projection(
     return 0
 
 
-def run(session: Session, *, diff: bool, json_output: bool = False) -> int:
+def run(session: Session, *, diff: bool) -> int:
     """List the files and their states, or diff the ones that differ; 1 when blocked."""
     if session.workspace is None:
         raise UsageError("not inside an ow workspace; pass -w <name|path> or run `ow init`")
 
-    with term.json_mode(json_output):
-        multi = None
-        if session.workspace.is_stack:
-            parent = stacks.parent_multi_workspace(session.workspace.root)
-            if parent is not None:
-                loaded = stacks.load_multi_workspace(
-                    parent, session.plugins, discover_repo_plugins=False
-                )
-                multi = loaded[0] if loaded is not None else None
-        projection = (
-            refresh.project(session.workspace, session.plugins, multi=multi)
-            if multi is not None
-            else refresh.project(session.workspace, session.plugins)
-        )
-        return _emit_projection(
-            name=session.workspace.name,
-            projection=projection,
-            diff=diff,
-            json_output=json_output,
-        )
+    multi = None
+    if session.workspace.is_stack:
+        parent = stacks.parent_multi_workspace(session.workspace.root)
+        if parent is not None:
+            loaded = stacks.load_multi_workspace(
+                parent, session.plugins, discover_repo_plugins=False
+            )
+            multi = loaded[0] if loaded is not None else None
+    projection = (
+        refresh.project(session.workspace, session.plugins, multi=multi)
+        if multi is not None
+        else refresh.project(session.workspace, session.plugins)
+    )
+    return _emit_projection(projection, diff=diff)
 
 
-def run_multi(
-    multi_root: Path,
-    plugins: Plugins,
-    *,
-    diff: bool,
-    json_output: bool = False,
-) -> int:
+def run_multi(multi_root: Path, plugins: Plugins, *, diff: bool) -> int:
     """Inspect multi-stack workspace-level generated files (e.g. `<ws>.code-workspace`)."""
-    loaded = stacks.load_multi_workspace(multi_root, plugins)
-    if loaded is None:
-        raise UsageError(f"no valid stacks found in {multi_root}")
-    multi, sessions = loaded
-    eff_plugins = sessions[0].plugins if sessions else plugins
-    with term.json_mode(json_output):
-        projection = stacks.project_multi_workspace_files(multi, eff_plugins)
-        return _emit_projection(
-            name=multi.name,
-            projection=projection,
-            diff=diff,
-            json_output=json_output,
-            multi_stack=True,
-        )
+    target = open_target(multi_root, "multi", plugins)
+    assert target.multi is not None
+    projection = stacks.project_multi_workspace_files(target.multi, target.plugins)
+    return _emit_projection(projection, diff=diff)
 
 
 def _print_states(projection: Projection) -> None:
@@ -123,7 +69,7 @@ def _print_states(projection: Projection) -> None:
         line = f"{status.path.as_posix()}\t{status.state}"
         if status.state in ("yours", "skipped") and status.reason:
             line += f"\t{status.reason}"
-        _line(line)
+        term.out(line)
     _print_stale(projection)
 
 
@@ -140,7 +86,7 @@ def _print_diffs(projection: Projection) -> None:
         # An absent file has no current bytes, so every proposal line is an addition.
         current = "" if status.state == "absent" else _text(status.current)
         if proposal is None or current is None:
-            _line(f"{path}: binary")
+            term.out(f"{path}: binary")
             continue
         for line in difflib.unified_diff(
             current.splitlines(),
@@ -149,19 +95,14 @@ def _print_diffs(projection: Projection) -> None:
             tofile=f"ow's {path}",
             lineterm="",
         ):
-            _line(line)
+            term.out(line)
     _print_stale(projection)
 
 
 def _print_stale(projection: Projection) -> None:
     """The lock entries no plugin produces any more; their files stay put."""
     for path in projection.stale_lock:
-        _line(f"{path}\tstale (no longer produced)")
-
-
-def _line(text: str) -> None:
-    """Write one line to stdout verbatim."""
-    sys.stdout.write(f"{text}\n")
+        term.out(f"{path}\tstale (no longer produced)")
 
 
 def _text(data: bytes | None) -> str | None:

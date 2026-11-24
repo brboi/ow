@@ -8,6 +8,7 @@ import pytest
 
 from ow.core.workspace import Workspace
 from ow.plugins import local
+from tests.lab import make_executable
 
 
 def _ws(root):
@@ -78,7 +79,7 @@ def test_local_preserves_seed_mode(tmp_path, monkeypatch):
     seed = _seed(tmp_path, monkeypatch)
     sourced = seed / "script.sh"
     sourced.write_text("#!/bin/sh\n")
-    sourced.chmod(0o755)
+    make_executable(sourced)
 
     ws_root = tmp_path / "ws"
     ws_root.mkdir()

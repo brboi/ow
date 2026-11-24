@@ -6,7 +6,6 @@ import json
 import os
 import shlex
 import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +18,7 @@ from ow.core.plugins import load_plugins
 from ow.core.session import open_session
 from ow.errors import UsageError
 from tests.conftest import add_repo, init_workspace, workspace
+from tests.lab import make_executable
 
 
 def _mount_pairs(argv: tuple[str, ...]) -> list[tuple[str, str, str]]:
@@ -57,7 +57,7 @@ def _install_fake_bwrap(bin_dir: Path, log_path: Path, *, exit_code: int = 0) ->
         f"sys.exit({exit_code})\n",
         encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    make_executable(script)
     return script
 
 
@@ -298,7 +298,7 @@ def test_auto_mounts_home_binary_and_symlink_target(lab):
     pkg.mkdir(parents=True)
     target = pkg / "cli.sh"
     target.write_text("#!/bin/sh\necho ok\n")
-    target.chmod(0o755)
+    make_executable(target)
 
     local_bin = lab.home / ".local" / "bin"
     local_bin.mkdir(parents=True)
@@ -532,3 +532,18 @@ def test_real_bwrap_enforces_isolation_and_allows_git_commit(lab, monkeypatch):
     assert res.exit_code == 0, res.stderr + res.stdout
     assert (root / "community" / "agent.txt").read_text() == "hello from sandbox\n"
     assert "sandbox commit" in lab.git(root / "community", "log", "-1", "--pretty=%s")
+
+
+def test_host_postgres_socket_directory_is_always_mounted_read_only(monkeypatch):
+    """A host Postgres (`postgres.enabled = false`) is only reachable through its socket directory."""
+    real_is_dir = Path.is_dir
+    monkeypatch.setattr(
+        Path, "is_dir", lambda self: str(self) == "/var/run/postgresql" or real_is_dir(self)
+    )
+    args: list[str] = []
+
+    sandbox_cmd._append_system_mounts(args)
+
+    assert ("--ro-bind", "/var/run/postgresql", "/var/run/postgresql") in {
+        tuple(args[i : i + 3]) for i in range(len(args))
+    }

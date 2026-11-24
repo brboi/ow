@@ -487,18 +487,6 @@ def test_an_unknown_only_repo_is_a_usage_error(lab):
     assert "unknown repo 'nope' in --only" in result.stderr
 
 
-def test_retarget_json_output_emits_the_schema_envelope(lab):
-    import json
-
-    ws, worktree, _collab = _workspace(lab)
-
-    res_json = lab.ow("retarget", "--no-fetch", "-y", "--json", cwd=ws)
-    assert res_json.exit_code == 0, res_json.stderr
-    data = json.loads(res_json.stdout)
-    assert data["schema_version"] == 1
-    assert data["exit_code"] == 0
-
-
 def test_retarget_switches_detached_core_updates_config_skips_missing_series_and_refreshes(lab):
     """Retargeting master -> 19.0 switches detached `community`, updates `[repos]`, skips `upgrade`, and refreshes venv/odoorc."""
     import tomllib

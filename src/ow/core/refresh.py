@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import os
 import re
 import stat
 import tomllib
@@ -69,18 +68,13 @@ def _unsafe_relative(rel: PurePosixPath) -> str | None:
     return fs.unsafe_relative(rel, reserved=_RESERVED_DESTINATIONS)
 
 
-def _ancestry_problem(root: Path, rel: PurePosixPath) -> str | None:
-    """The first parent directory of `rel` that is unsafe to write through."""
-    return fs.ancestry_problem(root, rel)
-
-
 def read_lock(root: Path) -> dict[str, str]:
     """The rendered lock at `root`, or `{}` if it does not exist yet.
 
     Corrupt structure (bad TOML, a non-table, a non-hex value) raises `OwError` naming the lock path.
     """
     lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
-    ancestry_problem = _ancestry_problem(root, lock_rel)
+    ancestry_problem = fs.ancestry_problem(root, lock_rel)
     if ancestry_problem:
         raise OwError(f"rendered lock: {ancestry_problem}")
 
@@ -113,10 +107,7 @@ def _read_lock_or_warn(root: Path) -> tuple[dict[str, str], Diagnostic | None]:
     try:
         return read_lock(root), None
     except OwError:
-        diag = Diagnostic(
-            "warning",
-            f"malformed lock at {RENDERED_LOCK.as_posix()}; files that differ from ow's are treated as yours",
-        )
+        diag = Diagnostic(level="warning", text=f"malformed lock at {RENDERED_LOCK.as_posix()}; files that differ from ow's are treated as yours")
         return {}, diag
 
 
@@ -132,14 +123,14 @@ def dumps_lock(lock: dict[str, str]) -> bytes:
 def _write_lock_file(root: Path, lock: dict[str, str]) -> None:
     """Write the lock atomically."""
     lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
-    ancestry_problem = _ancestry_problem(root, lock_rel)
+    ancestry_problem = fs.ancestry_problem(root, lock_rel)
     if ancestry_problem:
         raise OwError(f"rendered lock: {ancestry_problem}")
 
     lock_path = root / RENDERED_LOCK
-    st = _destination_stat(lock_path)
+    st = fs.destination_stat(lock_path)
     if st is not None:
-        problem = _unsafe_destination(RENDERED_LOCK.as_posix(), st)
+        problem = fs.unsafe_destination(RENDERED_LOCK.as_posix(), st)
         if problem:
             raise OwError(f"rendered lock: {problem}")
 
@@ -158,21 +149,6 @@ def _write_lock_if_changed(root: Path, lock: dict[str, str]) -> None:
         _write_lock_file(root, lock)
 
 
-def _atomic_write(dest: Path, data: bytes, mode: int) -> None:
-    """Write `data` to `dest` via a same-directory temp file and `os.replace`."""
-    fs.atomic_write(dest, data, mode=mode)
-
-
-def _destination_stat(dest: Path) -> os.stat_result | None:
-    """`lstat(dest)`, or None if nothing is there — never follows a link."""
-    return fs.destination_stat(dest)
-
-
-def _unsafe_destination(name: str, st: os.stat_result) -> str | None:
-    """Why a destination is unsafe to write."""
-    return fs.unsafe_destination(name, st)
-
-
 def classify_proposals(
     root: Path,
     files: Sequence[tuple[str, GeneratedFile]],
@@ -184,19 +160,19 @@ def classify_proposals(
         path_key = gf.path.as_posix()
         dest = root / gf.path
 
-        ancestry = _ancestry_problem(root, gf.path)
+        ancestry = fs.ancestry_problem(root, gf.path)
         if ancestry:
             file_statuses.append(
                 FileStatus(gf.path, owner, "skipped", gf.data, None, ancestry, gf.mode)
             )
             continue
 
-        st = _destination_stat(dest)
+        st = fs.destination_stat(dest)
         if st is None:
             file_statuses.append(FileStatus(gf.path, owner, "absent", gf.data, None, None, gf.mode))
             continue
 
-        problem = _unsafe_destination(path_key, st)
+        problem = fs.unsafe_destination(path_key, st)
         if problem:
             file_statuses.append(
                 FileStatus(gf.path, owner, "yours", gf.data, None, problem, gf.mode)
@@ -323,7 +299,7 @@ def flatten_contributions(
     return files, diagnostics
 
 
-def _stack_lock_location(ws: "Workspace") -> tuple[Path, PurePosixPath | None]:
+def _stack_lock_location(ws: Workspace) -> tuple[Path, PurePosixPath | None]:
     """Return `(lock_root, lock_prefix)` for `ws` (parent root + stack name when `ws.is_stack`)."""
     if ws.is_stack:
         return ws.root.parent, PurePosixPath(ws.name)
@@ -331,7 +307,7 @@ def _stack_lock_location(ws: "Workspace") -> tuple[Path, PurePosixPath | None]:
 
 
 def project(
-    ws: "Workspace",
+    ws: Workspace,
     plugins: Plugins,
     *,
     multi: object | None = None,
@@ -340,15 +316,12 @@ def project(
 
     Raises `PluginError` on a bad path or two owners of one path; a symlinked parent marks just that file `skipped`.
     """
-    answers: dict[str, list[Diagnostic]] = {}
-    for plugin_name, diag_list in plugins.call("ow_diagnostics", ws, multi=multi):
-        if not diag_list:
-            continue
-        if not isinstance(diag_list, list):
-            raise PluginError(
-                plugin_name, "ow_diagnostics", f"expected list, got {type(diag_list).__name__}"
-            )
-        answers[plugin_name] = list(diag_list)
+    from ow.term import warn
+
+    found, diagnostic_warnings = plugins.diagnostics(ws, multi)
+    for text in diagnostic_warnings:
+        warn(text)
+    answers = {name: list(diags) for name, diags in found}
 
     files_by_plugin, extra_diags = collect_contributions(
         "ow_generated_files",
@@ -369,7 +342,7 @@ def project(
 def _refresh_lock(root: Path):
     """Hold an exclusive sidecar lock while refreshing generated files and the lock file."""
     lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
-    if _ancestry_problem(root, lock_rel):
+    if fs.ancestry_problem(root, lock_rel):
         yield
         return
     with fs.sidecar_lock(root / RENDERED_LOCK):
@@ -406,14 +379,14 @@ def write_files(
             lock_key = f"{pfx}{path_key}"
             if status.state in ("absent", "outdated"):
                 dest = root / status.path
-                if _ancestry_problem(root, status.path):
+                if fs.ancestry_problem(root, status.path):
                     continue
                 # Re-read right before writing: bytes that changed since projection are
                 # a hand edit, which wins. Leave it alone and keep the old lock entry,
                 # so the next projection reads it as "yours".
-                st = _destination_stat(dest)
+                st = fs.destination_stat(dest)
                 if st is not None:
-                    if _unsafe_destination(path_key, st):
+                    if fs.unsafe_destination(path_key, st):
                         continue
                     try:
                         current = dest.read_bytes()
@@ -422,7 +395,7 @@ def write_files(
                     if current != status.current:
                         continue
                 try:
-                    _atomic_write(dest, status.proposal, status.mode)
+                    fs.atomic_write(dest, status.proposal, mode=status.mode)
                 except OSError as exc:
                     msg = f"cannot write {path_key}: {exc}"
                     if written:
@@ -452,7 +425,7 @@ def write_files(
 def remove_lock_prefix(lock_root: Path, prefix: str) -> None:
     """Drop all lock entries under `<prefix>/` from `lock_root`'s rendered lock."""
     lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
-    if _ancestry_problem(lock_root, lock_rel):
+    if fs.ancestry_problem(lock_root, lock_rel):
         return
     if not (lock_root / RENDERED_LOCK).exists():
         return
@@ -466,7 +439,7 @@ def remove_lock_prefix(lock_root: Path, prefix: str) -> None:
 def migrate_lock_to_prefix(lock_root: Path, prefix: str) -> None:
     """Prefix every existing lock entry at `lock_root` with `<prefix>/` (used during promotion)."""
     lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
-    if _ancestry_problem(lock_root, lock_rel):
+    if fs.ancestry_problem(lock_root, lock_rel):
         return
     if not (lock_root / RENDERED_LOCK).exists():
         return
@@ -480,7 +453,7 @@ def migrate_lock_to_prefix(lock_root: Path, prefix: str) -> None:
 
 
 def refresh(
-    ws: "Workspace",
+    ws: Workspace,
     plugins: Plugins,
     *,
     multi: object | None = None,
@@ -498,7 +471,7 @@ def refresh(
 
 
 def sync_if_stale(
-    ws: "Workspace",
+    ws: Workspace,
     plugins: Plugins,
     *,
     multi: object | None = None,
@@ -520,21 +493,13 @@ def sync_if_stale(
 
 def _owned_regular(root: Path, rel: PurePosixPath) -> Path | None:
     """`root / rel` when it is a regular file reachable without a symlink, else None."""
-    if _unsafe_relative(rel) or _ancestry_problem(root, rel):
+    if _unsafe_relative(rel) or fs.ancestry_problem(root, rel):
         return None
     path = root / rel
-    st = _destination_stat(path)
-    if st is None or _unsafe_destination(rel.as_posix(), st):
+    st = fs.destination_stat(path)
+    if st is None or fs.unsafe_destination(rel.as_posix(), st):
         return None
     return path
-
-
-def owned_files(root: Path) -> tuple[Path, ...]:
-    """The existing regular files the lock at `root` records, as absolute paths."""
-    lock, _ = _read_lock_or_warn(root)
-    return tuple(
-        path for key in lock if (path := _owned_regular(root, PurePosixPath(key))) is not None
-    )
 
 
 def remove_owned_files(root: Path) -> tuple[Path, ...]:
@@ -543,7 +508,7 @@ def remove_owned_files(root: Path) -> tuple[Path, ...]:
     This is the only deletion of generated files: ow calls it when it removes the workspace root itself. Hand-edited files stay. The `.ow` directory goes too when nothing else is in it.
     """
     lock_rel = PurePosixPath(RENDERED_LOCK.as_posix())
-    if _ancestry_problem(root, lock_rel):
+    if fs.ancestry_problem(root, lock_rel):
         return ()
     removed: list[Path] = []
     lock_path = root / RENDERED_LOCK
@@ -559,8 +524,8 @@ def remove_owned_files(root: Path) -> tuple[Path, ...]:
                     removed.append(path)
             except OSError:
                 continue
-        st = _destination_stat(lock_path)
-        if st is not None and not _unsafe_destination(RENDERED_LOCK.as_posix(), st):
+        st = fs.destination_stat(lock_path)
+        if st is not None and not fs.unsafe_destination(RENDERED_LOCK.as_posix(), st):
             with contextlib.suppress(OSError):
                 lock_path.unlink()
     # `fs.sidecar_lock` keeps its flock file next to the lock as `.<name>.lock`.
@@ -599,7 +564,7 @@ def report(projection: Projection, written: Sequence[PurePosixPath]) -> None:
         error("nothing was written")
 
 
-def _enclosing_multi(ws: "Workspace", plugins: Plugins) -> object | None:
+def _enclosing_multi(ws: Workspace, plugins: Plugins) -> object | None:
     """Load the enclosing `MultiWorkspace` for a stack without re-discovering repo plugins."""
     if not ws.is_stack:
         return None
@@ -612,7 +577,7 @@ def _enclosing_multi(ws: "Workspace", plugins: Plugins) -> object | None:
     return loaded[0] if loaded is not None else None
 
 
-def refresh_workspace(session: "Session", *, multi: object | None = None) -> int:
+def refresh_workspace(session: Session, *, multi: object | None = None) -> int:
     """Refresh the session's workspace and print the summary; 1 when an error diagnostic blocked it."""
     assert session.workspace is not None
     eff_multi = multi if multi is not None else _enclosing_multi(session.workspace, session.plugins)
@@ -621,6 +586,6 @@ def refresh_workspace(session: "Session", *, multi: object | None = None) -> int
     return 1 if projection.blocked else 0
 
 
-def refresh_after(session: "Session") -> int:
+def refresh_after(session: Session) -> int:
     """Refresh after a git batch: git just moved branches, so re-derive the session first."""
     return refresh_workspace(session.reload())

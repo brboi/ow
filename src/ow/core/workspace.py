@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, Mapping, Sequence
+from typing import Literal
 
 from ow.core import config
-from ow.core.git import GitFailed, read as git_read
+from ow.core.git import GitFailed
+from ow.core.git import read as git_read
 from ow.core.index import read as read_index
 from ow.core.paths import repos_dir
 from ow.errors import UsageError
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Repo:
     """A repo in a workspace as plugins see it."""
 
@@ -40,7 +42,7 @@ class RepoLocation:
     head: str | None  # SHA when detached, else None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Workspace:
     """A workspace (or one stack inside a multi-stack workspace): repos under one directory."""
 
@@ -49,10 +51,13 @@ class Workspace:
     repos: tuple[Repo, ...]
     settings: Mapping[str, object]  # MappingProxyType in practice
     is_stack: bool = False
+    # Setting key -> layer that supplied its value ("stack", "workspace" or "global");
+    # a key absent here holds its declared default.
+    origins: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
-    def setting_int(self, key: str) -> int | None:
-        """Return integer value of setting `key` (excluding bools), or None."""
-        return config.as_int(self.settings.get(key))
+    def is_explicit(self, key: str) -> bool:
+        """Whether the user set `key` in a config layer (so it is not a declared default)."""
+        return self.origins.get(key, "default") != "default"
 
 
 def find_root(start: Path | None = None) -> Path | None:
@@ -70,7 +75,7 @@ def find_root(start: Path | None = None) -> Path | None:
     while True:
         cfg = current / ".ow" / "config.toml"
         if cfg.exists():
-            if config.is_multi_config(cfg):
+            if stack_names := config.stack_names_in_config(cfg):
                 if resolved_start == current:
                     return None
                 try:
@@ -78,7 +83,7 @@ def find_root(start: Path | None = None) -> Path | None:
                 except ValueError:
                     return None
                 top_part = rel.parts[0]
-                if top_part in config.stack_names_in_config(cfg):
+                if top_part in stack_names:
                     stack_dir = current / top_part
                     if stack_dir.is_dir():
                         return stack_dir.resolve()
@@ -120,7 +125,7 @@ def derive_repos(
             continue
 
         try:
-            with open(git_file, "r") as f:
+            with open(git_file) as f:
                 content = f.read().strip()
         except OSError:
             continue
@@ -167,7 +172,7 @@ def derive_repos(
                     if not worktree_gitdir.exists():
                         problem = "prunable"
                     else:
-                        with open(worktree_gitdir, "r") as f:
+                        with open(worktree_gitdir) as f:
                             stored_gitdir = f.read().strip()
                         if (worktree_dir / stored_gitdir).resolve() != git_file.resolve():
                             problem = "prunable"
@@ -178,7 +183,7 @@ def derive_repos(
                 head_file = worktree_dir / "HEAD"
                 try:
                     if head_file.exists():
-                        with open(head_file, "r") as f:
+                        with open(head_file) as f:
                             head_content = f.read().strip()
                         if head_content.startswith("ref: "):
                             ref = head_content[5:]
@@ -233,8 +238,13 @@ def build_workspace(
     settings: dict[str, object],
     *,
     is_stack: bool = False,
+    origins: Mapping[str, str] | None = None,
 ) -> Workspace:
-    """Build a Workspace from RepoLocations and settings."""
+    """Build a Workspace from RepoLocations and settings.
+
+    `origins` maps each setting key to the layer that supplied it (as resolved by
+    `config.resolve_settings`); keys at their default may be omitted or marked "default".
+    """
     repos = tuple(
         Repo(
             name=loc.name,
@@ -251,16 +261,17 @@ def build_workspace(
         repos=repos,
         settings=MappingProxyType(settings),
         is_stack=is_stack,
+        origins=MappingProxyType({k: v for k, v in (origins or {}).items() if v != "default"}),
     )
 
 
 def _entry_kind(path: Path) -> Literal["workspace", "multi"] | None:
     """Classify an indexed or target directory as mono-stack workspace/stack, multi-stack workspace, or dead."""
-    from ow.core.stacks import detect_multi_workspace, is_stack_dir, is_stack_dir
+    from ow.core.stacks import detect_multi_workspace, is_stack_dir
 
     cfg = path / ".ow" / "config.toml"
     if cfg.exists():
-        if config.is_multi_config(cfg):
+        if config.stack_names_in_config(cfg):
             return "multi" if detect_multi_workspace(path) else None
         return "workspace"
     if path.is_dir() and is_stack_dir(path):
@@ -369,7 +380,7 @@ def resolve_root(workspace: str | None = None, *, cwd: Path | None = None) -> Pa
 
     Raises UsageError when the resolved target is a multi-stack workspace container.
     """
-    from ow.core.stacks import detect_multi_workspace, is_stack_dir
+    from ow.core.stacks import detect_multi_workspace
 
     root, kind = resolve_target_root(workspace, cwd=cwd)
     if kind == "multi":

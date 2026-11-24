@@ -2,28 +2,17 @@
 
 from __future__ import annotations
 
-import json
-
 from ow.core.paths import repos_dir
 from ow.plugins import runbot
-from tests.conftest import add_repo, init_workspace
-
-
-def _setup_pr_repo(lab, name: str, base: str, base_files: dict[str, str], pr_num: int, pr_branch: str, pr_files: dict[str, str]):
-    remote = add_repo(lab, name, {base: base_files}, base=base)
-    collab = lab.collaborator(f"author-{name}-{pr_num}", of=remote)
-    collab.commit(pr_files, message=f"PR #{pr_num}", branch=pr_branch)
-    collab.push(pr_branch)
-    lab.publish_pr(remote, pr_num, pr_branch)
-    return remote
+from tests.conftest import add_repo, init_workspace, setup_pr_repo
 
 
 def test_parse_runbot_url_variants():
-    assert runbot.parse_runbot_target("https://runbot.odoo.com/runbot/bundle/12345") == ("bundle", "12345")
-    assert runbot.parse_runbot_target("https://runbot.odoo.com/runbot/bundle/master-1") == ("bundle", "master-1")
-    assert runbot.parse_runbot_target("https://runbot.odoo.com/runbot/batch/987654") == ("batch", "987654")
-    assert runbot.parse_runbot_target("https://example.com/runbot/bundle/12345") is None
-    assert runbot.parse_runbot_target(
+    assert runbot.parse_runbot_spec("https://runbot.odoo.com/runbot/bundle/12345") == ("bundle", "12345")
+    assert runbot.parse_runbot_spec("https://runbot.odoo.com/runbot/bundle/master-1") == ("bundle", "master-1")
+    assert runbot.parse_runbot_spec("https://runbot.odoo.com/runbot/batch/987654") == ("batch", "987654")
+    assert runbot.parse_runbot_spec("https://example.com/runbot/bundle/12345") is None
+    assert runbot.parse_runbot_spec(
         "https://custom.runbot.internal/runbot/bundle/42",
         base_url="https://custom.runbot.internal",
     ) == ("bundle", "42")
@@ -42,15 +31,13 @@ def test_runbot_pins_community_to_exact_base_match_commit_on_pr_init(lab):
     comm_collab.push("master")
     assert latest_sha != pinned_sha
 
-    _setup_pr_repo(
-        lab,
-        "enterprise",
-        "master",
-        {"sale_ent/__manifest__.py": "{}"},
-        12345,
-        "master-voip-review",
-        {"sale_ent/fix.py": "fixed = True\n"},
-    )
+    setup_pr_repo(lab,
+    "enterprise",
+    "master",
+    {"sale_ent/__manifest__.py": "{}"},
+    12345,
+    "master-voip-review",
+    {"sale_ent/fix.py": "fixed = True\n"},)
     lab.fake_gh(
         [
             {
@@ -205,29 +192,27 @@ def test_runbot_status_workspace_external_and_ttl_cache(lab):
     assert len(calls) == 1
 
     # 4. External Runbot URL status
-    ext = lab.ow("status", "https://runbot.odoo.com/runbot/bundle/601", "--json")
+    ext = lab.ow("status", "https://runbot.odoo.com/runbot/bundle/601")
     assert ext.exit_code == 0, ext.stderr
-    payload = json.loads(ext.stdout)
-    assert any(r["plugin"] == "runbot" and "done ko" in r["summary"] for r in payload["results"])
+    rows = [line.split("\t") for line in ext.stdout.splitlines()]
+    assert any(r[0] == "runbot" and "done ko" in r[2] for r in rows)
 
     # 5. External PR status combines Runbot status too
-    ext_pr = lab.ow("status", "enterprise#4242", "--json")
+    ext_pr = lab.ow("status", "enterprise#4242")
     assert ext_pr.exit_code == 0, ext_pr.stderr
-    pr_payload = json.loads(ext_pr.stdout)
-    assert any(r["plugin"] == "runbot" and "bundle #601" in r["summary"] for r in pr_payload["results"])
+    pr_rows = [line.split("\t") for line in ext_pr.stdout.splitlines()]
+    assert any(r[0] == "runbot" and "bundle #601" in r[2] for r in pr_rows)
 
 
 def test_runbot_unreachable_prints_fallback_notice(lab):
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
-    _setup_pr_repo(
-        lab,
-        "enterprise",
-        "18.0",
-        {"sale_ent/__manifest__.py": "{}"},
-        31415,
-        "18.0-offline-fallback",
-        {"sale_ent/fix.py": "ok = True\n"},
-    )
+    setup_pr_repo(lab,
+    "enterprise",
+    "18.0",
+    {"sale_ent/__manifest__.py": "{}"},
+    31415,
+    "18.0-offline-fallback",
+    {"sale_ent/fix.py": "ok = True\n"},)
     lab.fake_gh(
         [
             {
@@ -252,15 +237,13 @@ def test_runbot_unreachable_prints_fallback_notice(lab):
 
 def test_runbot_missing_bundle_warns_about_private_project_fallback(lab):
     add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
-    _setup_pr_repo(
-        lab,
-        "iap-apps",
-        "18.0",
-        {"iap_mod/__manifest__.py": "{}"},
-        1992,
-        "18.0-phone-service",
-        {"iap_mod/phone.py": "ok = True\n"},
-    )
+    setup_pr_repo(lab,
+    "iap-apps",
+    "18.0",
+    {"iap_mod/__manifest__.py": "{}"},
+    1992,
+    "18.0-phone-service",
+    {"iap_mod/phone.py": "ok = True\n"},)
     lab.fake_gh(
         [
             {

@@ -5,23 +5,25 @@ from __future__ import annotations
 import os
 import tempfile
 import types
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Mapping
 
 import pytest
+
 from ow.core.plugins import (
     Diagnostic,
     GeneratedFile,
     KnownRepo,
     PluginError,
-    Plugins,
     Setting,
     hookimpl,
     load_plugins,
 )
-from ow.specs.editors import DebugLaunch, EditorContribution, merge as merge_editors
-from ow.specs.python_env import PythonEnvironment as MiseEnvironment, merge as merge_mise
+from ow.specs.editors import DebugLaunch, EditorContribution
+from ow.specs.editors import merge as merge_editors
+from ow.specs.python_env import PythonEnvironment as MiseEnvironment
+from ow.specs.python_env import merge as merge_mise
 
 
 @dataclass(frozen=True)
@@ -84,7 +86,7 @@ def test_plugins_settings_includes_enabled_and_plugin_settings():
 
     # Check the enabled setting
     enabled_setting = next(s for s in settings if s.key == "a.enabled")
-    assert enabled_setting.type == bool
+    assert enabled_setting.type is bool
     assert enabled_setting.default is True
 
 
@@ -582,7 +584,7 @@ def test_plugins_call_with_errors_collect():
 
     @hookimpl
     def ow_diagnostics_a(ws):
-        return [Diagnostic("info", "diagnostic from a")]
+        return [Diagnostic(level="info", text="diagnostic from a")]
 
     @hookimpl
     def ow_diagnostics_b(ws):
@@ -590,7 +592,7 @@ def test_plugins_call_with_errors_collect():
 
     @hookimpl
     def ow_diagnostics_c(ws):
-        return [Diagnostic("warning", "diagnostic from c")]
+        return [Diagnostic(level="warning", text="diagnostic from c")]
 
     plugin_a.ow_diagnostics = ow_diagnostics_a
 
@@ -726,3 +728,65 @@ def test_plugins_call_propagates_usage_error_unchanged():
     with pytest.raises(UsageError, match="bad user input"):
         plugins.call("ow_diagnostics", ws=fake_ws)
 
+
+def test_plugins_diagnostics_collects_failures_as_warnings():
+    """`ow_diagnostics` is a collected hook: a raise or a malformed answer warns, the others still answer."""
+    good, broken, malformed, silent = (types.ModuleType(n) for n in ("good", "broken", "malformed", "silent"))
+    seen = {}
+
+    @hookimpl
+    def ow_diagnostics_good(ws, multi):
+        seen["multi"] = multi
+        return [Diagnostic(level="warning", text="careful")]
+
+    @hookimpl
+    def ow_diagnostics_broken(ws):
+        raise ValueError("kaput")
+
+    @hookimpl
+    def ow_diagnostics_malformed(ws):
+        return "not a list"
+
+    @hookimpl
+    def ow_diagnostics_silent(ws):
+        return []
+
+    for module, impl in (
+        (good, ow_diagnostics_good),
+        (broken, ow_diagnostics_broken),
+        (malformed, ow_diagnostics_malformed),
+        (silent, ow_diagnostics_silent),
+    ):
+        impl.__name__ = "ow_diagnostics"
+        module.ow_diagnostics = impl
+
+    plugins = load_plugins(
+        builtins=(("good", good), ("broken", broken), ("malformed", malformed), ("silent", silent))
+    )
+
+    found, warnings = plugins.diagnostics(FakeWorkspace(root=Path("/tmp"), settings={}))
+
+    assert found == (("good", (Diagnostic(level="warning", text="careful"),)),)
+    assert seen == {"multi": None}
+    assert warnings == (
+        "broken: ow_diagnostics failed: kaput",
+        "malformed: ow_diagnostics failed: expected a list of Diagnostic, got str",
+    )
+
+
+def test_answers_for_workspace_rebinds_the_callable_to_another_workspace():
+    plugin = types.ModuleType("plugin")
+
+    @hookimpl
+    def python_environment(ws):
+        return MiseEnvironment(env={"WS": str(ws.root)})
+
+    plugin.python_environment = python_environment
+    plugins = load_plugins(builtins=(("a", plugin),))
+    here = FakeWorkspace(root=Path("/here"), settings={})
+    there = FakeWorkspace(root=Path("/there"), settings={})
+
+    answers = plugins.answers(here)
+
+    assert answers("python_environment")[0].env == {"WS": "/here"}
+    assert answers.for_workspace(there)("python_environment")[0].env == {"WS": "/there"}

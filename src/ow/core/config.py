@@ -43,22 +43,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
     except (UnicodeDecodeError, OSError) as e:
         raise UsageError(f"cannot read {path}: {e}")
     except tomllib.TOMLDecodeError as e:
-        raise UsageError(f"Invalid TOML in {path}: {e}")
-
-
-def is_multi_config(path: Path) -> bool:
-    """Cheaply check whether `path` (`.ow/config.toml`) declares a multi-stack workspace (`[stacks]`)."""
-    if not path.is_file():
-        return False
-    try:
-        with open(path, "rb") as handle:
-            data = tomllib.load(handle)
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        return False
-    stacks_table = data.get("stacks")
-    return isinstance(stacks_table, dict) and any(
-        isinstance(v, dict) for v in stacks_table.values()
-    )
+        raise UsageError(f"invalid TOML in {path}: {e}")
 
 
 def stack_names_in_config(path: Path) -> tuple[str, ...]:
@@ -477,33 +462,33 @@ def parse_cli_value(setting: Any, args: list[str]) -> object:
     
     if setting_type is str:
         if len(args) != 1:
-            raise UsageError(f"Expected exactly one value for {setting_key}, got {len(args)}")
+            raise UsageError(f"expected exactly one value for {setting_key}, got {len(args)}")
         return args[0]
     
     elif setting_type is int:
         if len(args) != 1:
-            raise UsageError(f"Expected exactly one value for {setting_key}, got {len(args)}")
+            raise UsageError(f"expected exactly one value for {setting_key}, got {len(args)}")
         try:
             return int(args[0])
         except ValueError:
-            raise UsageError(f"Expected an integer for {setting_key}, got {args[0]!r}")
+            raise UsageError(f"expected an integer for {setting_key}, got {args[0]!r}")
     
     elif setting_type is bool:
         if len(args) != 1:
-            raise UsageError(f"Expected exactly one value for {setting_key}, got {len(args)}")
+            raise UsageError(f"expected exactly one value for {setting_key}, got {len(args)}")
         val = args[0].lower()
         if val == "true":
             return True
         elif val == "false":
             return False
         else:
-            raise UsageError(f"Expected 'true' or 'false' for {setting_key}, got {args[0]!r}")
+            raise UsageError(f"expected 'true' or 'false' for {setting_key}, got {args[0]!r}")
     
     elif setting_type is list:
         return list(args)
     
     else:
-        raise UsageError(f"Unknown type for {setting_key}: {setting_type}")
+        raise UsageError(f"unknown type for {setting_key}: {setting_type}")
 
 
 def closest_key(key: str, declared: Mapping[str, Any]) -> str | None:

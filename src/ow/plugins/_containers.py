@@ -15,6 +15,7 @@ import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 
@@ -28,7 +29,7 @@ class ContainerState:
 
 
 def detect_engine() -> str | None:
-    """Return the container CLI binary (`docker` or `podman`), or None when absent."""
+    """Return the container CLI to invoke (`OW_CONTAINER_ENGINE`, else `docker` or `podman`), or None when absent."""
     override = os.environ.get("OW_CONTAINER_ENGINE", "").strip()
     if override:
         return override if shutil.which(override) else None
@@ -36,6 +37,12 @@ def detect_engine() -> str | None:
         if shutil.which(candidate):
             return candidate
     return None
+
+
+def detect_container_engine() -> str | None:
+    """The engine's name (`docker`, `podman`), even when `OW_CONTAINER_ENGINE` is a path; None when absent."""
+    engine = detect_engine()
+    return None if engine is None else Path(engine).name
 
 
 @functools.cache
