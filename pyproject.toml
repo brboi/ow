@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "setuptools-scm>=8"]
+requires = ["setuptools>=84", "setuptools-scm>=10"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,10 +9,10 @@ authors = [{ name = "Bruno BOI", email = "boi@odoo.com" }]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["typer>=0.26", "click>=8.5.0", "tomli-w>=1.0", "pluggy>=1.5"]
+dependencies = ["typer>=0.29.2,<0.30", "tomli-w>=1.2", "pluggy>=1.7"]
 dynamic = ["version"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Version Control :: Git",
 ]
 
@@ -29,7 +30,7 @@ Repository = "https://github.com/brboi/ow"
 
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=9.2", "ruff>=0.17.6"]
 
 [project.scripts]
 ow = "ow.__main__:main"
@@ -38,9 +39,19 @@ ow = "ow.__main__:main"
 where = ["src"]
 include = ["ow*"]
 
+[tool.setuptools.package-data]
+ow = ["py.typed"]
+
 [tool.setuptools_scm]
 write_to = "src/ow/_version.py"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["src/tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Pinned rule set so a ruff upgrade never changes what CI enforces.
+select = ["E4", "E7", "E9", "F", "I", "UP"]

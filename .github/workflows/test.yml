@@ -7,6 +7,14 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/ruff-action@v4.1.0
+        with:
+          version-file: pyproject.toml
+
   test-ubuntu:
     runs-on: ubuntu-latest
     strategy:
@@ -14,11 +22,11 @@ jobs:
         python-version: ['3.11', '3.x']
     
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
@@ -42,7 +50,7 @@ jobs:
         run: |
           apk add --no-cache git python3 py3-pip py3-virtualenv bash zsh fish \
             build-base curl curl-dev zlib-dev openssl-dev expat-dev
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       # The container runs as root over a checkout owned by the runner user.
