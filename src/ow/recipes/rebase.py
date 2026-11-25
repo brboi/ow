@@ -1,7 +1,8 @@
 """The guarded rebase recipe: read the reflogs, then plan purely.
 
-A shared branch takes a colleague's commits in without replaying them: by
-`cherry-pick --ff` when the branch has no local commits, else `--fork-point`.
+A shared branch takes a colleague's commits in without rewriting them: by
+`cherry-pick --ff` when the branch has no local commits (a fast-forward), else
+by replaying the local commits on the upstream with `--fork-point`.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from ow.core import git
 from ow.core.facts import RepoFacts
 from ow.core.plan import GitStep, RepoPlan, Step
 
-AUTOSTASH_MESSAGE = "ow retarget --autostash"
+AUTOSTASH_MESSAGE = "ow rebase --autostash"
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,9 @@ class RebaseInputs:
     base_in_upstream: bool = False
     # `last_taken..upstream` holds a merge, which a cherry-pick cannot replay.
     has_merge_in_range: bool = False
-    # HEAD already contains the `--base` replacement, so only the config write is left.
+    # HEAD holds commits of its own: neither on the base nor already in the upstream.
+    has_local_commits: bool = False
+    # HEAD already contains the new base, so only the config write is left.
     new_base_is_ancestor: bool = False
     # Detached HEAD with no commits above `facts.base` (e.g. Runbot-pinned or clean detached).
     detached_clean_base: bool = False
@@ -48,7 +51,7 @@ def gather_rebase(facts: RepoFacts, *, new_base: str | None = None) -> RebaseInp
     HEAD is prepended to the branch reflog: a reflog can be missing.
     """
     path = facts.path
-    upstream = _upstream(facts)
+    upstream = _upstream(facts, new_base)
 
     branch_values: tuple[str, ...] = ()
     if facts.branch is not None:
@@ -62,6 +65,7 @@ def gather_rebase(facts: RepoFacts, *, new_base: str | None = None) -> RebaseInp
     last_taken_fast_forward = False
     new_upstream_commits = 0
     has_merge_in_range = False
+    has_local_commits = False
 
     if upstream is not None:
         upstream_values = _reflog(path, f"refs/remotes/{upstream}")
@@ -80,6 +84,8 @@ def gather_rebase(facts: RepoFacts, *, new_base: str | None = None) -> RebaseInp
                 has_merge_in_range = _has_merge(path, f"{last_taken}..{upstream}")
         if last_taken is not None and last_taken_fast_forward and not has_merge_in_range:
             new_upstream_commits = _unpatched(path, upstream) or 0
+            if new_upstream_commits > 0:
+                has_local_commits = _local_commits(path, upstream, facts.base) > 0
 
     base_is_ancestor = True
     if facts.base is not None:
@@ -122,6 +128,7 @@ def gather_rebase(facts: RepoFacts, *, new_base: str | None = None) -> RebaseInp
         base_is_ancestor=base_is_ancestor,
         base_in_upstream=base_in_upstream,
         has_merge_in_range=has_merge_in_range,
+        has_local_commits=has_local_commits,
         new_base_is_ancestor=new_base_is_ancestor,
         detached_clean_base=detached_clean_base,
         head_equals_new_base=head_equals_new_base,
@@ -141,19 +148,20 @@ def plan_rebase(
     so the base step is left out: rebasing onto the base afterwards would replay
     the upstream's own commits as new copies, the rewrite the guard prevents.
 
-    `--base <new>` always runs `--onto`: the branch already holds its old base,
+    A new base always runs `--onto`: the branch already holds its old base,
     and once it holds the new one only the config write is left.
     """
     path = str(facts.path)
     steps: list[GitStep] = []
 
-    upstream = _upstream(facts)
+    upstream = _upstream(facts, new_base)
     if facts.branch is not None and upstream is not None:
         if not inputs.upstream_in_branch_past:
             if (
                 inputs.last_taken is not None
                 and inputs.last_taken_fast_forward
                 and not inputs.has_merge_in_range
+                and not inputs.has_local_commits
             ):
                 if inputs.new_upstream_commits > 0:
                     # `--ff` fast-forwards when the branch has no local commits,
@@ -266,9 +274,9 @@ def _destination(step: Step) -> str | None:
     return None
 
 
-def _upstream(facts: RepoFacts) -> str | None:
-    """The upstream that gets its own step: none when it is the base."""
-    if facts.upstream is None or facts.upstream == facts.base:
+def _upstream(facts: RepoFacts, new_base: str | None) -> str | None:
+    """The upstream that gets its own step: none when it is the base or the new base."""
+    if facts.upstream is None or facts.upstream in (facts.base, new_base):
         return None
     return facts.upstream
 
@@ -309,6 +317,22 @@ def _unpatched(path: Path, upstream: str) -> int | None:
         return int(result.stdout.strip() or "0")
     except ValueError:
         return None
+
+
+def _local_commits(path: Path, upstream: str, base: str | None) -> int:
+    """HEAD's commits that are neither reachable from `base` nor patch-equivalent to the upstream's.
+
+    A failure counts as local commits: the caller then replays instead of fast-forwarding.
+    """
+    argv = ["git", "-C", str(path), "rev-list", "--cherry-pick", "--left-only", "--count"]
+    argv.append(f"HEAD...{upstream}")
+    if base is not None:
+        argv.append(f"^{base}")
+    result = git.run(argv)
+    try:
+        return int(result.stdout.strip()) if result.returncode == 0 else 1
+    except ValueError:
+        return 1
 
 
 def _has_merge(path: Path, range_: str) -> bool:

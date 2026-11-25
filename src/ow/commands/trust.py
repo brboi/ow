@@ -109,13 +109,15 @@ def run(
     workspace: str | None = None,
     untrust: bool = False,
     list_all: bool = False,
+    yes: bool = False,
     cwd: Path | None = None,
 ) -> int:
     """Trust, untrust, or list plugin locations: plugin files or whole directories.
 
-    With no PATH, `untrust` revokes the workspace's plugin files; trusting asks what to trust
-    on a terminal (the plugin files, the workspace root or its parent directory) and trusts the
-    plugin files found otherwise, then refreshes the workspace so they take effect.
+    With no PATH, `untrust` revokes the workspace's plugin files. Trusting asks what to trust on
+    a terminal (the plugin files, the workspace root or its parent directory); `-y` trusts the
+    plugin files found without asking, and without a terminal `-y` is required (exit 2): nobody
+    read the code being trusted. Then the workspace is refreshed so the plugins take effect.
     """
     if list_all:
         if path is not None or untrust:
@@ -146,13 +148,15 @@ def run(
             _untrust(item.path)
         return 0
 
-    if term.interactive():
-        locations = _choose_locations(root, discovered)
-    elif discovered:
-        locations = tuple(item.path for item in discovered)
-    else:
+    if not discovered and (yes or not term.interactive()):
         term.out("no in-repo plugins found in this workspace")
         return 0
+    if yes:
+        locations = tuple(item.path for item in discovered)
+    elif term.interactive():
+        locations = _choose_locations(root, discovered)
+    else:
+        raise UsageError("no terminal to confirm; re-run with -y")
     for location in locations:
         _trust(location)
 

@@ -29,6 +29,7 @@ def _answers(ws: Workspace):
             return [env] if env is not None else []
         return []
 
+    answers.implementers = lambda hook: ("mise",) if hook == "python_bootstrap" else ()
     return answers
 
 
@@ -465,7 +466,11 @@ def test_odoo_debug_args_setting_default_tracks_the_core(lab):
 
 def _odoorc_options(ws: Workspace, answers) -> configparser.SectionProxy:
     python = _answers(ws)
-    result = odoo.ow_generated_files(ws, lambda hook: python(hook) + answers(hook))
+    def combined(hook: str) -> list:
+        return python(hook) + answers(hook)
+
+    combined.implementers = python.implementers
+    result = odoo.ow_generated_files(ws, combined)
     odoorc = next(f for f in files_of(result) if f.path.as_posix() == "odoorc")
     parser = configparser.ConfigParser(interpolation=None)
     parser.read_string(odoorc.data.decode("utf-8"))
@@ -536,6 +541,7 @@ def _managed_answers(dropped: list[str]):
             ]
         return []
 
+    answers.implementers = lambda hook: ()
     return answers
 
 
@@ -594,8 +600,8 @@ def test_generated_files_and_mise_share_the_venv_of_the_merged_python_environmen
     """A second plugin answering `python_environment` moves the venv for odoo's files and mise alike."""
     import types
 
-    from ow.core.plugins import _get_builtins, hookimpl, load_plugins
-    from ow.plugins import mise
+    from ow.core.plugins import hookimpl, load_plugins
+    from ow.plugins import builtin_plugins, mise
     from ow.specs.python_env import PythonEnvironment, resolve_workspace_python
 
     extra = types.ModuleType("extra")
@@ -612,7 +618,7 @@ def test_generated_files_and_mise_share_the_venv_of_the_merged_python_environmen
     extra.python_environment = python_environment
 
     ws = _core_workspace(lab)
-    answers = load_plugins(builtins=(*_get_builtins(), ("extra", extra))).answers(ws)
+    answers = load_plugins(builtins=(*builtin_plugins(), ("extra", extra))).answers(ws)
 
     resolved = resolve_workspace_python(ws, answers)
     assert resolved is not None

@@ -11,7 +11,7 @@ import os
 import shutil
 import signal
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -117,6 +117,56 @@ def running_refusals(ws: Workspace, plugins: Plugins) -> list[tuple[str, str]]:
     if items:
         refusals.append(("runtime", f"running ({', '.join(items)}); run `ow stop` first"))
     return refusals
+
+
+def enclosing_multi(ws: Workspace, plugins: Plugins) -> stacks.MultiWorkspace | None:
+    """The multi-stack root `ws` is a stack of, else None: the `multi` argument its hooks get."""
+    return refresh._enclosing_multi(ws, plugins)  # type: ignore[return-value]
+
+
+def scoped_answer(
+    plugins: Plugins,
+    hook: str,
+    ws: Workspace | None,
+    multi: stacks.MultiWorkspace | None,
+    **kwargs: object,
+) -> tuple[str, object] | None:
+    """The first plugin answer `(plugin, answer)` of a hook taking `(ws, multi)` for one scope.
+
+    These are `ow_runner`, `ow_stop` and `ow_logs`. With `ws` set the scope is that workspace or
+    stack and `multi` its multi-stack root (None for a mono-stack workspace). With `ws` None it
+    is the multi-stack root `multi` as a whole: which plugins are enabled, and what `answers`
+    is bound to, follow its first stack.
+    """
+    if ws is not None:
+        return plugins.first_with_name(hook, ws=ws, multi=multi, **kwargs)
+    assert multi is not None
+    scope = multi.stacks[0] if multi.stacks else None
+    return plugins.first_with_name(hook, ws=None, scope=scope, multi=multi, **kwargs)
+
+
+def running_probe(
+    plugins: Plugins, workspaces: Sequence[Workspace], multi: stacks.MultiWorkspace | None
+) -> Callable[[], bool]:
+    """Whether any of `workspaces` still has a detached process or a plugin-reported one.
+
+    Polled while following, so a failing `ow_running` is warned about on the first poll only.
+    """
+    first_poll = True
+
+    def running() -> bool:
+        nonlocal first_poll
+        report, first_poll = first_poll, False
+        if multi is not None and runtime.list_running(multi.root):
+            return True
+        for ws in workspaces:
+            if runtime.running_for_workspace(ws) is not None:
+                return True
+            if plugin_running(ws, plugins, report=report):
+                return True
+        return False
+
+    return running
 
 
 EXIT_INTERRUPTED = 130

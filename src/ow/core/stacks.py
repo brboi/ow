@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import socket
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -164,6 +165,16 @@ def next_free_port(
         if port > 65535:
             raise UsageError(f"no free TCP port available >= {start}")
     return port
+
+
+def is_port_free(port: int, host: str = "127.0.0.1") -> bool:
+    """Whether `host:port` is currently unbound."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+            return True
+        except OSError:
+            return False
 
 
 @contextlib.contextmanager

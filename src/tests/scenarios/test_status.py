@@ -69,7 +69,8 @@ def test_status_reads_the_upstream_from_branch_config(lab):
     assert result.stdout.splitlines()[0].split("\t")[3] == "origin/18.0-voip (ahead 1, behind 0)"
 
 
-def test_status_shows_an_upstream_whose_remote_ref_is_missing(lab):
+def test_status_shows_an_upstream_not_pushed_yet(lab):
+    """A pre-set upstream whose remote-tracking ref does not exist reads `not pushed`, not an error."""
     ws, _remote = _init(lab, branch="18.0-voip")
     bare = repos_dir() / "community.git"
     lab.git(bare, "config", "branch.18.0-voip.remote", "origin")
@@ -78,7 +79,7 @@ def test_status_shows_an_upstream_whose_remote_ref_is_missing(lab):
     result = lab.ow("status", cwd=ws)
 
     assert result.exit_code == 0
-    assert result.stdout.splitlines()[0].split("\t")[3] == "origin/gone"
+    assert result.stdout.splitlines()[0].split("\t")[3] == "origin/gone (not pushed)"
 
 
 def test_status_during_a_rebase(lab):
@@ -182,7 +183,7 @@ def test_status_multi_stack_tty_dedupes_services_hides_non_odoo_port_and_aligns_
     monkeypatch.setattr(
         status_cmd,
         "_collect_plugin_status",
-        lambda plugins, *, ws, facts, spec, offline: [
+        lambda session, *, facts, spec, offline: [
             StatusInfo(plugin="postgres", scope="service", subject="postgres", summary="running on localhost:5432"),
             StatusInfo(plugin="mailsink", scope="service", subject="mailsink", summary="running on smtp://localhost:1025"),
         ],

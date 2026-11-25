@@ -41,7 +41,7 @@ class TestRefusal:
 
     def test_operation_refuses_every_mutating_command(self, facts):
         dirty = replace(facts, operation="rebase")
-        for command in ("retarget", "repo rm", "rm"):
+        for command in ("rebase", "repo rm", "rm"):
             assert refusal(dirty, command) is not None
 
     def test_operation_allows_status(self, facts):
@@ -59,29 +59,54 @@ class TestRefusal:
         ],
     )
     def test_operation_hint_names_the_real_abort_command(self, facts, operation, command):
-        msg = refusal(replace(facts, operation=operation), "retarget")
+        msg = refusal(replace(facts, operation=operation), "rebase")
         assert msg == f"{operation} in progress; finish it or run `git -C /ws/test {command}`"
 
     def test_operation_hint_prints_workspace_relative_with_root(self, facts):
-        msg = refusal(replace(facts, operation="bisect"), "retarget", root=Path("/ws"))
+        msg = refusal(replace(facts, operation="bisect"), "rebase", root=Path("/ws"))
         assert msg == "bisect in progress; finish it or run `git -C test bisect reset`"
 
-    def test_modified_files_refuse_retarget_without_autostash(self, facts):
+    def test_modified_files_refuse_rebase_without_autostash(self, facts):
         dirty = replace(facts, modified=("file.py",))
-        assert refusal(dirty, "retarget") == "modified files; commit, stash, or pass --autostash"
+        assert refusal(dirty, "rebase") == "modified files; commit, stash, or pass --autostash"
 
     def test_modified_files_allowed_with_autostash(self, facts):
         dirty = replace(facts, modified=("file.py",))
-        assert refusal(dirty, "retarget", autostash=True) is None
+        assert refusal(dirty, "rebase", autostash=True) is None
+
+    NO_BASE = (
+        "no base; run `ow init` to migrate an older workspace, or `ow rebase <base>` to set one"
+    )
 
     def test_detached_without_base_refused(self, facts):
         detached = replace(facts, branch=None, base=None)
-        assert refusal(detached, "retarget") == "no default base; set one with `ow repo add <name> --base <ref>`"
+        assert refusal(detached, "rebase") == self.NO_BASE
+
+    def test_branch_without_base_refused(self, facts):
+        """A branch with no base would take a base-tracking upstream for a colleague's branch."""
+        unbased = replace(facts, base=None, default_base=None, explicit_base=None)
+        assert refusal(unbased, "rebase") == self.NO_BASE
+
+    def test_branch_tracking_the_base_without_base_refused(self, facts):
+        unbased = replace(
+            facts, base=None, default_base=None, explicit_base=None, upstream="origin/18.0"
+        )
+        assert refusal(unbased, "rebase") == self.NO_BASE
+
+    def test_without_base_allowed_when_the_command_names_one(self, facts):
+        unbased = replace(facts, base=None, default_base=None, explicit_base=None)
+        assert refusal(unbased, "rebase", has_target_base=True) is None
+        assert refusal(replace(unbased, branch=None), "rebase", has_target_base=True) is None
+
+    def test_without_base_does_not_stop_other_commands(self, facts):
+        unbased = replace(facts, base=None, default_base=None, explicit_base=None)
+        for command in ("status", "rm", "repo rm"):
+            assert refusal(unbased, command) is None
 
     def test_detached_with_base_allowed(self, facts):
         detached = replace(facts, branch=None, base="origin/18.0")
-        assert refusal(detached, "retarget") is None
+        assert refusal(detached, "rebase") is None
 
     def test_healthy_branch_allowed_everywhere(self, facts):
-        for command in ("status", "retarget", "rm", "repo rm"):
+        for command in ("status", "rebase", "rm", "repo rm"):
             assert refusal(facts, command) is None

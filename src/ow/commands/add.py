@@ -12,14 +12,16 @@ from ow.commands._shared import known_repo_catalog
 from ow.commands._specs import UnitSpec, deduplicate_name, parse_unit_spec
 from ow.commands._workspace import (
     AddResult,
+    UnitJob,
     UnitMode,
     UnitResult,
-    add_into_workspace,
-    create_workspace_unit,
+    create_workspace_units,
+    existing_unit_job,
+    merge_specs,
     report_result,
     resolve_required_spec,
+    stack_job,
     sync_multi_files,
-    upsert_stack,
 )
 from ow.core import index, stacks
 from ow.core.plugins import ResolvedSpec
@@ -80,7 +82,6 @@ def _apply_mono_specs(
     ws_root: Path,
     units: Sequence[UnitSpec],
     *,
-    branch: str | None,
     as_name: str | None,
     dry_run: bool,
     yes: bool,
@@ -101,15 +102,9 @@ def _apply_mono_specs(
         parsed_units = _resolve_units(
             units, plugins, unnamed_ws=session.workspace, named_ws=None
         )
-        created_list: list[UnitResult] = []
-        exit_code = 0
-        for _unit, resolved in parsed_units:
-            created, code = add_into_workspace(
-                plugins, ws_root, resolved, branch=branch, dry_run=dry_run
-            )
-            created_list.append(created)
-            exit_code = max(exit_code, code)
-        return AddResult(workspaces=tuple(created_list), exit_code=exit_code)
+        job = existing_unit_job(ws_root, merge_specs([resolved for _unit, resolved in parsed_units]))
+        created, exit_code = create_workspace_units(plugins, [job], dry_run=dry_run)
+        return AddResult(workspaces=created, exit_code=exit_code)
 
     # Named stack(s) inside a mono-stack workspace -> convert empty workspace or promote to multi-stack.
     new_names: list[str] = []
@@ -147,22 +142,18 @@ def _apply_mono_specs(
         if promo_code != 0 or (not dry_run and moved_root is None):
             return AddResult(workspaces=(), exit_code=promo_code)
 
-    created_list = []
+    jobs = [
+        UnitJob(ws_root / unit.name, resolved, UnitMode.stack(ws_root))
+        for unit, resolved in parsed_units
+        if unit.name is not None
+    ]
+    created: tuple[UnitResult, ...] = ()
     exit_code = 0
     ws_files: tuple[Path, ...] = ()
     try:
-        for unit, resolved in parsed_units:
-            assert unit.name is not None
-            created, code = create_workspace_unit(
-                plugins,
-                root=ws_root / unit.name,
-                resolved=resolved,
-                mode=UnitMode.stack(ws_root, dry_run=dry_run),
-                branch=branch,
-                pending=pending,
-            )
-            created_list.append(created)
-            exit_code = max(exit_code, code)
+        created, exit_code = create_workspace_units(
+            plugins, jobs, dry_run=dry_run, pending=pending
+        )
     finally:
         if not dry_run:
             if empty_mono and any(stacks.is_stack_dir(ws_root / n) for n in new_names):
@@ -170,7 +161,7 @@ def _apply_mono_specs(
             ws_files = sync_multi_files(ws_root, plugins)
 
     return AddResult(
-        workspaces=tuple(created_list),
+        workspaces=created,
         workspace_files=ws_files,
         exit_code=exit_code,
     )
@@ -183,7 +174,6 @@ def _apply_multi_specs(
     *,
     default_stack: Path | None,
     taken: set[str],
-    branch: str | None,
     dry_run: bool,
 ) -> AddResult:
     stack_ws = (
@@ -192,53 +182,43 @@ def _apply_multi_specs(
         else None
     )
     parsed_units = _resolve_units(units, plugins, unnamed_ws=stack_ws, named_ws=None)
-    created_list: list[UnitResult] = []
+
+    # Specs without a name go to the current stack (one job for all of them) or to a stack of their own.
+    jobs: list[UnitJob | None] = []
+    default_specs: list[ResolvedSpec] = []
+    default_slot = -1
+    for unit, resolved in parsed_units:
+        if unit.name is not None:
+            taken.add(unit.name)
+            jobs.append(stack_job(multi_root, unit.name, resolved))
+        elif default_stack is not None:
+            if not default_specs:
+                default_slot = len(jobs)
+                jobs.append(None)
+            default_specs.append(resolved)
+        else:
+            jobs.append(stack_job(multi_root, deduplicate_name(resolved.name, taken), resolved))
+    if default_stack is not None and default_specs:
+        jobs[default_slot] = existing_unit_job(default_stack, merge_specs(default_specs))
+
+    created: tuple[UnitResult, ...] = ()
     exit_code = 0
     ws_files: tuple[Path, ...] = ()
     pending: list[dict[str, object]] = []
-
     try:
-        for unit, resolved in parsed_units:
-            if unit.name is not None:
-                taken.add(unit.name)
-                created, code = upsert_stack(
-                    plugins,
-                    multi_root,
-                    unit.name,
-                    resolved,
-                    branch=branch,
-                    dry_run=dry_run,
-                    pending=pending,
-                )
-            elif default_stack is not None:
-                created, code = add_into_workspace(
-                    plugins,
-                    default_stack,
-                    resolved,
-                    branch=branch,
-                    dry_run=dry_run,
-                    pending=pending,
-                )
-            else:
-                stack_name = deduplicate_name(resolved.name, taken)
-                created, code = upsert_stack(
-                    plugins,
-                    multi_root,
-                    stack_name,
-                    resolved,
-                    branch=branch,
-                    dry_run=dry_run,
-                    pending=pending,
-                )
-            created_list.append(created)
-            exit_code = max(exit_code, code)
+        created, exit_code = create_workspace_units(
+            plugins,
+            [job for job in jobs if job is not None],
+            dry_run=dry_run,
+            pending=pending,
+        )
     finally:
         if not dry_run:
             index.add(multi_root)
             ws_files = sync_multi_files(multi_root, plugins)
 
     return AddResult(
-        workspaces=tuple(created_list),
+        workspaces=created,
         workspace_files=ws_files,
         exit_code=exit_code,
     )
@@ -249,7 +229,6 @@ def apply_specs_to_existing(
     specs: Sequence[str],
     *,
     cwd: Path,
-    branch: str | None = None,
     as_name: str | None = None,
     dry_run: bool = False,
     yes: bool = False,
@@ -278,7 +257,6 @@ def apply_specs_to_existing(
             plugins,
             ws_root,
             units,
-            branch=branch,
             as_name=as_name,
             dry_run=dry_run,
             yes=yes,
@@ -297,7 +275,6 @@ def apply_specs_to_existing(
             units,
             default_stack=ws_root,
             taken={p.name for p in existing},
-            branch=branch,
             dry_run=dry_run,
         )
 
@@ -309,7 +286,6 @@ def apply_specs_to_existing(
         units,
         default_stack=None,
         taken={p.name for p in multi_stacks},
-        branch=branch,
         dry_run=dry_run,
     )
 
@@ -318,7 +294,6 @@ def run(
     plugins: Plugins,
     specs: Sequence[str],
     *,
-    branch: str | None = None,
     as_name: str | None = None,
     dry_run: bool = False,
     yes: bool = False,
@@ -333,7 +308,6 @@ def run(
         plugins,
         specs,
         cwd=base_cwd,
-        branch=branch,
         as_name=as_name,
         dry_run=dry_run,
         yes=yes,

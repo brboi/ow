@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -51,9 +52,28 @@ def fetch_then_gather(
             if (steps := fetch_steps(repo_facts, tuple(extra)))
         }
         failures = run_fetches(steps_by_repo, root, hint=hint)
+        _fetch_unpushed(before)
         facts = gather_all(locations)
 
     return root, facts, failures
+
+
+def _fetch_unpushed(facts: Sequence[RepoFacts]) -> None:
+    """Pick up the branches pushed since the last fetch, quietly.
+
+    A bare has no fetch refspec, so a plain `git push` leaves no remote-tracking
+    ref: the pre-set upstream of an unpushed branch only shows up by fetching it.
+    A branch still absent from its remote is the normal case, not a failure.
+    """
+    argvs = []
+    for repo_facts in facts:
+        if repo_facts.unpushed_upstream is None:
+            continue
+        remote, branch = _split(repo_facts.unpushed_upstream, repo_facts.remotes)
+        if remote is not None and branch is not None:
+            argvs.append(_argv(repo_facts.bare, remote, {branch}))
+    with ThreadPoolExecutor() as executor:
+        list(executor.map(lambda argv: git.run(argv, interactive=False), argvs))
 
 
 def fetch_steps(facts: RepoFacts, extra: Sequence[str] = ()) -> tuple[GitStep, ...]:

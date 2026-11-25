@@ -8,32 +8,31 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from ow.core import bases, cache, config, git, stacks
 from ow.core.paths import repos_dir
-from ow.core.plugins import (
+from ow.plugin_api import (
     KnownRepo,
     PruneCandidate,
+    RepoFacts,
     ResolvedRepo,
     ResolvedSpec,
     Setting,
     StatusInfo,
+    UsageError,
+    Workspace,
     hookimpl,
 )
-from ow.errors import UsageError
 from ow.plugins._github import (
     BareCatalog,
     bare_gh_info,
+    fork_clone_url,
     parse_gh_slug,
     parse_pr_spec,
     pr_identity,
     recorded_branch_pr,
 )
-
-if TYPE_CHECKING:
-    from ow.core.facts import RepoFacts
-    from ow.core.workspace import Workspace
 
 _PR_VIEW_FIELDS = (
     "number,title,url,state,isDraft,headRefName,baseRefName,"
@@ -120,6 +119,36 @@ def _login_of(pr: Mapping[str, Any], field: str) -> str | None:
     return None
 
 
+def _pr_head(
+    pr: Mapping[str, Any],
+    gh_slug: str,
+    local_name: str,
+    origin_url: str | None,
+    base_remote: str | None,
+    bare_catalog: BareCatalog,
+) -> tuple[str | None, str | None]:
+    """The remote holding the head branch of `pr`, and the URL to add it from when the bare lacks it.
+
+    A PR from the repository itself has its head on the remote of that repository (`origin`
+    unless the bare names it otherwise). A fork's head is on a remote the bare already has for
+    that fork, else one named after the fork owner's login, cloned like `origin_url` (same
+    ssh or https scheme). A PR whose head repository is gone has no head remote.
+    """
+    owner = _login_of(pr, "headRepositoryOwner")
+    if owner is None:
+        return None, None
+    base_owner, base_repo = gh_slug.split("/", 1)
+    head_repository = pr.get("headRepository")
+    head_repo = head_repository.get("name") if isinstance(head_repository, Mapping) else None
+    repo_name = head_repo if isinstance(head_repo, str) and head_repo else base_repo
+    if owner == base_owner.lower() and repo_name.lower() == base_repo.lower():
+        return base_remote or "origin", None
+    existing = bare_catalog.remote_for_slug(local_name, f"{owner}/{repo_name}")
+    if existing is not None:
+        return existing, None
+    return owner, fork_clone_url(origin_url, owner, repo_name)
+
+
 def _find_sister_pr(
     known: KnownRepo,
     head_ref: str,
@@ -189,6 +218,7 @@ def _find_sister_pr(
         if existing is not None:
             local_name, clone_url = existing[0], existing[3]
     remote_hint = bare_catalog.remote_for_slug(local_name, gh_slug)
+    head_remote, head_url = _pr_head(pr, gh_slug, local_name, clone_url, remote_hint, bare_catalog)
     return ResolvedRepo(
         name=local_name,
         url=clone_url,
@@ -198,6 +228,8 @@ def _find_sister_pr(
         fetch_ref=f"refs/pull/{number}/head",
         explicit=False,
         pr=pr_identity(gh_slug, number),
+        head_remote=head_remote,
+        head_url=head_url,
     )
 
 
@@ -236,6 +268,7 @@ def ow_resolve_spec(
     primary_head_owner = _login_of(pr, "headRepositoryOwner")
     primary_author = _login_of(pr, "author")
     remote_hint = bare_catalog.remote_for_slug(local_name, gh_slug)
+    head_remote, head_url = _pr_head(pr, gh_slug, local_name, clone_url, remote_hint, bare_catalog)
 
     primary = ResolvedRepo(
         name=local_name,
@@ -246,6 +279,8 @@ def ow_resolve_spec(
         fetch_ref=f"refs/pull/{number}/head",
         explicit=True,
         pr=pr_identity(gh_slug, number),
+        head_remote=head_remote,
+        head_url=head_url,
     )
 
     # Discover sister PRs across other known repos in the same org in parallel.

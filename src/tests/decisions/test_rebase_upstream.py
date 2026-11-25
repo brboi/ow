@@ -93,6 +93,34 @@ class TestUpstreamStep:
         )
         assert plan.steps == ()
 
+    def test_local_commits_are_replayed_on_the_upstream_not_left_below_a_copy(self):
+        """A cherry-pick would stack the colleague's copies above my commits: replay mine instead."""
+        plan = _plan(
+            inputs=RebaseInputs(
+                last_taken=TAKEN,
+                last_taken_fast_forward=True,
+                new_upstream_commits=2,
+                has_local_commits=True,
+            )
+        )
+        assert _argvs(plan) == [
+            ("git", "-C", str(WORKTREE), "rebase", "--fork-point", UPSTREAM)
+        ]
+
+    def test_an_upstream_equal_to_the_new_base_has_no_upstream_step(self):
+        """`ow rebase <base>` on a branch tracking that base must not take the base in as a colleague's."""
+        plan = _plan(
+            facts=_facts(upstream=BASE, base=None, explicit_base=None, default_base=None),
+            inputs=RebaseInputs(
+                last_taken=TAKEN,
+                last_taken_fast_forward=True,
+                new_upstream_commits=3,
+                new_base_is_ancestor=True,
+            ),
+            new_base=BASE,
+        )
+        assert all("cherry-pick" not in step.argv for step in plan.steps)
+
     def test_fast_forward_with_new_commits_fast_forwards_the_range(self):
         """The colleague's commits land as they are, named by the SHA they follow."""
         plan = _plan(

@@ -74,7 +74,9 @@ def ow_generated_files(ws, answers, multi):
 
 
 @hookimpl
-def ow_multi_runner(multi, args):
+def ow_runner(ws, multi, args):
+    if ws is not None:
+        return None
     voip_stack = next((s for s in multi.stacks if any(r.name == "voip" for r in s.repos)), None)
     if voip_stack is None:
         return None
@@ -113,7 +115,7 @@ def test_in_repo_plugin_trust_cross_stack_files_config_layers_and_multi_runner(l
     assert root_cfg["stacks"]["client"]["odoo"]["http_port"] == 8069
 
     # 2. `ow trust` trusts the plugin and refreshes immediately -> generates `voip/.dev/config`
-    tr = lab.ow("trust", cwd=ws)
+    tr = lab.ow("trust", "-y", cwd=ws)
     assert tr.exit_code == 0, tr.stderr + tr.stdout
     assert "trusted " in tr.stdout
 
@@ -144,7 +146,7 @@ def test_in_repo_plugin_trust_cross_stack_files_config_layers_and_multi_runner(l
     assert st_piped.exit_code == 0, st_piped.stderr
     assert "# plugin: voipdemo (" in st_piped.stdout
 
-    # 6. `ow run` at multi-stack root uses `ow_multi_runner`, announces the plugin, and forwards args
+    # 6. `ow run` at multi-stack root uses the plugin's whole-root `ow_runner` answer, announces it, and forwards args
     run_res = lab.ow("run", "--", "--flag", cwd=ws)
     assert run_res.exit_code == 0, run_res.stderr + run_res.stdout
     assert "# starting porting (plugin voipdemo:" in run_res.stdout
@@ -201,13 +203,13 @@ def test_in_repo_plugin_pyproject_discovery_and_api_version_contract(lab):
     ws_good = lab.home / "ws-good"
     ws_good.mkdir(parents=True)
     assert lab.ow("init", "goodrepo", cwd=ws_good).exit_code == 0
-    assert lab.ow("trust", cwd=ws_good).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=ws_good).exit_code == 0
     assert (ws_good / "hello.txt").read_text() == "hi\n"
 
     ws_bad = lab.home / "ws-bad"
     ws_bad.mkdir(parents=True)
     assert lab.ow("init", "badrepo", cwd=ws_bad).exit_code == 0
-    tr_bad = lab.ow("trust", cwd=ws_bad)
+    tr_bad = lab.ow("trust", "-y", cwd=ws_bad)
     assert tr_bad.exit_code == 0
     assert "incompatible OW_API_VERSION=99" in tr_bad.stderr
 
@@ -309,6 +311,54 @@ def test_failing_ow_settings_skips_only_that_in_repo_plugin(tmp_path):
     assert "good.enabled" in {s.key for s in plugins.settings()}
 
 
+def test_ow_settings_returning_something_that_is_not_a_setting_skips_only_that_in_repo_plugin(tmp_path):
+    good = _plugin_repo(tmp_path / "src", "good", _PLAIN_PLUGIN.format(name="good"))
+    wrong_item = _plugin_repo(
+        tmp_path / "src",
+        "wrongitem",
+        "OW_API_VERSION = 1\nPLUGIN_NAME = 'wrongitem'\n"
+        "from ow.plugin_api import hookimpl\n"
+        "@hookimpl\n"
+        "def ow_settings():\n"
+        "    return ['wrongitem.key']\n",
+    )
+    wrong_container = _plugin_repo(
+        tmp_path / "src",
+        "wrongcontainer",
+        "OW_API_VERSION = 1\nPLUGIN_NAME = 'wrongcontainer'\n"
+        "from ow.plugin_api import hookimpl\n"
+        "@hookimpl\n"
+        "def ow_settings():\n"
+        "    return 3\n",
+    )
+    trust.trust_path(tmp_path / "src")
+
+    plugins, warnings = load_plugins().with_repo_plugins(
+        [("good", good), ("wrongitem", wrong_item), ("wrongcontainer", wrong_container)]
+    )
+
+    assert [name for name, _p in plugins.external_plugins] == ["good"]
+    assert any("wrongitem" in w and "expected a list of Setting, got str" in w for w in warnings), warnings
+    assert any("wrongcontainer" in w and "expected a list of Setting, got int" in w for w in warnings), warnings
+
+
+def test_a_builtin_plugin_whose_ow_settings_returns_a_non_setting_is_a_plugin_error():
+    import types
+
+    from ow.core.plugins import hookimpl
+
+    module = types.ModuleType("bad")
+
+    @hookimpl
+    def ow_settings():
+        return ["bad.key"]
+
+    module.ow_settings = ow_settings
+
+    with pytest.raises(PluginError, match="plugin bad failed in ow_settings: expected a list of Setting"):
+        load_plugins((("bad", module),)).settings()
+
+
 def test_every_builtin_plugin_declares_only_prefixed_settings():
     plugins = load_plugins()
     settings, warnings = plugins._collect_settings()
@@ -317,8 +367,25 @@ def test_every_builtin_plugin_declares_only_prefixed_settings():
     assert plugins.names == (
         "mise", "odoo", "postgres", "mailsink", "github", "runbot", "vscode", "zed", "local", "sandbox",
     )
+    # `python.` is ow's own namespace; every other key belongs to the plugin named by its prefix.
+    assert [s.key for s in settings if s.key.startswith("python.")] == ["python.version", "python.shared_venv"]
     for setting in settings:
-        assert setting.key.split(".", 1)[0] in plugins.names, setting.key
+        if not setting.key.startswith("python."):
+            assert setting.key.split(".", 1)[0] in plugins.names, setting.key
+
+
+def test_the_python_namespace_is_reserved_for_ow(tmp_path):
+    import types
+
+    squatter = _plugin_repo(tmp_path / "src", "squatter", _PLAIN_PLUGIN.format(name="python"))
+    trust.trust_path(tmp_path / "src")
+
+    plugins, warnings = load_plugins().with_repo_plugins([("squatter", squatter)])
+
+    assert plugins.external_plugins == ()
+    assert any("'python' is reserved by ow" in w for w in warnings), warnings
+    with pytest.raises(PluginError, match="reserved"):
+        load_plugins((("python", types.ModuleType("python")),))
 
 
 def test_duplicate_in_repo_plugin_name_is_refused(tmp_path):

@@ -4,15 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeVar
+from typing import TypeVar
 
 from ow.core import config
-from ow.core.plugins import Diagnostic, Setting
+from ow.plugin_api import DatabaseService, Diagnostic, Setting, SmtpService, Workspace
 from ow.plugins.odoo.release import get_core, read_demo_capability
-from ow.specs.services import DatabaseService, SmtpService
-
-if TYPE_CHECKING:
-    from ow.core.workspace import Workspace
 
 _T = TypeVar("_T")
 

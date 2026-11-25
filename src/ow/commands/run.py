@@ -10,19 +10,25 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ow import term
 from ow.commands._repos import pr_local_ref
 from ow.commands._runtime import (
+    EXIT_INTERRUPTED,
     Target,
     combined_plugins,
+    enclosing_multi,
     exit_status,
     open_target,
     plugin_running,
     run_command,
+    running_probe,
+    scoped_answer,
 )
 from ow.commands._shared import known_repo_catalog, prepare_services
 from ow.commands._specs import deduplicate_name, parse_unit_spec
@@ -32,6 +38,8 @@ from ow.commands._workspace import (
     resolve_required_spec,
     stack_info,
 )
+from ow.commands.logs import entries_for
+from ow.commands.stop import plugin_stop
 from ow.core import git, refresh, runtime, stacks
 from ow.core.paths import repos_dir
 from ow.core.plugins import ResolvedSpec, RunCommand
@@ -98,27 +106,37 @@ def _cleanup_ephemeral(
 
 
 def _find_runner_with_name(
-    ws: Workspace, plugins: Plugins, args: tuple[str, ...], *, detach: bool = False
+    ws: Workspace | None,
+    plugins: Plugins,
+    args: tuple[str, ...],
+    multi: stacks.MultiWorkspace | None,
 ) -> tuple[str, RunCommand] | None:
-    """Return `(plugin_name, RunCommand)` for the first enabled plugin answering `ow_runner`, or None."""
-    hit = plugins.first_with_name("ow_runner", ws=ws, args=args, detach=detach)
+    """Return `(plugin_name, RunCommand)` for the first enabled plugin answering `ow_runner`, or None.
+
+    `ws` None asks for the whole multi-stack root `multi`; otherwise `ws` is one workspace or stack
+    and `multi` its multi-stack root (None for a mono-stack workspace).
+    """
+    hit = scoped_answer(plugins, "ow_runner", ws, multi, args=args)
     if hit is not None and isinstance(hit[1], RunCommand):
         return hit[0], hit[1]
     return None
 
 
 def _find_runner(
-    ws: Workspace, plugins: Plugins, args: tuple[str, ...], *, detach: bool = False
+    ws: Workspace | None,
+    plugins: Plugins,
+    args: tuple[str, ...],
+    multi: stacks.MultiWorkspace | None,
 ) -> RunCommand | None:
-    """Return the first RunCommand contributed by an enabled plugin for `ws`, or None."""
-    hit = _find_runner_with_name(ws, plugins, args, detach=detach)
+    """Return the first RunCommand contributed by an enabled plugin for that scope, or None."""
+    hit = _find_runner_with_name(ws, plugins, args, multi)
     return hit[1] if hit is not None else None
 
 
 def _select_runner(
-    ws: Workspace, plugins: Plugins, args: tuple[str, ...], *, detach: bool = False
+    ws: Workspace, plugins: Plugins, args: tuple[str, ...], multi: stacks.MultiWorkspace | None
 ) -> tuple[str, RunCommand]:
-    hit = _find_runner_with_name(ws, plugins, args, detach=detach)
+    hit = _find_runner_with_name(ws, plugins, args, multi)
     if hit is None:
         raise UsageError(
             f"no runner available for workspace {ws.name!r}; ensure a runnable plugin (e.g. odoo) is enabled"
@@ -389,30 +407,30 @@ def _launch(
     detach: bool,
     multi: stacks.MultiWorkspace | None,
 ) -> int:
+    def hook_multi(ws: Workspace) -> stacks.MultiWorkspace | None:
+        """The multi-stack root a stack's hooks get: the one being run, else the stack's own."""
+        return multi if multi is not None else enclosing_multi(ws, plugins)
+
     if len(items) == 1:
         _label, ws, args = items[0]
+        ws_multi = hook_multi(ws)
         # Verify a runner exists before starting services, then re-resolve after syncing generated files.
-        _select_runner(ws, plugins, args, detach=detach)
+        _select_runner(ws, plugins, args, ws_multi)
         if not args or detach:
             _ensure_not_running((ws,), plugins)
         if reset:
             _confirm_reset((ws,), plugins, yes=yes)
         prepare_services((ws,), plugins)
         _refresh_before_run((ws,), plugins, multi=multi)
-        plugin_name, cmd = _select_runner(ws, plugins, args, detach=detach)
+        plugin_name, cmd = _select_runner(ws, plugins, args, ws_multi)
         if reset:
             _reset_workspaces((ws,), plugins)
         _announce_plugin_runner(ws.name, plugin_name, plugins, always=False)
-        if detach and not cmd.self_detaching:
-            root = runtime.runtime_root(ws)
-            proc = runtime.start_detached(root, ws.name, cmd.argv, cwd=cmd.cwd, env=cmd.env)
-            term.out(f"# started {ws.name} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
-            return 0
-        return run_command(cmd)
+        return _execute(cmd, plugins, ws=ws, multi=ws_multi, detach=detach)
 
     runnable_items: list[tuple[str, Workspace, tuple[str, ...]]] = []
     for label, ws, args in items:
-        if _find_runner(ws, plugins, args, detach=detach) is None:
+        if _find_runner(ws, plugins, args, hook_multi(ws)) is None:
             term.out(f"# {label}: no runner available, skipping")
             continue
         runnable_items.append((label, ws, args))
@@ -428,11 +446,12 @@ def _launch(
     prepare_services(runnable_ws, plugins)
     _refresh_before_run(runnable_ws, plugins, multi=multi)
 
-    runnable: list[tuple[str, Workspace, str | None, RunCommand]] = []
+    runnable: list[_Runnable] = []
     for label, ws, args in runnable_items:
-        cmd = _find_runner(ws, plugins, args, detach=detach)
+        ws_multi = hook_multi(ws)
+        cmd = _find_runner(ws, plugins, args, ws_multi)
         if cmd is not None:
-            runnable.append((label, ws, stack_info(ws, plugins).note, cmd))
+            runnable.append(_Runnable(label, ws, ws_multi, stack_info(ws, plugins).note, cmd))
 
     if not runnable:
         names = ", ".join(label for label, _, _ in runnable_items)
@@ -444,37 +463,143 @@ def _launch(
     if detach:
         started: list[tuple[Path, runtime.RunningProcess]] = []
         try:
-            for label, ws, _note, cmd in runnable:
-                if cmd.self_detaching:
-                    rc = run_command(cmd)
+            for unit in runnable:
+                if unit.cmd.self_detaching:
+                    rc = run_command(unit.cmd)
                     if rc != 0:
-                        raise UsageError(f"{label} failed to start (exit {rc})")
+                        raise UsageError(f"{unit.label} failed to start (exit {rc})")
                     continue
-                root = runtime.runtime_root(ws)
-                proc = runtime.start_detached(root, ws.name, cmd.argv, cwd=cmd.cwd, env=cmd.env)
+                root = runtime.runtime_root(unit.ws)
+                proc = runtime.start_detached(root, unit.ws.name, unit.cmd.argv, cwd=unit.cmd.cwd, env=unit.cmd.env)
                 started.append((root, proc))
-                term.out(f"# started {label} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
+                term.out(f"# started {unit.label} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
         except Exception:
             for root, proc in reversed(started):
                 runtime.stop_process(root, proc)
             raise
         return 0
 
+    if any(unit.cmd.self_detaching for unit in runnable):
+        return _run_foreground_with_services(runnable, plugins, fail_fast=fail_fast)
+
     if len(runnable) == 1:
-        return run_command(runnable[0][3])
+        return run_command(runnable[0].cmd)
 
-    return _run_multi([(label, note, cmd) for label, _ws, note, cmd in runnable], fail_fast=fail_fast)
+    return _run_multi([(unit.label, unit.note, unit.cmd) for unit in runnable], fail_fast=fail_fast)
 
 
-def _find_multi_runner(
-    multi: stacks.MultiWorkspace, plugins: Plugins, args: tuple[str, ...], *, detach: bool = False
-) -> tuple[str, RunCommand] | None:
-    """Return `(plugin_name, RunCommand)` for the first enabled plugin answering `ow_multi_runner`, or None."""
-    ws_ctx = multi.stacks[0] if multi.stacks else None
-    hit = plugins.first_with_name("ow_multi_runner", ws=ws_ctx, multi=multi, args=args, detach=detach)
-    if hit is not None and isinstance(hit[1], RunCommand):
-        return hit[0], hit[1]
-    return None
+@dataclass(frozen=True)
+class _Runnable:
+    """One stack to run: the command that answered for it, and the `multi` its hooks were called with."""
+
+    label: str
+    ws: Workspace
+    multi: stacks.MultiWorkspace | None
+    note: str | None
+    cmd: RunCommand
+
+
+def _execute(
+    cmd: RunCommand,
+    plugins: Plugins,
+    *,
+    ws: Workspace | None,
+    multi: stacks.MultiWorkspace | None,
+    detach: bool,
+) -> int:
+    """Run the command that answered `ow_runner` for one scope (`ws` None: a multi-stack root as a whole).
+
+    ow decides how it runs: a self-detaching command starts services and returns (`-d` stops
+    there; in the foreground ow then follows the logs and stops the services when it ends or is
+    interrupted), any other command runs on the terminal, or detached under `-d`.
+    """
+    if cmd.self_detaching:
+        return _run_self_detaching(cmd, plugins, ((ws, multi),), detach=detach)
+    if detach:
+        if ws is not None:
+            root, name = runtime.runtime_root(ws), ws.name
+        else:
+            assert multi is not None
+            root, name = multi.root, multi.name
+        proc = runtime.start_detached(root, name, cmd.argv, cwd=cmd.cwd, env=cmd.env)
+        term.out(f"# started {name} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
+        return 0
+    return run_command(cmd)
+
+
+Scope = tuple["Workspace | None", "stacks.MultiWorkspace | None"]
+
+
+def _run_self_detaching(cmd: RunCommand, plugins: Plugins, scopes: Sequence[Scope], *, detach: bool) -> int:
+    """Start a self-detaching command; unless detached, follow its services' logs, then stop them."""
+    rc = run_command(cmd)
+    if detach:
+        return rc
+    try:
+        result = _follow_services(plugins, scopes) if rc == 0 else rc
+    finally:
+        stop_rc = _stop_services(plugins, scopes)
+    return result or stop_rc
+
+
+def _run_foreground_with_services(runnable: Sequence[_Runnable], plugins: Plugins, *, fail_fast: bool) -> int:
+    """Run stacks of which some are self-detaching: start those, run the others on the terminal
+    (or follow the services' logs when there are no others), then stop the started services."""
+    started: list[Scope] = []
+    result = 0
+    try:
+        for unit in runnable:
+            if not unit.cmd.self_detaching:
+                continue
+            started.append((unit.ws, unit.multi))
+            rc = run_command(unit.cmd)
+            if rc != 0:
+                raise UsageError(f"{unit.label} failed to start (exit {rc})")
+        plain = [unit for unit in runnable if not unit.cmd.self_detaching]
+        if not plain:
+            result = _follow_services(plugins, started)
+        elif len(plain) == 1:
+            result = run_command(plain[0].cmd)
+        else:
+            result = _run_multi([(unit.label, unit.note, unit.cmd) for unit in plain], fail_fast=fail_fast)
+    finally:
+        stop_rc = _stop_services(plugins, started)
+    return result or stop_rc
+
+
+def _follow_services(plugins: Plugins, scopes: Sequence[Scope]) -> int:
+    """Follow the logs of the services just started, as `ow logs -f` does, until none is running or Ctrl+C.
+
+    Returns 130 when interrupted. Without a plugin reporting what runs (`ow_running`) there is
+    nothing to wait on but Ctrl+C.
+    """
+    entries: list[tuple[str, Path]] = []
+    probes = []
+    tracked = False
+    for ws, multi in scopes:
+        entries.extend(entries_for(plugins, ws, multi))
+        workspaces = (ws,) if ws is not None else (multi.stacks if multi is not None else ())
+        probes.append(running_probe(plugins, workspaces, multi if ws is None else None))
+        tracked = tracked or any(plugins.implementers("ow_running", w) for w in workspaces)
+    running = (lambda: any(probe() for probe in probes)) if tracked else None
+    if entries:
+        return runtime.follow_files(entries, lines=50, follow=True, running=running)
+    try:
+        while running is None or running():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+    return 0
+
+
+def _stop_services(plugins: Plugins, scopes: Sequence[Scope]) -> int:
+    """Run `ow_stop` for every scope whose services were started; the first non-zero exit code."""
+    exit_code = 0
+    for ws, multi in scopes:
+        _stopped, rc = plugin_stop(plugins, ws, multi)
+        if rc != 0 and exit_code == 0:
+            exit_code = rc
+    return exit_code
 
 
 def _exec_multi_runner(
@@ -486,7 +611,7 @@ def _exec_multi_runner(
     yes: bool,
     detach: bool,
 ) -> int:
-    """Prepare services, sync stale files, and run a plugin's `ow_multi_runner` (foreground or detached)."""
+    """Prepare services, sync stale files, and run the plugin's whole-root `ow_runner` answer."""
     guard = runtime.launch_lock((multi.root,)) if detach else contextlib.nullcontext()
     with guard:
         if not args or detach:
@@ -495,23 +620,13 @@ def _exec_multi_runner(
             _confirm_reset(multi.stacks, plugins, yes=yes)
         prepare_services(multi.stacks, plugins)
         _refresh_before_run(multi.stacks, plugins, multi=multi)
-        multi_hit = _find_multi_runner(multi, plugins, args, detach=detach)
+        multi_hit = _find_runner_with_name(None, plugins, args, multi)
         assert multi_hit is not None
         plugin_name, multi_cmd = multi_hit
         if reset:
             _reset_workspaces(multi.stacks, plugins)
         _announce_plugin_runner(multi.name, plugin_name, plugins, always=True)
-        if detach and not multi_cmd.self_detaching:
-            proc = runtime.start_detached(
-                multi.root, multi.name, multi_cmd.argv, cwd=multi_cmd.cwd, env=multi_cmd.env
-            )
-            term.out(f"# started {multi.name} (pid {proc.pid}, logs: {git.display_path(proc.log_path)})")
-            return 0
-        return run_command(multi_cmd)
-
-
-def _looks_like_target_spec(token: str) -> bool:
-    return any(sym in token for sym in ("#", "@", ",", "://", "/pull/", "/runbot/"))
+        return _execute(multi_cmd, plugins, ws=None, multi=multi, detach=detach)
 
 
 def run(
@@ -621,7 +736,7 @@ def run(
             )
 
         multi = target.multi
-        if _find_multi_runner(multi, target.plugins, passthrough, detach=detach) is not None:
+        if _find_runner(None, target.plugins, passthrough, multi) is not None:
             return _exec_multi_runner(
                 multi, target.plugins, passthrough, reset=reset, yes=yes, detach=detach
             )
@@ -629,7 +744,7 @@ def run(
             runnable_ws = [
                 ws
                 for ws in multi.stacks
-                if _find_runner(ws, target.plugins, passthrough, detach=detach) is not None
+                if _find_runner(ws, target.plugins, passthrough, multi) is not None
             ]
             if len(runnable_ws) > 1:
                 names = ", ".join(ws.name for ws in runnable_ws)
@@ -662,14 +777,10 @@ def run(
         try:
             root, kind = resolve_target_root(lookup, cwd=base_cwd)
         except UsageError as exc:
-            if _looks_like_target_spec(raw):
-                raise UsageError(
-                    f"unknown workspace or stack {lookup!r}; did you mean `ow run --tmp {raw}`, "
-                    "or initialize a workspace with `ow init` first?"
-                ) from exc
+            # A token that names no indexed workspace or stack is a SPEC, which needs `--tmp`.
             raise UsageError(
-                f"unknown workspace or stack {lookup!r}; pass --tmp for an ephemeral run, "
-                "or initialize a workspace with `ow init` first"
+                f"unknown workspace or stack {lookup!r}; did you mean `ow run --tmp {raw}`, "
+                "or initialize a workspace with `ow init` first?"
             ) from exc
 
         combined_args = unit.extra_args + (passthrough if len(items) == 1 else ())
@@ -678,9 +789,7 @@ def run(
         if target.multi is None:
             to_run.append((target.workspace.name, target.workspace, combined_args))
             continue
-        if len(items) == 1 and _find_multi_runner(
-            target.multi, target.plugins, combined_args, detach=detach
-        ) is not None:
+        if len(items) == 1 and _find_runner(None, target.plugins, combined_args, target.multi) is not None:
             return _exec_multi_runner(
                 target.multi, target.plugins, combined_args, reset=reset, yes=yes, detach=detach
             )

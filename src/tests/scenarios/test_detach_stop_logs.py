@@ -177,14 +177,14 @@ def _state_file(root: Path) -> Path:
     return root / ".demo_running"
 
 @hookimpl
-def ow_multi_runner(multi, args, detach=False):
+def ow_runner(ws, multi, args):
+    if ws is not None:
+        return None
     sf = _state_file(multi.root)
     if args:
         return RunCommand(argv=(sys.executable, "-c", f"print('PASS', {list(args)!r})"), cwd=multi.root)
-    if detach:
-        code = f"from pathlib import Path; Path({str(sf)!r}).write_text('up'); print('SELF_DETACHED_UP')"
-        return RunCommand(argv=(sys.executable, "-c", code), cwd=multi.root, self_detaching=True)
-    return RunCommand(argv=(sys.executable, "-c", "print('FG_RUN')"), cwd=multi.root)
+    code = f"from pathlib import Path; Path({str(sf)!r}).write_text('up'); print('SELF_DETACHED_UP')"
+    return RunCommand(argv=(sys.executable, "-c", code), cwd=multi.root, self_detaching=True)
 
 @hookimpl
 def ow_running(ws):
@@ -192,13 +192,17 @@ def ow_running(ws):
     return ["demo-svc"] if _state_file(root).is_file() else None
 
 @hookimpl
-def ow_multi_stop(multi):
+def ow_stop(ws, multi):
+    if ws is not None:
+        return None
     sf = _state_file(multi.root)
     code = f"from pathlib import Path; Path({str(sf)!r}).unlink(missing_ok=True); print('PLUGIN_STOPPED')"
     return RunCommand(argv=(sys.executable, "-c", code), cwd=multi.root)
 
 @hookimpl
-def ow_multi_logs(multi):
+def ow_logs(ws, multi):
+    if ws is not None:
+        return None
     return [("demo", multi.root / ".demo.log")]
 
 @hookimpl
@@ -225,7 +229,7 @@ def ow_status(ws, spec):
     multi = lab.home / "demo-ws"
     multi.mkdir(parents=True)
     assert lab.ow("init", "odoo=community@18.0", "app=demo@main", cwd=multi).exit_code == 0
-    assert lab.ow("trust", cwd=multi).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=multi).exit_code == 0
 
     up = lab.ow("run", "-d", cwd=multi)
     assert up.exit_code == 0, up.stderr + up.stdout
@@ -247,17 +251,198 @@ def ow_status(ws, spec):
     assert rm_refused.exit_code == 1
     assert "running (demo-svc)" in rm_refused.stdout
 
-    # `ow logs` shows the files `ow_multi_logs` returns.
+    # `ow logs` shows the files `ow_logs` returns for the multi-stack root.
     (multi / ".demo.log").write_text("PLUGIN_LOGS\n")
     logs = lab.ow("logs", cwd=multi)
     assert logs.exit_code == 0
     assert "PLUGIN_LOGS" in logs.stdout
 
-    # `ow stop` delegates to `ow_multi_stop`.
+    # `ow stop` delegates to the root's `ow_stop`.
     stopped = lab.ow("stop", cwd=multi)
     assert stopped.exit_code == 0
     assert "PLUGIN_STOPPED" in capfd.readouterr().out
     assert not (multi / ".demo_running").exists()
+
+
+_SERVICE_PLUGIN = '''
+import sys
+from ow.plugin_api import RunCommand, hookimpl
+
+OW_API_VERSION = 1
+PLUGIN_NAME = "svc"
+DIES_ALONE = __DIES_ALONE__
+
+START = """
+import subprocess, sys
+from pathlib import Path
+state, log, dies = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3] == "1"
+state.write_text("up")
+log.write_text("SVC_STARTED\\\\n")
+if dies:
+    waiter = "import os, sys, time; time.sleep(1); os.unlink(sys.argv[1])"
+    subprocess.Popen([sys.executable, "-c", waiter, str(state)], start_new_session=True)
+"""
+
+STOP = """
+import sys
+from pathlib import Path
+Path(sys.argv[1]).unlink(missing_ok=True)
+Path(sys.argv[2]).write_text("stopped")
+"""
+
+
+def _state(ws):
+    return ws.root / ".svc_state"
+
+
+@hookimpl
+def ow_runner(ws, multi, args):
+    if ws is None:
+        return None
+    argv = (sys.executable, "-c", START, str(_state(ws)), str(ws.root / ".svc.log"), "1" if DIES_ALONE else "0")
+    return RunCommand(argv=argv, cwd=ws.root, self_detaching=True)
+
+
+@hookimpl
+def ow_running(ws):
+    return ["svc"] if _state(ws).is_file() else None
+
+
+@hookimpl
+def ow_logs(ws, multi):
+    return [("svc", ws.root / ".svc.log")]
+
+
+@hookimpl
+def ow_stop(ws, multi):
+    argv = (sys.executable, "-c", STOP, str(_state(ws)), str(ws.root / ".svc_stopped"))
+    return RunCommand(argv=argv, cwd=ws.root)
+'''
+
+
+def _service_workspace(lab, *, dies_alone: bool) -> Path:
+    add_repo(
+        lab,
+        "demo",
+        {
+            "main": {
+                "pyproject.toml": '[tool.ow]\nplugin = "ow_plugin.py"\n',
+                "ow_plugin.py": _SERVICE_PLUGIN.replace("__DIES_ALONE__", repr(dies_alone)),
+            }
+        },
+        base="main",
+    )
+    ws = lab.ws("svc")
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "demo@main", cwd=ws).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=ws).exit_code == 0
+    return ws
+
+
+def test_self_detaching_runner_in_the_foreground_follows_the_logs_then_stops_the_services(lab):
+    ws = _service_workspace(lab, dies_alone=True)
+
+    res = lab.ow("run", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    # ow started the command, followed the files `ow_logs` returned until `ow_running` went quiet ...
+    assert "SVC_STARTED" in res.stdout
+    # ... and called `ow_stop` on the way out.
+    assert (ws / ".svc_stopped").read_text() == "stopped"
+    assert not (ws / ".svc_state").exists()
+
+
+def test_self_detaching_runner_with_detach_starts_and_returns_without_stopping(lab):
+    ws = _service_workspace(lab, dies_alone=False)
+
+    res = lab.ow("run", "-d", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert (ws / ".svc_state").is_file()
+    assert not (ws / ".svc_stopped").exists()
+    assert lab.ow("stop", cwd=ws).exit_code == 0
+    assert (ws / ".svc_stopped").is_file()
+
+
+def test_self_detaching_runner_in_the_foreground_is_stopped_on_ctrl_c(lab):
+    import os
+    import select
+    import signal
+    import subprocess
+
+    ws = _service_workspace(lab, dies_alone=False)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "ow", "run"],
+        cwd=ws,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        # Its own session: `killpg(SIGINT)` reaches ow like a terminal's Ctrl+C.
+        start_new_session=True,
+    )
+    try:
+        seen = ""
+        deadline = time.monotonic() + 20
+        while "SVC_STARTED" not in seen:
+            assert time.monotonic() < deadline, f"services never followed:\n{seen}"
+            if select.select([proc.stdout], [], [], 0.2)[0]:
+                seen += proc.stdout.readline()
+        assert (ws / ".svc_state").is_file()
+        assert not (ws / ".svc_stopped").exists()
+
+        os.killpg(proc.pid, signal.SIGINT)
+
+        assert proc.wait(timeout=20) == 130
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+    assert (ws / ".svc_stopped").read_text() == "stopped"
+    assert not (ws / ".svc_state").exists()
+
+
+def test_stop_and_logs_hooks_get_the_stack_and_its_multi_stack_root_when_the_root_does_not_answer(lab):
+    plugin_code = """
+from ow.plugin_api import hookimpl
+
+OW_API_VERSION = 1
+PLUGIN_NAME = "perstack"
+
+@hookimpl
+def ow_stop(ws, multi):
+    if ws is None or not any(r.name == "demo" for r in ws.repos):
+        return None
+    return [f"perstack stopped {ws.name} of {multi.name}"]
+
+@hookimpl
+def ow_logs(ws, multi):
+    if ws is None or not any(r.name == "demo" for r in ws.repos):
+        return None
+    return [(f"{ws.name}@{multi.name}", ws.root / ".perstack.log"), ("extra", ws.root / ".perstack2.log")]
+"""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(
+        lab,
+        "demo",
+        {"main": {"pyproject.toml": '[tool.ow]\nplugin = "ow_plugin.py"\n', "ow_plugin.py": plugin_code}},
+        base="main",
+    )
+    multi = lab.home / "per-stack"
+    multi.mkdir(parents=True)
+    assert lab.ow("init", "odoo=community@18.0", "app=demo@main", cwd=multi).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=multi).exit_code == 0
+    (multi / "app" / ".perstack.log").write_text("PERSTACK_LOG\n")
+    (multi / "app" / ".perstack2.log").write_text("PERSTACK_EXTRA\n")
+
+    stopped = lab.ow("stop", cwd=multi)
+    assert stopped.exit_code == 0, stopped.stderr
+    assert "# perstack stopped app of per-stack" in stopped.stdout
+    assert "odoo of" not in stopped.stdout
+
+    logs = lab.ow("logs", cwd=multi)
+    assert logs.exit_code == 0, logs.stderr
+    assert "[app@per-stack] PERSTACK_LOG" in logs.stdout
+    assert "[extra] PERSTACK_EXTRA" in logs.stdout
 
 
 def test_follow_files_interleaves_chronologically_keeping_multiline_tracebacks(tmp_path, capsys):
@@ -390,6 +575,22 @@ def test_launch_lock_serializes_detached_launches_of_one_root(tmp_path):
     assert order == ["first done", "second ran"]
 
 
+def test_a_process_whose_start_time_is_unknown_is_not_considered_ours(tmp_path):
+    import os
+
+    from ow.core import runtime
+
+    def record(starttime):
+        return runtime.RunningProcess(
+            label="x", pid=os.getpid(), starttime=starttime, log_path=tmp_path / "x.log", started_at="", argv=()
+        )
+
+    # The PID is alive and ours, but a record without a start time cannot prove it: a recycled PID would look the same.
+    assert runtime.is_alive(record(runtime.process_starttime(os.getpid())))
+    assert not runtime.is_alive(record(None))
+    assert not runtime.is_alive(record("1"))
+
+
 def _wait_for(path: Path, text: str, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -420,7 +621,7 @@ def ow_logs(ws):
     ws = lab.ws("quiet")
     ws.mkdir(parents=True)
     assert lab.ow("init", "community@18.0,demo@main", cwd=ws).exit_code == 0
-    assert lab.ow("trust", cwd=ws).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=ws).exit_code == 0
     (ws / ".ow" / "logs").mkdir(parents=True, exist_ok=True)
     (ws / ".ow" / "logs" / "quiet.log").write_text("FROM_OW_LOGS\n", encoding="utf-8")
 

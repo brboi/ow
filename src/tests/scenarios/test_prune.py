@@ -153,7 +153,7 @@ def _demo_workspace(lab, name: str):
         base="main",
     )
     ws = init_workspace(lab, "demo", base="main", name=name)
-    assert lab.ow("trust", cwd=ws).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=ws).exit_code == 0
     return ws
 
 

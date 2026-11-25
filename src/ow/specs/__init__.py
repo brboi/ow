@@ -1,1 +1,1 @@
-"""Plugin hookspecs for specific features (mise, editors)."""
+"""Plugin hookspecs for specific features (Python environments, editors, services)."""

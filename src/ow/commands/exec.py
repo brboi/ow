@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ow import term
-from ow.commands._runtime import default_shell, open_target, run_foreground
+from ow.commands._runtime import Target, default_shell, open_target, run_foreground
 from ow.core.workspace import Workspace, resolve_target_root
 from ow.errors import UsageError
 from ow.specs.python_env import (
@@ -18,6 +17,7 @@ from ow.specs.python_env import (
     WorkspaceVenv,
     ensure_venv_ready,
     resolve_workspace_python,
+    wrap_command,
 )
 
 if TYPE_CHECKING:
@@ -66,7 +66,12 @@ def _resolve_workspace(
     plugins: Plugins,
     *,
     base_cwd: Path,
-) -> tuple[Workspace, Plugins]:
+) -> tuple[Target, Workspace]:
+    """Open the target `lookup` names and pick the one workspace or stack to run in.
+
+    The returned `Target` carries the plugin set (built-ins plus the target's in-repo plugins)
+    every later hook of the command goes through.
+    """
     try:
         root, kind = resolve_target_root(lookup, cwd=base_cwd)
     except UsageError as exc:
@@ -78,12 +83,12 @@ def _resolve_workspace(
 
     target = open_target(root, kind, plugins)
     if target.multi is None:
-        return target.workspace, target.plugins
-    multi, eff_plugins = target.multi, target.plugins
+        return target, target.workspace
+    multi = target.multi
 
-    py_stacks = [ws for ws in multi.stacks if resolve_workspace_python(ws, eff_plugins.answers(ws)) is not None]
+    py_stacks = [ws for ws in multi.stacks if resolve_workspace_python(ws, target.plugins.answers(ws)) is not None]
     if len(py_stacks) == 1:
-        return py_stacks[0], eff_plugins
+        return target, py_stacks[0]
     if len(py_stacks) > 1:
         names = ", ".join(ws.name for ws in py_stacks)
         raise UsageError(
@@ -91,7 +96,7 @@ def _resolve_workspace(
             "specify one with `ow exec <stack> -- ...`"
         )
     if len(multi.stacks) == 1:
-        return multi.stacks[0], eff_plugins
+        return target, multi.stacks[0]
     names = ", ".join(ws.name for ws in multi.stacks)
     raise UsageError(f"no stack with a Python environment in {multi.name!r} ({names}); specify one with `ow exec <stack> -- ...`")
 
@@ -105,22 +110,24 @@ def run(
 ) -> int:
     """Run `command` (or an interactive shell) inside a workspace/stack's environment."""
     base_cwd = (cwd or Path.cwd()).resolve()
-    ws, eff_plugins = _resolve_workspace(ws_name, plugins, base_cwd=base_cwd)
+    target, ws = _resolve_workspace(ws_name, plugins, base_cwd=base_cwd)
+    answers = target.plugins.answers(ws)
 
     exec_cwd = resolve_exec_cwd(ws, base_cwd)
-    resolved = resolve_workspace_python(ws, eff_plugins.answers(ws))
+    resolved = resolve_workspace_python(ws, answers)
     if resolved is None:
         env = dict(os.environ)
         for stale in ("PYTHONHOME", "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT"):
             env.pop(stale, None)
         env["OW_WORKSPACE"] = ws.name
-        use_mise = bool(ws.settings.get("mise.enabled", True)) and bool(shutil.which("mise"))
+        # A plugin managing environments may run the command in the one it manages.
         if command:
-            argv = ("mise", "exec", "--", *command) if use_mise else tuple(command)
+            argv = wrap_command(answers, command) or tuple(command)
         else:
             shell = default_shell(env)
-            argv = ("mise", "exec", "--", shell) if use_mise else (shell,)
-            mode_label = "mise" if use_mise else "shell"
+            wrapped = wrap_command(answers, (shell,))
+            argv = wrapped or (shell,)
+            mode_label = "managed environment" if wrapped else "shell"
             print(f"# {ws.name}: {mode_label} (no Python venv)", file=sys.stderr)
     else:
         merged, venv = resolved
@@ -130,12 +137,12 @@ def run(
                 term.warn(diag.text)
 
         requirements = merged.requirements if merged is not None else ()
-        ensure_venv_ready(ws, venv.path, requirements=requirements, log_to_stderr=True)
+        ensure_venv_ready(ws, venv, answers, requirements=requirements, log_to_stderr=True)
 
         venv_python = venv.path / "bin" / "python"
         if not venv_python.exists():
             raise UsageError(
-                f"virtualenv not found at {venv.path}; ensure mise is installed or create the virtualenv first"
+                f"virtualenv not found at {venv.path}; create it, or enable a plugin that builds Python environments"
             )
 
         env = build_exec_env(ws, merged, venv)

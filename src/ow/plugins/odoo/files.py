@@ -7,20 +7,24 @@ from collections.abc import Callable
 from configparser import ConfigParser
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
 
 import tomli_w
 
 from ow.core.fs import json_text
-from ow.core.plugins import Diagnostic, GeneratedFile
+from ow.plugin_api import (
+    DebugLaunch,
+    Diagnostic,
+    EditorContribution,
+    GeneratedFile,
+    PythonEnvironment,
+    Repo,
+    Workspace,
+    WorkspaceVenv,
+)
 from ow.plugins.odoo.addons import workspace_addon_paths
 from ow.plugins.odoo.release import read_odoo_series, read_python_bounds
 from ow.plugins.odoo.settings import database_target, get_setting, smtp_target
-from ow.specs.editors import DebugLaunch, EditorContribution
-from ow.specs.python_env import PythonEnvironment, WorkspaceVenv, resolve_workspace_python
-
-if TYPE_CHECKING:
-    from ow.core.workspace import Repo, Workspace
+from ow.specs.python_env import resolve_workspace_python
 
 
 def python_environment(core: Repo) -> PythonEnvironment:

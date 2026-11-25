@@ -1,4 +1,4 @@
-"""`ow retarget`: guarded multi-repo replay onto each repo's base, or onto a new base ref."""
+"""`ow rebase`: guarded multi-repo update onto each repo's base, or a series change onto a new base ref."""
 
 from __future__ import annotations
 
@@ -174,7 +174,7 @@ def run(
     dry_run: bool,
     yes: bool,
 ) -> int:
-    """CLI entrypoint for `ow retarget`."""
+    """CLI entrypoint for `ow rebase`."""
     _outcome, code = execute(
         session,
         only=only,
@@ -188,7 +188,7 @@ def run(
 
 
 def _new_base(session: Session, only: Sequence[str], base: str | None) -> str | None:
-    """`--base` as a fully qualified ref, parsed against the selected repos' remotes."""
+    """The BASE argument as a fully qualified ref, parsed against the selected repos' remotes."""
     if base is None:
         return None
     remotes = {
@@ -220,7 +220,7 @@ def _plan(
     )
     refused = refusal(
         facts,
-        "retarget",
+        "rebase",
         autostash=autostash or not plan.steps,
         root=root,
         has_target_base=new_base is not None,

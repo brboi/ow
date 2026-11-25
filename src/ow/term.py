@@ -9,6 +9,11 @@ def out(text: str = "") -> None:
     print(text)
 
 
+def err(text: str) -> None:
+    """Write one plain line to stderr."""
+    print(text, file=sys.stderr)
+
+
 def warn(text: str) -> None:
     """Write a warning message to stderr."""
     print(f"warning: {text}", file=sys.stderr)

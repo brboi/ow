@@ -1,7 +1,8 @@
 """Container runtime helper shared by service plugins (`postgres`, `mailsink`).
 
-Support module, not a plugin. Detects `docker` or `podman`, inspects and ensures
-global shared containers, and resolves non-colliding host ports.
+Support module, not a plugin. Inspects and ensures global shared containers, and resolves
+non-colliding host ports. The engine itself (`docker` or `podman`) comes from
+`ow.core.container_engine`.
 """
 
 from __future__ import annotations
@@ -9,14 +10,17 @@ from __future__ import annotations
 import functools
 import json
 import os
-import shutil
 import socket
 import subprocess
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+
+from ow.core.container_engine import detect_engine as detect_engine  # the plugins call `containers.detect_engine()`
+from ow.plugin_api import is_port_free
 
 
 @dataclass(frozen=True)
@@ -26,23 +30,6 @@ class ContainerState:
     status: Literal["running", "stopped"]
     ports: Mapping[int, int]
     bind_addresses: Mapping[int, str] = field(default_factory=dict)
-
-
-def detect_engine() -> str | None:
-    """Return the container CLI to invoke (`OW_CONTAINER_ENGINE`, else `docker` or `podman`), or None when absent."""
-    override = os.environ.get("OW_CONTAINER_ENGINE", "").strip()
-    if override:
-        return override if shutil.which(override) else None
-    for candidate in ("docker", "podman"):
-        if shutil.which(candidate):
-            return candidate
-    return None
-
-
-def detect_container_engine() -> str | None:
-    """The engine's name (`docker`, `podman`), even when `OW_CONTAINER_ENGINE` is a path; None when absent."""
-    engine = detect_engine()
-    return None if engine is None else Path(engine).name
 
 
 @functools.cache
@@ -117,16 +104,6 @@ def inspect_container(engine: str, name: str) -> ContainerState | None:
         ports=ports,
         bind_addresses=bind_addresses,
     )
-
-
-def is_port_free(port: int, host: str = "127.0.0.1") -> bool:
-    """Whether `host:port` is currently unbound."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        try:
-            sock.bind((host, port))
-            return True
-        except OSError:
-            return False
 
 
 def resolve_host_port(
@@ -241,16 +218,40 @@ def ensure_container(
         argv.extend(["-p", f"{bind_address}:{host_port}:{container_port}"])
     for source, target in volumes:
         argv.extend(["-v", f"{source}:{target}"])
-    if isinstance(env, Mapping):
-        for key, value in env.items():
-            argv.extend(["-e", f"{key}={value}"])
-    argv.append(image)
-
-    created = subprocess.run(argv, capture_output=True, text=True, check=False)
+    env_file = _write_env_file(env) if isinstance(env, Mapping) and env else None
+    try:
+        if env_file is not None:
+            argv.extend(["--env-file", str(env_file)])
+        argv.append(image)
+        created = subprocess.run(argv, capture_output=True, text=True, check=False)
+    finally:
+        if env_file is not None:
+            env_file.unlink(missing_ok=True)
     if created.returncode != 0:
         detail = (created.stderr or created.stdout).strip()
         raise RuntimeError(f"{engine} run {name} failed: {detail}")
     return "created"
+
+
+def _write_env_file(env: Mapping[str, str]) -> Path:
+    """Write `env` as `KEY=value` lines to a new 0600 file, so a secret never shows in the process list.
+
+    The caller deletes it once the container is created.
+    """
+    lines = []
+    for key, value in env.items():
+        if "\n" in key or "\n" in value or "=" in key:
+            raise RuntimeError(f"environment variable {key!r} cannot be passed to a container")
+        lines.append(f"{key}={value}\n")
+    fd, raw_path = tempfile.mkstemp(prefix="ow-container-env-", suffix=".env")
+    path = Path(raw_path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("".join(lines))
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
 
 
 def wait_for_tcp(host: str, port: int, *, timeout: float = 15.0) -> bool:

@@ -4,16 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from ow.core import config
-from ow.core.plugins import StackInfo
 from ow.core.stacks import next_free_port
+from ow.plugin_api import StackInfo, Workspace
 from ow.plugins._odoo_repos import ODOO_CORE_NAMES
 from ow.plugins.odoo.release import get_core, is_odoo_core
-
-if TYPE_CHECKING:
-    from ow.core.workspace import Workspace
 
 _PORT_KEYS = ("odoo.http_port", "odoo.gevent_port")
 

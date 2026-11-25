@@ -29,6 +29,10 @@ class RepoFacts:
     modified: tuple[str, ...]
     untracked: tuple[str, ...]
     problem: str | None
+    # The upstream the branch config names while `refs/remotes/<upstream>` does not
+    # exist yet: the branch is not pushed. `upstream` is None then, so no recipe
+    # fetches or replays a ref that is not there.
+    unpushed_upstream: str | None = None
 
 
 # Operations to detect, in priority order (first one present wins), as
@@ -162,6 +166,9 @@ def gather_facts(location) -> RepoFacts:
     remotes = tuple(remotes_output.split("\n")) if remotes_output else ()
     upstream = _upstream(path, branch) if branch is not None else None
     upstream_ab = _upstream_ab(path, upstream) if upstream is not None else None
+    unpushed_upstream = None
+    if upstream is not None and upstream_ab is None:
+        upstream, unpushed_upstream = None, upstream
     operation = operation_in_progress(path)
     return RepoFacts(
         name=name,
@@ -179,6 +186,7 @@ def gather_facts(location) -> RepoFacts:
         modified=tuple(modified),
         untracked=tuple(untracked),
         problem=problem,
+        unpushed_upstream=unpushed_upstream,
     )
 
 

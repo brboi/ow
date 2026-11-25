@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from ow.core import git, stacks
+from ow.core import bases, git, stacks
 from ow.core.config import (
     Layer,
+    as_int,
     read_global,
     read_multi_config,
     read_workspace_config,
@@ -303,12 +304,19 @@ def _collect_warnings(
     if global_parts:
         warnings.append("; ".join(global_parts))
 
+    ws_unknown = {key: value for key, value in workspace_layer.unknown.items() if key not in ignore_workspace}
+    legacy_keys = [key for key, value in ws_unknown.items() if is_legacy_key(key, value, declared)]
     ws_parts = [
         f"unknown setting {key} in .ow/config.toml; "
         f"remove it with `ow config unset {key}`"
-        for key in workspace_layer.unknown
-        if key not in ignore_workspace
+        for key in ws_unknown
+        if key not in legacy_keys
     ]
+    if legacy_keys:
+        ws_parts.append(
+            f".ow/config.toml is in an older ow format ({', '.join(legacy_keys)}); "
+            "run `ow init` to migrate it"
+        )
     ws_parts += [
         _wrong_type_note(key, ".ow/config.toml", declared)
         for key in workspace_layer.wrong_type
@@ -327,14 +335,58 @@ def _collect_warnings(
             for key in stack_layer.wrong_type
             if key not in ignore_workspace
         ]
-    ws_parts += [
-        f"ignoring default base {raw} for {name} in .ow/config.toml: invalid base"
-        for name, raw in rejected_bases.items()
-    ]
+    ws_parts += [_rejected_base_note(name, raw) for name, raw in rejected_bases.items()]
     if ws_parts:
         warnings.append("; ".join(ws_parts))
 
     return tuple(warnings)
+
+
+LEGACY_ROOT_KEYS = ("version", "templates")
+
+
+def _fits(value: object, expected: type) -> bool:
+    """Whether a TOML `value` has the type a setting declares (an int is not a bool)."""
+    if expected is int:
+        return as_int(value) is not None
+    if expected is list:
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    return isinstance(value, expected) and not (expected is not bool and isinstance(value, bool))
+
+
+def vars_target(key: str, value: object, declared: Mapping[str, Any]) -> str | None:
+    """The `odoo.<name>` setting that the `[vars]` key `vars.<name>` moves to, or None.
+
+    `ow init` moves a ow 2.x `[vars]` key only when `odoo.<name>` is declared, still current
+    and of the value's type; any other `[vars]` key is an unknown key like the rest.
+    """
+    if not key.startswith("vars."):
+        return None
+    target = f"odoo.{key.removeprefix('vars.')}"
+    setting = declared.get(target)
+    if setting is None or setting.renamed_to or not _fits(value, setting.type):
+        return None
+    return target
+
+
+def is_legacy_key(key: str, value: object, declared: Mapping[str, Any]) -> bool:
+    """Whether `ow init` migrates `key`: `version`, `templates`, or a `[vars]` key it moves."""
+    return key in LEGACY_ROOT_KEYS or vars_target(key, value, declared) is not None
+
+
+def _rejected_base_note(name: str, raw: object) -> str:
+    """Why a `[repos]` entry is ignored; the ow 3.0.0a1 `<base>..<feature>` format has its remedy."""
+    if isinstance(raw, str) and ".." in raw:
+        try:
+            bases.split_range(raw)
+        except bases.BaseError:
+            pass
+        else:
+            return (
+                f"ignoring {name} = {raw!r} in .ow/config.toml: the ow 3.0.0a1 format; "
+                "run `ow init` to migrate it"
+            )
+    return f"ignoring default base {raw} for {name} in .ow/config.toml: invalid base"
 
 
 def _wrong_type_note(key: str, where: Path | str, declared: Mapping[str, object]) -> str:

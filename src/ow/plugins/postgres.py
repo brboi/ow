@@ -2,24 +2,29 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
 from urllib.parse import quote
 
 from ow import term
-from ow.core import config, paths
+from ow.core import config
 from ow.core.fs import atomic_write, sidecar_lock
-from ow.core.plugins import Setting, StatusInfo, hookimpl
-from ow.errors import UsageError
+from ow.core.paths import state_dir
+from ow.plugin_api import (
+    DatabaseService,
+    RepoFacts,
+    SandboxMounts,
+    Setting,
+    StatusInfo,
+    UsageError,
+    Workspace,
+    hookimpl,
+)
 from ow.plugins import _containers as containers
-from ow.specs.services import DatabaseService
-
-if TYPE_CHECKING:
-    from ow.core.facts import RepoFacts
-    from ow.core.workspace import Workspace
 
 _PG_CONTAINER = "ow-postgres"
 _PGWEB_CONTAINER = "ow-pgweb"
@@ -70,7 +75,7 @@ _SETTINGS = (
     Setting(
         key="postgres.pgweb_image",
         type=str,
-        default="sosedoff/pgweb",
+        default="sosedoff/pgweb:0.17.0",
         help="pgweb container image",
     ),
     Setting(
@@ -172,7 +177,7 @@ _PG_MIGRATOR_USER = "ow_migrator"
 
 def _admin_password() -> str:
     """The random `postgres` superuser password, generated on first use and kept in ow's state (0600)."""
-    path = paths.postgres_admin_password_file()
+    path = state_dir() / "postgres-admin-password"
 
     def read() -> str:
         try:
@@ -518,3 +523,21 @@ def ow_status(
             summary=summary,
         )
     ]
+
+
+_SOCKET_DIRS = (Path("/run/postgresql"), Path("/var/run/postgresql"))
+
+
+@hookimpl
+def ow_sandbox_mounts() -> SandboxMounts | None:
+    """Expose the host PostgreSQL unix-socket directories read-only (a local server Odoo may connect to)."""
+    seen: set[str] = set()
+    ro_paths: list[Path] = []
+    for candidate in _SOCKET_DIRS:
+        if not candidate.is_dir():
+            continue
+        real = os.path.realpath(candidate)
+        if real not in seen:
+            seen.add(real)
+            ro_paths.append(candidate)
+    return SandboxMounts(ro_paths=tuple(ro_paths)) if ro_paths else None

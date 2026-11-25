@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from ow.core.workspace import Workspace
 
 SPEC_USAGE_HINT = (
-    "pass a PR (enterprise#12345), base (@18.0), repo@branch, known repo (voip), "
+    "pass a PR (enterprise#12345), base (@18.0), repo@branch, repo@base..branch, known repo (voip), "
     "Runbot URL, or register with `ow repo add <name> <url>`"
 )
 
@@ -116,17 +116,6 @@ def deduplicate_name(candidate: str, taken: set[str]) -> str:
     return unique
 
 
-def _split_remote_prefix(ref: str, remotes: Sequence[str]) -> tuple[str | None, str]:
-    """Split `<remote>/<branch>` by the longest matching remote name in `remotes`."""
-    best = ""
-    for remote in remotes:
-        if ref.startswith(remote + "/") and len(remote) > len(best):
-            best = remote
-    if best:
-        return best, ref[len(best) + 1 :]
-    return None, ref
-
-
 def _is_upstream_base_branch(
     bare: Path,
     repo: str,
@@ -155,11 +144,13 @@ def _resolve_branch_spec(
     plugins: Plugins,
     ws: Workspace | None,
 ) -> ResolvedSpec | None:
-    """Resolve `<repo>@<ref>` (or `<repo>@<remote>/<ref>`) across configured remotes.
+    """Resolve `<repo>@<ref>`, `<repo>@<remote>/<ref>` or `<repo>@<base>..<branch>` across configured remotes.
 
     Upstream base/series branches (`master`, `main`, plugin base series, `origin/HEAD`)
     resolve detached (`branch=None, base=origin/<ref>`) to prevent cross-worktree branch
-    collisions; feature branches resolve as local tracking branches.
+    collisions; feature branches resolve as local tracking branches. `<base>..<branch>` names
+    the base explicitly: the branch is checked out when a remote holds it, and created from
+    `<base>` otherwise (`<branch>` may be `<remote>/<branch>` to say which remote holds it).
     """
     match = _BRANCH_SPEC_RE.match(part.strip())
     if not match:
@@ -169,6 +160,11 @@ def _resolve_branch_spec(
     raw_ref = match.group("ref").strip()
     if not raw_ref:
         raise UsageError(f"branch name cannot be empty in {part!r}")
+    explicit_base, ranged_ref = bases.split_range(raw_ref)
+    if ranged_ref is not None:
+        raw_ref = ranged_ref
+    else:
+        explicit_base = None
 
     bare = repos_dir() / f"{repo}.git"
     known = catalog.get(repo)
@@ -181,7 +177,7 @@ def _resolve_branch_spec(
         configured = git.remotes(bare)
     else:
         configured = ("origin",)
-    explicit_remote, branch = _split_remote_prefix(raw_ref, configured)
+    explicit_remote, branch = bases.split_remote_prefix(raw_ref, configured)
 
     if (
         not branch
@@ -193,7 +189,7 @@ def _resolve_branch_spec(
 
     chosen_remote: str | None
     if not bare.is_dir():
-        chosen_remote = explicit_remote or "origin"
+        chosen_remote = explicit_remote or ("origin" if explicit_base is None else None)
         url = known.url if known is not None else None
     else:
         origin_url = git.read(["git", "-C", str(bare), "remote", "get-url", "origin"], check=False)
@@ -230,23 +226,31 @@ def _resolve_branch_spec(
                         f"branch {branch!r} exists on multiple remotes of {repo} "
                         f"({', '.join(matches)}); specify {repo}@<remote>/{branch}"
                     )
-            elif git.has_ref(bare, f"refs/heads/{branch}"):
-                chosen_remote = None
+            elif git.has_ref(bare, f"refs/heads/{branch}") or explicit_base is not None:
+                chosen_remote = None  # a local-only branch, or one `<base>..<branch>` creates
             else:
                 checked = ", ".join(configured) or "(none)"
                 raise UsageError(
-                    f"branch {branch!r} not found on any remote of {repo} (checked: {checked})"
+                    f"branch {branch!r} not found on any remote of {repo} (checked: {checked}); "
+                    f"to create it, spell its base: {repo}@<base>..{branch}"
                 )
 
-    is_base = _is_upstream_base_branch(bare, repo, chosen_remote, branch, plugins, ws)
     source = f"git:{repo}@{chosen_remote}/{branch}" if chosen_remote else f"git:{repo}@{branch}"
-    if is_base:
-        qualified_base = f"{chosen_remote or 'origin'}/{branch}"
+    if explicit_base is not None:
+        resolved_repo = ResolvedRepo(
+            name=repo,
+            url=url,
+            branch=branch,
+            base=bases.parse_base_for(explicit_base, repo),
+            remote=chosen_remote,
+            explicit=True,
+        )
+    elif _is_upstream_base_branch(bare, repo, chosen_remote, branch, plugins, ws):
         resolved_repo = ResolvedRepo(
             name=repo,
             url=url,
             branch=None,
-            base=qualified_base,
+            base=f"{chosen_remote or 'origin'}/{branch}",
             remote=None,
             explicit=True,
         )
@@ -344,6 +348,8 @@ def resolve_composite_spec(
     - Runbot URLs (`https://runbot.odoo.com/runbot/bundle/12345`, `.../batch/98765`)
     - Base shorthand (`@18.0`, `@master`)
     - Repo + ref (`iap@18.0`, `enterprise@18.0-my-fix`, `voip@dev/my-branch`)
+    - A branch on an explicit base (`enterprise@18.0..18.0-my-fix`, `voip@master..dev/my-branch`,
+      `@18.0..18.0-my-fix` on every `odoo.default_repos` repo)
     - Bare repo (`voip`, `upgrade`)
     """
     raw_parts = [p.strip() for p in spec.split(",")]

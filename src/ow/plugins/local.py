@@ -7,14 +7,10 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ow import term
 from ow.core.paths import local_seed_dir
-from ow.core.plugins import hookimpl
-
-if TYPE_CHECKING:
-    from ow.core.workspace import Workspace
+from ow.plugin_api import Workspace, hookimpl
 
 
 def _is_symlinked(path: Path, stop: Path) -> bool:

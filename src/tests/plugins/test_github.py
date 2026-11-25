@@ -6,7 +6,7 @@ from ow.core.paths import repos_dir
 from ow.core.plugins import KnownRepo
 from ow.plugins import github
 from ow.plugins._github import BareCatalog, parse_pr_spec
-from tests.conftest import add_repo, init_workspace
+from tests.conftest import add_repo, git_ok, init_workspace, route_github
 
 
 def test_parse_pr_target_variants():
@@ -514,12 +514,14 @@ def test_status_prefers_fork_head_owner_for_pr_opened_after_the_fact(lab):
         ]
     )
     add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    fork = lab.remote("forks/odoo-dev/enterprise")
+    route_github(odoo_dev=fork.parent)
     bare = repos_dir() / "enterprise.git"
     lab.git(bare, "config", "ow.github-repo", "odoo/enterprise")
     lab.git(bare, "remote", "add", "dev", "git@github.com:odoo-dev/enterprise.git")
     ws = init_workspace(lab, "enterprise", name="fork-pr-ws", branch="18.0-shared-name")
-    lab.git(bare, "config", "branch.18.0-shared-name.remote", "dev")
-    lab.git(bare, "config", "branch.18.0-shared-name.merge", "refs/heads/18.0-shared-name")
+    # The user publishes the branch to their fork: `push -u` is what makes `dev` its upstream.
+    lab.git(ws / "enterprise", "push", "-u", "dev", "18.0-shared-name")
 
     st = lab.ow("status", cwd=ws)
     assert st.exit_code == 0, st.stderr
@@ -571,3 +573,174 @@ def test_bare_catalog_scans_and_marks_sisters_non_explicit(lab):
     by_name = {r.name: r for r in resolved.repos}
     assert by_name["enterprise"].explicit is True
     assert by_name["iap"].explicit is False
+
+
+def _github_world(lab):
+    """`enterprise` (with `community`) cloned from `odoo/enterprise`, and an empty `odoo-dev` fork, on disk."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    origin = lab.remote("enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    fork = lab.remote("forks/odoo-dev/enterprise")
+    route_github(odoo=origin.parent, odoo_dev=fork.parent)
+    assert lab.ow("repo", "add", "enterprise", "git@github.com:odoo/enterprise.git").exit_code == 0
+    return origin, fork
+
+
+def _pr_json(number: int, branch: str, owner: str | None) -> dict:
+    pr = {
+        "repo": "odoo/enterprise",
+        "number": number,
+        "title": f"PR {number}",
+        "url": f"https://github.com/odoo/enterprise/pull/{number}",
+        "state": "OPEN",
+        "isDraft": False,
+        "headRefName": branch,
+        "baseRefName": "18.0",
+    }
+    if owner is not None:
+        pr["headRepositoryOwner"] = {"login": owner}
+        pr["headRepository"] = {"name": "enterprise"}
+    return pr
+
+
+def test_a_same_repo_pr_gets_its_head_branch_as_upstream(lab):
+    """Q19: the PR's branch tracks `origin/<head>`, so bare `git pull` and `git push` work."""
+    origin, _fork = _github_world(lab)
+    author = lab.collaborator("author", of=origin)
+    author.git("checkout", "18.0")
+    author.commit({"ent/pr.py": "pr = 1\n"}, message="the PR", branch="18.0-same-repo")
+    author.push("18.0-same-repo")
+    lab.publish_pr(origin, 301, "18.0-same-repo")
+    lab.fake_gh([_pr_json(301, "18.0-same-repo", "odoo")])
+    ws = lab.home / "same-repo"
+    ws.mkdir(parents=True)
+
+    res = lab.ow("init", "enterprise#301", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    wt = ws / "enterprise"
+    assert lab.git(wt, "rev-parse", "--abbrev-ref", "@{u}") == "origin/18.0-same-repo"
+    author.commit({"ent/more.py": "more = 1\n"}, message="author pushes again")
+    author.push("18.0-same-repo")
+    assert git_ok(wt, "pull")
+    assert (wt / "ent" / "more.py").read_text() == "more = 1\n"
+    (wt / "ent" / "mine.py").write_text("mine = 1\n")
+    lab.git(wt, "add", "ent/mine.py")
+    lab.git(wt, "commit", "-m", "mine")
+    assert git_ok(wt, "push")
+    assert lab.sha(origin, "refs/heads/18.0-same-repo") == lab.sha(wt, "HEAD")
+
+
+def test_a_fork_pr_adds_the_fork_remote_and_tracks_its_head_branch(lab):
+    """Q19: a fork's PR adds a remote named after the owner's login, in the origin's ssh scheme."""
+    origin, fork = _github_world(lab)
+    author = lab.collaborator("fork-author", of=origin)
+    author.git("checkout", "18.0")
+    author.commit({"ent/fork.py": "fork = 1\n"}, message="from a fork", branch="18.0-from-fork")
+    author.git("push", str(fork), "18.0-from-fork")
+    author.push("18.0-from-fork")
+    lab.publish_pr(origin, 302, "18.0-from-fork")
+    author.git("push", "origin", "--delete", "18.0-from-fork")  # a fork's branch is not in the base repo
+    lab.fake_gh([_pr_json(302, "18.0-from-fork", "odoo-dev")])
+    ws = lab.home / "fork-pr"
+    ws.mkdir(parents=True)
+
+    res = lab.ow("init", "enterprise#302", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    bare = repos_dir() / "enterprise.git"
+    wt = ws / "enterprise"
+    assert lab.git(bare, "config", "remote.odoo-dev.url") == "git@github.com:odoo-dev/enterprise.git"
+    assert lab.git(bare, "config", "branch.18.0-from-fork.remote") == "odoo-dev"
+    assert lab.git(wt, "rev-parse", "--abbrev-ref", "@{u}") == "odoo-dev/18.0-from-fork"
+    author.commit({"ent/later.py": "later = 1\n"}, message="fork author pushes again")
+    author.git("push", str(fork), "18.0-from-fork")
+    assert git_ok(wt, "pull")
+    assert (wt / "ent" / "later.py").read_text() == "later = 1\n"
+    (wt / "ent" / "mine.py").write_text("mine = 1\n")
+    lab.git(wt, "add", "ent/mine.py")
+    lab.git(wt, "commit", "-m", "mine")
+    assert git_ok(wt, "push")
+    assert lab.sha(fork, "refs/heads/18.0-from-fork") == lab.sha(wt, "HEAD")
+
+
+def test_a_fork_pr_reuses_the_remote_the_bare_already_has_for_that_fork(lab):
+    origin, fork = _github_world(lab)
+    bare = repos_dir() / "enterprise.git"
+    lab.git(bare, "remote", "add", "dev", "git@github.com:odoo-dev/enterprise.git")
+    author = lab.collaborator("reuse-author", of=origin)
+    author.git("checkout", "18.0")
+    author.commit({"ent/fork.py": "fork = 1\n"}, message="from a fork", branch="18.0-reuse")
+    author.git("push", str(fork), "18.0-reuse")
+    author.push("18.0-reuse")
+    lab.publish_pr(origin, 303, "18.0-reuse")
+    author.git("push", "origin", "--delete", "18.0-reuse")
+    lab.fake_gh([_pr_json(303, "18.0-reuse", "odoo-dev")])
+    ws = lab.home / "reuse-fork"
+    ws.mkdir(parents=True)
+
+    res = lab.ow("init", "enterprise#303", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert lab.git(bare, "config", "branch.18.0-reuse.remote") == "dev"
+    assert "odoo-dev" not in lab.git(bare, "remote").split()
+
+
+def test_a_pr_whose_head_branch_cannot_be_fetched_warns_and_has_no_upstream(lab):
+    """Q19: a deleted fork is a warning, not a failure."""
+    origin, _fork = _github_world(lab)
+    author = lab.collaborator("gone-author", of=origin)
+    author.git("checkout", "18.0")
+    author.commit({"ent/gone.py": "gone = 1\n"}, message="fork is gone", branch="18.0-gone")
+    author.push("18.0-gone")
+    lab.publish_pr(origin, 304, "18.0-gone")
+    author.git("push", "origin", "--delete", "18.0-gone")
+    lab.fake_gh([_pr_json(304, "18.0-gone", "odoo-dev")])  # the fork holds no such branch
+    ws = lab.home / "gone-fork"
+    ws.mkdir(parents=True)
+
+    res = lab.ow("init", "enterprise#304", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "cannot fetch 18.0-gone from odoo-dev" in res.stderr
+    assert (ws / "enterprise" / "ent" / "gone.py").read_text() == "gone = 1\n"
+    assert not git_ok(repos_dir() / "enterprise.git", "config", "--get", "branch.18.0-gone.remote")
+
+
+def test_a_pr_with_no_head_repository_warns_and_has_no_upstream(lab):
+    origin, _fork = _github_world(lab)
+    author = lab.collaborator("ghost-author", of=origin)
+    author.git("checkout", "18.0")
+    author.commit({"ent/ghost.py": "ghost = 1\n"}, message="ghost", branch="18.0-ghost")
+    author.push("18.0-ghost")
+    lab.publish_pr(origin, 305, "18.0-ghost")
+    lab.fake_gh([_pr_json(305, "18.0-ghost", None)])
+    ws = lab.home / "ghost-head"
+    ws.mkdir(parents=True)
+
+    res = lab.ow("init", "enterprise#305", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "head repository of the PR is unknown" in res.stderr
+    assert not git_ok(repos_dir() / "enterprise.git", "config", "--get", "branch.18.0-ghost.remote")
+
+
+def test_a_pr_attached_to_an_existing_worktree_gets_its_head_branch_as_upstream(lab):
+    """Q19: `ow add enterprise#N` over a detached worktree sets the same upstream as `ow init` does."""
+    origin, _fork = _github_world(lab)
+    author = lab.collaborator("attach-author", of=origin)
+    author.git("checkout", "18.0")
+    author.commit({"ent/attach.py": "attach = 1\n"}, message="the PR", branch="18.0-attach")
+    author.push("18.0-attach")
+    lab.publish_pr(origin, 306, "18.0-attach")
+    lab.fake_gh([_pr_json(306, "18.0-attach", "odoo")])
+    ws = lab.home / "attach-pr"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0,enterprise@18.0", cwd=ws).exit_code == 0
+
+    res = lab.ow("add", "enterprise#306", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    wt = ws / "enterprise"
+    assert lab.git(wt, "branch", "--show-current") == "18.0-attach"
+    assert lab.git(wt, "rev-parse", "--abbrev-ref", "@{u}") == "origin/18.0-attach"
+    assert git_ok(wt, "pull")

@@ -16,9 +16,15 @@ BASE = "18.0"
 COMMANDS = (
     "init", "add", "run", "sandbox", "status",
     "refresh", "files", "ls", "cd", "shell-init", "rm", "prune",
-    "repo", "config", "retarget",
+    "repo", "config", "rebase",
 )
-REMOVED_COMMANDS = ("fetch", "switch", "pull", "rebase", "reset")
+HELP_PAGES = (
+    ("init",), ("add",), ("run",), ("stop",), ("logs",), ("exec",), ("sandbox",),
+    ("status",), ("rebase",), ("refresh",), ("files",), ("trust",), ("ls",), ("cd",),
+    ("shell-init",), ("rm",), ("prune",), ("repo",), ("repo", "add"), ("repo", "ls"),
+    ("repo", "rm"), ("config",), ("config", "get"), ("config", "set"), ("config", "unset"),
+)
+REMOVED_COMMANDS = ("fetch", "switch", "pull", "retarget", "reset")
 
 
 def test_bare_ow_prints_help_and_exits_zero(lab):
@@ -49,6 +55,54 @@ def test_workspace_and_only_metavars(lab):
     status_help = lab.ow("status", "--help").stdout
     assert "-w, --workspace WS" in status_help
     assert "--only REPO" in status_help
+
+
+def test_rebase_takes_an_optional_positional_base_and_no_base_option(lab):
+    help_text = lab.ow("rebase", "--help").stdout
+
+    assert re.search(r"^Usage: \S+ rebase \[OPTIONS\] \[BASE\]$", help_text, re.M)
+    assert "--base" not in help_text
+
+
+@pytest.mark.parametrize(
+    ("command", "synopsis"),
+    [
+        ("run", r"\[OPTIONS\] \[WS\]\.\.\. \[-- ARGS\.\.\.\]"),
+        ("exec", r"\[OPTIONS\] \[WS\] \[-- COMMAND\.\.\.\]"),
+        ("sandbox", r"\[OPTIONS\] \[WS\] \[-- COMMAND\.\.\.\]"),
+    ],
+)
+def test_passthrough_commands_show_the_double_dash_in_their_usage(lab, command, synopsis):
+    help_text = lab.ow(command, "--help").stdout
+
+    assert re.search(rf"^Usage: \S+ {command} {synopsis}$", help_text, re.M)
+
+
+def test_no_help_page_shows_a_type_tag_or_a_required_brace(lab):
+    for argv in HELP_PAGES:
+        help_text = lab.ow(*argv, "--help").stdout
+
+        assert help_text.startswith("Usage:"), argv
+        assert not re.search(r"<[^>\s]+>|\{\w+\}", help_text), argv
+
+
+def test_a_usage_error_is_reported_as_an_ow_error(lab):
+    result = lab.ow("status", "--nope")
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert re.search(r"^Usage: \S+ status \[OPTIONS\] \[SPEC\]$", result.stderr, re.M)
+    assert re.search(r"^Try '\S+ status --help' for help\.$", result.stderr, re.M)
+    assert "error: No such option: --nope" in result.stderr
+    assert "Error:" not in result.stderr
+
+
+def test_a_missing_argument_is_reported_as_an_ow_error(lab):
+    result = lab.ow("rm")
+
+    assert result.exit_code == 2
+    assert re.search(r"^Usage: \S+ rm \[OPTIONS\] WS$", result.stderr, re.M)
+    assert "error: Missing argument 'WS'." in result.stderr
 
 
 def test_repo_with_no_arguments_prints_help_and_exits_zero(lab):
@@ -93,11 +147,12 @@ def test_status_supports_only_option(lab):
     assert REPO in result.stdout
 
 
-def test_cd_outside_a_workspace_exits_two(lab):
+def test_cd_outside_a_workspace_exits_two_without_advising_a_missing_option(lab):
     result = lab.ow("cd", cwd=lab.home)
 
     assert result.exit_code == 2
-    assert "not inside an ow workspace" in result.stderr
+    assert "error: not inside an ow workspace; pass a workspace name or path" in result.stderr
+    assert "-w" not in result.stderr
 
 
 def test_config_get_global_reads_the_global_layer_only(lab):
@@ -133,7 +188,7 @@ def test_repo_names_complete_for_repo_add(lab):
     assert REPO in result.stdout.split()
 
 
-def test_repo_names_complete_for_retarget_only(lab):
+def test_repo_names_complete_for_rebase_only(lab):
     from typer.testing import CliRunner
 
     from ow.cli import build_app
@@ -144,7 +199,7 @@ def test_repo_names_complete_for_retarget_only(lab):
     app = build_app(load_plugins())
     env = {
         "_OW_COMPLETE": "complete_bash",
-        "COMP_WORDS": "ow retarget --only ",
+        "COMP_WORDS": "ow rebase --only ",
         "COMP_CWORD": "3",
     }
 

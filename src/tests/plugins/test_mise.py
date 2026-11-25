@@ -5,6 +5,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path, PurePosixPath
 
+from ow.core.paths import venvs_dir
 from ow.plugins import mise
 from ow.specs.python_env import PythonEnvironment as MiseEnvironment
 from tests.conftest import diagnostics_of, files_of, resolved_workspace
@@ -13,13 +14,30 @@ from tests.lab import make_executable
 _FRAGMENT = "mise/conf.d/00-ow.toml"
 
 
-def _answers(*given: MiseEnvironment):
+def _answers(*given: MiseEnvironment, bootstrap: bool = True):
+    """The `answers` ow hands hooks; `bootstrap` says the mise plugin (a `python_bootstrap` implementer) is enabled."""
+
     def answers(hook: str):
         if hook == "python_environment":
             return list(given)
         return []
 
+    answers.implementers = lambda hook: ("mise",) if bootstrap and hook == "python_bootstrap" else ()
     return answers
+
+
+def test_the_venv_is_shared_only_when_a_plugin_can_bootstrap_it(lab):
+    """With no `python_bootstrap` implementer (mise disabled or absent) nobody would create the shared venv: it is `.venv`."""
+    root = lab.ws("shared")
+    root.mkdir(parents=True)
+    ws = resolved_workspace(root)
+    env = MiseEnvironment(python=((3, 10), (3, 12)), venv_key="18.0")
+
+    shared = _fragment(mise.ow_generated_files(ws, _answers(env)))
+    local = _fragment(mise.ow_generated_files(ws, _answers(env, bootstrap=False)))
+
+    assert shared["env"]["_"]["python"]["venv"]["path"] == str(venvs_dir() / "py3.12-18.0")
+    assert local["env"]["_"]["python"]["venv"]["path"] == ".venv"
 
 
 def _fragment(result: list) -> dict:
@@ -32,7 +50,7 @@ def test_mise_fragment_parses_with_a_stub_answer(lab):
     """A stub answer produces a parseable fragment carrying every field."""
     root = lab.ws("mise")
     root.mkdir(parents=True)
-    ws = resolved_workspace(root, (), {"mise.python": "3.11"})
+    ws = resolved_workspace(root, (), {"python.version": "3.11"})
 
     result = mise.ow_generated_files(
         ws,
@@ -71,7 +89,7 @@ def test_mise_clamps_explicit_python_into_range(lab):
     """`3.9` with range 3.10–3.12 clamps to `3.10` with an `info` diagnostic."""
     root = lab.ws("clamp")
     root.mkdir(parents=True)
-    ws = resolved_workspace(root, (), {"mise.python": "3.9"})
+    ws = resolved_workspace(root, (), {"python.version": "3.9"})
 
     result = mise.ow_generated_files(ws, _answers(MiseEnvironment(python=((3, 10), (3, 12)))))
 
@@ -83,7 +101,7 @@ def test_mise_clamps_explicit_python_into_range(lab):
 
 
 def test_mise_unset_python_defaults_to_range_max(lab):
-    """An unset `mise.python` takes the range's max."""
+    """An unset `python.version` takes the range's max."""
     root = lab.ws("max")
     root.mkdir(parents=True)
     ws = resolved_workspace(root)
@@ -95,7 +113,7 @@ def test_mise_unset_python_defaults_to_range_max(lab):
 
 
 def test_mise_no_answer_and_no_python_writes_nothing(lab):
-    """Without an answer and without `mise.python` there is no file, no diagnostic."""
+    """Without an answer and without `python.version` there is no file, no diagnostic."""
     root = lab.ws("nothing")
     root.mkdir(parents=True)
     ws = resolved_workspace(root)
@@ -104,10 +122,10 @@ def test_mise_no_answer_and_no_python_writes_nothing(lab):
 
 
 def test_mise_python_setting_alone_sets_the_tool_and_venv(lab):
-    """`mise.python` alone yields a fragment with the tool and the venv, nothing else."""
+    """`python.version` alone yields a fragment with the tool and the venv, nothing else."""
     root = lab.ws("pythononly")
     root.mkdir(parents=True)
-    ws = resolved_workspace(root, (), {"mise.python": "3.11"})
+    ws = resolved_workspace(root, (), {"python.version": "3.11"})
 
     result = mise.ow_generated_files(ws, _answers())
 
@@ -124,7 +142,7 @@ def test_mise_without_range_uses_the_value_as_is(lab):
     """Without a range the explicit value is used as is."""
     root = lab.ws("norange")
     root.mkdir(parents=True)
-    ws = resolved_workspace(root, (), {"mise.python": "3.13"})
+    ws = resolved_workspace(root, (), {"python.version": "3.13"})
 
     result = mise.ow_generated_files(ws, _answers())
 
@@ -159,6 +177,19 @@ def test_mise_trust_logs_the_fragment_with_recent_mise(tmp_path, lab, capsys):
         f"trust {root / 'mise' / 'conf.d' / '00-ow.toml'}",
     ]
     assert capsys.readouterr().err == ""
+
+
+def test_mise_sandbox_mounts_trust_the_workspace_fragment(lab):
+    """The sandbox's mise state is empty: `MISE_TRUSTED_CONFIG_PATHS` makes it load the fragment anyway."""
+    (lab.home / ".local" / "share" / "mise").mkdir(parents=True)
+    root = lab.ws("sandboxed")
+    root.mkdir(parents=True)
+    ws = resolved_workspace(root)
+
+    mounts = mise.ow_sandbox_mounts(ws)
+
+    assert mounts is not None
+    assert mounts.env["MISE_TRUSTED_CONFIG_PATHS"] == str(root / "mise" / "conf.d" / "00-ow.toml")
 
 
 def test_mise_trust_old_mise_warns_and_does_not_trust(tmp_path, lab, capsys):
