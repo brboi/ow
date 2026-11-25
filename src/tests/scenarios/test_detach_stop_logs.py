@@ -376,17 +376,19 @@ def test_self_detaching_runner_in_the_foreground_is_stopped_on_ctrl_c(lab):
         cwd=ws,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
         # Its own session: `killpg(SIGINT)` reaches ow like a terminal's Ctrl+C.
         start_new_session=True,
     )
     try:
         seen = ""
         deadline = time.monotonic() + 20
+        fd = proc.stdout.fileno()
         while "SVC_STARTED" not in seen:
             assert time.monotonic() < deadline, f"services never followed:\n{seen}"
-            if select.select([proc.stdout], [], [], 0.2)[0]:
-                seen += proc.stdout.readline()
+            # Raw reads: a buffered readline() can pull several lines at once and leave the
+            # rest where select() no longer sees them.
+            if select.select([fd], [], [], 0.2)[0]:
+                seen += os.read(fd, 65536).decode()
         assert (ws / ".svc_state").is_file()
         assert not (ws / ".svc_stopped").exists()
 
