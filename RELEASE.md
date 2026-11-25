@@ -15,19 +15,13 @@ git tag vX.Y.Z          # e.g. v3.0.0b1, v3.0.0rc1, v3.0.0
 git push origin vX.Y.Z
 ```
 
-The tag push triggers `.github/workflows/release.yml`, which:
+The tag push triggers `.github/workflows/release.yml`. It first runs `.github/workflows/test.yml`: lint, and the tests on Ubuntu and Alpine. Only when that passes does it:
 
-1. builds the package with `python -m build`,
-2. publishes to PyPI with `pypa/gh-action-pypi-publish`,
-3. creates a GitHub release with the `dist/*` artifacts and generated notes. A tag whose name
-   contains `a`, `b` or `rc` (`v3.0.0a1`, `v3.0.0b1`, `v3.0.0rc1`) is published as a GitHub
-   **pre-release**; PyPI hides such versions from a plain `pip install`.
+1. build the package with `python -m build`,
+2. publish to PyPI with `pypa/gh-action-pypi-publish`,
+3. create a GitHub release with the `dist/*` artifacts and generated notes. A tag whose name contains `a`, `b` or `rc` (`v3.0.0a1`, `v3.0.0b1`, `v3.0.0rc1`) is published as a GitHub **pre-release**. PyPI hides such versions from a plain `pip install`.
 
-**Prerequisites:** the `pypi` environment in the repository settings must exist and hold a
-`PYPI_API_TOKEN` secret.
-
-Tags are not covered by `.github/workflows/test.yml`: it runs on pull requests and on pushes to
-`main` only. Release from a commit whose tests are green.
+**Prerequisites:** the `pypi` environment in the repository settings must exist and hold a `PYPI_API_TOKEN` secret.
 
 ## Version Format
 

@@ -2,6 +2,24 @@
 
 ow generates and maintains a set of workspace files: Odoo config, Python environment and IDE settings. It tracks what it wrote and never overwrites a hand edit. A refresh never deletes a file.
 
+## Where ow keeps its files
+
+| Path | What |
+|---|---|
+| `<workspace>/.ow/config.toml` | The workspace config, and every stack's, in one file ([Configuration](configuration.md#file-format)) |
+| `<workspace>/.ow/rendered.lock.toml` | The lock, below |
+| `<workspace>/.ow/run/`, `<workspace>/.ow/logs/` | PID records and output of `ow run -d` |
+| `$XDG_CONFIG_HOME/ow/config.toml` | The global config |
+| `$XDG_CONFIG_HOME/ow/local/` | Seed files copied once into a new workspace's `.local/` |
+| `$XDG_DATA_HOME/ow/repos/<name>.git` | One bare repo per repo, shared by every workspace |
+| `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>` | Shared Python virtualenvs |
+| `$XDG_STATE_HOME/ow/workspaces` | The workspace index |
+| `$XDG_STATE_HOME/ow/trusted-plugins.toml` | The [trust registry](plugins.md#trust) |
+| `$XDG_STATE_HOME/ow/postgres-admin-password` | The superuser password of the shared Postgres |
+| `$XDG_CACHE_HOME/ow/` | The PR and Runbot status cache |
+
+The sections below are about the generated files.
+
 ## The lock
 
 `.ow/rendered.lock.toml` records, for each generated path, the SHA-256 of the bytes ow last wrote or adopted. It is the source of truth for ownership.
@@ -78,7 +96,7 @@ If any plugin reports an `error` diagnostic, the errors are printed and `ow file
 
 | Plugin | Path | Written when |
 |---|---|---|
-| mise | `mise/conf.d/00-ow.toml` | a plugin answers `python_environment`, or `mise.python` is set |
+| mise | `mise/conf.d/00-ow.toml` | a plugin answers `python_environment`, or `python.version` is set |
 | odoo | `odoorc` (mode `0600`) | the workspace has exactly one readable Odoo core |
 | odoo | `odools.toml` | same |
 | odoo | `pyrightconfig.json` | same |
@@ -89,7 +107,7 @@ If any plugin reports an `error` diagnostic, the errors are printed and `ow file
 | zed | `.zed/settings.json` | a plugin contributes a language server or an exclude |
 | zed | `.zed/debug.json` | a plugin contributes a launch config |
 
-`odoorc` holds the `[options]` Odoo loads: `http_port`, `gevent_port`, database settings, `addons_path`, and `data_dir` pointing at `.odoo/`. When `mise.enabled` and `mise.shared_venv` are `true` (default), `mise/conf.d/00-ow.toml`, `odools.toml`, `pyrightconfig.json`, `.vscode/settings.json`, `.vscode/launch.json`, and `.zed/debug.json` all point at the shared virtualenv under `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`. A workspace with no Odoo core and no `mise.python` gets nothing.
+`odoorc` holds the `[options]` Odoo loads: `http_port`, `gevent_port`, database settings, `addons_path`, and `data_dir` pointing at `.odoo/`. When `python.shared_venv` is `true` (the default) and `mise` is enabled, `mise/conf.d/00-ow.toml`, `odools.toml`, `pyrightconfig.json`, `.vscode/settings.json`, `.vscode/launch.json`, and `.zed/debug.json` all point at the shared virtualenv under `$XDG_DATA_HOME/ow/venvs/py<ver>-<series>`. Otherwise they point at `<workspace>/.venv`. A workspace with no Odoo core and no `python.version` gets no Python files.
 
 Any other plugin, including a [trusted in-repo plugin](plugins.md), can contribute files through `ow_generated_files`; they follow the same lock and ownership rules.
 
@@ -120,7 +138,7 @@ A corrupted lock is recoverable the same way: delete `.ow/rendered.lock.toml` an
 
 - After `ow init`, `ow add`, `ow repo add` and `ow repo rm`.
 - After `ow config set` and `ow config unset`.
-- After `ow retarget`, when a repo actually changed.
+- After `ow rebase`, when a repo actually changed.
 - On explicit `ow refresh` (which also syncs `<workspace>.code-workspace` for multi-stack workspaces).
 
 A dry run or a declined prompt does not refresh.
@@ -135,7 +153,7 @@ A dry run or a declined prompt does not refresh.
 
 ## Outside the workspace
 
-A worktree's `.git` points into its bare repo under `$XDG_DATA_HOME/ow/repos`, and with `mise.shared_venv = true` (the default) `odools.toml`, the editor settings and `ow run` point at `$XDG_DATA_HOME/ow/venvs`. A sandbox around a workspace must mount both, besides the workspace itself, or git and the Python tooling fail inside it. Set `mise.shared_venv = false` to use a local `.venv/` instead.
+A worktree's `.git` points into its bare repo under `$XDG_DATA_HOME/ow/repos`. With `python.shared_venv` true (the default) and `mise` enabled, `odools.toml`, the editor settings and `ow run` point at `$XDG_DATA_HOME/ow/venvs`. A sandbox you build yourself around a workspace must mount both, besides the workspace, or git and the Python tooling fail inside it. `ow sandbox` mounts them for you ([Commands](commands.md#ow-sandbox)). Set `python.shared_venv = false` to use a local `.venv/` instead.
 
 ## See also
 
