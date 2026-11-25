@@ -15,7 +15,7 @@ from ow.core import git
 from ow.core.paths import repos_dir
 
 if TYPE_CHECKING:
-    from ow.core.plugins import KnownRepo
+    from ow.plugin_api import KnownRepo
 
 _GH_REMOTE_RE = re.compile(
     r"^(?:git@github\.com:|https?://(?:[^/@]+@)?github\.com/|ssh://git@github\.com(?::\d+)?/)"
@@ -41,6 +41,25 @@ _PR_SHORT_RE = re.compile(
 def github_clone_url(owner: str, repo: str) -> str:
     """The SSH clone URL of GitHub repository `owner/repo`."""
     return f"git@github.com:{owner}/{repo}.git"
+
+
+_GH_URL_FORM_RE = re.compile(
+    r"^(?P<prefix>git@github\.com:|https?://(?:[^/@]+@)?github\.com/|ssh://git@github\.com(?::\d+)?/)"
+    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?(?P<suffix>\.git)?/?$",
+    re.IGNORECASE,
+)
+
+
+def fork_clone_url(origin_url: str | None, owner: str, repo: str) -> str:
+    """The clone URL of GitHub repository `owner/repo`, in the scheme of `origin_url`.
+
+    An SSH origin gives an SSH URL and an HTTPS origin an HTTPS one (keeping its credentials
+    prefix and `.git` suffix); an origin that is not GitHub gives the SSH form.
+    """
+    match = _GH_URL_FORM_RE.match((origin_url or "").strip())
+    if match is None:
+        return github_clone_url(owner, repo)
+    return f"{match.group('prefix')}{owner}/{repo}{match.group('suffix') or ''}"
 
 
 def parse_gh_slug(url: str) -> tuple[str, str] | None:

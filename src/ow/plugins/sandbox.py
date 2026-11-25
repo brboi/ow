@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ow.core.plugins import Setting, hookimpl
+from ow.plugin_api import Setting, hookimpl
 
 
 @hookimpl

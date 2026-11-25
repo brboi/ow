@@ -210,7 +210,7 @@ def test_plugins_first_returns_first_answer_and_stops():
 
 
 def test_plugins_settings_lists_every_plugin_in_order():
-    """settings() lists each plugin's enabled flag before its own settings, in plugin order."""
+    """settings() lists ow's own `python.` settings, then each plugin's enabled flag before its own settings, in plugin order."""
     plugin_a = types.ModuleType("plugin_a")
     plugin_b = types.ModuleType("plugin_b")
 
@@ -230,7 +230,13 @@ def test_plugins_settings_lists_every_plugin_in_order():
 
     plugins = load_plugins(builtins=(("a", plugin_a), ("b", plugin_b)))
 
-    assert [s.key for s in plugins.settings()] == ["a.enabled", "b.enabled", "b.setting"]
+    assert [s.key for s in plugins.settings()] == [
+        "python.version",
+        "python.shared_venv",
+        "a.enabled",
+        "b.enabled",
+        "b.setting",
+    ]
 
 
 def test_plugins_call_raises_plugin_error_on_exception():

@@ -4,25 +4,23 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
 
 import tomli_w
 
-from ow.core.plugins import (
+from ow.plugin_api import (
     Diagnostic,
     GeneratedFile,
     SandboxMounts,
     Setting,
+    Workspace,
+    WorkspaceVenv,
     hookimpl,
 )
-from ow.specs.python_env import resolve_workspace_python
-
-if TYPE_CHECKING:
-    from ow.core.workspace import Workspace
-
+from ow.specs.python_env import progress, resolve_workspace_python, run_bootstrap
 
 _FRAGMENT = PurePosixPath("mise/conf.d/00-ow.toml")
 _MISE_MIN_VERSION = (2026, 8, 13)
@@ -41,19 +39,21 @@ def _rooted(path: str) -> str:
 
 @hookimpl
 def ow_settings() -> list[Setting]:
-    """Provide mise settings: python version override and shared virtualenv toggle."""
+    """Declare the two settings that moved to the `python.` namespace, so a config still using them is refused."""
     return [
         Setting(
             key="mise.python",
             type=str,
             default=None,
-            help="Python version for mise (e.g. '3.11', '3.12')",
+            help="Renamed to python.version",
+            renamed_to="python.version",
         ),
         Setting(
             key="mise.shared_venv",
             type=bool,
             default=True,
-            help="Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
+            help="Renamed to python.shared_venv",
+            renamed_to="python.shared_venv",
         ),
     ]
 
@@ -156,8 +156,27 @@ def ow_refreshed(ws: Workspace, owned: tuple[PurePosixPath, ...]) -> None:
 
 
 @hookimpl
+def python_bootstrap(ws: Workspace, venv: WorkspaceVenv, log_to_stderr: bool) -> bool | None:
+    """Install the Python version and let mise create the virtualenv (`[env._.python.venv] create`)."""
+    if shutil.which("mise") is None:
+        return None
+    progress(f"# {ws.name}: preparing Python virtualenv at {venv.path}", log_to_stderr=log_to_stderr)
+    run_bootstrap(["mise", "install"], cwd=ws.root, log_to_stderr=log_to_stderr)
+    run_bootstrap(["mise", "exec", "--", "python", "-c", ""], cwd=ws.root, log_to_stderr=log_to_stderr)
+    return True
+
+
+@hookimpl
+def python_wrap(argv: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Run `argv` under `mise exec` when mise is installed."""
+    if shutil.which("mise") is None:
+        return None
+    return ("mise", "exec", "--", *argv)
+
+
+@hookimpl
 def ow_sandbox_mounts(ws: Workspace) -> SandboxMounts | None:
-    """Expose mise installs/config read-only and keep mise caches inside `/tmp`."""
+    """Expose mise installs/config read-only, keep mise caches inside `/tmp`, and trust the workspace fragment."""
     home = Path(os.environ.get("HOME") or Path.home()).resolve()
     xdg_data = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share")).resolve()
     xdg_config = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config")).resolve()
@@ -176,5 +195,7 @@ def ow_sandbox_mounts(ws: Workspace) -> SandboxMounts | None:
             "MISE_CONFIG_DIR": str(xdg_config / "mise"),
             "MISE_CACHE_DIR": "/tmp/ow-sandbox/mise-cache",
             "MISE_STATE_DIR": "/tmp/ow-sandbox/mise-state",
+            # The sandbox's mise state is empty, so `mise trust` from the host does not apply there.
+            "MISE_TRUSTED_CONFIG_PATHS": str(ws.root / _FRAGMENT),
         },
     )

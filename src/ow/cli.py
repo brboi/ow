@@ -5,11 +5,15 @@ Every Typer signature lives here (a `commands/` module never imports `ow.cli`).
 from __future__ import annotations
 
 import importlib
+import re
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 import typer
+from typer._click.exceptions import ClickException
+from typer._click.exceptions import UsageError as ClickUsageError
 from typer.core import TyperCommand, TyperGroup
 
 from . import __version__, errors, term
@@ -34,8 +38,42 @@ YES_HELP = "Skip the confirmation prompt"
 typer.completion.completion_init()
 
 
-class _RunCommand(TyperCommand):
+# click's marker for a required argument in the usage line (`{WS}`).
+_REQUIRED_MARK = re.compile(r"\{(\w+)\}")
+# typer's type tag after an argument in the help listing (`WS <list[str]>`).
+_TYPE_TAG = re.compile(r" <[^>]*>$")
+
+
+class OwCommand(TyperCommand):
+    """A command whose help names each argument by its metavar alone."""
+
+    def collect_usage_pieces(self, ctx: typer.Context) -> list[str]:
+        return [_REQUIRED_MARK.sub(r"\1", piece) for piece in super().collect_usage_pieces(ctx)]
+
+    def format_options(self, ctx: typer.Context, formatter: Any) -> None:
+        arguments: list[tuple[str, str]] = []
+        options: list[tuple[str, str]] = []
+        for param in self.get_params(ctx):
+            record = param.get_help_record(ctx)
+            if record is None:
+                continue
+            if param.param_type_name == "argument":
+                arguments.append((_TYPE_TAG.sub("", record[0]), record[1]))
+            else:
+                options.append(record)
+        for title, records in (("Arguments", arguments), ("Options", options)):
+            if records:
+                with formatter.section(title):
+                    formatter.write_dl(records)
+
+
+class _PassthroughCommand(OwCommand):
     """Capture everything after `--` as passthrough args before Click parses WS/options."""
+
+    passthrough: ClassVar[str]
+
+    def collect_usage_pieces(self, ctx: typer.Context) -> list[str]:
+        return [*super().collect_usage_pieces(ctx), f"[-- {self.passthrough}]"]
 
     def parse_args(self, ctx: typer.Context, args: list[str]) -> list[str]:
         if "--" in args:
@@ -47,8 +85,16 @@ class _RunCommand(TyperCommand):
         return super().parse_args(ctx, args)
 
 
+class _RunCommand(_PassthroughCommand):
+    passthrough = "ARGS..."
+
+
+class _ExecCommand(_PassthroughCommand):
+    passthrough = "COMMAND..."
+
+
 class OwGroup(TyperGroup):
-    """Custom Typer group that handles no_args_is_help with exit 0 and OwError exceptions."""
+    """Custom Typer group that handles no_args_is_help with exit 0, OwError and usage errors."""
 
     def parse_args(self, ctx: typer.Context, args: list[str]) -> list[str]:
         """Override to handle bare 'ow' (no args) by printing help and exiting with 0.
@@ -60,12 +106,21 @@ class OwGroup(TyperGroup):
             ctx.exit(0)
         return super().parse_args(ctx, args)
 
+    def make_context(self, info_name: str | None, args: list[str], **extra: Any) -> typer.Context:
+        """Override to report a usage error of this group's own arguments as ow does."""
+        try:
+            return super().make_context(info_name, args, **extra)
+        except ClickException as exc:
+            raise typer.Exit(fail_usage(exc)) from None
+
     def invoke(self, ctx: typer.Context) -> None:
-        """Override to turn an OwError into its exit code."""
+        """Override to turn an OwError, or a usage error of a subcommand, into its exit code."""
         try:
             super().invoke(ctx)
         except errors.OwError as exc:
             raise typer.Exit(fail(exc)) from None
+        except ClickException as exc:
+            raise typer.Exit(fail_usage(exc)) from None
 
 
 def _command_module(name: str) -> Any:
@@ -79,6 +134,17 @@ def fail(exc: errors.OwError) -> int:
     return exc.exit_code
 
 
+def fail_usage(exc: ClickException) -> int:
+    """Print a click/typer usage failure like an OwError, after the usage lines that help, and return its exit code."""
+    if isinstance(exc, ClickUsageError) and exc.ctx is not None:
+        ctx = exc.ctx
+        term.err(ctx.get_usage())
+        if ctx.command.get_help_option(ctx) is not None:
+            term.err(f"Try '{ctx.command_path} {ctx.help_option_names[0]}' for help.")
+    term.error(exc.format_message())
+    return exc.exit_code
+
+
 def build_app(plugins: Plugins) -> typer.Typer:
     """Build the Typer application with plugins."""
 
@@ -89,11 +155,12 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     app = typer.Typer(
         cls=OwGroup,
-        help="Ready-to-code Odoo workspaces on git worktrees",
+        help="Ready-to-code Odoo workspaces on git worktrees.",
         no_args_is_help=True,
         add_completion=False,
         rich_markup_mode=None,
     )
+    command = partial(app.command, cls=OwCommand)
 
     @app.callback()
     def app_callback(
@@ -224,7 +291,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     def _setting_keys() -> list[str]:
         try:
-            return [setting.key for setting in plugins.settings()]
+            return [setting.key for setting in plugins.settings() if not setting.renamed_to]
         except Exception:
             return []
 
@@ -246,15 +313,12 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- init ------------------------------------------------------------
 
-    @app.command("init")
+    @command("init")
     def init_cmd(
         specs: list[str] = typer.Argument(
             None,
             metavar="SPEC",
-            help="Spec(s): @18.0, enterprise#12345, a=community#1,enterprise#2, voip",
-        ),
-        branch: str = typer.Option(
-            None, "--branch", metavar="BRANCH", help="Create or check out this branch in every added repo"
+            help="Spec(s): @18.0, enterprise#12345, enterprise@18.0..18.0-fix, a=community#1,enterprise#2, voip",
         ),
         as_name: str = typer.Option(
             None,
@@ -271,7 +335,6 @@ def build_app(plugins: Plugins) -> typer.Typer:
             _command_module("init").run(
                 plugins,
                 tuple(specs or ()),
-                branch=branch,
                 as_name=as_name,
                 dry_run=dry_run,
                 yes=yes,
@@ -280,15 +343,12 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- add -------------------------------------------------------------
 
-    @app.command("add")
+    @command("add")
     def add_cmd(
         specs: list[str] = typer.Argument(
             ...,
             metavar="SPEC",
             help="Repo, PR, or named stack spec to add inside the current workspace",
-        ),
-        branch: str = typer.Option(
-            None, "--branch", metavar="BRANCH", help="Create or check out this branch in every added repo"
         ),
         as_name: str = typer.Option(
             None,
@@ -305,7 +365,6 @@ def build_app(plugins: Plugins) -> typer.Typer:
             _command_module("add").run(
                 plugins,
                 tuple(specs),
-                branch=branch,
                 as_name=as_name,
                 dry_run=dry_run,
                 yes=yes,
@@ -314,7 +373,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- run -------------------------------------------------------------
 
-    @app.command(
+    @command(
         "run",
         cls=_RunCommand,
         context_settings={"allow_extra_args": True, "ignore_unknown_options": False},
@@ -351,7 +410,10 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
-        """Run a workspace (foreground or detached with -d)."""
+        """Run a workspace (foreground or detached with -d).
+
+        Everything after `--` is passed to the runner.
+        """
         git.check_version()
         passthrough = tuple(ctx.meta.get("ow_run_passthrough", ()))
         extra_args = list(ctx.args) + list(passthrough)
@@ -371,7 +433,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- stop ------------------------------------------------------------
 
-    @app.command("stop")
+    @command("stop")
     def stop_cmd(
         ws_names: list[str] = typer.Argument(
             None,
@@ -402,7 +464,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- logs ------------------------------------------------------------
 
-    @app.command("logs")
+    @command("logs")
     def logs_cmd(
         ws_names: list[str] = typer.Argument(
             None,
@@ -419,6 +481,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
             50,
             "-n",
             "--lines",
+            metavar="LINES",
             help="Number of trailing lines to show per log file",
         ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
@@ -435,9 +498,9 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- exec ------------------------------------------------------------
 
-    @app.command(
+    @command(
         "exec",
-        cls=_RunCommand,
+        cls=_ExecCommand,
         context_settings={"allow_extra_args": True, "ignore_unknown_options": False},
     )
     def exec_cmd(
@@ -450,7 +513,10 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
-        """Run a command or shell in a stack's virtualenv."""
+        """Run a command or shell in a stack's virtualenv.
+
+        Everything after `--` is the command; without one, starts a shell.
+        """
         git.check_version()
         if ctx.args:
             hint_tokens = ([ws_name] if ws_name is not None else []) + list(ctx.args)
@@ -470,22 +536,25 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- sandbox ---------------------------------------------------------
 
-    @app.command(
+    @command(
         "sandbox",
-        cls=_RunCommand,
-        context_settings={
-            "allow_extra_args": True,
-            "ignore_unknown_options": False,
-            "allow_interspersed_args": False,
-        },
+        cls=_ExecCommand,
+        context_settings={"allow_extra_args": True, "ignore_unknown_options": False},
     )
     def sandbox_cmd(
         ctx: typer.Context,
+        ws_name: str = typer.Argument(
+            None,
+            metavar="WS",
+            help="Workspace or stack (WS[/STACK]) to sandbox (default: current directory)",
+            autocompletion=complete_workspace,
+        ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
         profile: str = typer.Option(
             None,
+            "-p",
             "--profile",
-            metavar="NAME",
+            metavar="PROFILE",
             help="Harness profile: auto, claude, opencode, codex, pi, omp, or none",
         ),
         ro: list[str] = typer.Option(
@@ -502,15 +571,25 @@ def build_app(plugins: Plugins) -> typer.Typer:
         ),
         dry_run: bool = typer.Option(False, "-n", "--dry-run", help=DRY_RUN_HELP),
     ) -> None:
-        """Run a command or AI harness inside a bubblewrap sandbox."""
+        """Experimental: run a command in a sandbox.
+
+        Runs a command or AI harness inside a bubblewrap sandbox. Everything after `--` is the
+        command; without one, starts a shell.
+        """
         git.check_version()
-        passthrough = tuple(ctx.meta.get("ow_run_passthrough", ()))
-        command = tuple(ctx.args) + passthrough
+        if ctx.args:
+            hint_tokens = ([ws_name] if ws_name is not None else []) + list(ctx.args)
+            hint = " ".join(hint_tokens)
+            raise errors.UsageError(
+                f"unexpected arguments before `--`; pass commands after `--` (e.g. `ow sandbox -- {hint}`)"
+            )
+        command = tuple(ctx.meta.get("ow_run_passthrough", ()))
+        target = _targets(ws_name, workspace)
         _exit(
             _command_module("sandbox").run(
                 plugins,
                 command=command,
-                workspace=workspace,
+                workspace=target[0] if target else None,
                 profile=profile,
                 ro_paths=tuple(ro or ()),
                 rw_paths=tuple(rw or ()),
@@ -524,13 +603,14 @@ def build_app(plugins: Plugins) -> typer.Typer:
     repo_app = typer.Typer(
         cls=OwGroup,
         name="repo",
-        help="Register, list and remove repos",
+        help="Register, list and remove repos.",
         no_args_is_help=True,
         add_completion=False,
         rich_markup_mode=None,
     )
+    repo_command = partial(repo_app.command, cls=OwCommand)
 
-    @repo_app.command("add")
+    @repo_command("add")
     def repo_add(
         name: str = typer.Argument(
             ..., metavar="NAME", help="Repo name", autocompletion=complete_any_repo
@@ -549,7 +629,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         git.check_version()
         _exit(_command_module("repo").add(session, name, url, base=base))
 
-    @repo_app.command("ls")
+    @repo_command("ls")
     def repo_ls(
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
@@ -559,7 +639,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         git.check_version()
         _exit(_command_module("repo").ls(session))
 
-    @repo_app.command("rm")
+    @repo_command("rm")
     def repo_rm(
         name: str = typer.Argument(
             ...,
@@ -585,11 +665,12 @@ def build_app(plugins: Plugins) -> typer.Typer:
             "Bare `ow config` lists every setting with its effective value, its"
             " origin and its help; get, set or unset one with a subcommand."
         ),
-        short_help="Read and write ow settings",
+        short_help="Read and write ow settings.",
         invoke_without_command=True,
         add_completion=False,
         rich_markup_mode=None,
     )
+    config_command = partial(config_app.command, cls=OwCommand)
 
     def _config_context(
         ctx: typer.Context, workspace: str | None, global_: bool
@@ -660,7 +741,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
             _command_module("config").show_all(session, global_=global_, multi_root=multi_root)
         )
 
-    @config_app.command("get")
+    @config_command("get")
     def config_get(
         ctx: typer.Context,
         key: str = typer.Argument(
@@ -677,7 +758,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
             _command_module("config").get(session, key, global_=global_, multi_root=multi_root)
         )
 
-    @config_app.command("set")
+    @config_command("set")
     def config_set(
         ctx: typer.Context,
         key: str = typer.Argument(
@@ -703,7 +784,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
             )
         )
 
-    @config_app.command("unset")
+    @config_command("unset")
     def config_unset(
         ctx: typer.Context,
         key: str = typer.Argument(
@@ -732,7 +813,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- status ----------------------------------------------------------
 
-    @app.command("status")
+    @command("status")
     def status_cmd(
         spec: str = typer.Argument(
             None,
@@ -769,20 +850,14 @@ def build_app(plugins: Plugins) -> typer.Typer:
         root = _single_root(workspace, status_multi)
         _exit(status.run(_checked(root, only), only=_only(only), fetch=fetch, offline=offline))
 
-    # -- retarget --------------------------------------------------------
+    # -- rebase ----------------------------------------------------------
 
-    @app.command("retarget")
-    def retarget_cmd(
-        target_base: str = typer.Argument(
+    @command("rebase")
+    def rebase_cmd(
+        base: str = typer.Argument(
             None,
             metavar="BASE",
-            help="New base ref to retarget onto (shorthand for --base)",
-        ),
-        base: str = typer.Option(
-            None,
-            "--base",
-            metavar="REF",
-            help="Rebase onto this base ref and record it as the new base",
+            help="Change series: rebase onto this base ref and record it as the new base",
         ),
         autostash: bool = typer.Option(
             False, "--autostash", help="Stash modified files before rebasing and pop afterwards"
@@ -795,15 +870,17 @@ def build_app(plugins: Plugins) -> typer.Typer:
         yes: bool = typer.Option(False, "-y", "--yes", help=YES_HELP),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
-        """Guarded replay of each repo onto its base (or a new base ref)."""
-        if target_base is not None and base is not None:
-            raise errors.UsageError("pass either positional BASE or --base, not both")
+        """Update each repo on its base, or change series.
+
+        Without BASE, fetch and rebase every repo on its current base (detached
+        repos advance). With BASE, move every repo to that base and record it.
+        """
         session = _checked(workspace, only)
         _exit(
-            _command_module("retarget").run(
+            _command_module("rebase").run(
                 session,
                 only=_only(only),
-                base=target_base if target_base is not None else base,
+                base=base,
                 autostash=autostash,
                 no_fetch=no_fetch,
                 dry_run=dry_run,
@@ -813,7 +890,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
 
     # -- refresh, files --------------------------------------------------
 
-    @app.command("refresh")
+    @command("refresh")
     def refresh_cmd(
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
     ) -> None:
@@ -822,7 +899,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         root = _single_root(workspace, lambda multi_root: refresh.run_multi(multi_root, plugins))
         _exit(refresh.run(_opened(root)))
 
-    @app.command("files")
+    @command("files")
     def files_cmd(
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
         diff: bool = typer.Option(
@@ -838,7 +915,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         )
         _exit(files.run(_opened(root), diff=diff))
 
-    @app.command("trust")
+    @command("trust")
     def trust_cmd(
         path: str = typer.Argument(
             None,
@@ -852,14 +929,16 @@ def build_app(plugins: Plugins) -> typer.Typer:
             False, "--list", help="List every trusted plugin file and directory"
         ),
         workspace: str = typer.Option(None, "-w", "--workspace", **workspace_option),
+        yes: bool = typer.Option(False, "-y", "--yes", help="Trust the plugin files found without asking"),
     ) -> None:
         """Trust, untrust, or list where in-repo plugins may run from.
 
         Trust is by location, like an editor's workspace trust: a trusted plugin file or a
         trusted directory runs whatever code sits there, including code that arrives later
         (e.g. a PR checked out with `ow add`). Without PATH on a terminal, asks whether to
-        trust the plugin files found, the workspace root, or its parent directory; without a
-        terminal, trusts the plugin files found. Then refreshes the workspace.
+        trust the plugin files found, the workspace root, or its parent directory; with -y,
+        trusts the plugin files found. Without a terminal and without -y, refuses (exit 2).
+        Then refreshes the workspace.
         """
         _exit(
             _command_module("trust").run(
@@ -868,18 +947,19 @@ def build_app(plugins: Plugins) -> typer.Typer:
                 workspace=workspace,
                 untrust=untrust,
                 list_all=list_all,
+                yes=yes,
             )
         )
 
     # -- fleet: ls, cd, shell-init, rm, prune ----------------------------
 
-    @app.command("ls")
+    @command("ls")
     def ls_cmd() -> None:
         """List the known workspaces and their repos or stacks."""
         git.check_version()
         _exit(_command_module("ls").run(plugins))
 
-    @app.command("cd")
+    @command("cd")
     def cd_cmd(
         ws: str = typer.Argument(
             None,
@@ -890,9 +970,18 @@ def build_app(plugins: Plugins) -> typer.Typer:
     ) -> None:
         """Print a workspace or stack path."""
         git.check_version()
-        _exit(_command_module("cd").run(ws))
+        try:
+            code = _command_module("cd").run(ws)
+        except errors.UsageError:
+            if ws is not None:
+                raise
+            # Without WS the only failure is "not inside a workspace", whose generic hint names `-w`, which `cd` lacks.
+            raise errors.UsageError(
+                "not inside an ow workspace; pass a workspace name or path (`ow cd WS`) or run `ow init`"
+            ) from None
+        _exit(code)
 
-    @app.command("shell-init")
+    @command("shell-init")
     def shell_init_cmd(
         shell: str = typer.Argument(..., metavar="SHELL", help="bash, zsh or fish"),
     ) -> None:
@@ -903,7 +992,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
             )
         _exit(_command_module("shell_init").run(shell, app=app))
 
-    @app.command("rm")
+    @command("rm")
     def rm_cmd(
         ws: str = typer.Argument(
             ...,
@@ -922,7 +1011,7 @@ def build_app(plugins: Plugins) -> typer.Typer:
         session = _checked(str(root))
         _exit(_command_module("rm").run(session, dry_run=dry_run, yes=yes))
 
-    @app.command("prune")
+    @command("prune")
     def prune_cmd(
         offline: bool = typer.Option(
             False, "--offline", help="Skip external network lookups (e.g. GitHub merged PRs)"

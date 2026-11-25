@@ -47,16 +47,14 @@ def run(
         locations = tuple(loc for loc in session.locations if not only or loc.name in only)
         facts = gather_all(locations)
 
-    infos = _collect_plugin_status(
-        session.plugins, ws=session.workspace, facts=facts, spec=None, offline=offline
-    )
+    infos = _collect_plugin_status(session, facts=facts, spec=None, offline=offline)
     print_table(session, facts, infos)
     return exit_code
 
 
 def run_spec(session: Session, *, spec: str, offline: bool) -> int:
     """Print what the plugins say about an external SPEC (`enterprise#12345`, a Runbot URL)."""
-    infos = _collect_plugin_status(session.plugins, ws=None, facts=(), spec=spec, offline=offline)
+    infos = _collect_plugin_status(session, facts=(), spec=spec, offline=offline)
     if not infos:
         if offline:
             term.error(f"offline mode prevents inspecting {spec!r}; drop --offline to look it up")
@@ -82,9 +80,12 @@ def _dedupe_services(infos: Sequence[StatusInfo]) -> list[StatusInfo]:
     return result
 
 
-def _stack_note_with_runtime(ws, plugins: Plugins) -> str | None:
+def _stack_note_with_runtime(session: Session) -> str | None:
     """Combine plugin `StackInfo.note` with live detached process PID when running."""
-    note = stack_info(ws, plugins).note
+    ws = session.workspace
+    if ws is None:
+        return None
+    note = stack_info(ws, session.plugins).note
     proc = runtime.running_for_workspace(ws)
     if proc is None:
         return note
@@ -103,28 +104,25 @@ def run_multi(
     target = open_target(multi_root, "multi", plugins)
     multi = target.multi
     assert multi is not None
-    eff_plugins = target.plugins
 
     exit_code = 0
     gathered: list[tuple[Session, tuple[RepoFacts, ...], list[StatusInfo], str | None]] = []
     all_services: list[StatusInfo] = []
 
     for sess in target.sessions:
-        assert sess.workspace is not None
-        ws = sess.workspace
         if fetch:
             _root, facts, failures = fetch_then_gather(sess, (), no_fetch=False, hint=None)
             if any(err is not None for err in failures.values()):
                 exit_code = 1
         else:
             facts = gather_all(sess.locations)
-        infos = _collect_plugin_status(eff_plugins, ws=ws, facts=facts, spec=None, offline=offline)
+        infos = _collect_plugin_status(sess, facts=facts, spec=None, offline=offline)
         all_services.extend(i for i in infos if i.scope == "service")
         non_service = [i for i in infos if i.scope != "service"]
-        gathered.append((sess, facts, non_service, _stack_note_with_runtime(ws, eff_plugins)))
+        gathered.append((sess, facts, non_service, _stack_note_with_runtime(sess)))
 
     services = _dedupe_services(all_services)
-    external_plugins = eff_plugins.external_plugins
+    external_plugins = target.plugins.external_plugins
 
     if sys.stdout.isatty():
         sections = [
@@ -153,13 +151,13 @@ def run_multi(
 
 
 def _collect_plugin_status(
-    plugins: Plugins,
+    session: Session,
     *,
-    ws,
     facts: Sequence[RepoFacts],
     spec: str | None,
     offline: bool,
 ) -> list[StatusInfo]:
+    plugins, ws = session.plugins, session.workspace
     catalog = known_repo_catalog(plugins) if spec is not None else {}
     settings = global_settings(plugins) if spec is not None else (ws.settings if ws is not None else {})
     infos: list[StatusInfo] = []
@@ -252,7 +250,12 @@ def _format_tty_delta(raw: str) -> str:
 
 def _format_tty_upstream(facts: RepoFacts) -> str:
     upstream = facts.upstream
-    if upstream is None or upstream == facts.base:
+    if upstream is None:
+        pending = facts.unpushed_upstream
+        if pending is None or pending == facts.base:
+            return ""
+        return f"{_ansi(pending, '36')} {_ansi('not pushed', '2')}"
+    if upstream == facts.base:
         return ""
     if facts.upstream_ab is None:
         return _ansi(upstream, "36")
@@ -435,7 +438,7 @@ def print_table(
         services = _dedupe_services(infos)
         non_service = [i for i in infos if i.scope != "service"]
         ws = session.workspace
-        note = _stack_note_with_runtime(ws, session.plugins) if ws is not None else None
+        note = _stack_note_with_runtime(session)
         title = ws.name if ws is not None else ""
         section = _build_tty_section(title, note, session, facts, non_service)
         _print_tty_sections([section], services, external_plugins=external_plugins)
@@ -538,7 +541,12 @@ def _base(facts: RepoFacts) -> str:
 
 def _upstream(facts: RepoFacts) -> str:
     upstream = facts.upstream
-    if upstream is None or upstream == facts.base:
+    if upstream is None:
+        pending = facts.unpushed_upstream
+        if pending is None or pending == facts.base:
+            return "(none)"
+        return f"{pending} (not pushed)"
+    if upstream == facts.base:
         return "(none)"
     if facts.upstream_ab is None:
         return upstream

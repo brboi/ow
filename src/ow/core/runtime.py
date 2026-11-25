@@ -119,7 +119,8 @@ def is_alive(proc: RunningProcess) -> bool:
         return False
     if not group_alive(proc.pid):
         return False
-    if proc.starttime is not None and current is not None and current != proc.starttime:
+    # Without a start time on both sides the PID could belong to anything: it is not ours.
+    if proc.starttime is None or current is None or current != proc.starttime:
         return False
     return True
 

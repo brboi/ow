@@ -2,35 +2,118 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ow import term
 from ow.commands import add as add_cmd
 from ow.commands._repos import resolve_base
-from ow.commands._shared import known_repo_catalog, print_dropped, refresh_workspace, remotes_of
+from ow.commands._shared import (
+    known_repo_catalog,
+    print_dropped,
+    refresh_workspace,
+    remotes_of,
+    run_steps,
+)
 from ow.commands._specs import deduplicate_name, parse_unit_spec
 from ow.commands._workspace import (
     AddResult,
     UnitMode,
     UnitResult,
     create_workspace_unit,
+    create_workspace_units,
     report_result,
     resolve_required_spec,
     stack_info,
+    stack_job,
     sync_multi_files,
     unique_setting_values,
 )
-from ow.core import config, git, index, stacks
+from ow.core import bases, config, git, index, stacks
+from ow.core.paths import repos_dir
+from ow.core.plan import GitStep
 from ow.core.plugins import ResolvedSpec
-from ow.core.session import global_settings, open_session, workspace_plugins
+from ow.core.session import (
+    LEGACY_ROOT_KEYS,
+    global_settings,
+    open_session,
+    vars_target,
+    workspace_plugins,
+)
 from ow.core.workspace import build_workspace, derive_repos, find_root
-from ow.errors import UsageError
+from ow.errors import OwError, UsageError
 
 if TYPE_CHECKING:
     from ow.core.plugins import Plugins
+
+
+def _legacy_bases(rejected: Mapping[str, object]) -> dict[str, tuple[str, str]]:
+    """The `[repos]` entries in the ow 3.0.0a1 format: repo -> (qualified base, feature branch).
+
+    That format spelled `<base>..<feature>`; the base now lives in `branch.<feature>.ow-base`
+    and `[repos]` only holds the repo's default base.
+    """
+    legacy: dict[str, tuple[str, str]] = {}
+    for name, raw in rejected.items():
+        if not isinstance(raw, str) or ".." not in raw:
+            continue
+        try:
+            base_text, feature = bases.split_range(raw)
+            if feature is not None:
+                legacy[name] = (bases.parse_base_for(base_text, name), feature)
+        except bases.BaseError:
+            continue
+    return legacy
+
+
+def _migrate_legacy_bases(
+    root: Path, legacy: Mapping[str, tuple[str, str]], *, dry_run: bool
+) -> None:
+    """Record each legacy entry's base as `branch.<feature>.ow-base`, unless that branch has one."""
+    for name, (base, feature) in legacy.items():
+        bare = repos_dir() / f"{name}.git"
+        term.out(f"# {name}: [repos] entry in the 3.0.0a1 format; its base is now {base}")
+        if not git.has_ref(bare, f"refs/heads/{feature}"):
+            term.warn(f"{name}: branch {feature} not found; only the default base {base} is recorded")
+            continue
+        if git.read(["git", "-C", str(bare), "config", "--get", f"branch.{feature}.ow-base"], check=False):
+            continue
+        argv = ("git", "-C", str(bare), "config", f"branch.{feature}.ow-base", base)
+        if run_steps(name, [GitStep(argv)], root=root, dry_run=dry_run) != 0:
+            raise OwError(f"{name}: could not record the base of {feature}")
+
+
+def _legacy_layout(
+    unknown: Mapping[str, object],
+    values: Mapping[str, object],
+    declared: Mapping[str, Any],
+) -> tuple[dict[str, object], set[str]]:
+    """What `ow init` rewrites of an ow 3.0.0a1 or 2.x `.ow/config.toml`: `(moved, forget)`.
+
+    `version` and `templates` go. Each `[vars]` key that is a declared `odoo.<key>` setting moves
+    to `[odoo]` unless `[odoo]` already sets it (its value wins and the `[vars]` one goes);
+    any other `[vars]` key stays: an unknown key like the rest. `moved` maps the new keys to their values and
+    `forget` holds the old keys the rewrite removes.
+    """
+    moved: dict[str, object] = {}
+    forget: set[str] = set()
+    for key, value in unknown.items():
+        if key in LEGACY_ROOT_KEYS:
+            term.out(f"# {key}: removed from .ow/config.toml (ow 3.0.0a1 format)")
+            forget.add(key)
+        elif key.startswith("vars."):
+            target = vars_target(key, value, declared)
+            if target is None:
+                continue  # an unknown key like any other: the session warns about it
+            forget.add(key)
+            if target in values:
+                term.warn(f"{key} dropped: [odoo] already sets {target}")
+            else:
+                term.out(f"# {key} moves to {target}")
+                moved[target] = value
+    return moved, forget
 
 
 def _repair_and_adopt_single(
@@ -46,19 +129,34 @@ def _repair_and_adopt_single(
     config_path = (root.parent / ".ow" / "config.toml") if is_stack else (root / ".ow" / "config.toml")
     is_new_config = not is_stack and not config_path.is_file()
 
+    layer_unknown: Mapping[str, object] = {}
+    root_unknown: Mapping[str, object] = {}
     if is_stack:
-        _ws_layer, stacks_cfg = config.read_multi_config(config_path, declared, remotes_of)
+        ws_layer, stacks_cfg = config.read_multi_config(config_path, declared, remotes_of)
+        root_unknown = ws_layer.unknown
         sc = stacks_cfg.get(root.name)
         accepted = dict(sc.accepted_repos) if sc else {}
+        rejected = dict(sc.rejected_repos) if sc else {}
         ws_values = dict(sc.layer.values) if sc else {}
     elif not is_new_config:
-        ws_layer, accepted, _rejected = config.read_workspace_config(
+        ws_layer, accepted, rejected = config.read_workspace_config(
             config_path, declared, remotes_of
         )
+        layer_unknown = ws_layer.unknown
         ws_values = dict(ws_layer.values)
     else:
         accepted = {}
+        rejected = {}
         ws_values = {}
+
+    legacy = _legacy_bases(rejected)
+    migrated_keys = {f"repos.{name}" for name in legacy}
+    accepted.update({name: base for name, (base, _feature) in legacy.items()})
+    _migrate_legacy_bases(root, legacy, dry_run=dry_run)
+    moved, forget = _legacy_layout(layer_unknown, ws_values, declared)
+    root_only = {key: value for key, value in root_unknown.items() if key in LEGACY_ROOT_KEYS}
+    _no_moves, root_forget = _legacy_layout(root_only, {}, declared)
+    ws_values.update(moved)
 
     if dry_run:
         initial_locations = derive_repos(root, accepted)
@@ -111,7 +209,7 @@ def _repair_and_adopt_single(
             )
 
     locations = derive_repos(root, accepted)
-    changed = is_new_config
+    changed = is_new_config or bool(legacy) or bool(forget) or bool(root_forget)
     for loc in locations:
         if loc.name not in accepted and loc.problem != "forgotten":
             try:
@@ -122,25 +220,30 @@ def _repair_and_adopt_single(
             except UsageError as exc:
                 term.warn(f"{loc.name}: {exc}")
 
-    def write_config() -> None:
+    def write_config(known: Mapping[str, Any] = declared) -> None:
         if is_stack:
             dropped = config.write_stack(
                 config_path,
                 root.name,
                 accepted,
                 ws_values,
-                declared=declared,
+                declared=known,
                 remotes_of=remotes_of,
             )
+            if root_forget:
+                config.update_multi_workspace(
+                    config_path, lambda current: current, declared=known, forget=root_forget
+                )
         else:
-            dropped = config.write_workspace(
+            dropped = config.update_workspace(
                 config_path,
                 accepted,
-                ws_values,
-                declared=declared,
+                lambda _current: ws_values,
+                declared=known,
                 remotes_of=remotes_of,
+                forget=forget,
             )
-        print_dropped(dropped)
+        print_dropped({key: value for key, value in dropped.items() if key not in migrated_keys})
 
     if changed:
         write_config()
@@ -155,9 +258,8 @@ def _repair_and_adopt_single(
     if is_new_config:
         unique_values = unique_setting_values(session, plugins)
         if unique_values:
-            declared.update(session.declared)  # the keys of in-repo plugins, or writing the config drops them
             ws_values.update(unique_values)
-            write_config()
+            write_config(session.declared)  # the keys of in-repo plugins are known to the session
             changed = True
             session = session.reload()
     for warning in session.warnings:
@@ -195,7 +297,6 @@ def run(
     plugins: Plugins,
     specs: Sequence[str] = (),
     *,
-    branch: str | None = None,
     as_name: str | None = None,
     dry_run: bool = False,
     yes: bool = False,
@@ -207,7 +308,6 @@ def run(
         plugins,
         target_dir,
         specs,
-        branch=branch,
         as_name=as_name,
         dry_run=dry_run,
         yes=yes,
@@ -220,7 +320,6 @@ def _execute(
     target_dir: Path,
     specs: Sequence[str],
     *,
-    branch: str | None,
     as_name: str | None,
     dry_run: bool,
     yes: bool,
@@ -248,7 +347,6 @@ def _execute(
                 plugins,
                 specs,
                 cwd=target_dir,
-                branch=branch,
                 as_name=as_name,
                 dry_run=dry_run,
                 yes=yes,
@@ -296,8 +394,8 @@ def _execute(
                     resume_plugins,
                     root=target_dir,
                     resolved=resolved,
-                    mode=UnitMode.mono(allow_existing_dir=True, allow_attach=True, dry_run=dry_run),
-                    branch=branch,
+                    mode=UnitMode.mono(allow_existing_dir=True, allow_attach=True),
+                    dry_run=dry_run,
                 )
                 return AddResult(workspaces=(created,), exit_code=code)
 
@@ -306,7 +404,6 @@ def _execute(
             plugins,
             specs,
             cwd=target_dir,
-            branch=branch,
             as_name=as_name,
             dry_run=dry_run,
             yes=yes,
@@ -358,14 +455,14 @@ def _execute(
     # 4. Single unnamed spec -> mono-stack workspace in `target_dir`
     if len(parsed) == 1 and parsed[0][0] is None:
         _name, resolved = parsed[0]
-        created, code = create_workspace_unit(
+        created_one, code = create_workspace_unit(
             plugins,
             root=target_dir,
             resolved=resolved,
-            mode=UnitMode.mono(allow_existing_dir=True, dry_run=dry_run),
-            branch=branch,
+            mode=UnitMode.mono(allow_existing_dir=True),
+            dry_run=dry_run,
         )
-        return AddResult(workspaces=(created,), exit_code=code)
+        return AddResult(workspaces=(created_one,), exit_code=code)
 
     # 5. Multi-stack workspace: 1+ named specs or 2+ specs
     taken: set[str] = set()
@@ -377,29 +474,22 @@ def _execute(
         else:
             planned.append((deduplicate_name(resolved.name, taken), resolved))
 
-    created_list: list[UnitResult] = []
-    exit_code = 0
     ws_files = ()
     pending: list[dict[str, object]] = []
+    jobs = [stack_job(target_dir, stack_name, resolved) for stack_name, resolved in planned]
+    created: tuple[UnitResult, ...] = ()
+    exit_code = 0
     try:
-        for stack_name, resolved in planned:
-            created, code = create_workspace_unit(
-                plugins,
-                root=target_dir / stack_name,
-                resolved=resolved,
-                mode=UnitMode.stack(target_dir, dry_run=dry_run),
-                branch=branch,
-                pending=pending,
-            )
-            created_list.append(created)
-            exit_code = max(exit_code, code)
+        created, exit_code = create_workspace_units(
+            plugins, jobs, dry_run=dry_run, pending=pending
+        )
     finally:
-        if not dry_run and created_list:
+        if not dry_run and any(stacks.is_stack_dir(target_dir / name) for name, _ in planned):
             index.add(target_dir)
             ws_files = sync_multi_files(target_dir, plugins)
 
     return AddResult(
-        workspaces=tuple(created_list),
+        workspaces=created,
         workspace_files=ws_files,
         exit_code=exit_code,
     )

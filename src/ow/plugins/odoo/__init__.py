@@ -8,29 +8,26 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from ow.core.plugins import (
+from ow.plugin_api import (
     Diagnostic,
+    EditorContribution,
     GeneratedFile,
     KnownRepo,
+    PythonEnvironment,
     ResolvedRepo,
     ResolvedSpec,
     RunCommand,
     SandboxMounts,
     Setting,
     StackInfo,
+    Workspace,
     hookimpl,
 )
 from ow.plugins._odoo_repos import ODOO_REPOS
 from ow.plugins.odoo import files, runner, stacks, targets
 from ow.plugins.odoo import settings as odoo_settings
 from ow.plugins.odoo.release import get_core
-from ow.specs.editors import EditorContribution
-from ow.specs.python_env import PythonEnvironment
-
-if TYPE_CHECKING:
-    from ow.core.workspace import Workspace
 
 
 @hookimpl
@@ -140,8 +137,10 @@ def ow_stack_info(ws: Workspace) -> StackInfo | None:
 
 
 @hookimpl
-def ow_runner(ws: Workspace, args: tuple[str, ...], answers: Callable[[str], list]) -> RunCommand | None:
-    """Run Odoo locally using the workspace's resolved Python virtualenv (or `mise exec`)."""
+def ow_runner(ws: Workspace | None, args: tuple[str, ...], answers: Callable[..., list]) -> RunCommand | None:
+    """Run one Odoo stack locally in its Python virtualenv; nothing for a multi-stack root as a whole."""
+    if ws is None:
+        return None
     core, core_diagnostics = get_core(ws)
     if core_diagnostics or core is None:
         return None

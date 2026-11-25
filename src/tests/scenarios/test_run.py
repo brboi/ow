@@ -467,3 +467,14 @@ def test_run_refreshes_stale_generated_files_when_postgres_port_changes(lab, mon
     res2 = lab.ow("run", cwd=ws)
     assert res2.exit_code == 0, res2.stderr + res2.stdout
     assert "# refreshed" not in res2.stdout
+
+
+def test_run_treats_a_token_naming_no_indexed_workspace_as_a_spec_whatever_it_looks_like(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    init_workspace(lab, "community", name="known")
+
+    # Every token that names no indexed workspace or stack is a SPEC, with or without a symbol in it.
+    for token in ("enterprise#123", "https://github.com/odoo/odoo/pull/1", "nosuchworkspace", "a/b"):
+        res = lab.ow("run", token, cwd=lab.home)
+        assert res.exit_code == 2, token
+        assert f"unknown workspace or stack {token!r}; did you mean `ow run --tmp {token}`" in res.stderr

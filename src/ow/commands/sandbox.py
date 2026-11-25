@@ -1,4 +1,4 @@
-"""`ow sandbox` — run a command or AI agent harness inside a bubblewrap sandbox."""
+"""`ow sandbox` (experimental) — run a command or AI agent harness inside a bubblewrap sandbox."""
 
 from __future__ import annotations
 
@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING
 from ow import term
 from ow.commands._runtime import default_shell, open_target, run_foreground
 from ow.commands._shared import prepare_services
+from ow.core import trust
 from ow.core.plugins import SandboxMounts
+from ow.core.refresh import read_lock
 from ow.core.session import global_settings
 from ow.core.workspace import RepoLocation, Workspace, resolve_target_root
-from ow.errors import UsageError
+from ow.errors import OwError, UsageError
 
 if TYPE_CHECKING:
     from ow.core.plugins import Plugins
@@ -190,8 +192,17 @@ _SECRET_VAR_TOKENS: tuple[str, ...] = (
     "PASSWORD",
     "PASSWD",
     "CREDENTIAL",
-    "AUTH",
 )
+
+# Too short to match as a substring (`GIT_AUTHOR_NAME` is not a secret): only whole `_`-separated words.
+_SECRET_VAR_WORDS: tuple[str, ...] = ("AUTH", "AUTHORIZATION")
+
+# Files git reads from a worktree's admin dir that must not change under a session.
+_WORKTREE_PINNED_FILES: tuple[str, ...] = ("commondir", "gitdir")
+
+EXPERIMENTAL_NOTICE = "# experimental: `ow sandbox` may change or break during 3.x; read the docs before relying on it"
+
+_DISABLED = "`ow sandbox` is disabled for this workspace (sandbox.enabled = false)"
 
 
 @dataclass(frozen=True)
@@ -208,8 +219,30 @@ class SandboxPlan:
 
 
 def _is_secret_var(name: str) -> bool:
+    """Whether `name` looks like it holds a secret: a secret-ish substring, or `AUTH` as a whole word."""
     upper = name.upper()
-    return any(token in upper for token in _SECRET_VAR_TOKENS)
+    return any(token in upper for token in _SECRET_VAR_TOKENS) or any(
+        word in _SECRET_VAR_WORDS for word in upper.split("_")
+    )
+
+
+def _locked_files(workspaces: Sequence[Workspace], root: Path) -> list[Path]:
+    """Regular files under `root` that the rendered lock of `workspaces` records and that exist on disk."""
+    lock_roots = {ws.root.resolve().parent if ws.is_stack else ws.root.resolve() for ws in workspaces}
+    files: list[Path] = []
+    for lock_root in sorted(lock_roots):
+        for rel in read_lock(lock_root):
+            path = lock_root / rel
+            # A key with `..` or a symlinked component resolves elsewhere: never mount what it escapes to.
+            if path.resolve() == path and path.is_file() and path.is_relative_to(root) and path not in files:
+                files.append(path)
+    return files
+
+
+def _trusted_plugin_files(locations: Sequence[RepoLocation], root: Path) -> list[Path]:
+    """In-repo plugin files of `locations` that `ow trust` approved, under `root`."""
+    found = trust.discover_repo_plugins([(loc.name, loc.path) for loc in locations])
+    return [item.path for item in found if item.path.is_relative_to(root) and trust.is_trusted(item.path)]
 
 
 def _host_home(host_env: Mapping[str, str]) -> Path:
@@ -381,10 +414,6 @@ def _append_system_mounts(args: list[str]) -> None:
         if Path(optional_ro).is_dir():
             args.extend(["--ro-bind", optional_ro, optional_ro])
 
-    # Host PostgreSQL Unix socket (a host Postgres, i.e. `postgres.enabled = false`, is reachable only through it).
-    if Path("/var/run/postgresql").is_dir():
-        args.extend(["--ro-bind", "/var/run/postgresql", "/var/run/postgresql"])
-
 
 def _build_env(
     *,
@@ -534,19 +563,13 @@ def build_sandbox_plan(
     for p in plugin_rw:
         _append_rw_path(args, p, seen_before_ws)
 
-    # 5. Harness profile mounts
+    # 5. Harness profile mounts: only paths that exist on the host. Nothing is created there: $HOME is a
+    #    tmpfs, so a harness creates whatever state it needs itself (it is lost when the session ends).
     if profile is not None:
         for raw in profile.ro_paths:
             _append_ro_path(args, _expand_user_path(raw, home, resolved_root), seen_before_ws)
-        for raw in profile.rw_dirs:
-            d = _expand_user_path(raw, home, resolved_root)
-            if not d.exists():
-                ensure_dirs.append(d)
-            _append_rw_path(args, d, seen_before_ws, allow_missing=True)
-        for raw in profile.rw_files:
-            f = _expand_user_path(raw, home, resolved_root)
-            if f.exists():
-                _append_rw_path(args, f, seen_before_ws)
+        for raw in (*profile.rw_dirs, *profile.rw_files):
+            _append_rw_path(args, _expand_user_path(raw, home, resolved_root), seen_before_ws)
 
     # Auto-mount the resolved executable if it lives inside $HOME (e.g. ~/.local/bin/<tool>).
     cmd_bin = shutil.which(effective_cmd[0], path=env_source.get("PATH"))
@@ -555,17 +578,13 @@ def build_sandbox_plan(
         if cmd_path.is_relative_to(home) or cmd_path.resolve().is_relative_to(home):
             _append_ro_path(args, cmd_path, seen_before_ws)
 
-    # 6. Workspace root (RW) + RO overlays for `.ow/` and `<repo>/.git`
+    # 6. Workspace root (RW) + RO overlays: `.ow/`, `<repo>/.git`, every file ow generated
+    #    (rendered lock) and the trusted in-repo plugin files, so a session cannot rewrite what
+    #    ow or the user's tools will run later.
     args.extend(["--bind", str(resolved_root), str(resolved_root)])
 
-    ow_dirs_seen: set[Path] = set()
-    for ws in workspaces:
-        ow_dir = ws.root.resolve() / ".ow"
-        if ow_dir.exists() and ow_dir not in ow_dirs_seen:
-            ow_dirs_seen.add(ow_dir)
-            args.extend(["--ro-bind", str(ow_dir), str(ow_dir)])
     root_ow = resolved_root / ".ow"
-    if root_ow.exists() and root_ow not in ow_dirs_seen:
+    if root_ow.exists():
         args.extend(["--ro-bind", str(root_ow), str(root_ow)])
 
     for loc in locations:
@@ -573,8 +592,13 @@ def build_sandbox_plan(
         if git_file.exists():
             args.extend(["--ro-bind", str(git_file), str(git_file)])
 
+    protected: set[tuple[str, str]] = set()
+    for protected_file in (*_locked_files(workspaces, resolved_root), *_trusted_plugin_files(locations, resolved_root)):
+        _append_ro_path(args, protected_file, protected)
+
     # 7. Partial-RW shared bare repos: bare root, config, hooks, and sibling worktrees stay RO;
-    #    objects/, refs/, logs/, and this workspace's worktrees/<id>/ are RW.
+    #    objects/, refs/, logs/, and this workspace's worktrees/<id>/ are RW, except that
+    #    worktrees/<id>/{commondir,gitdir} are RO again.
     bare_worktrees: dict[Path, list[str]] = {}
     for loc in locations:
         bare = loc.bare.resolve()
@@ -596,8 +620,14 @@ def build_sandbox_plan(
         args.extend(["--bind", str(logs_dir), str(logs_dir)])
         for wt_id in wt_ids:
             wt_dir = bare / "worktrees" / wt_id
-            if wt_dir.is_dir():
-                args.extend(["--bind", str(wt_dir), str(wt_dir)])
+            if not wt_dir.is_dir():
+                continue
+            args.extend(["--bind", str(wt_dir), str(wt_dir)])
+            # `commondir` and `gitdir` decide which repository and checkout git resolves: they stay RO.
+            for name in _WORKTREE_PINNED_FILES:
+                pinned = wt_dir / name
+                if pinned.is_file():
+                    args.extend(["--ro-bind", str(pinned), str(pinned)])
 
     # 8. User-configured and CLI extra mounts (applied last so explicit overrides win)
     seen_extra: set[tuple[str, str]] = set()
@@ -635,7 +665,6 @@ def build_sandbox_plan(
         "--unshare-cgroup-try",
         "--share-net",
         "--die-with-parent",
-        "--new-session",
         "--chdir",
         str(chdir),
         "--clearenv",
@@ -694,23 +723,30 @@ def _load_target(
     tuple[RepoLocation, ...],
     list[Mapping[str, object]],
 ]:
-    """Resolve mono-stack workspace, stack, or multi-stack root into plugins, workspaces & locations."""
+    """Resolve mono-stack workspace, stack, or multi-stack root into plugins, workspaces & locations.
+
+    Raises `OwError` when `sandbox.enabled` is false for the target (globally, for a multi-stack root).
+    """
     root, kind = resolve_target_root(workspace, cwd=cwd)
     target = open_target(root, kind, plugins)
     eff = target.plugins
+    if target.multi is not None and not eff.is_enabled("sandbox", None):
+        raise OwError(_DISABLED)
+    for sess in target.sessions:
+        if sess.workspace is not None and not eff.is_enabled("sandbox", sess.workspace):
+            raise OwError(_DISABLED)
+
     settings_layers: list[Mapping[str, object]] = []
     if target.multi is None:
         ws = target.workspace
-        if eff.is_enabled("sandbox", ws):
-            settings_layers.append(ws.settings)
+        settings_layers.append(ws.settings)
         return eff, ws.root, ws.name, (ws,), target.sessions[0].locations, settings_layers
 
-    if eff.is_enabled("sandbox", None):
-        settings_layers.append(global_settings(eff))
+    settings_layers.append(global_settings(eff))
     locations: list[RepoLocation] = []
     for sess in target.sessions:
         locations.extend(sess.locations)
-        if sess.workspace is not None and eff.is_enabled("sandbox", sess.workspace):
+        if sess.workspace is not None:
             settings_layers.append(sess.workspace.settings)
     return eff, target.multi.root, target.multi.name, target.multi.stacks, tuple(locations), settings_layers
 
@@ -731,6 +767,11 @@ def run(
     if sys.platform != "linux":
         raise UsageError("`ow sandbox` requires Linux (bubblewrap `bwrap`)")
 
+    base_cwd = (cwd or Path.cwd()).resolve()
+    plugins, target_root, target_name, workspaces, locations, settings_layers = _load_target(
+        workspace, plugins, base_cwd
+    )
+
     bwrap_bin = shutil.which("bwrap")
     if bwrap_bin is None:
         if dry_run:
@@ -741,11 +782,6 @@ def run(
                 "bubblewrap (`bwrap`) not found on PATH; install it via your package manager "
                 "(e.g. `sudo apt install bubblewrap` or `sudo pacman -S bubblewrap`)"
             )
-
-    base_cwd = (cwd or Path.cwd()).resolve()
-    plugins, target_root, target_name, workspaces, locations, settings_layers = _load_target(
-        workspace, plugins, base_cwd
-    )
 
     plan = build_sandbox_plan(
         target_root=target_root,
@@ -763,6 +799,7 @@ def run(
         bwrap_bin=bwrap_bin,
     )
 
+    print(EXPERIMENTAL_NOTICE, file=sys.stderr)
     if dry_run:
         term.out(format_dry_run(plan))
         return 0

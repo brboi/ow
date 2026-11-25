@@ -6,7 +6,7 @@ import json
 import shutil
 
 from ow.core.paths import repos_dir
-from tests.conftest import add_repo, file_url, setup_pr_repo
+from tests.conftest import add_repo, file_url, git_ok, setup_pr_repo
 
 
 def test_init_empty_creates_empty_workspace(lab):
@@ -475,3 +475,291 @@ def test_init_suffixes_the_db_name_when_another_workspace_resolves_to_the_same_o
     assert lab.ow("config", "get", "odoo.db_name", cwd=third).stdout.strip() == "voip-3"
     assert 'db_name = "voip-2"' in (second / ".ow" / "config.toml").read_text()
     assert "db_name = voip-2" in (second / "odoorc").read_text()
+
+
+def test_init_migrates_a_workspace_created_by_3_0_0a1(lab):
+    """Q18: `[repos]` in the `<base>..<feature>` format becomes the default base, and `ow-base` lands on the branch."""
+    import tomllib
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = lab.home / "from-a1"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+    bare = repos_dir() / "community.git"
+    lab.git(ws / "community", "switch", "--no-track", "-c", "18.0-mine", "origin/18.0")
+    assert not git_ok(bare, "config", "--get", "branch.18.0-mine.ow-base")
+    config = ws / ".ow" / "config.toml"
+    config.write_text('version = 2\n\n[repos]\ncommunity = "18.0..18.0-mine"\n')
+
+    refused = lab.ow("status", cwd=ws)
+    assert "run `ow init` to migrate it" in refused.stderr
+    assert refused.stderr.count("older ow format (version)") == 1
+
+    dry = lab.ow("init", "-n", cwd=ws)
+    assert dry.exit_code == 0, dry.stderr + dry.stdout
+    assert "# version: removed" in dry.stdout
+    assert "branch.18.0-mine.ow-base origin/18.0" in dry.stdout
+    assert config.read_text().startswith("version = 2")
+
+    res = lab.ow("init", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert tomllib.loads(config.read_text()) == {"repos": {"community": "origin/18.0"}}
+    assert lab.git(bare, "config", "branch.18.0-mine.ow-base") == "origin/18.0"
+    assert "dropped repos.community" not in res.stderr
+    assert "3.0.0a1" not in lab.ow("status", cwd=ws).stderr
+
+
+def test_init_dry_run_migration_changes_nothing(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = lab.home / "from-a1-dry"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+    lab.git(ws / "community", "switch", "--no-track", "-c", "18.0-mine", "origin/18.0")
+    config = ws / ".ow" / "config.toml"
+    legacy = 'version = 2\n\n[repos]\ncommunity = "18.0..18.0-mine"\n'
+    config.write_text(legacy)
+
+    res = lab.ow("init", "-n", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "branch.18.0-mine.ow-base origin/18.0" in res.stdout
+    assert config.read_text() == legacy
+    assert not git_ok(repos_dir() / "community.git", "config", "--get", "branch.18.0-mine.ow-base")
+
+
+def test_init_multi_stack_spells_a_base_and_branch_per_stack(lab):
+    """Q24: `odoo=@18.0..18.0-fix iap=iap@18.0..topic` gives each stack its branches over a base."""
+    import tomllib
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    add_repo(lab, "iap", {"18.0": {"iap_mod/__manifest__.py": "{}"}})
+    root = lab.home / "per-stack"
+    root.mkdir(parents=True)
+
+    res = lab.ow("init", "odoo=@18.0..18.0-fix", "iap=iap@18.0..topic", cwd=root)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    for repo in ("community", "enterprise"):
+        assert lab.git(root / "odoo" / repo, "branch", "--show-current") == "18.0-fix"
+        bare = repos_dir() / f"{repo}.git"
+        assert lab.git(bare, "config", "branch.18.0-fix.ow-base") == "origin/18.0"
+        assert lab.git(bare, "config", "branch.18.0-fix.remote") == "origin"
+        assert lab.git(bare, "config", "branch.18.0-fix.merge") == "refs/heads/18.0-fix"
+    assert lab.git(root / "iap" / "iap", "branch", "--show-current") == "topic"
+    assert lab.git(repos_dir() / "iap.git", "config", "branch.topic.ow-base") == "origin/18.0"
+    stacks = tomllib.loads((root / ".ow" / "config.toml").read_text())["stacks"]
+    assert stacks["odoo"]["repos"]["community"] == "origin/18.0"
+    assert stacks["iap"]["repos"]["iap"] == "origin/18.0"
+
+
+def test_init_spells_a_base_and_branch_in_a_mono_stack(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    remote = add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    ws = lab.home / "mono-range"
+    ws.mkdir(parents=True)
+
+    res = lab.ow("init", "community@18.0..18.0-mine,enterprise@18.0..18.0-mine", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert lab.git(ws / "enterprise", "branch", "--show-current") == "18.0-mine"
+    assert git_ok(ws / "enterprise", "push")
+    assert git_ok(remote, "rev-parse", "--verify", "refs/heads/18.0-mine")
+
+
+def test_init_refuses_malformed_ranges_before_creating_anything(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = lab.home / "bad-range"
+    ws.mkdir(parents=True)
+
+    for spec in ("community@..topic", "community@18.0..", "@18.0..", "community@18.0..-x"):
+        res = lab.ow("init", spec, cwd=ws)
+        assert res.exit_code == 2, spec
+    assert list(ws.iterdir()) == []
+
+
+def test_init_refuses_the_branch_option_it_no_longer_has(lab):
+    ws = lab.home / "no-branch-option"
+    ws.mkdir(parents=True)
+
+    assert lab.ow("init", "--branch", "x", cwd=ws).exit_code == 2
+    assert lab.ow("add", "--branch", "x", "community", cwd=ws).exit_code == 2
+
+
+def test_init_plans_every_stack_before_touching_any(lab):
+    """Q11: a refusal in the second stack leaves the first one uncreated, nothing cloned or added."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    root = lab.home / "all-or-nothing"
+    root.mkdir(parents=True)
+    (root / "second").mkdir()
+    (root / "second" / "stray.txt").write_text("a directory ow did not create\n")
+
+    res = lab.ow("init", "first=community@18.0", "second=community@18.0", cwd=root)
+
+    assert res.exit_code == 2
+    assert not (root / "first").exists()
+    assert not (root / ".ow").exists()
+
+
+def test_a_failed_repo_undoes_a_new_workspace_and_keeps_an_existing_one(lab, tmp_path):
+    """The plan runs as one batch: a repo that cannot be cloned rolls a new workspace back whole."""
+    from ow.core import index
+    from tests.conftest import route_github
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    route_github(odoo=tmp_path / "nowhere")  # `upgrade` is a known repo whose URL leads nowhere
+    ws = lab.home / "fails-new"
+    ws.mkdir(parents=True)
+
+    res = lab.ow("init", "community@18.0,upgrade", cwd=ws)
+
+    assert res.exit_code == 1
+    assert not (ws / "community").exists()
+    assert not (ws / ".ow").exists()
+    assert index.read() == ()
+    listing = lab.git(repos_dir() / "community.git", "worktree", "list", "--porcelain")
+    assert str(ws) not in listing
+    assert not (repos_dir() / "upgrade.git").exists()
+
+    keep = lab.home / "fails-existing"
+    keep.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=keep).exit_code == 0
+
+    again = lab.ow("add", "upgrade", cwd=keep)
+
+    assert again.exit_code == 1
+    assert (keep / "community" / "odoo-bin").is_file()
+    assert not (keep / "upgrade").exists()
+    assert "upgrade" not in (keep / ".ow" / "config.toml").read_text()
+
+
+def test_add_puts_several_specs_into_one_plan_and_refuses_a_repo_given_twice(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(lab, "upgrade", {"18.0": {"migrations/u.py": "u = 1\n"}})
+    add_repo(lab, "iap", {"18.0": {"iap_mod/__manifest__.py": "{}"}})
+    ws = lab.home / "several-specs"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+
+    twice = lab.ow("add", "upgrade@18.0", "upgrade@18.0..again", cwd=ws)
+    assert twice.exit_code == 2
+    assert "given more than once" in twice.stderr
+    assert not (ws / "upgrade").exists()
+
+    res = lab.ow("add", "upgrade@18.0", "iap@18.0", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert (ws / "upgrade" / "migrations" / "u.py").is_file()
+    assert (ws / "iap" / "iap_mod" / "__manifest__.py").is_file()
+
+
+def test_an_interrupted_init_leaves_no_worktree_behind(lab, monkeypatch, tmp_path):
+    """Ctrl+C in the middle of the batch removes what the plan already added, as a failure does."""
+    from ow.commands import _workspace
+    from tests.conftest import route_github
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    route_github(odoo=tmp_path / "nowhere")
+
+    def interrupted(name, url):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_workspace, "ensure_bare", interrupted)
+    ws = lab.home / "ctrl-c"
+    ws.mkdir(parents=True)
+
+    res = lab.ow("init", "community@18.0,upgrade", cwd=ws)
+
+    assert res.exit_code != 0
+    assert list(ws.iterdir()) == []
+    listing = lab.git(repos_dir() / "community.git", "worktree", "list", "--porcelain")
+    assert str(ws) not in listing
+
+
+_V1_CONFIG = """version = 1
+templates = ["odoorc", "launch.json"]
+
+[vars]
+http_port = 8070
+db_host = "db.local"
+db_port = 5433
+db_user = "from-vars"
+db_password = "pw"
+admin_passwd = "admin"
+smtp_server = "mail.local"
+smtp_port = 1025
+custom_thing = "kept"
+
+[odoo]
+db_user = "already-set"
+"""
+
+
+def test_init_migrates_a_v1_workspace_config(lab):
+    """Q18: `version`, `templates` go; `[vars]` keys that are `odoo.*` settings move, the rest stay."""
+    import tomllib
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = lab.home / "from-v1"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+    config = ws / ".ow" / "config.toml"
+    config.write_text(_V1_CONFIG)
+
+    outside = lab.ow("status", cwd=ws)
+    assert outside.stderr.count("older ow format") == 1
+    assert "run `ow init` to migrate it" in outside.stderr
+    older = outside.stderr.split("older ow format (")[1].split(")")[0]
+    assert "vars.custom_thing" not in older  # `ow init` does not migrate it: no advice to run it
+    assert "vars.http_port" in older
+    assert "unknown setting vars.custom_thing" in outside.stderr
+
+    dry = lab.ow("init", "-n", cwd=ws)
+
+    assert dry.exit_code == 0, dry.stderr + dry.stdout
+    assert "# version: removed" in dry.stdout
+    assert "# templates: removed" in dry.stdout
+    assert "# vars.http_port moves to odoo.http_port" in dry.stdout
+    assert "vars.db_user dropped: [odoo] already sets odoo.db_user" in dry.stderr
+    assert config.read_text() == _V1_CONFIG
+
+    res = lab.ow("init", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert tomllib.loads(config.read_text()) == {
+        "repos": {"community": "origin/18.0"},
+        "odoo": {
+            "http_port": 8070,
+            "db_host": "db.local",
+            "db_port": 5433,
+            "db_user": "already-set",
+            "db_password": "pw",
+            "admin_passwd": "admin",
+            "smtp_server": "mail.local",
+            "smtp_port": 1025,
+        },
+        "vars": {"custom_thing": "kept"},
+    }
+    after = lab.ow("status", cwd=ws).stderr
+    assert "older ow format" not in after  # nothing left for `ow init` to do: no loop
+    assert "unknown setting vars.custom_thing" in after
+    assert lab.ow("config", "get", "odoo.http_port", cwd=ws).stdout.strip() == "8070"
+
+
+def test_init_migrates_the_version_key_of_a_multi_stack_root(lab):
+    import tomllib
+
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    root = lab.home / "multi-a1"
+    root.mkdir(parents=True)
+    assert lab.ow("init", "one=community@18.0", "two=community@18.0", cwd=root).exit_code == 0
+    config = root / ".ow" / "config.toml"
+    config.write_text("version = 2\n\n" + config.read_text())
+
+    res = lab.ow("init", cwd=root)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    data = tomllib.loads(config.read_text())
+    assert "version" not in data
+    assert set(data["stacks"]) == {"one", "two"}

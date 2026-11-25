@@ -7,7 +7,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-from ow.core import paths
+from ow.core import container_engine, paths
 from ow.core.workspace import Workspace
 from ow.plugins import _containers as containers
 from ow.plugins import mailsink, postgres
@@ -37,7 +37,7 @@ def test_postgres_before_run_creates_network_postgres_and_pgweb(monkeypatch):
     assert running["ow-pgweb"] == {8081: 8081}
     assert any(c[:3] == ["docker", "network", "create"] for c in calls)
     pg_run = next(c for c in calls if c[:2] == ["docker", "run"] and "ow-postgres" in c)
-    assert "POSTGRES_USER=postgres" in pg_run
+    assert "POSTGRES_USER=postgres" not in pg_run
     assert "0.0.0.0:5432:5432" in pg_run
     pgweb_run = next(c for c in calls if c[:2] == ["docker", "run"] and "ow-pgweb" in c)
     assert "127.0.0.1:8081:8081" in pgweb_run
@@ -234,24 +234,56 @@ def test_running_postgres_container_recreated_when_bind_address_changes(monkeypa
     assert running["ow-postgres"] == {5432: 5433}
 
 
+def _state_file() -> Path:
+    return paths.state_dir() / "postgres-admin-password"
+
+
 def _state_password() -> str:
-    return paths.postgres_admin_password_file().read_text(encoding="utf-8").strip()
+    return _state_file().read_text(encoding="utf-8").strip()
+
+
+def _spy_env_files(monkeypatch) -> dict[str, tuple[int, str, Path]]:
+    """Record, per container name, the mode and content of the `--env-file` a `run` was given."""
+    seen: dict[str, tuple[int, str, Path]] = {}
+    inner = containers.subprocess.run
+
+    def spy(argv, **kwargs):
+        if "--env-file" in argv:
+            path = Path(argv[argv.index("--env-file") + 1])
+            seen[argv[argv.index("--name") + 1]] = (
+                stat.S_IMODE(path.stat().st_mode),
+                path.read_text(encoding="utf-8"),
+                path,
+            )
+        return inner(argv, **kwargs)
+
+    monkeypatch.setattr(containers.subprocess, "run", spy)
+    return seen
 
 
 def test_new_postgres_container_gets_random_superuser_password_from_state(monkeypatch):
     calls, _running = make_fake_engine(monkeypatch)
+    env_files = _spy_env_files(monkeypatch)
     monkeypatch.setattr(containers, "is_port_free", lambda port, host="127.0.0.1": True)
     ws = Workspace(root=Path("/tmp/ws"), name="ws", repos=(), settings={"postgres.pgweb": False})
 
     postgres.ow_before_run(ws, (ws,))
 
-    state_file = paths.postgres_admin_password_file()
+    state_file = _state_file()
     secret = _state_password()
     assert len(secret) >= 32
     assert secret != "odoo"
     assert stat.S_IMODE(state_file.stat().st_mode) == 0o600
+    # The secret reaches the container through a 0600 env file, never through the command line.
     pg_run = next(c for c in calls if c[:2] == ["docker", "run"] and "ow-postgres" in c)
-    assert f"POSTGRES_PASSWORD={secret}" in pg_run
+    assert not any(secret in token for token in pg_run)
+    assert "-e" not in pg_run
+    mode, content, env_path = env_files["ow-postgres"]
+    assert mode == 0o600
+    assert f"POSTGRES_PASSWORD={secret}\n" in content
+    assert "POSTGRES_USER=postgres\n" in content
+    # ... and the file is gone once the container exists.
+    assert not env_path.exists()
     # The password is generated once: a later start reuses it.
     postgres.ow_before_run(ws, (ws,))
     assert _state_password() == secret
@@ -300,15 +332,50 @@ def test_detect_container_engine_names_the_engine_even_when_configured_with_a_pa
     monkeypatch.setenv("OW_CONTAINER_ENGINE", str(fake))
 
     # The binary to invoke stays the configured one; the public name is `podman`.
-    assert containers.detect_engine() == str(fake)
-    assert containers.detect_container_engine() == "podman"
+    assert container_engine.detect_engine() == str(fake)
+    assert container_engine.detect_container_engine() == "podman"
 
     monkeypatch.setenv("OW_CONTAINER_ENGINE", "not-installed-anywhere")
-    assert containers.detect_engine() is None
-    assert containers.detect_container_engine() is None
+    assert container_engine.detect_engine() is None
+    assert container_engine.detect_container_engine() is None
 
 
-def test_plugin_api_exposes_the_normalized_engine_name():
+def test_plugin_api_and_the_service_plugins_take_the_engine_from_the_core():
     from ow import plugin_api
 
-    assert plugin_api.detect_container_engine is containers.detect_container_engine
+    assert plugin_api.detect_container_engine is container_engine.detect_container_engine
+    assert containers.detect_engine is container_engine.detect_engine
+
+
+def test_container_images_are_pinned_to_a_tag():
+    assert postgres._DEFAULTS["postgres.pgweb_image"] == "sosedoff/pgweb:0.17.0"
+    assert mailsink._DEFAULTS["mailsink.image"] == "axllent/mailpit:v1.34.0"
+    assert ":" in postgres._DEFAULTS["postgres.image"]
+
+
+def test_a_container_environment_value_with_a_line_break_is_refused(monkeypatch):
+    import pytest
+
+    make_fake_engine(monkeypatch)
+    monkeypatch.setattr(containers, "inspect_container", lambda engine, name: None)
+
+    with pytest.raises(RuntimeError, match="cannot be passed to a container"):
+        containers.ensure_container("docker", "x", image="img", ports=(), env={"K": "a\nb"})
+
+
+def test_postgres_offers_the_existing_socket_directories_to_the_sandbox_once(monkeypatch, tmp_path):
+    real = tmp_path / "run" / "postgresql"
+    real.mkdir(parents=True)
+    alias = tmp_path / "var-run-postgresql"
+    alias.symlink_to(real)
+    absent = tmp_path / "absent"
+    monkeypatch.setattr(postgres, "_SOCKET_DIRS", (real, alias, absent))
+
+    mounts = postgres.ow_sandbox_mounts()
+
+    assert mounts is not None
+    assert mounts.ro_paths == (real,)
+    assert mounts.rw_paths == ()
+
+    monkeypatch.setattr(postgres, "_SOCKET_DIRS", (absent,))
+    assert postgres.ow_sandbox_mounts() is None

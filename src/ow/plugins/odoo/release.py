@@ -7,12 +7,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from ow.core.plugins import Diagnostic
-
-if TYPE_CHECKING:
-    from ow.core.workspace import Repo, Workspace
+from ow.plugin_api import Diagnostic, Repo, Workspace
 
 
 def is_odoo_core(repo_path: Path) -> bool:

@@ -33,17 +33,69 @@ class StackConfig:
     rejected_repos: dict[str, str]
 
 
-def _read_toml(path: Path) -> dict[str, Any]:
-    """The TOML data of `path`, or `{}`; a UsageError when unreadable or invalid UTF-8/TOML."""
+def _read_toml(path: Path, declared: Mapping[str, Any]) -> dict[str, Any]:
+    """The TOML data of `path`, or `{}`; a UsageError when unreadable, invalid UTF-8/TOML, or
+    holding a key that `declared` marks as renamed."""
     if not path.exists():
         return {}
     try:
         with open(path, "rb") as f:
-            return tomllib.load(f)
+            data = tomllib.load(f)
     except (UnicodeDecodeError, OSError) as e:
         raise UsageError(f"cannot read {path}: {e}")
     except tomllib.TOMLDecodeError as e:
         raise UsageError(f"invalid TOML in {path}: {e}")
+    _reject_renamed(data, declared, path)
+    return data
+
+
+def _reject_renamed(data: Mapping[str, Any], declared: Mapping[str, Any], path: Path) -> None:
+    """Raise a UsageError naming the new key for every renamed setting `data` still sets,
+    at the top level or inside a `[stacks.<name>]` table."""
+    stacks_table = data.get("stacks")
+    scopes = [data]
+    if isinstance(stacks_table, dict):
+        scopes.extend(entry for entry in stacks_table.values() if isinstance(entry, dict))
+    for scope in scopes:
+        for table, table_data in scope.items():
+            if not isinstance(table_data, dict):
+                continue
+            for short in table_data:
+                setting = declared.get(f"{table}.{short}")
+                if setting is not None and setting.renamed_to:
+                    raise UsageError(
+                        f"{path}: setting {table}.{short} was renamed to {setting.renamed_to}; "
+                        f"edit the file to use {setting.renamed_to}"
+                    )
+
+
+def _unknown_tables(
+    data: Mapping[str, Any], declared: Mapping[str, Any], forget: Collection[str] = ()
+) -> dict[str, Any]:
+    """The tables of `data` ow does not declare, to write back as they are: unknown keys keep
+    their value through every rewrite, and only `forget` removes one. `repos` is the caller's."""
+    kept: dict[str, Any] = {}
+    for table, table_data in data.items():
+        if table == "repos" or table in forget:
+            continue
+        if not isinstance(table_data, dict):
+            kept[table] = table_data
+            continue
+        for short, value in table_data.items():
+            full_key = f"{table}.{short}"
+            if full_key not in declared and full_key not in forget:
+                kept.setdefault(table, {})[short] = value
+    return kept
+
+
+def _merge_unknown(tables: dict[str, Any], unknown: Mapping[str, Any]) -> dict[str, Any]:
+    """`tables` with the `unknown` tables added after the known ones."""
+    for table, value in unknown.items():
+        if isinstance(value, dict) and isinstance(tables.get(table), dict):
+            tables[table].update(value)
+        else:
+            tables[table] = value
+    return tables
 
 
 def stack_names_in_config(path: Path) -> tuple[str, ...]:
@@ -63,7 +115,7 @@ def stack_names_in_config(path: Path) -> tuple[str, ...]:
 
 def read_global(path: Path, declared: Mapping[str, Any]) -> Layer:
     """Read the global config file; an absent file is an empty layer."""
-    return _parse_layer(_read_toml(path), declared)
+    return _parse_layer(_read_toml(path, declared), declared)
 
 
 def read_workspace_config(
@@ -72,7 +124,7 @@ def read_workspace_config(
     remotes_of: Callable[[str], Collection[str]] = lambda n: ("origin",),
 ) -> tuple[Layer, dict[str, str], dict[str, str]]:
     """Read a mono-stack workspace config file into `(layer, accepted_repos, rejected_repos)`."""
-    return _layer_and_repos(_read_toml(path), declared, remotes_of)
+    return _layer_and_repos(_read_toml(path, declared), declared, remotes_of)
 
 
 def read_multi_config(
@@ -81,7 +133,7 @@ def read_multi_config(
     remotes_of: Callable[[str], Collection[str]] = lambda n: ("origin",),
 ) -> tuple[Layer, dict[str, StackConfig]]:
     """Read a multi-stack root `.ow/config.toml` into `(workspace_layer, stacks_by_name)`."""
-    data = _read_toml(path)
+    data = _read_toml(path, declared)
     stacks_raw = data.get("stacks")
     top_data = {k: v for k, v in data.items() if k != "stacks"}
     ws_layer = _parse_layer(top_data, declared)
@@ -179,6 +231,8 @@ def resolve_settings(
     values: dict[str, object] = {}
     origins: dict[str, str] = {}
     for key, setting in declared.items():
+        if setting.renamed_to:
+            continue
         if stack_layer is not None and key in stack_layer.values:
             values[key] = stack_layer.values[key]
             origins[key] = "stack"
@@ -223,11 +277,9 @@ def _dropped_keys(
     raw: Mapping[str, Any],
     extra: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """The keys a rewrite drops: the layer's unknown keys, any wrong-typed key it does
-    not re-set (with its raw old value), and `extra`."""
-    dropped = dict(layer.unknown)
-    if extra:
-        dropped.update(extra)
+    """The keys a rewrite drops: any wrong-typed key it does not re-set (with its raw old
+    value), and `extra`. Unknown keys are never dropped: `forget` removes them."""
+    dropped: dict[str, object] = dict(extra) if extra else {}
     for key in layer.wrong_type:
         if key in values:
             continue
@@ -243,15 +295,20 @@ def update_global(
     mutate: Callable[[dict[str, object]], Mapping[str, object]],
     *,
     declared: Mapping[str, Any],
+    forget: Collection[str] = (),
 ) -> Mapping[str, object]:
     """Rewrite the global config after applying `mutate` to its known values, under an
-    exclusive lock so concurrent runs cannot lose an update; returns the dropped keys."""
+    exclusive lock so concurrent runs cannot lose an update; returns the dropped keys.
+
+    Keys ow does not declare (a plugin that is not loaded) are written back as they are,
+    except those named in `forget`."""
     def _do_write() -> Mapping[str, object]:
-        raw = _read_toml(path)
+        raw = _read_toml(path, declared)
         layer = _parse_layer(raw, declared)
         values = dict(mutate(dict(layer.values)))
         dropped = _dropped_keys(values, layer, raw)
-        _atomic_write_toml(path, _values_by_table(values, declared))
+        tables = _merge_unknown(_values_by_table(values, declared), _unknown_tables(raw, declared, forget))
+        _atomic_write_toml(path, tables)
         return dropped
 
     return _with_lock(path, _do_write)
@@ -264,11 +321,13 @@ def update_workspace(
     *,
     declared: Mapping[str, Any],
     remotes_of: Callable[[str], Collection[str]] = lambda n: ("origin",),
+    forget: Collection[str] = (),
 ) -> Mapping[str, object]:
     """Rewrite a mono-stack workspace config after applying `mutate` to its known values, under an
-    exclusive lock; `repos` is the `[repos]` table, and an empty table is left out."""
+    exclusive lock; `repos` is the `[repos]` table, and an empty table is left out. Unknown keys
+    are written back as they are, except those named in `forget`."""
     def _do_write() -> Mapping[str, object]:
-        raw = _read_toml(path)
+        raw = _read_toml(path, declared)
         layer, _accepted, rejected = _layer_and_repos(raw, declared, remotes_of)
         values = dict(mutate(dict(layer.values)))
         extra = {f"repos.{name}": value for name, value in rejected.items()}
@@ -277,6 +336,7 @@ def update_workspace(
         if repos:
             tables["repos"] = dict(repos)
         tables.update(_values_by_table(values, declared))
+        _merge_unknown(tables, _unknown_tables(raw, declared, forget))
         _atomic_write_toml(path, tables)
         return dropped
 
@@ -309,11 +369,13 @@ def update_stack(
     *,
     declared: Mapping[str, Any],
     remotes_of: Callable[[str], Collection[str]] = lambda n: ("origin",),
+    forget: Collection[str] = (),
 ) -> Mapping[str, object]:
     """Rewrite `[stacks.<stack_name>]` inside a multi-stack workspace's `.ow/config.toml`,
-    preserving top-level workspace settings and all sibling stacks."""
+    preserving top-level workspace settings and all sibling stacks. Unknown keys of the stack
+    are written back as they are, except those named in `forget`."""
     def _do_write() -> Mapping[str, object]:
-        raw = _read_toml(path)
+        raw = _read_toml(path, declared)
         existing_stacks = raw.get("stacks")
         stacks_out: dict[str, Any] = (
             {k: v for k, v in existing_stacks.items() if isinstance(v, dict)}
@@ -330,6 +392,7 @@ def update_stack(
         if repos:
             stack_table["repos"] = dict(repos)
         stack_table.update(_values_by_table(values, declared))
+        _merge_unknown(stack_table, _unknown_tables(raw_stack, declared, forget))
         stacks_out[stack_name] = stack_table
 
         tables: dict[str, Any] = {
@@ -367,11 +430,13 @@ def update_multi_workspace(
     mutate: Callable[[dict[str, object]], Mapping[str, object]],
     *,
     declared: Mapping[str, Any],
+    forget: Collection[str] = (),
 ) -> Mapping[str, object]:
     """Rewrite top-level workspace-wide settings in a multi-stack `.ow/config.toml`,
-    preserving `[stacks]` untouched."""
+    preserving `[stacks]` untouched. Unknown keys are written back as they are, except those
+    named in `forget`."""
     def _do_write() -> Mapping[str, object]:
-        raw = _read_toml(path)
+        raw = _read_toml(path, declared)
         existing_stacks = raw.get("stacks")
         stacks_out: dict[str, Any] = (
             {k: v for k, v in existing_stacks.items() if isinstance(v, dict)}
@@ -383,7 +448,9 @@ def update_multi_workspace(
         values = dict(mutate(dict(layer.values)))
         dropped = _dropped_keys(values, layer, top_raw)
 
-        tables: dict[str, Any] = _values_by_table(values, declared)
+        tables: dict[str, Any] = _merge_unknown(
+            _values_by_table(values, declared), _unknown_tables(top_raw, declared, forget)
+        )
         if stacks_out:
             tables["stacks"] = stacks_out
         _atomic_write_toml(path, tables)
@@ -403,7 +470,7 @@ def promote_to_multi(
 ) -> Mapping[str, object]:
     """Rewrite a mono-stack `.ow/config.toml` at `path` into multi-stack format with `[stacks.<stack_name>]`."""
     def _do_write() -> Mapping[str, object]:
-        raw = _read_toml(path)
+        raw = _read_toml(path, declared)
         layer, _accepted, rejected = _layer_and_repos(raw, declared, remotes_of)
         extra = {f"repos.{name}": value for name, value in rejected.items()}
         dropped = _dropped_keys(values, layer, raw, extra)
@@ -411,7 +478,9 @@ def promote_to_multi(
         if repos:
             stack_table["repos"] = dict(repos)
         stack_table.update(_values_by_table(values, declared))
-        _atomic_write_toml(path, {"stacks": {stack_name: stack_table}})
+        tables: dict[str, Any] = _merge_unknown({}, _unknown_tables(raw, declared))
+        tables["stacks"] = {stack_name: stack_table}
+        _atomic_write_toml(path, tables)
         return dropped
 
     return _with_lock(path, _do_write)
@@ -420,7 +489,7 @@ def promote_to_multi(
 def remove_stack(path: Path, stack_name: str) -> bool:
     """Drop `[stacks.<stack_name>]` from `path`; returns True if any stacks remain, else deletes `path`."""
     def _do_remove() -> Mapping[str, object]:
-        raw = _read_toml(path)
+        raw = _read_toml(path, {})
         existing_stacks = raw.get("stacks")
         if not isinstance(existing_stacks, dict):
             return {"remaining": False}

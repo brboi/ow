@@ -85,7 +85,7 @@ def test_relative_worktree_gitdir_is_not_prunable(lab):
     assert locations[0].problem is None
 
 
-def test_unknown_keys_and_rejected_bases_collapse_to_one_warning(lab):
+def test_legacy_keys_and_rejected_bases_collapse_to_one_warning(lab):
     ws = _init_workspace(lab)
     (ws / ".ow" / "config.toml").write_text(
         'version = 2\n\n[repos]\ncommunity = "x..y"\nextra = "also..bad"\n'
@@ -94,8 +94,8 @@ def test_unknown_keys_and_rejected_bases_collapse_to_one_warning(lab):
     warnings = [w for w in _session(ws).warnings if ".ow/config.toml" in w]
 
     assert len(warnings) == 1
-    assert "unknown setting version in .ow/config.toml" in warnings[0]
-    assert "`ow config unset version`" in warnings[0]
+    assert "older ow format (version)" in warnings[0]
+    assert "run `ow init` to migrate it" in warnings[0]
     assert "x..y" in warnings[0]
     assert "also..bad" in warnings[0]
 

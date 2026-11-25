@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from ow.core.workspace import Repo, Workspace
+from ow.plugin_api import Repo, Workspace
 
 
 def _is_dir(path: Path) -> bool:

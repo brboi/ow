@@ -7,37 +7,30 @@ import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from ow.core.plugins import RunCommand
-from ow.errors import UsageError
+from ow.plugin_api import Repo, RunCommand, UsageError, Workspace
 from ow.plugins.odoo.settings import DatabaseTarget, database_target, get_setting
-from ow.specs.python_env import ensure_venv_ready, resolve_workspace_python
-
-if TYPE_CHECKING:
-    from ow.core.workspace import Repo, Workspace
+from ow.specs.python_env import ensure_venv_ready, resolve_workspace_python, wrap_command
 
 
 def run_command(
-    ws: Workspace, core: Repo, args: tuple[str, ...], answers: Callable[[str], list]
+    ws: Workspace, core: Repo, args: tuple[str, ...], answers: Callable[..., list]
 ) -> RunCommand:
-    """Run Odoo using the workspace's resolved Python virtualenv (or `mise exec`)."""
+    """Run Odoo using the workspace's resolved Python virtualenv (else the plugin-managed or system Python)."""
     resolved = resolve_workspace_python(ws, answers)
     assert resolved is not None, "the odoo plugin answers python_environment for an Odoo workspace"
     merged, venv = resolved
-    venv_path = venv.path
-    ensure_venv_ready(ws, venv_path, requirements=merged.requirements if merged else ())
-    venv_python = venv_path / "bin" / "python"
+    ensure_venv_ready(ws, venv, answers, requirements=merged.requirements if merged else ())
+    venv_python = venv.path / "bin" / "python"
     odoorc = ws.root / "odoorc"
     odoo_bin = core.path / "odoo-bin"
     env = {"ODOO_RC": str(odoorc)}
+    odoo_args = (str(odoo_bin), "-c", str(odoorc), *args)
 
     if venv_python.exists():
-        argv = (str(venv_python), str(odoo_bin), "-c", str(odoorc), *args)
-    elif ws.settings.get("mise.enabled", True) and shutil.which("mise"):
-        argv = ("mise", "exec", "--", "python", str(odoo_bin), "-c", str(odoorc), *args)
+        argv = (str(venv_python), *odoo_args)
     else:
-        argv = ("python3", str(odoo_bin), "-c", str(odoorc), *args)
+        argv = wrap_command(answers, ("python", *odoo_args)) or ("python3", *odoo_args)
 
     return RunCommand(argv=argv, cwd=ws.root, env=env)
 

@@ -1,10 +1,6 @@
 # ow — Odoo Workspaces
 
-ow keeps Odoo's repos on one machine and gives each workspace its own git worktrees. The bare repos
-are shared, so Odoo is cloned once and every fetch is visible to every workspace; a worktree is a
-cheap checkout, so a new branch costs seconds, not gigabytes. The core is plain git; `odoo`, `postgres`,
-`mailsink`, `github` (`gh`), `runbot`, `mise`, `vscode`, `zed`, `local` and `sandbox` are built-in
-plugins, and a repo can ship its own ([writing a plugin](docs/plugins.md)).
+ow keeps Odoo's repos on one machine and gives each workspace its own git worktrees. The bare repos are shared: Odoo is cloned once and every fetch is visible to every workspace. A worktree is a cheap checkout, so a new branch is a new directory. The core is plain git. Plugins add the Odoo, GitHub and Runbot knowledge ([built-in plugins](docs/plugins.md#built-in-plugins)), and a repo can ship its own ([writing a plugin](docs/plugins.md)).
 
 ## Install
 
@@ -13,26 +9,31 @@ pipx install --pip-args=--pre odoo-workspaces   # 3.0 is in beta: a plain instal
 pip install --pre odoo-workspaces               # or, inside a venv
 ```
 
-`ow` needs git ≥ 2.45 and an SSH key with access to the Odoo repos. GitHub CLI (`gh`) is used by
-the built-in `github` plugin for PR resolution (`ow init enterprise#12345`), PR status, and
-merged-PR pruning. The built-in `runbot` plugin queries Runbot's public JSON API to pin companion
-repos (`community`) to the exact Runbot `base_match` commit, resolve direct Runbot bundle/batch
-URLs, and display build status (printing a fallback note when Runbot is unreachable). mise
-(≥ 2026.8.13) is optional; with it, ow writes a mise fragment pointing at a shared Python
-virtualenv per `(python, odoo-series)` under `~/.local/share/ow/venvs/`. Docker or Podman is optional;
-with it, `ow run` also starts a shared PostgreSQL, pgweb and Mailpit for every workspace
-([Services](docs/migrating-to-3.0.md#services)).
+Coming from 3.0.0a1 or 2.x? Read [Migrating to 3.0](docs/migrating-to-3.0.md) first.
+
+## Requirements
+
+- Linux.
+- Python ≥ 3.11 and git ≥ 2.45.
+- SSH access to the repos you use. How ow handles git's prompts: [Commands](docs/commands.md#confirmation-rules).
+
+Optional:
+
+- **`gh`** (GitHub CLI) for PR specs, PR status and merged-PR pruning. Turn the plugin off with `ow config set --global github.enabled false`.
+- **mise** ≥ 2026.8.13 for Python virtualenvs shared by Python version and Odoo series. Without it, ow uses `<workspace>/.venv` if you create it.
+- **Docker or Podman** for the [shared services](docs/configuration.md#shared-services): PostgreSQL, pgweb and Mailpit.
+- **bubblewrap** (`bwrap`) for the experimental [`ow sandbox`](docs/commands.md#ow-sandbox).
 
 ## Quick start
 
-### Initialize a mono-stack or multi-stack workspace (`ow init`)
+### Create a workspace (`ow init`)
 
 ```sh
-# 1. Mono-stack workspace on 18.0 (expands odoo.default_repos: community + enterprise, each on branch 18.0-my-fix)
+# 1. A mono-stack workspace on 18.0: community and enterprise on a new branch 18.0-my-fix
 mkdir my-fix && cd my-fix
-ow init @18.0 --branch 18.0-my-fix
+ow init @18.0..18.0-my-fix
 
-# 2. Review a multi-version, multi-service feature in one multi-stack workspace
+# 2. A multi-version, multi-service review in one multi-stack workspace
 mkdir voip-review && cd voip-review
 ow init \
   odoo=community#56789,enterprise#12345,upgrade#2345 \
@@ -40,57 +41,58 @@ ow init \
   voip=voip
 ```
 
-Each stack gets its own worktrees and non-colliding HTTP and gevent ports; stacks with an Odoo core
-also get an `odoorc`. The root gets `voip-review.code-workspace`.
+Each stack gets its own worktrees and its own HTTP and gevent ports. A stack with an Odoo core also gets an `odoorc`. The root gets `voip-review.code-workspace`. ow prints the whole plan before it acts.
 
-Upstream base checkouts (`@18.0`, `iap@18.0`, `voip`) stay detached, so workspaces never collide on
-local `18.0`/`master` branches. PR targets pin companion repos (`community`) to Runbot's exact
-`base_match` commit when available.
+Base checkouts (`@18.0`, `iap@18.0`, `voip`) stay detached, so workspaces never collide on a local `18.0` or `master`. The spec grammar is in [Commands](docs/commands.md#specs).
 
-### Run locally (`ow run`)
+### Run (`ow run`)
 
 ```sh
-# Inside a mono-stack workspace (or a single stack): inherited TTY (pdb / shell work directly)
+# In a mono-stack workspace (or a stack): the runner gets your terminal, so pdb works
 ow run -- -i sale
 
-# At a multi-stack workspace root: runs every runnable stack in parallel with [stack] logs
+# At a multi-stack root: every runnable stack, in parallel, with [stack] prefixes
 ow run
 ow run odoo:"-i voip --dev=all" iap:"--log-level=debug"
 
-# Throwaway run without initializing a persistent workspace (cleaned up on exit)
+# A throwaway run, cleaned up on exit
 ow run --tmp enterprise#12345 -- -i sale
-ow run --tmp odoo=enterprise#12345:"-i voip" iap=iap#4321
 
-# Run commands or open a shell inside a stack's Python virtualenv & environment
+# A command or a shell inside a stack's Python environment
 ow exec -- pip install phonenumbers
-ow exec iap -- python -m pytest
 ow exec iap
 ```
 
-### Evolve an existing workspace (`ow add` & `ow retarget`)
+### Evolve a workspace (`ow add`)
 
 ```sh
-ow add upgrade                  # add a missing repo to the current workspace/stack
-ow add enterprise#12345         # attach a PR onto an existing clean/detached worktree
-ow add iap=iap#4321             # promote a mono-stack workspace to multi-stack (confirmed)
-ow retarget 19.0                # replay commits & retarget detached repos onto origin/19.0
+ow add upgrade               # add a repo to the current workspace or stack
+ow add enterprise#12345      # attach a PR to an existing clean or detached worktree
+ow add iap=iap#4321          # promote a mono-stack workspace to multi-stack (asks first)
 ```
 
-### Inspect & clean up
+### Update my branch on its base (`ow rebase`)
 
 ```sh
-ow status                       # workspace or multi-stack status (with cached PR + Runbot info)
-ow status --fetch               # fetch tracked refs in parallel first
-ow ls                           # list all indexed workspaces and their repos or stacks
-ow rm voip-review/iap           # remove a single stack (or `ow rm voip-review` for the whole workspace)
-ow prune                        # clean up stale state and merged/closed-PR workspaces & stacks
+ow rebase                    # fetch, then put each branch back on its base
+ow rebase 19.0               # change series: move every repo onto origin/19.0
+```
+
+### Inspect and clean up
+
+```sh
+ow status                    # branches, bases, upstreams, PR and Runbot state
+ow status --fetch            # fetch tracked refs in parallel first
+ow ls                        # every indexed workspace
+ow rm voip-review/iap        # remove one stack (`ow rm voip-review` removes all)
+ow prune                     # stale state, and workspaces whose PRs are merged or closed
 ```
 
 ## Documentation
 
-- [Commands](docs/commands.md) — every command, specs, flags, exit codes and confirmation rules
-- [Configuration](docs/configuration.md) — settings, precedence, and `ow config`
-- [Generated files](docs/files.md) — the fixed outputs, ownership, file states and the refresh model
-- [Plugins](docs/plugins.md) — writing, trusting and shipping a plugin; the hook reference
-- [Migrating to 3.0](docs/migrating-to-3.0.md) — what changed since ow 2, the shared services, and what to delete
+- [Commands](docs/commands.md): every command, the spec grammar, flags, exit codes, confirmation rules
+- [Configuration](docs/configuration.md): settings, layers, shared services
+- [Generated files](docs/files.md): where ow keeps its files, ownership and the refresh model
+- [Plugins](docs/plugins.md): built-in plugins, writing and trusting a plugin, the hook reference, versions
+- [Migrating to 3.0](docs/migrating-to-3.0.md): from 3.0.0a1 and 2.x
 - [Changelog](CHANGELOG.md)

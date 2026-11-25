@@ -86,7 +86,9 @@ def hermetic(tmp_path: Path, monkeypatch: MonkeyPatch) -> Iterator[None]:
     inherited = [
         var
         for var in os.environ
-        if var.startswith(("MISE_", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+        # OW_* (container engine, sandbox marker, workspace) and the completion switch
+        # must not leak in: they start real containers or change what ow does.
+        if var.startswith(("MISE_", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "OW_", "_OW_"))
     ]
     for var in inherited:
         monkeypatch.delenv(var, raising=False)
@@ -250,6 +252,20 @@ def setup_pr_repo(
     return remote
 
 
+def route_github(**orgs: Path) -> None:
+    """Make `git@github.com:<org>/<repo>.git` URLs reach `<directory>/<repo>.git` on disk.
+
+    Keyword names are GitHub owners (`odoo`, or `odoo_dev` for `odoo-dev`: underscores become
+    dashes); git itself rewrites the URLs, so the code under test keeps its GitHub URLs.
+    """
+    for owner, directory in orgs.items():
+        git(
+            Path(os.environ["GIT_CONFIG_GLOBAL"]).parent,
+            "config", "--file", os.environ["GIT_CONFIG_GLOBAL"],
+            f"url.file://{directory}/.insteadOf", f"git@github.com:{owner.replace('_', '-')}/",
+        )
+
+
 def init_workspace(
     lab: Lab,
     *names: str,
@@ -282,13 +298,12 @@ def init_workspace(
                 lab.git(root / repo, "config", f"branch.{branch}.ow-base", f"origin/{base}")
         return root
 
+    suffix = f"..{branch}" if branch is not None else ""
     if names:
-        spec = ",".join(f"{repo}@{base}" for repo in names)
+        spec = ",".join(f"{repo}@{base}{suffix}" for repo in names)
         args = ["init", spec]
     else:
-        args = ["init", f"@{base}"]
-    if branch is not None:
-        args += ["--branch", branch]
+        args = ["init", f"@{base}{suffix}"]
     result = lab.ow(*args, cwd=root)
     assert result.exit_code == 0, result.stderr + result.stdout
     return root

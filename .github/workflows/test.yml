@@ -5,6 +5,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow gates publication on this one.
+  workflow_call:
 
 jobs:
   lint:
@@ -20,19 +22,36 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.11', '3.x']
-    
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # The runner's git is far newer than the declared floor, so the floor is built from
+      # source here too (same recipe as the alpine job).
+      - name: Install git build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential curl libcurl4-openssl-dev \
+            zlib1g-dev libssl-dev libexpat1-dev
+      - name: Build git 2.45.4 (the declared floor)
+        run: |
+          curl -fsSL https://www.kernel.org/pub/software/scm/git/git-2.45.4.tar.gz -o /tmp/git.tar.gz
+          tar -C /tmp -xzf /tmp/git.tar.gz
+          # git 2.45 predates C23, which GCC 15 defaults to (its `unreachable` macro clashes).
+          flags="prefix=/usr/local NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_REGEX=NeedsStartEnd"
+          make -C /tmp/git-2.45.4 -j4 $flags CFLAGS='-O2 -std=gnu17' all
+          sudo make -C /tmp/git-2.45.4 $flags CFLAGS='-O2 -std=gnu17' install
+      - name: Verify git 2.45.4 wins on PATH
+        run: |
+          command -v git
+          test "$(command -v git)" = "/usr/local/bin/git"
+          test "$(git --version)" = "git version 2.45.4"
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: |
-          pip install -e .
-          pip install pytest
+        run: pip install -e ".[dev]"
       - name: Run tests
         run: python -m pytest -q src/tests
 
@@ -40,7 +59,6 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: alpine:3.22
-    
     steps:
       # git must exist before checkout: without it, actions/checkout downloads a tarball
       # with no .git, and setuptools-scm cannot compute the version.
@@ -71,8 +89,7 @@ jobs:
         run: |
           python3 -m venv venv
           . venv/bin/activate
-          pip install -e .
-          pip install pytest
+          pip install -e ".[dev]"
       - name: Run tests
         run: |
           . venv/bin/activate

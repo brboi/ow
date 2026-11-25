@@ -9,8 +9,7 @@ from typing import cast
 
 from ow.core import bases, git, stacks
 from ow.core.paths import repos_dir
-from ow.core.plugins import KnownRepo, ResolvedRepo, ResolvedSpec
-from ow.errors import UsageError
+from ow.plugin_api import KnownRepo, ResolvedRepo, ResolvedSpec, UsageError
 from ow.plugins._github import bare_gh_info, parse_git_slug, parse_pr_identity
 from ow.plugins._odoo_repos import (
     ODOO_ADDON_NAMES,
@@ -60,13 +59,25 @@ def resolve_spec(
     known_repos: Mapping[str, KnownRepo],
     settings: Mapping[str, object],
 ) -> ResolvedSpec | None:
-    """Resolve `@<base>` into `odoo.default_repos` detached on `<base>`."""
+    """Resolve `@<base>` into `odoo.default_repos` detached on `<base>`.
+
+    `@<base>..<branch>` and `@<base>..<remote>/<branch>` put every default repo on `<branch>`
+    over `<base>`: checked out when a remote holds it, created from `<base>` otherwise (the
+    `<remote>/` prefix counts in the repos whose bare has that remote).
+    """
     part = spec.strip()
     if not part.startswith("@"):
         return None
     raw_base = part[1:].strip()
     if not raw_base:
         raise UsageError(f"base ref cannot be empty in {part!r}")
+    raw_base, raw_branch = bases.split_range(raw_base)
+    if raw_branch is not None and (
+        raw_branch.startswith("-")
+        or "@{" in raw_branch
+        or git.run(["git", "check-ref-format", f"refs/heads/{raw_branch}"]).returncode != 0
+    ):
+        raise UsageError(f"invalid branch name {raw_branch!r} in {part!r}")
     default_repos = tuple(dict.fromkeys(cast(list[str], settings["odoo.default_repos"])))
     if not default_repos:
         raise UsageError(
@@ -81,20 +92,25 @@ def resolve_spec(
                 f"unknown default repo {rname!r}; register it with `ow repo add {rname} <url>`"
             )
         qualified_base = bases.parse_base_for(raw_base, rname)
+        branch: str | None = None
+        remote: str | None = None
+        if raw_branch is not None:
+            remote, branch = bases.split_remote_prefix(raw_branch, git.remotes(bare))
         resolved_repos.append(
             ResolvedRepo(
                 name=rname,
                 url=known.url if known else None,
-                branch=None,
+                branch=branch,
                 base=qualified_base,
+                remote=remote,
                 explicit=True,
             )
         )
-    short_name = raw_base.split("/", 1)[-1]
+    short_name = (raw_branch or raw_base).split("/", 1)[-1]
     return ResolvedSpec(
         name=stacks.sanitize_slug(short_name, "workspace"),
         repos=tuple(resolved_repos),
-        source=f"base:{raw_base}",
+        source=f"base:{part[1:].strip()}",
     )
 
 

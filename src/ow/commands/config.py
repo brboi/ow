@@ -1,5 +1,6 @@
 """`ow config` — read and write settings in the global and workspace layers; a write
-rewrites the whole file, prints what it dropped, and refreshes the resolved workspace.
+rewrites the whole file, keeps the keys ow does not know, prints what it dropped, and
+refreshes the resolved workspace.
 """
 
 from __future__ import annotations
@@ -23,22 +24,30 @@ from ow.core.config import (
     update_workspace,
 )
 from ow.core.paths import global_config
+from ow.core.plugins import Setting
 from ow.core.session import Session
 from ow.errors import UsageError
 
 _NO_WORKSPACE = "not inside an ow workspace; pass --global or use -w"
 _REPOS_KEY = "`[repos]` is not a setting; remove a repo with `ow repo rm <name>`"
 _STACKS_KEY = "`[stacks]` is workspace layout metadata, not a plugin setting"
+_UNKNOWN_NOTE = "unknown (plugin not loaded?)"
 
 
 def show_all(session: Session, *, global_: bool, multi_root: Path | None = None) -> int:
-    """Print every declared key: `<key> = <value> (<origin>) # <help>`.
+    """Print every declared key: `<key> = <value> (<origin>) # <help>`, then the keys set in a
+    config file that no loaded plugin declares, marked `unknown (plugin not loaded?)`.
 
     With `global_`, the workspace layer is ignored and built-in defaults fill the rest.
     """
     values, origins = _values_and_origins(session, global_=global_, multi_root=multi_root)
     for key, setting in session.declared.items():
+        if setting.renamed_to:
+            continue
         term.out(f"{key} = {render_value(values.get(key))} ({origins[key]}) # {setting.help}")
+    for origin, layer in _unknown_layers(session, global_=global_, multi_root=multi_root):
+        for key, value in layer.unknown.items():
+            term.out(f"{key} = {render_value(value)} ({origin}) # {_UNKNOWN_NOTE}")
     return 0
 
 
@@ -54,7 +63,7 @@ def get(
     `global_` reads the global layer alone, otherwise the effective value.
     """
     setting = session.declared.get(key)
-    if setting is None:
+    if setting is None or setting.renamed_to:
         raise _unknown_key(key, session.declared)
     if global_:
         value = session.global_layer.values.get(key)
@@ -77,7 +86,7 @@ def set_(
 ) -> int:
     """Write one key in the global, workspace, or stack layer, then refresh."""
     setting = session.declared.get(key)
-    if setting is None:
+    if setting is None or setting.renamed_to:
         raise _unknown_key(key, session.declared)
     value = parse_cli_value(setting, list(values))
     return _update(
@@ -120,7 +129,27 @@ def unset(
         global_=global_,
         multi_root=multi_root,
         ignore_dropped=(key,),
+        forget=(key,),
     )
+
+
+def _unknown_layers(
+    session: Session, *, global_: bool, multi_root: Path | None
+) -> list[tuple[str, Layer]]:
+    """The `(origin, layer)` pairs whose unknown keys a listing shows, lowest layer first."""
+    layers = [("global", session.global_layer)]
+    if global_:
+        return layers
+    if multi_root is not None:
+        ws_layer, _stacks = read_multi_config(
+            multi_root / ".ow" / "config.toml", session.declared, remotes_of=remotes_of
+        )
+        return [*layers, ("workspace", ws_layer)]
+    if session.workspace is not None:
+        layers.append(("workspace", session.workspace_layer))
+        if session.stack_name is not None:
+            layers.append(("stack", session.stack_layer))
+    return layers
 
 
 def _values_and_origins(
@@ -162,13 +191,17 @@ def _update(
     global_: bool,
     multi_root: Path | None = None,
     ignore_dropped: Collection[str] = (),
+    forget: Collection[str] = (),
 ) -> int:
-    """Apply `mutate` to the target file, print what the rewrite dropped, then refresh."""
+    """Apply `mutate` to the target file, print what the rewrite dropped, then refresh.
+
+    Keys no loaded plugin declares stay in the file; `forget` names the ones to remove.
+    """
     if global_:
-        dropped = update_global(global_config(), mutate, declared=session.declared)
+        dropped = update_global(global_config(), mutate, declared=session.declared, forget=forget)
     elif multi_root is not None:
         dropped = update_multi_workspace(
-            multi_root / ".ow" / "config.toml", mutate, declared=session.declared
+            multi_root / ".ow" / "config.toml", mutate, declared=session.declared, forget=forget
         )
     elif session.stack_name is not None:
         dropped = update_stack(
@@ -178,6 +211,7 @@ def _update(
             mutate,
             declared=session.declared,
             remotes_of=remotes_of,
+            forget=forget,
         )
     else:
         # `[repos]` is not a setting: the rewrite keeps the workspace's repos,
@@ -188,6 +222,7 @@ def _update(
             mutate,
             declared=session.declared,
             remotes_of=remotes_of,
+            forget=forget,
         )
 
     print_dropped({k: v for k, v in dropped.items() if k not in ignore_dropped})
@@ -237,8 +272,11 @@ def _sets_key(path: Path, key: str, *, stack_name: str | None = None) -> bool:
     return True
 
 
-def _unknown_key(key: str, declared: Mapping[str, object]) -> UsageError:
-    """The usage error an unknown key gets, suggesting the closest declared one."""
+def _unknown_key(key: str, declared: Mapping[str, Setting]) -> UsageError:
+    """The usage error an unknown key gets: the new name of a renamed setting, else the closest declared key."""
+    setting = declared.get(key)
+    if setting is not None and setting.renamed_to:
+        return UsageError(f"{key} was renamed to {setting.renamed_to}")
     suggestion = closest_key(key, declared)
     hint = f"; did you mean {suggestion!r}?" if suggestion else ""
     return UsageError(f"unknown setting {key!r}{hint}")

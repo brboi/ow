@@ -8,7 +8,7 @@ from ow.core import git
 from ow.core.facts import RepoFacts
 
 # Mutating commands that can't continue if an operation is in progress
-MUTATING = frozenset(("retarget", "repo rm", "rm"))
+MUTATING = frozenset(("rebase", "repo rm", "rm"))
 
 
 def refusal(
@@ -29,11 +29,12 @@ def refusal(
         hint = git.show(["git", "-C", str(facts.path), *abort], root)
         return f"{facts.operation} in progress; finish it or run `{hint}`"
 
-    if command == "retarget" and not autostash and facts.modified:
+    if command == "rebase" and not autostash and facts.modified:
         return "modified files; commit, stash, or pass --autostash"
 
-    if command == "retarget":
-        if facts.branch is None and facts.base is None and not has_target_base:
-            return "no default base; set one with `ow repo add <name> --base <ref>`"
+    # Without a base the recipe would take the base for a colleague's branch
+    # (a branch) or has nothing to advance to (a detached HEAD).
+    if command == "rebase" and facts.base is None and not has_target_base:
+        return "no base; run `ow init` to migrate an older workspace, or `ow rebase <base>` to set one"
 
     return None

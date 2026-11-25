@@ -1,13 +1,15 @@
-"""Stable, versioned public API for external and in-repo ow plugins.
+"""Versioned public API for external and in-repo ow plugins.
 
 A plugin declares ``OW_API_VERSION = 1`` and imports hooks, data records, errors and helpers
 exclusively from this module, never from internal ``ow.core.*``, ``ow.specs.*`` or
 ``ow.plugins.*`` modules. ow loads a plugin whose ``OW_API_VERSION`` lies within
-``SUPPORTED_API_RANGE`` (currently ``(1, 1)``) and skips the others with a warning.
+``SUPPORTED_API_RANGE`` (currently ``(1, 1)``) and skips the others with a warning;
+``OW_API_CURRENT`` is the version ow itself implements.
 
-Compatibility policy: API v1 is frozen through every 3.x release. 3.x only *adds* to it
-(new hooks, new optional fields, new exports); anything slated for removal first emits a
-deprecation warning and is removed in 4.0, which raises ``OW_API_VERSION``.
+Compatibility policy: API v1 is frozen from 3.0.0rc1. Until then (the 3.0 betas) it may still
+change. Once frozen, 3.x only *adds* to it (new hooks, new optional fields, new exports);
+anything slated for removal first emits a deprecation warning and is removed in 4.0, which
+raises ``OW_API_VERSION``.
 
 Which hooks abort a command when they raise and which only warn is documented per hook in
 ``ow.core.plugins.CoreSpec``.
@@ -17,9 +19,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ow.core.container_engine import detect_container_engine
 from ow.core.facts import RepoFacts
 from ow.core.plugins import (
-    PLUGIN_API_VERSION,
+    OW_API_CURRENT,
     SUPPORTED_API_RANGE,
     Answers,
     Diagnostic,
@@ -35,11 +38,9 @@ from ow.core.plugins import (
     StatusInfo,
     hookimpl,
 )
-from ow.core.runtime import follow_files as follow_log_files
-from ow.core.stacks import MultiWorkspace
+from ow.core.stacks import MultiWorkspace, is_port_free
 from ow.core.workspace import Repo, Workspace
 from ow.errors import PluginError, UsageError
-from ow.plugins._containers import detect_container_engine, is_port_free
 from ow.specs.editors import DebugLaunch, EditorContribution
 from ow.specs.python_env import PythonEnvironment, WorkspaceVenv, resolve_workspace_python, workspace_venv
 from ow.specs.services import DatabaseService, SmtpService
@@ -57,7 +58,7 @@ def resolve_stack_python(ws: Workspace, answers: Answers) -> Path | None:
 
 
 __all__ = [
-    "PLUGIN_API_VERSION",
+    "OW_API_CURRENT",
     "SUPPORTED_API_RANGE",
     "Answers",
     "DatabaseService",
@@ -84,7 +85,6 @@ __all__ = [
     "Workspace",
     "WorkspaceVenv",
     "detect_container_engine",
-    "follow_log_files",
     "hookimpl",
     "is_port_free",
     "resolve_stack_python",

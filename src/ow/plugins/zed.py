@@ -4,15 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
 
 from ow.core.fs import json_text
-from ow.core.plugins import GeneratedFile, hookimpl
+from ow.plugin_api import GeneratedFile, Workspace, hookimpl
 from ow.specs.editors import BASE_EXCLUDES, debugpy_fields, default_python
 from ow.specs.editors import merge as merge_editors
-
-if TYPE_CHECKING:
-    from ow.core.workspace import Workspace
 
 # Baseline file scan exclusions
 _ZED_FILE_SCAN_EXCLUSIONS: tuple[str, ...] = (*BASE_EXCLUDES, "**/node_modules")

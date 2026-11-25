@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ow import term
-from ow.commands._runtime import open_target, plugin_running, run_command
+from ow.commands._runtime import enclosing_multi, open_target, plugin_running, run_command, scoped_answer
 from ow.core import index, runtime, stacks
 from ow.core.plugins import RunCommand
 from ow.core.workspace import resolve_target_root
@@ -34,7 +34,8 @@ def _stop_global_services(plugins: Plugins) -> int:
     return 0
 
 
-def _handle_stop_answer(answer: object) -> tuple[bool, int]:
+def _apply_stop_answer(answer: object) -> tuple[bool, int]:
+    """Carry out what a plugin's `ow_stop` returned: run its command, or print its lines."""
     if isinstance(answer, RunCommand):
         rc = run_command(answer)
         return True, rc
@@ -48,12 +49,46 @@ def _handle_stop_answer(answer: object) -> tuple[bool, int]:
     return False, 0
 
 
+def plugin_stop(
+    plugins: Plugins,
+    ws: Workspace | None,
+    multi: stacks.MultiWorkspace | None,
+    *,
+    quiet_if_idle: bool = False,
+) -> tuple[bool, int]:
+    """Run `ow_stop` for one scope; returns `(stopped something, exit code)`.
+
+    With `ws` set the scope is that workspace or stack (`multi` its multi-stack root, None for a
+    mono-stack workspace). With `ws` None it is the multi-stack root `multi`: a plugin's
+    whole-root answer when there is one, else each stack's. With `quiet_if_idle`, a workspace no
+    plugin reports running is left alone.
+    """
+    if ws is not None:
+        if quiet_if_idle and not plugin_running(ws, plugins):
+            return False, 0
+        hit = scoped_answer(plugins, "ow_stop", ws, multi)
+        return _apply_stop_answer(hit[1]) if hit is not None else (False, 0)
+
+    assert multi is not None
+    if not quiet_if_idle or any(plugin_running(stack, plugins) for stack in multi.stacks):
+        hit = scoped_answer(plugins, "ow_stop", None, multi)
+        if hit is not None:
+            return _apply_stop_answer(hit[1])
+    stopped = False
+    exit_code = 0
+    for stack in multi.stacks:
+        stack_stopped, rc = plugin_stop(plugins, stack, multi, quiet_if_idle=quiet_if_idle)
+        stopped = stopped or stack_stopped
+        if rc != 0 and exit_code == 0:
+            exit_code = rc
+    return stopped, exit_code
+
+
 def _stop_workspace(
     ws: Workspace, plugins: Plugins, *, quiet_if_idle: bool = False
 ) -> tuple[bool, int]:
     """Stop detached processes and plugin-managed services for a single workspace or stack."""
     stopped = False
-    exit_code = 0
 
     proc = runtime.running_for_workspace(ws)
     if proc is not None:
@@ -61,14 +96,10 @@ def _stop_workspace(
             term.out(f"# stopped {ws.name} (pid {proc.pid})")
             stopped = True
 
-    should_call_plugin = (not quiet_if_idle) or bool(plugin_running(ws, plugins))
-    if should_call_plugin:
-        hit = plugins.first_with_name("ow_stop", ws=ws)
-        if hit is not None:
-            plugin_stopped, rc = _handle_stop_answer(hit[1])
-            stopped = stopped or plugin_stopped
-            if rc != 0 and exit_code == 0:
-                exit_code = rc
+    plugin_stopped, exit_code = plugin_stop(
+        plugins, ws, enclosing_multi(ws, plugins), quiet_if_idle=quiet_if_idle
+    )
+    stopped = stopped or plugin_stopped
 
     if not stopped and not quiet_if_idle:
         term.out(f"# {ws.name}: not running")
@@ -80,33 +111,14 @@ def _stop_multi(
 ) -> tuple[bool, int]:
     """Stop detached processes and plugin-managed services for a multi-stack workspace."""
     stopped = False
-    exit_code = 0
 
     for proc in runtime.list_running(multi.root):
         if runtime.stop_process(multi.root, proc):
             term.out(f"# stopped {multi.name}/{proc.label} (pid {proc.pid})")
             stopped = True
 
-    ws_ctx = multi.stacks[0] if multi.stacks else None
-    any_plugin_running = any(plugin_running(ws, plugins) for ws in multi.stacks)
-    multi_hit = None
-    if (not quiet_if_idle) or any_plugin_running:
-        multi_hit = plugins.first_with_name("ow_multi_stop", ws=ws_ctx, multi=multi)
-    if multi_hit is not None:
-        plugin_stopped, rc = _handle_stop_answer(multi_hit[1])
-        stopped = stopped or plugin_stopped
-        if rc != 0 and exit_code == 0:
-            exit_code = rc
-    else:
-        for ws in multi.stacks:
-            if quiet_if_idle and not plugin_running(ws, plugins):
-                continue
-            hit = plugins.first_with_name("ow_stop", ws=ws)
-            if hit is not None:
-                plugin_stopped, rc = _handle_stop_answer(hit[1])
-                stopped = stopped or plugin_stopped
-                if rc != 0 and exit_code == 0:
-                    exit_code = rc
+    plugin_stopped, exit_code = plugin_stop(plugins, None, multi, quiet_if_idle=quiet_if_idle)
+    stopped = stopped or plugin_stopped
 
     if not stopped and not quiet_if_idle:
         term.out(f"# {multi.name}: not running")

@@ -3,22 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING
 
 from ow import term
 from ow.core import config
-from ow.core.plugins import Setting, StatusInfo, hookimpl
+from ow.plugin_api import RepoFacts, Setting, SmtpService, StatusInfo, Workspace, hookimpl
 from ow.plugins import _containers as containers
-from ow.specs.services import SmtpService
-
-if TYPE_CHECKING:
-    from ow.core.facts import RepoFacts
-    from ow.core.workspace import Workspace
 
 _CONTAINER = "ow-mailsink"
 
 _SETTINGS = (
-    Setting(key="mailsink.image", type=str, default="axllent/mailpit", help="Mailpit container image"),
+    Setting(key="mailsink.image", type=str, default="axllent/mailpit:v1.34.0", help="Mailpit container image"),
     Setting(key="mailsink.smtp_port", type=int, default=1025, help="Host SMTP port for mailsink"),
     Setting(key="mailsink.web_port", type=int, default=8025, help="Host Web UI port for mailsink"),
 )

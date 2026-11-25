@@ -18,12 +18,89 @@ from ow.errors import UsageError
 from ow.recipes.removal import PR_REFS, branch_is_pushed, orphan_commits
 
 
-def tracking_steps(path: str, branch: str, remote: str) -> tuple[GitStep, GitStep]:
-    """The `branch.<b>.remote` and `merge` writes that make `<remote>/<b>` the upstream."""
+def _apply(step: Step) -> None:
+    """Run `step` in this process (inside another step); a failure raises."""
+    if isinstance(step, OwStep):
+        step.run()
+        return
+    result = git.run(step.argv)
+    if result.returncode != 0:
+        raise git.GitFailed(step.argv, result.returncode, result.stderr, result.stdout)
+
+
+def tracking_steps(
+    path: str, branch: str, remote: str, remote_branch: str | None = None
+) -> tuple[Step, ...]:
+    """The steps that make `<remote>/<remote_branch>` the upstream of `branch`.
+
+    `remote_branch` defaults to `branch`. `branch.<b>.remote` and `merge` name it, and a fetch
+    refspec for that one branch lets git resolve `@{u}` (a bare holds no wildcard refspec). The
+    upstream need not exist yet: a branch never pushed still names where `git push` will create
+    it, and `git pull` fails until then.
+    """
+    remote_branch = remote_branch or branch
+    refspec = f"+refs/heads/{remote_branch}:refs/remotes/{remote}/{remote_branch}"
+    key = f"remote.{remote}.fetch"
+
+    def _add_refspec() -> None:
+        held = git.run(["git", "-C", path, "config", "--get-all", key]).stdout.splitlines()
+        if refspec not in held:
+            _apply(GitStep(("git", "-C", path, "config", "--add", key, refspec)))
+
     return (
+        OwStep(shown=git.show(("git", "-C", path, "config", "--add", key, refspec), None), run=_add_refspec),
         GitStep(("git", "-C", path, "config", f"branch.{branch}.remote", remote)),
-        GitStep(("git", "-C", path, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")),
+        GitStep(("git", "-C", path, "config", f"branch.{branch}.merge", f"refs/heads/{remote_branch}")),
     )
+
+
+def head_upstream_steps(
+    bare: Path,
+    branch: str,
+    head_branch: str,
+    head_remote: str | None,
+    head_url: str | None,
+) -> tuple[Step, ...]:
+    """The steps that make a PR's head branch `<head_remote>/<head_branch>` the upstream of `branch`.
+
+    The remote is added to `bare` when it has none of that name. A head branch that cannot be
+    fetched (a deleted fork) only warns: `branch` is then left without an upstream.
+    """
+    if head_remote is None:
+        term.warn(f"{bare.stem}: head repository of the PR is unknown (deleted fork?); {branch} has no upstream")
+        return ()
+    steps: list[Step] = []
+    if head_remote not in git.remotes(bare):
+        if head_url is None:
+            term.warn(f"{bare.stem}: no URL for remote {head_remote}; {branch} has no upstream")
+            return ()
+        key = f"remote.{head_remote}"
+        steps.extend(
+            (
+                GitStep(("git", "-C", str(bare), "remote", "add", head_remote, head_url)),
+                GitStep(("git", "-C", str(bare), "config", f"{key}.tagOpt", "--no-tags")),
+                GitStep(("git", "-C", str(bare), "config", "--unset-all", f"{key}.fetch")),
+            )
+        )
+    fetch = (
+        "git", "-C", str(bare), "fetch", head_remote,
+        f"+refs/heads/{head_branch}:refs/remotes/{head_remote}/{head_branch}",
+    )
+
+    def _run() -> None:
+        result = git.run(fetch)
+        if result.returncode != 0:
+            reason = (result.stderr.strip().splitlines() or ["fetch failed"])[-1]
+            term.warn(
+                f"{bare.stem}: cannot fetch {head_branch} from {head_remote} ({reason}); "
+                f"{branch} has no upstream"
+            )
+            return
+        for step in tracking_steps(str(bare), branch, head_remote, head_branch):
+            _apply(step)
+
+    steps.append(OwStep(shown=git.show(fetch, None), run=_run))
+    return tuple(steps)
 
 
 def origin_has(bare: Path, branch: str) -> bool:
@@ -223,14 +300,18 @@ def _same_sha(bare: Path, ref_a: str, ref_b: str) -> bool:
     return res_a.stdout.strip() == res_b.stdout.strip()
 
 
-def _checked_out_branches(bare: Path) -> set[str]:
-    """Local branch names currently checked out in any worktree of `bare`."""
+def _checked_out_branches(bare: Path, *, exclude: Path | None = None) -> set[str]:
+    """Local branch names currently checked out in any worktree of `bare`, bar the one at `exclude`."""
     res = git.run(["git", "-C", str(bare), "worktree", "list", "--porcelain"])
     if res.returncode != 0:
         return set()
+    skipped = exclude.resolve() if exclude is not None else None
     checked: set[str] = set()
+    here: Path | None = None
     for line in res.stdout.splitlines():
-        if line.startswith("branch refs/heads/"):
+        if line.startswith("worktree "):
+            here = Path(line[len("worktree "):]).resolve()
+        elif line.startswith("branch refs/heads/") and here != skipped:
             checked.add(line[len("branch refs/heads/"):])
     return checked
 
@@ -277,6 +358,8 @@ def add_worktree(
     fetch_ref: str | None = None,
     remote_hint: str | None = None,
     ow_pr: str | None = None,
+    head_remote: str | None = None,
+    head_url: str | None = None,
     commit: str | None = None,
     detach: bool = False,
 ) -> tuple[Step, ...]:
@@ -284,7 +367,10 @@ def add_worktree(
 
     When `fetch_ref` is given (e.g. `refs/pull/12345/head`), fetches that ref first
     into `refs/ow/pr/<num>` and creates a worktree from it (detached when `detach=True`
-    or `branch is None`, else on a non-colliding local branch with `ow-base` and `ow-pr`).
+    or `branch is None`, else on a non-colliding local branch with `ow-base` and `ow-pr`,
+    whose upstream is the PR's head branch on `head_remote`, added from `head_url` when
+    the bare lacks it). A branch created from `base` and never pushed gets `origin/<branch>`
+    as its upstream already, so a bare `git push` creates it and a bare `git pull` fails.
     When `commit` is given for a detached checkout (e.g. Runbot `base_match`), checks out
     that exact SHA with graceful fallback to `base`.
     """
@@ -318,7 +404,9 @@ def add_worktree(
             )
             return tuple(steps)
 
-        local_branch, reset_existing = _resolve_pr_local_branch(bare, branch, pr_ref, pr_num, ow_pr)
+        local_branch, reset_existing = _resolve_pr_local_branch(
+            bare, branch, pr_ref, pr_num, ow_pr, exclude_worktree=Path(target)
+        )
         if reset_existing:
             steps.append(GitStep(("git", "-C", str(bare), "branch", "-f", local_branch, pr_ref)))
             steps.append(
@@ -341,6 +429,7 @@ def add_worktree(
             steps.append(
                 GitStep(("git", "-C", target, "config", f"branch.{local_branch}.ow-pr", ow_pr))
             )
+        steps.extend(head_upstream_steps(bare, local_branch, branch, head_remote, head_url))
         return tuple(steps)
 
     if detach or branch is None:
@@ -431,6 +520,7 @@ def add_worktree(
                 live=True,
             )
         )
+        steps.extend(tracking_steps(target, branch, "origin"))
     steps.append(GitStep(("git", "-C", target, "config", f"branch.{branch}.ow-base", base)))
     return tuple(steps)
 
@@ -443,12 +533,13 @@ def _resolve_pr_local_branch(
     ow_pr: str | None,
     *,
     current_branch: str | None = None,
+    exclude_worktree: Path | None = None,
 ) -> tuple[str, bool]:
     """Return `(local_branch_name, reset_existing)` for a PR checkout without clobbering unpushed work."""
     local_branch = branch
     reset_existing = False
     if git.has_ref(bare, f"refs/heads/{local_branch}"):
-        checked_out = _checked_out_branches(bare)
+        checked_out = _checked_out_branches(bare, exclude=exclude_worktree)
         if current_branch is not None:
             checked_out.discard(current_branch)
         same_pr = (
@@ -496,6 +587,8 @@ def attach_pr_to_worktree(
     fetch_ref: str | None = None,
     remote_hint: str | None = None,
     ow_pr: str | None = None,
+    head_remote: str | None = None,
+    head_url: str | None = None,
 ) -> tuple[Step, ...]:
     """Safely switch an existing healthy worktree onto a PR or feature branch.
 
@@ -564,6 +657,7 @@ def attach_pr_to_worktree(
         steps.append(GitStep(("git", "-C", target, "config", f"branch.{local_branch}.ow-base", base)))
         if ow_pr:
             steps.append(GitStep(("git", "-C", target, "config", f"branch.{local_branch}.ow-pr", ow_pr)))
+        steps.extend(head_upstream_steps(bare, local_branch, branch, head_remote, head_url))
         return tuple(steps)
 
     # Feature branch attach (no PR fetch_ref)
@@ -588,11 +682,52 @@ def attach_pr_to_worktree(
         steps.extend(tracking_steps(target, branch, remote_hint))
     else:
         steps.append(GitStep(("git", "-C", target, "switch", "--no-track", "-c", branch, base)))
+        steps.extend(tracking_steps(target, branch, "origin"))
     steps.append(GitStep(("git", "-C", target, "config", f"branch.{branch}.ow-base", base)))
     return tuple(steps)
 
 
-def worktree_state(bare: Path, wt_path: Path) -> Literal["missing", "healthy", "broken", "foreign"]:
+WorktreeState = Literal["missing", "healthy", "moved", "broken", "forgotten", "foreign"]
+"""What `worktree_state` found at a path: nothing, a worktree `bare` registers and `ow` can use,
+one whose registration points at its old location (a moved workspace: `repair_step` fixes it),
+a directory of an interrupted creation (nothing of the user's: `cleanup_worktree` removes it),
+a directory whose registration `bare` forgot (`git worktree prune` after a move: it may hold
+work, so nothing touches it), or something that is not a worktree of `bare` at all."""
+
+
+def _holds_nothing(wt: Path) -> bool:
+    """Whether `wt` is empty or holds only its `.git` file."""
+    try:
+        return all(entry.name == ".git" for entry in wt.iterdir())
+    except OSError:
+        return False
+
+
+def _admin_dir(wt: Path) -> Path | None:
+    """The administrative directory `wt/.git` points at, or None when it is not a gitdir file."""
+    try:
+        content = (wt / ".git").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not content.startswith("gitdir: "):
+        return None
+    raw = content[len("gitdir: "):].strip()
+    admin = Path(raw) if os.path.isabs(raw) else wt / raw
+    try:
+        return admin.resolve()
+    except OSError:
+        return None
+
+
+def _is_initializing(admin: Path) -> bool:
+    """Whether `git worktree add` left `admin` locked as still being created."""
+    try:
+        return (admin / "locked").read_text(encoding="utf-8").strip().startswith("initializing")
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def worktree_state(bare: Path, wt_path: Path) -> WorktreeState:
     """Classify an existing worktree path for idempotent creation/update."""
     if not wt_path.exists() and not wt_path.is_symlink():
         return "missing"
@@ -609,43 +744,26 @@ def worktree_state(bare: Path, wt_path: Path) -> Literal["missing", "healthy", "
     if git_entry.is_dir() or not git_entry.is_file():
         return "foreign"
 
-    try:
-        content = git_entry.read_text(encoding="utf-8").strip()
-    except OSError:
-        return "broken"
-    if not content.startswith("gitdir: "):
+    admin = _admin_dir(wt_path)
+    if admin is None:
         return "foreign"
-
-    gitdir_str = content[len("gitdir: "):].strip()
-    gitdir = Path(gitdir_str) if os.path.isabs(gitdir_str) else (wt_path / gitdir_str)
     try:
-        gitdir = gitdir.resolve()
         bare_resolved = bare.resolve()
     except OSError:
-        return "broken"
-
-    if gitdir.parent.name != "worktrees" or gitdir.parent.parent != bare_resolved:
         return "foreign"
-    if not gitdir.is_dir():
+    if admin.parent.name != "worktrees" or admin.parent.parent != bare_resolved:
+        return "foreign"
+    if not admin.is_dir():
+        return "broken" if _holds_nothing(wt_path) else "forgotten"
+    if _is_initializing(admin):
         return "broken"
 
-    stored_gitdir_file = gitdir / "gitdir"
-    if not stored_gitdir_file.is_file():
-        return "broken"
     try:
-        stored_target = stored_gitdir_file.read_text(encoding="utf-8").strip()
-        if (gitdir / stored_target).resolve() != git_entry.resolve():
-            return "broken"
-    except OSError:
-        return "broken"
-
-    locked_file = gitdir / "locked"
-    if locked_file.is_file():
-        try:
-            if locked_file.read_text(encoding="utf-8").strip().startswith("initializing"):
-                return "broken"
-        except OSError:
-            return "broken"
+        stored = (admin / "gitdir").read_text(encoding="utf-8").strip()
+        if (admin / stored).resolve() != git_entry.resolve():
+            return "moved"
+    except (OSError, UnicodeDecodeError):
+        return "moved"
 
     head_check = git.run(["git", "-C", str(wt_path), "rev-parse", "--verify", "--quiet", "HEAD"])
     if head_check.returncode != 0:
@@ -653,22 +771,47 @@ def worktree_state(bare: Path, wt_path: Path) -> Literal["missing", "healthy", "
     return "healthy"
 
 
+def repair_step(bare: Path, wt: Path) -> GitStep:
+    """The step that re-registers a moved worktree: `bare` learns where `wt` is now."""
+    return GitStep(("git", "-C", str(bare), "worktree", "repair", str(wt)))
+
+
+def removal_blocker(wt: Path) -> str | None:
+    """Why `cleanup_worktree` must not remove `wt`, or None when it provably holds no work.
+
+    Safe to remove: nothing there, a directory of a creation git itself marks `initializing`,
+    or a worktree whose `git status --porcelain --ignored` is empty.
+    """
+    if wt.is_symlink():
+        return f"{wt} is a symlink"
+    if not wt.exists():
+        return None
+    if not wt.is_dir():
+        return f"{wt} is not a directory"
+    admin = _admin_dir(wt)
+    if (admin is not None and _is_initializing(admin)) or _holds_nothing(wt):
+        return None
+    status = git.run(["git", "-C", str(wt), "status", "--porcelain", "--ignored"])
+    if status.returncode != 0:
+        return f"{wt} may hold work and git cannot say (git status failed)"
+    if status.stdout.strip():
+        return f"{wt} holds changes or files git does not track (git status --porcelain --ignored is not empty)"
+    return None
+
+
 def cleanup_worktree(bare: Path, wt: Path) -> None:
-    """Best-effort removal of a worktree, including one left locked `initializing`."""
+    """Remove `wt` and its registration when it provably holds no work.
+
+    Raises `UsageError` when `removal_blocker` finds any; nothing is touched then.
+    """
+    reason = removal_blocker(wt)
+    if reason is not None:
+        raise UsageError(f"{bare.stem}: refusing to remove: {reason}; move your work out first")
     for argv in (
         ["git", "-C", str(bare), "worktree", "unlock", str(wt)],
         ["git", "-C", str(bare), "worktree", "remove", "--force", str(wt)],
     ):
-        try:
-            git.run(argv)
-        except (OSError, git.GitFailed, UsageError) as exc:
-            term.warn(f"{bare.stem}: worktree cleanup command failed ({exc})")
+        git.run(argv)
     if wt.exists() or wt.is_symlink():
-        try:
-            shutil.rmtree(wt)
-        except OSError as exc:
-            term.warn(f"{bare.stem}: could not remove {wt}: {exc}")
-    try:
-        git.run(["git", "-C", str(bare), "worktree", "prune"])
-    except (OSError, git.GitFailed, UsageError) as exc:
-        term.warn(f"{bare.stem}: worktree prune failed ({exc})")
+        shutil.rmtree(wt)
+    git.run(["git", "-C", str(bare), "worktree", "prune"])

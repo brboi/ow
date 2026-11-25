@@ -1,8 +1,8 @@
 # ow
 
 A CLI that keeps several git repos side by side as worktrees of shared bare repos, grouped into
-workspaces. The core is plain git: Odoo, GitHub and Runbot knowledge lives in plugins, along with
-mise, editor support, shared services and sandboxing.
+workspaces. Odoo, GitHub and Runbot knowledge lives in plugins. This file defines the words the
+code, the docs and the help text use. The commands are in [docs/commands.md](docs/commands.md).
 
 ## Language
 
@@ -75,7 +75,7 @@ _Avoid_: lost commits, dangling commits
 ### Commands
 
 **Spec**:
-What `ow init`, `ow add`, `ow run --tmp` and `ow status` take to say what to check out or look up: `[<stack>=]<item>[,<item>...]`, where `<stack>` names the stack and each item is a PR (`enterprise#12345`), a Runbot URL, `<repo>@<ref>`, `@<base>` (e.g. `@18.0`) or a bare `<repo>`. Plugins resolve PRs and URLs.
+What `ow init`, `ow add`, `ow run --tmp` and `ow status` take to say what to check out or look up: `[<stack>=]<item>[,<item>...]`. An item is a PR, a Runbot URL, `<repo>@<ref>`, `<repo>@<base>..<branch>`, `@<base>`, `@<base>..<branch>` or a bare `<repo>`. The grammar is in [docs/commands.md](docs/commands.md#specs). Plugins resolve PRs and URLs.
 _Avoid_: target, target DSL
 
 **Sister PR**:
@@ -91,8 +91,12 @@ The command `ow run` executes for a workspace or stack, supplied by a plugin's `
 _Avoid_: task, launcher
 
 **Detached run**:
-A runner started in the background by `ow run -d`, in its own session: ow records its PID under `<root>/.ow/run/` and its output under `<root>/.ow/logs/`, which `ow logs` shows and `ow stop` ends. A plugin's runner may detach itself instead.
+A runner started in the background by `ow run -d`, in its own session: ow records its PID under `<root>/.ow/run/` and its output under `<root>/.ow/logs/`, which `ow logs` shows and `ow stop` ends.
 _Avoid_: daemon, background job
+
+**Self-detaching runner**:
+A runner that starts background services itself and returns, flagged `self_detaching`. In the foreground ow follows its logs and stops it when you interrupt; with `-d` ow only starts it.
+_Avoid_: daemonizing runner
 
 **Shared service**:
 A container started by `ow run` or `ow sandbox` for every workspace on the machine, not for one: `ow-postgres` and `ow-pgweb` from the `postgres` plugin, `ow-mailsink` from `mailsink`. They outlive the run until `ow stop --services`; plugins reach them through the `database_service` and `smtp_service` hooks.
@@ -101,7 +105,7 @@ _Avoid_: stack service, compose stack
 ### Extension
 
 **Plugin**:
-A unit outside the core that contributes settings, generated files, spec resolution, status, runners, known repos and diagnostics, and reacts to what happens in a workspace. Ten are built in.
+A unit outside the core that contributes settings, generated files, spec resolution, status, runners, known repos and diagnostics, and reacts to what happens in a workspace. The built-in ones are listed in [docs/plugins.md](docs/plugins.md#built-in-plugins).
 _Avoid_: extension, module, template
 
 **In-repo plugin**:

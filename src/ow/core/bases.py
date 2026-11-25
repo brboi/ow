@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from ow.core.git import remotes_of
 from ow.core.git import run as git_run
@@ -30,6 +30,35 @@ def split_base(ref: str, remotes: Callable[[str], bool]) -> tuple[str, str]:
         if remotes(remote):
             return remote, "/".join(parts[n:])
     return "origin", ref
+
+
+def split_range(text: str) -> tuple[str, str | None]:
+    """Split `<base>..<branch>` into `(base, branch)`; `(text, None)` when there is no `..`.
+
+    A git branch name never contains `..`, so the split is unambiguous. Both sides must be
+    non-empty.
+    """
+    base, sep, branch = text.partition("..")
+    if not sep:
+        return text, None
+    base, branch = base.strip(), branch.strip()
+    if not base or not branch:
+        raise BaseError(f"expected <base>..<branch>, got {text!r}")
+    return base, branch
+
+
+def split_remote_prefix(ref: str, remotes: Sequence[str]) -> tuple[str | None, str]:
+    """Split `<remote>/<branch>` at the longest of `remotes` that prefixes `ref`.
+
+    A ref with no such prefix is a plain branch name: `(None, ref)`.
+    """
+    best = ""
+    for remote in remotes:
+        if ref.startswith(remote + "/") and len(remote) > len(best):
+            best = remote
+    if best:
+        return best, ref[len(best) + 1 :]
+    return None, ref
 
 
 def parse_base(ref: str, remotes: Callable[[str], bool] | None = None) -> str:

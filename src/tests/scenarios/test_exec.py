@@ -105,7 +105,7 @@ def test_exec_without_command_opens_interactive_shell_and_announces_venv_on_stde
     assert records[0]["odoo_rc"] == str(ws / "odoorc")
 
     # Local venv mode announces (local)
-    assert lab.ow("config", "set", "mise.shared_venv", "false", cwd=ws).exit_code == 0
+    assert lab.ow("config", "set", "python.shared_venv", "false", cwd=ws).exit_code == 0
     local_venv = ws / ".venv"
     _install_fake_venv(local_venv, log_path)
     res_local = lab.ow("exec", cwd=ws)
@@ -271,7 +271,7 @@ def test_exec_works_with_mise_python_without_odoo_and_skips_services(lab, monkey
 
     add_repo(lab, "voip", {"master": {"README.md": "voip\n"}}, base="master")
     ws = init_workspace(lab, "voip", name="py-only", base="master")
-    assert lab.ow("config", "set", "mise.python", "3.12", cwd=ws).exit_code == 0
+    assert lab.ow("config", "set", "python.version", "3.12", cwd=ws).exit_code == 0
 
     local_venv = ws / ".venv"
     log_path = lab.root / "pyonly.jsonl"
@@ -283,3 +283,60 @@ def test_exec_works_with_mise_python_without_odoo_and_skips_services(lab, monkey
     assert rec["virtual_env"] == str(local_venv)
     assert rec["odoo_rc"] is None
     assert rec["argv"] == ["install", "httpx"]
+
+
+def _install_recording_mise(log_path: Path) -> None:
+    """A fake `mise` on the hermetic PATH that records its argv and runs what follows `exec --`."""
+    bin_dir = Path(os.environ["PATH"].split(os.pathsep)[0])
+    fake_mise = bin_dir / "mise"
+    fake_mise.write_text(
+        f"#!{sys.executable}\n"
+        "import json, subprocess, sys\n"
+        f"with open({str(log_path)!r}, 'a', encoding='utf-8') as f:\n"
+        "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "args = sys.argv[1:]\n"
+        "if args[:2] == ['exec', '--']:\n"
+        "    sys.exit(subprocess.call(args[2:]))\n",
+        encoding="utf-8",
+    )
+    make_executable(fake_mise)
+
+
+def test_exec_without_python_environment_goes_through_the_plugin_that_wraps_commands(lab):
+    add_repo(lab, "voip", {"master": {"README.md": "voip\n"}}, base="master")
+    ws = init_workspace(lab, "voip", name="plain", base="master")
+    mise_log = lab.root / "mise.jsonl"
+    marker = lab.root / "ran"
+    _install_recording_mise(mise_log)
+
+    res = lab.ow("exec", "--", "sh", "-c", f"echo wrapped > {marker}", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr
+    assert read_jsonl(mise_log) == [["exec", "--", "sh", "-c", f"echo wrapped > {marker}"]]
+    assert marker.read_text() == "wrapped\n"
+
+    # With the plugin disabled nothing wraps the command: it runs as it is.
+    marker.unlink()
+    assert lab.ow("config", "set", "mise.enabled", "false", cwd=ws).exit_code == 0
+    res = lab.ow("exec", "--", "sh", "-c", f"echo bare > {marker}", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr
+    assert len(read_jsonl(mise_log)) == 1
+    assert marker.read_text() == "bare\n"
+
+
+def test_exec_with_mise_disabled_uses_the_workspace_venv_without_any_other_setting(lab, monkeypatch):
+    """Nothing else builds the shared venv, so with mise off the venv is `<workspace>/.venv`."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = init_workspace(lab, "community", name="no-mise")
+    assert lab.ow("config", "set", "mise.enabled", "false", cwd=ws).exit_code == 0
+    log_path = lab.root / "nomise.jsonl"
+    _install_fake_venv(ws / ".venv", log_path)
+    fake_shell = _make_recording_script(lab.root / "bin" / "fake-shell", log_path)
+    monkeypatch.setenv("SHELL", str(fake_shell))
+
+    res = lab.ow("exec", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr
+    assert f"# no-mise: venv {ws / '.venv'} (local)" in res.stderr
+    assert read_jsonl(log_path)[0]["virtual_env"] == str(ws / ".venv")

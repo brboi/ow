@@ -15,6 +15,7 @@ import pytest
 from ow.commands import sandbox as sandbox_cmd
 from ow.core.paths import global_config, repos_dir, venvs_dir
 from ow.core.plugins import load_plugins
+from ow.core.refresh import read_lock
 from ow.core.session import open_session
 from ow.errors import UsageError
 from tests.conftest import add_repo, init_workspace, workspace
@@ -414,7 +415,7 @@ def test_cli_executes_bwrap_creates_dirs_starts_services_and_propagates_exit_cod
 
     assert res.exit_code == 42
     assert services_called == [("exec-ws",)]
-    assert (lab.home / ".claude").is_dir()
+    assert not (lab.home / ".claude").exists()
     assert (repos_dir() / "community.git" / "logs").is_dir()
 
     recorded = json.loads(log_path.read_text(encoding="utf-8"))
@@ -534,8 +535,119 @@ def test_real_bwrap_enforces_isolation_and_allows_git_commit(lab, monkeypatch):
     assert "sandbox commit" in lab.git(root / "community", "log", "-1", "--pretty=%s")
 
 
-def test_host_postgres_socket_directory_is_always_mounted_read_only(monkeypatch):
-    """A host Postgres (`postgres.enabled = false`) is only reachable through its socket directory."""
+# -- Experimental notice, CLI shape, enablement --------------------------
+
+
+def test_sandbox_is_announced_as_experimental_in_help_and_at_launch(lab):
+    root = workspace(lab, name="exp-ws")
+
+    helped = lab.ow("sandbox", "--help")
+    first_line = next(line for line in helped.stdout.splitlines() if line.strip() and not line.startswith("Usage"))
+    assert helped.exit_code == 0
+    assert first_line.strip().lower().startswith("experimental")
+
+    res = lab.ow("sandbox", "-n", "--", "true", cwd=root)
+    assert res.exit_code == 0, res.stderr
+    assert "# experimental:" in res.stderr
+    assert "experimental" not in res.stdout
+
+
+def test_new_session_flag_is_never_passed_to_bwrap(lab):
+    root = workspace(lab, name="nosess-ws")
+
+    res = lab.ow("sandbox", "-n", "--", "true", cwd=root)
+
+    assert res.exit_code == 0, res.stderr
+    assert "--new-session" not in res.stdout
+
+
+def test_cli_takes_workspace_positionally_and_command_only_after_double_dash(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    multi = lab.home / "pos-multi"
+    multi.mkdir(parents=True)
+    assert lab.ow("init", "odoo=community@18.0", "iap=community@18.0", cwd=multi).exit_code == 0
+
+    res = lab.ow("sandbox", "iap", "-n", cwd=multi)
+    assert res.exit_code == 0, res.stderr
+    assert f"# workspace: {(multi / 'iap').resolve()}" in res.stdout
+
+    stray = lab.ow("sandbox", "iap", "echo", "-n", cwd=multi)
+    assert stray.exit_code == 2
+    assert "pass commands after `--`" in stray.stderr
+
+    short = lab.ow("sandbox", "iap", "-n", "-p", "codex", "--", "echo", "hi", cwd=multi)
+    assert short.exit_code == 0, short.stderr
+    assert "# profile: codex" in short.stdout
+    assert "-- echo hi" in short.stdout
+
+
+def test_dry_run_redacts_only_secret_variables(lab, monkeypatch):
+    root = workspace(lab, name="redact-ws")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Ada Lovelace")
+    monkeypatch.setenv("MY_AUTH_HEADER", "Bearer abc")
+
+    res = lab.ow("sandbox", "-n", "--env", "MY_AUTH_HEADER", "--", "true", cwd=root)
+
+    assert res.exit_code == 0, res.stderr
+    assert f"GIT_AUTHOR_NAME {shlex.quote('Ada Lovelace')}" in res.stdout
+    assert "Bearer abc" not in res.stdout
+    for secret in ("API_KEY", "GITHUB_TOKEN", "DB_PASSWORD", "AUTH", "X_AUTH_Y", "CLIENT_SECRET"):
+        assert sandbox_cmd._is_secret_var(secret), secret
+    for plain in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "AUTHOR", "TERM"):
+        assert not sandbox_cmd._is_secret_var(plain), plain
+
+
+def test_sandbox_refuses_when_disabled(lab):
+    root = workspace(lab, name="off-ws")
+    global_config().parent.mkdir(parents=True, exist_ok=True)
+    global_config().write_text("[sandbox]\nenabled = false\n", encoding="utf-8")
+
+    res = lab.ow("sandbox", "-n", "--", "true", cwd=root)
+
+    assert res.exit_code == 1
+    assert "sandbox.enabled" in res.stderr
+    assert res.stdout == ""
+
+
+# -- Profiles only mount what exists -------------------------------------
+
+
+def test_profile_mounts_only_existing_host_paths_and_creates_nothing(lab):
+    root = workspace(lab, name="lean-ws")
+    plugins = load_plugins()
+    session = open_session(str(root), need_workspace=True, plugins=plugins, cwd=root)
+    assert session.workspace is not None
+
+    def plan_for():
+        return sandbox_cmd.build_sandbox_plan(
+            target_root=root,
+            target_name="lean-ws",
+            workspaces=(session.workspace,),
+            locations=session.locations,
+            plugins=plugins,
+            command=("claude",),
+            cli_profile="claude",
+            cwd=root,
+        )
+
+    bare = (repos_dir() / "community.git").resolve()
+    absent = plan_for()
+    assert not any(".claude" in tok for tok in absent.bwrap_argv)
+    assert all(d.is_relative_to(bare) for d in absent.ensure_dirs)
+    assert not (lab.home / ".claude").exists()
+
+    (lab.home / ".claude").mkdir()
+    (lab.home / ".claude.json").write_text("{}")
+    present = _mount_pairs(plan_for().bwrap_argv)
+    assert ("--bind", str(lab.home / ".claude"), str(lab.home / ".claude")) in present
+    assert ("--bind", str(lab.home / ".claude.json"), str(lab.home / ".claude.json")) in present
+    assert not any(src == str(lab.home / ".cache" / "claude") for _, src, _ in present)
+
+
+# -- Plugin mounts come only from `ow_sandbox_mounts` --------------------
+
+
+def test_no_hardcoded_host_postgres_socket_mount(monkeypatch):
     real_is_dir = Path.is_dir
     monkeypatch.setattr(
         Path, "is_dir", lambda self: str(self) == "/var/run/postgresql" or real_is_dir(self)
@@ -544,6 +656,175 @@ def test_host_postgres_socket_directory_is_always_mounted_read_only(monkeypatch)
 
     sandbox_cmd._append_system_mounts(args)
 
-    assert ("--ro-bind", "/var/run/postgresql", "/var/run/postgresql") in {
-        tuple(args[i : i + 3]) for i in range(len(args))
-    }
+    assert "/var/run/postgresql" not in args
+
+
+def test_plugin_hook_mounts_and_env_are_applied(lab):
+    ro_dir = lab.home / "sockets"
+    rw_dir = lab.home / "scratch"
+    ro_dir.mkdir()
+    rw_dir.mkdir()
+    plugin = (
+        "from pathlib import Path\n"
+        "from ow.plugin_api import SandboxMounts, hookimpl\n"
+        "OW_API_VERSION = 1\n"
+        'PLUGIN_NAME = "demo_mounts"\n'
+        "@hookimpl\n"
+        "def ow_sandbox_mounts():\n"
+        f"    return SandboxMounts(ro_paths=(Path({str(ro_dir)!r}),), rw_paths=(Path({str(rw_dir)!r}),),"
+        f' env={{"DEMO_SOCKET": {str(ro_dir / "s")!r}}})\n'
+    )
+    add_repo(lab, "demo", {"main": {"ow_plugin.py": plugin}}, base="main")
+    ws = lab.home / "demo-ws"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "demo@main", cwd=ws).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=ws).exit_code == 0
+
+    res = lab.ow("sandbox", "-n", "--", "true", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr
+    assert f"--ro-bind {shlex.quote(str(ro_dir))} {shlex.quote(str(ro_dir))}" in res.stdout
+    assert f"--bind {shlex.quote(str(rw_dir))} {shlex.quote(str(rw_dir))}" in res.stdout
+    assert f"DEMO_SOCKET {shlex.quote(str(ro_dir / 's'))}" in res.stdout
+
+
+# -- Files a session must not rewrite ------------------------------------
+
+_GUARD_PLUGIN = (
+    "from ow.plugin_api import hookimpl\n"
+    "OW_API_VERSION = 1\n"
+    'PLUGIN_NAME = "demo_guard"\n'
+    "@hookimpl\n"
+    "def ow_known_repos():\n"
+    "    return []\n"
+)
+
+
+def _guarded_workspace(lab, name: str = "guard-ws") -> Path:
+    """An Odoo workspace (so ow generates `odoorc`) whose repo carries an in-repo plugin."""
+    add_repo(lab, "community", {"18.0": {**lab.odoo_files(series="18.0"), "ow_plugin.py": _GUARD_PLUGIN}})
+    return init_workspace(lab, "community", name=name)
+
+
+def _ro_bound(argv: tuple[str, ...], path: Path) -> bool:
+    return ("--ro-bind", str(path), str(path)) in _mount_pairs(argv)
+
+
+def _plan(root: Path, name: str):
+    plugins = load_plugins()
+    session = open_session(str(root), need_workspace=True, plugins=plugins, cwd=root)
+    assert session.workspace is not None
+    return sandbox_cmd.build_sandbox_plan(
+        target_root=root,
+        target_name=name,
+        workspaces=(session.workspace,),
+        locations=session.locations,
+        plugins=session.plugins,
+        command=("true",),
+        cwd=root,
+    ), session
+
+
+def test_worktree_commondir_and_gitdir_are_read_only_over_the_rw_worktree_dir(lab):
+    root_a = workspace(lab, name="pin-a", repo="community", branch="feat-a")
+    bare = (repos_dir() / "community.git").resolve()
+    root_b = workspace(lab, name="pin-b", repo="community", bare=bare, branch="feat-b")
+
+    plan, session = _plan(root_a, "pin-a")
+    other = open_session(str(root_b), need_workspace=True, plugins=load_plugins(), cwd=root_b)
+
+    mounts = _mount_pairs(plan.bwrap_argv)
+    wt_dir = bare / "worktrees" / session.locations[0].worktree_id
+    rw_idx = mounts.index(("--bind", str(wt_dir), str(wt_dir)))
+    for name in ("commondir", "gitdir"):
+        assert mounts.index(("--ro-bind", str(wt_dir / name), str(wt_dir / name))) > rw_idx
+    # The index and HEAD of the worktree stay writable (git add / commit), siblings are not pinned here.
+    assert not _ro_bound(plan.bwrap_argv, wt_dir / "index")
+    sibling = bare / "worktrees" / other.locations[0].worktree_id
+    assert not any(src.startswith(str(sibling)) for _, src, _ in mounts)
+
+
+def test_lock_files_and_trusted_plugin_files_are_read_only(lab):
+    root = _guarded_workspace(lab)
+    plugin_file = (root / "community" / "ow_plugin.py").resolve()
+    odoorc = (root / "odoorc").resolve()
+    assert "odoorc" in read_lock(root)
+
+    untrusted, _ = _plan(root, "guard-ws")
+    assert _ro_bound(untrusted.bwrap_argv, odoorc)
+    assert not _ro_bound(untrusted.bwrap_argv, plugin_file)
+
+    assert lab.ow("trust", "-y", cwd=root).exit_code == 0
+    trusted, _ = _plan(root, "guard-ws")
+    mounts = _mount_pairs(trusted.bwrap_argv)
+    ws_bind = mounts.index(("--bind", str(root.resolve()), str(root.resolve())))
+    for protected in (odoorc, plugin_file):
+        assert mounts.index(("--ro-bind", str(protected), str(protected))) > ws_bind
+
+    # A lock entry for a file that is gone is skipped, not mounted.
+    odoorc.unlink()
+    gone, _ = _plan(root, "guard-ws")
+    assert not any(src == str(odoorc) for _, src, _ in _mount_pairs(gone.bwrap_argv))
+
+
+def test_multi_stack_lock_files_are_mounted_per_target_and_stacks_have_no_ow_dir(lab):
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    multi = lab.home / "lock-multi"
+    multi.mkdir(parents=True)
+    assert lab.ow("init", "odoo=community@18.0", "iap=community@18.0", cwd=multi).exit_code == 0
+    assert "odoo/odoorc" in read_lock(multi)
+
+    def ro(stdout: str, path: Path) -> bool:
+        quoted = shlex.quote(str(path.resolve()))
+        return f"--ro-bind {quoted} {quoted}" in stdout
+
+    whole = lab.ow("sandbox", "-n", "--", "true", cwd=multi)
+    assert whole.exit_code == 0, whole.stderr
+    assert ro(whole.stdout, multi / "odoo" / "odoorc")
+    assert ro(whole.stdout, multi / "iap" / "odoorc")
+    assert ro(whole.stdout, multi / ".ow")
+
+    one = lab.ow("sandbox", "iap", "-n", "--", "true", cwd=multi)
+    assert one.exit_code == 0, one.stderr
+    assert ro(one.stdout, multi / "iap" / "odoorc")
+    assert not ro(one.stdout, multi / "odoo" / "odoorc")
+    assert not ro(one.stdout, multi / ".ow")
+
+
+def test_real_bwrap_pins_worktree_admin_lock_and_plugin_files_but_not_tracked_files(lab, monkeypatch):
+    bwrap = _real_bwrap_available()
+    if bwrap is None:
+        pytest.skip("real bubblewrap namespace creation unavailable in this test environment")
+
+    root = _guarded_workspace(lab, name="pinned-ws")
+    assert lab.ow("trust", "-y", cwd=root).exit_code == 0
+    assert "odoorc" in read_lock(root)
+    bare = (repos_dir() / "community.git").resolve()
+    (wt_dir,) = (bare / "worktrees").iterdir()
+    commondir = wt_dir / "commondir"
+    odoorc = root / "odoorc"
+    plugin_file = root / "community" / "ow_plugin.py"
+    originals = {p: p.read_bytes() for p in (commondir, odoorc, plugin_file)}
+
+    bin_dir = Path(os.environ["PATH"].split(os.pathsep)[0])
+    (bin_dir / "bwrap").symlink_to(bwrap)
+    monkeypatch.setattr(sandbox_cmd, "prepare_services", lambda workspaces, plugins: None)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+
+    script = (
+        "set -e\n"
+        f"sh -c 'echo x >> \"{commondir}\"' 2>/dev/null && exit 11\n"
+        f"sh -c 'echo x >> \"{wt_dir / 'gitdir'}\"' 2>/dev/null && exit 12\n"
+        f"sh -c 'echo x >> \"{odoorc}\"' 2>/dev/null && exit 13\n"
+        f"sh -c 'echo x >> \"{plugin_file}\"' 2>/dev/null && exit 14\n"
+        f'cd "{root / "community"}"\n'
+        "echo '# edited' >> odoo-bin\n"
+        "git add odoo-bin\n"
+        'git commit -m "tracked edit"\n'
+    )
+    res = lab.ow("sandbox", "--", "/bin/bash", "-c", script, cwd=root)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert {p: p.read_bytes() for p in originals} == originals
+    assert "tracked edit" in lab.git(root / "community", "log", "-1", "--pretty=%s")
+    assert (root / "community" / "odoo-bin").read_text().endswith("# edited\n")

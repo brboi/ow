@@ -22,9 +22,13 @@ if TYPE_CHECKING:
     from ow.core.stacks import MultiWorkspace
     from ow.core.workspace import Workspace
 
-# Public contract version for external / in-repo plugins (`OW_API_VERSION`).
-PLUGIN_API_VERSION = 1
+# Public contract version for external / in-repo plugins: what ow implements. A plugin declares the
+# version it was written for as `OW_API_VERSION`, which must lie within `SUPPORTED_API_RANGE`.
+OW_API_CURRENT = 1
 SUPPORTED_API_RANGE: tuple[int, int] = (1, 1)
+
+# Plugin names ow keeps for itself: `python.` is the namespace of the settings ow declares.
+_RESERVED_NAMES = frozenset({"python"})
 
 # Hook markers for the "ow" project
 hookspec = pluggy.HookspecMarker("ow")
@@ -43,6 +47,9 @@ class Setting:
     # its default and equals another indexed workspace's, `ow init`/`ow add` write `<value>-N`
     # into its config. Only meaningful for `str` settings.
     unique: bool = False
+    # Marks a setting that no longer exists: reading `key` from a config is an error naming
+    # `renamed_to`. Such a setting has no value, is never listed, and cannot be set.
+    renamed_to: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -87,6 +94,8 @@ class ResolvedRepo:
     commit: str | None = None  # optional exact SHA for detached checkout (e.g. Runbot base_match)
     explicit: bool = True  # False for auto-discovered companions/sisters that explicit targets override
     pr: str | None = None  # opaque PR identity, recorded in `branch.<b>.ow-pr` and compared as-is
+    head_remote: str | None = None  # remote holding the PR head branch: "origin" or the fork owner's login
+    head_url: str | None = None  # clone URL for `head_remote`, added to the bare when that remote is missing
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -113,7 +122,8 @@ class RunCommand:
     argv: tuple[str, ...]
     cwd: Path
     env: Mapping[str, str] = field(default_factory=dict)
-    self_detaching: bool = False  # True when the command itself starts background services and exits
+    # True when the command itself starts background services and exits (see `ow_runner`)
+    self_detaching: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -214,9 +224,24 @@ class CoreSpec:
 
     @hookspec
     def ow_runner(
-        self, ws: Workspace, args: tuple[str, ...], detach: bool, answers: Answers
+        self,
+        ws: Workspace | None,
+        multi: MultiWorkspace | None,
+        args: tuple[str, ...],
+        answers: Answers,
     ) -> RunCommand | None:
-        """Return the command to run this workspace via `ow run`, or None. Propagates."""
+        """Return the command `ow run` executes, or None. Propagates.
+
+        Called with `ws` the workspace and `multi=None` for a mono-stack workspace. At a
+        multi-stack root it is called first with `ws=None, multi=<root>`: an answer there is the
+        command for the whole multi-stack workspace (`answers` is then bound to its first
+        stack). With no such answer it is called once per stack with `ws=<stack>, multi=<root>`.
+
+        ow decides how the command runs. `RunCommand(self_detaching=True)` means "this command
+        starts the services, then returns": with `ow run -d` ow runs it and returns; in the
+        foreground ow runs it, follows the files `ow_logs` returns, and calls `ow_stop` when
+        interrupted. Any other command runs on the terminal (detached under `-d`).
+        """
 
     @hookspec
     def ow_running(self, ws: Workspace) -> list[str] | None:
@@ -226,8 +251,12 @@ class CoreSpec:
         """
 
     @hookspec
-    def ow_stop(self, ws: Workspace) -> RunCommand | list[str] | None:
-        """Stop background processes managed by this plugin for `ws` (`ow stop`). Propagates."""
+    def ow_stop(self, ws: Workspace | None, multi: MultiWorkspace | None) -> RunCommand | list[str] | None:
+        """Stop what this plugin runs for `ws` (`ow stop`, and `ow run`'s exit for a self-detaching runner). Propagates.
+
+        Same `ws`/`multi` convention as `ow_runner`: `ws=None, multi=<root>` first for the whole
+        multi-stack workspace, else once per stack.
+        """
 
     @hookspec
     def ow_stop_services(self, ws: Workspace | None) -> list[str] | None:
@@ -237,8 +266,11 @@ class CoreSpec:
         """
 
     @hookspec
-    def ow_logs(self, ws: Workspace) -> list[tuple[str, Path]] | None:
-        """Return the `(label, log_path)` files `ow logs` shows or follows for `ws`. Propagates."""
+    def ow_logs(self, ws: Workspace | None, multi: MultiWorkspace | None) -> list[tuple[str, Path]] | None:
+        """Return the `(label, log_path)` files `ow logs` shows or follows. Propagates.
+
+        Same `ws`/`multi` convention as `ow_runner`; an empty list means "nothing from this plugin".
+        """
 
     @hookspec
     def ow_before_run(
@@ -304,26 +336,6 @@ class CoreSpec:
         """
 
     @hookspec
-    def ow_multi_runner(
-        self,
-        multi: MultiWorkspace,
-        args: tuple[str, ...],
-        detach: bool,
-    ) -> RunCommand | None:
-        """Return a single workspace-wide command for `ow run` at a multi-stack root, or None. Propagates."""
-
-    @hookspec
-    def ow_multi_stop(
-        self,
-        multi: MultiWorkspace,
-    ) -> RunCommand | list[str] | None:
-        """Stop a multi-stack workspace managed by this plugin (`ow stop`), or None. Propagates."""
-
-    @hookspec
-    def ow_multi_logs(self, multi: MultiWorkspace) -> list[tuple[str, Path]] | None:
-        """Return the `(label, log_path)` files `ow logs` shows or follows for a multi-stack workspace. Propagates."""
-
-    @hookspec
     def ow_stack_values(
         self,
         ws: Workspace | None,
@@ -357,37 +369,6 @@ class CoreSpec:
     @hookspec
     def ow_sandbox_mounts(self, ws: Workspace, answers: Answers) -> SandboxMounts | None:
         """Return extra sandbox mounts and environment variables needed for `ws`, or None. Propagates."""
-
-
-def _get_builtins() -> tuple[tuple[str, types.ModuleType], ...]:
-    """Get all built-in plugin modules in order."""
-    from ow.plugins import (
-        github,
-        local,
-        mailsink,
-        mise,
-        odoo,
-        postgres,
-        runbot,
-        sandbox,
-        vscode,
-        zed,
-    )
-
-    # Order matters: `Plugins.pipe` threads values in this order (odoo expands companion
-    # repos before runbot pins them).
-    return (
-        ("mise", mise),
-        ("odoo", odoo),
-        ("postgres", postgres),
-        ("mailsink", mailsink),
-        ("github", github),
-        ("runbot", runbot),
-        ("vscode", vscode),
-        ("zed", zed),
-        ("local", local),
-        ("sandbox", sandbox),
-    )
 
 
 class Plugins:
@@ -469,6 +450,11 @@ class Plugins:
 
             raw_name = getattr(module, "PLUGIN_NAME", None) or item.repo_name
             plugin_name = str(raw_name).strip()
+            if plugin_name in _RESERVED_NAMES:
+                warnings.append(
+                    f"skipping plugin {shown}: plugin name {plugin_name!r} is reserved by ow"
+                )
+                continue
             if not _valid_plugin_name(plugin_name) or plugin_name in seen_names:
                 warnings.append(
                     f"skipping plugin {shown}: plugin name {plugin_name!r} is invalid or already registered"
@@ -533,9 +519,11 @@ class Plugins:
 
     def _collect_settings(self) -> tuple[tuple[Setting, ...], tuple[str, ...]]:
         """Return `(settings, warnings)`: the settings `settings()` lists and why others were dropped."""
-        result: list[Setting] = []
+        from ow.specs.python_env import SETTINGS as PYTHON_SETTINGS
+
+        result: list[Setting] = list(PYTHON_SETTINGS)
         warnings: list[str] = []
-        seen: set[str] = set()
+        seen: set[str] = {setting.key for setting in result}
         impls = self.pm.hook.ow_settings.get_hookimpls()
         impl_to_name = {impl.plugin: self.pm.get_name(impl.plugin) for impl in impls}
 
@@ -559,7 +547,15 @@ class Plugins:
                     raise
                 except Exception as e:
                     raise PluginError(name, "ow_settings", e) from e
+                if plugin_settings is not None and not isinstance(plugin_settings, (list, tuple)):
+                    raise PluginError(
+                        name, "ow_settings", f"expected a list of Setting, got {type(plugin_settings).__name__}"
+                    )
                 for setting in plugin_settings or ():
+                    if not isinstance(setting, Setting):
+                        raise PluginError(
+                            name, "ow_settings", f"expected a list of Setting, got {type(setting).__name__}"
+                        )
                     if not setting.key.startswith(prefix) or len(setting.key) == len(prefix):
                         warnings.append(
                             f"plugin {name}: ignoring setting {setting.key!r} "
@@ -634,7 +630,10 @@ class Plugins:
         kwargs: Mapping[str, Any],
         *,
         extra: Mapping[str, Any] | None = None,
+        scope: Workspace | None = None,
     ) -> dict[str, Any]:
+        """The keyword arguments `impl` declares; `answers` is bound to `scope`, else to `ws`."""
+        answers_for = scope if scope is not None else ws
         impl_kwargs: dict[str, Any] = {}
         for arg in (*impl.argnames, *impl.kwargnames):
             if extra and arg in extra:
@@ -643,8 +642,8 @@ class Plugins:
                 impl_kwargs[arg] = kwargs[arg]
             elif arg == "ws":
                 impl_kwargs[arg] = ws
-            elif arg == "answers" and ws is not None:
-                impl_kwargs[arg] = Answers(self, ws)
+            elif arg == "answers" and answers_for is not None:
+                impl_kwargs[arg] = Answers(self, answers_for)
         return impl_kwargs
 
     @staticmethod
@@ -694,11 +693,17 @@ class Plugins:
         return tuple(name for name, _impl in self._enabled_impls(hook, ws))
 
     def first_with_name(
-        self, hook: str, ws: Workspace | None = None, **kwargs: Any
+        self, hook: str, ws: Workspace | None = None, *, scope: Workspace | None = None, **kwargs: Any
     ) -> tuple[str, object] | None:
-        """Return `(plugin_name, answer)` for the first non-None answer of `hook`, else None."""
-        for name, impl in self._enabled_impls(hook, ws):
-            ret = self._invoke(name, impl, hook, self._bind_kwargs(impl, ws, kwargs))
+        """Return `(plugin_name, answer)` for the first non-None answer of `hook`, else None.
+
+        The hook receives `ws`. `scope` is the workspace whose settings decide which plugins are
+        enabled and that `answers` is bound to, when that is not `ws` itself (a hook called
+        with `ws=None` for a multi-stack root: its first stack).
+        """
+        context = scope if scope is not None else ws
+        for name, impl in self._enabled_impls(hook, context):
+            ret = self._invoke(name, impl, hook, self._bind_kwargs(impl, ws, kwargs, scope=context))
             if ret is not None:
                 return name, ret
         return None
@@ -754,8 +759,12 @@ class Answers:
         self._plugins = plugins
         self._ws = ws
 
-    def __call__(self, hook_name: str) -> list:
-        return [result for _name, result in self._plugins.call(hook_name, ws=self._ws)]
+    def __call__(self, hook_name: str, **kwargs: Any) -> list:
+        return [result for _name, result in self._plugins.call(hook_name, ws=self._ws, **kwargs)]
+
+    def implementers(self, hook_name: str) -> tuple[str, ...]:
+        """Names of the plugins enabled for this workspace that implement `hook_name`."""
+        return self._plugins.implementers(hook_name, self._ws)
 
     def for_workspace(self, ws: Workspace) -> Answers:
         """Return the same callable bound to `ws`."""
@@ -775,12 +784,13 @@ def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = Non
 
     Raises PluginError when a plugin's hook implementations are invalid.
     """
+    from ow.plugins import builtin_plugins
     from ow.specs.editors import EditorsSpec
     from ow.specs.python_env import PythonEnvSpec
     from ow.specs.services import ServicesSpec
 
     if builtins is None:
-        builtins = _get_builtins()
+        builtins = builtin_plugins()
 
     pm = pluggy.PluginManager("ow")
     for spec in (CoreSpec, PythonEnvSpec, EditorsSpec, ServicesSpec):
@@ -788,8 +798,8 @@ def load_plugins(builtins: tuple[tuple[str, types.ModuleType], ...] | None = Non
 
     names = []
     for name, _module in builtins:
-        if not _valid_plugin_name(name):
-            raise PluginError(name, "register", "plugin name must match [A-Za-z0-9_-]+")
+        if not _valid_plugin_name(name) or name in _RESERVED_NAMES:
+            raise PluginError(name, "register", "plugin name must match [A-Za-z0-9_-]+ and not be reserved by ow")
     for name, module in builtins:
         names.append(name)
         try:

@@ -6,7 +6,7 @@ import json
 import tomllib
 
 from ow.core.paths import repos_dir
-from tests.conftest import add_repo, file_url, setup_pr_repo
+from tests.conftest import add_repo, file_url, git_ok, setup_pr_repo
 
 
 def test_add_outside_workspace_refuses_with_init_hint(lab):
@@ -265,7 +265,7 @@ def test_add_dry_run_reports_each_worktree_state_like_a_real_add(lab):
     (ws / "upgrade").mkdir()  # an empty directory: an interrupted worktree
     broken = lab.ow("add", "-n", "upgrade", cwd=ws)
     assert broken.exit_code == 0, broken.stderr
-    assert "would clean up incomplete worktree" in broken.stdout
+    assert "remove incomplete worktree" in broken.stdout
     assert "worktree add" in broken.stdout
     assert list((ws / "upgrade").iterdir()) == []
 
@@ -329,12 +329,13 @@ def test_add_attach_without_branch_raises_usage_error_not_assert(lab):
             plugins,
             root=ws,
             resolved=target,
-            mode=UnitMode.mono(allow_existing_dir=True, allow_attach=True, dry_run=True),
+            mode=UnitMode.mono(allow_existing_dir=True, allow_attach=True),
+            dry_run=True,
         )
 
 
 def test_add_healthy_worktree_warns_on_runbot_commit_mismatch(lab, capsys):
-    from ow.commands._workspace import add_into_workspace
+    from ow.commands._workspace import create_workspace_units, existing_unit_job
     from ow.core.plugins import ResolvedRepo, ResolvedSpec, load_plugins
 
     remote = add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
@@ -356,7 +357,7 @@ def test_add_healthy_worktree_warns_on_runbot_commit_mismatch(lab, capsys):
         repos=(ResolvedRepo(name="community", base="origin/18.0", branch=None, commit=sha_old),),
         source="runbot:bundle:1",
     )
-    _res, code = add_into_workspace(load_plugins(), ws, target)
+    _res, code = create_workspace_units(load_plugins(), [existing_unit_job(ws, target)])
     assert code == 0
     captured = capsys.readouterr()
     assert "requested commit" in captured.err
@@ -414,7 +415,7 @@ def test_add_honours_an_in_repo_plugins_known_repos(lab):
     ws = lab.home / "demo-ws"
     ws.mkdir(parents=True)
     assert lab.ow("init", "demo@main", cwd=ws).exit_code == 0
-    assert lab.ow("trust", cwd=ws).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=ws).exit_code == 0
     assert not (repos_dir() / "extra.git").exists()
 
     res = lab.ow("add", "extra@main", cwd=ws)
@@ -422,3 +423,265 @@ def test_add_honours_an_in_repo_plugins_known_repos(lab):
     assert res.exit_code == 0, res.stderr + res.stdout
     assert (ws / "extra" / "README.md").is_file()
     assert (repos_dir() / "extra.git").is_dir()
+
+
+def _init_edited_community(lab, name: str):
+    """A one-repo workspace whose community worktree holds a tracked edit and an untracked file."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    ws = lab.home / name
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+    (ws / "community" / "odoo-bin").write_text("my edit\n")
+    (ws / "community" / "notes.txt").write_text("not committed\n")
+    return ws
+
+
+def test_add_on_a_moved_workspace_repairs_the_worktree_and_keeps_the_work(lab):
+    """R1: a moved workspace's worktrees are re-registered, never treated as broken and removed."""
+    ws = _init_edited_community(lab, "before-move")
+    moved = lab.home / "after-move"
+    ws.rename(moved)
+
+    res = lab.ow("add", "community", cwd=moved)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "worktree repair" in res.stdout
+    assert (moved / "community" / "odoo-bin").read_text() == "my edit\n"
+    assert (moved / "community" / "notes.txt").read_text() == "not committed\n"
+    listing = lab.git(repos_dir() / "community.git", "worktree", "list", "--porcelain")
+    assert f"worktree {moved / 'community'}" in listing
+
+
+def test_add_after_a_prune_of_a_moved_workspace_refuses_and_keeps_the_work(lab):
+    """R1: once `git worktree prune` forgot a moved worktree, `ow add` refuses; the files are the user's."""
+    ws = _init_edited_community(lab, "prune-before")
+    moved = lab.home / "prune-after"
+    ws.rename(moved)
+    lab.git(repos_dir() / "community.git", "worktree", "prune")
+
+    res = lab.ow("add", "community", cwd=moved)
+
+    assert res.exit_code == 2
+    assert "forgot" in res.stderr
+    assert (moved / "community" / "odoo-bin").read_text() == "my edit\n"
+    assert (moved / "community" / "notes.txt").read_text() == "not committed\n"
+
+
+def test_add_refuses_to_replace_an_incomplete_worktree_that_holds_files(lab):
+    """R1: only a directory proven incomplete is replaced; a `.git` file beside real files is not."""
+    ws = _init_edited_community(lab, "has-files")
+    add_repo(lab, "upgrade", {"master": {"migrations/u.py": "u = 1\n"}}, base="master")
+    (ws / "upgrade").mkdir()
+    (ws / "upgrade" / ".git").write_text("gitdir: /nowhere/upgrade.git/worktrees/upgrade\n")
+    (ws / "upgrade" / "mine.txt").write_text("work\n")
+
+    res = lab.ow("add", "upgrade", cwd=ws)
+
+    assert res.exit_code != 0
+    assert (ws / "upgrade" / "mine.txt").read_text() == "work\n"
+
+
+def test_add_base_dotdot_branch_creates_the_branch_with_its_base_and_an_upstream(lab):
+    """Q24 + Q20: `repo@<base>..<branch>` creates the branch from the base, upstream pre-set on origin."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    remote = add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    ws = lab.home / "fresh-branch"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+
+    res = lab.ow("add", "enterprise@18.0..18.0-fix", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    wt = ws / "enterprise"
+    bare = repos_dir() / "enterprise.git"
+    assert lab.git(wt, "branch", "--show-current") == "18.0-fix"
+    assert lab.git(bare, "config", "branch.18.0-fix.ow-base") == "origin/18.0"
+    assert lab.git(bare, "config", "branch.18.0-fix.remote") == "origin"
+    assert lab.git(bare, "config", "branch.18.0-fix.merge") == "refs/heads/18.0-fix"
+    assert "base = origin/18.0" not in (ws / ".ow" / "config.toml").read_text()
+
+    # G3: a bare `git pull` before the first push fails and merges nothing; the first `git push` creates it.
+    head = lab.sha(wt, "HEAD")
+    assert not git_ok(wt, "pull")
+    assert lab.sha(wt, "HEAD") == head
+    assert git_ok(wt, "push")
+    assert lab.sha(remote, "refs/heads/18.0-fix") == head
+
+
+def test_add_base_dotdot_branch_checks_out_a_branch_a_remote_has_and_tracks_it(lab):
+    """Q24: when a remote holds the branch it is checked out tracking it, with the spelled base."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    remote = add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    collab = lab.collaborator("feat-author", of=remote)
+    collab.git("checkout", "18.0")
+    collab.commit({"ent/feat.py": "feat = 1\n"}, message="feature", branch="18.0-feat")
+    collab.push("18.0-feat")
+    ws = lab.home / "existing-branch"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+
+    res = lab.ow("add", "enterprise@18.0..18.0-feat", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    bare = repos_dir() / "enterprise.git"
+    assert (ws / "enterprise" / "ent" / "feat.py").read_text() == "feat = 1\n"
+    assert lab.git(bare, "config", "branch.18.0-feat.ow-base") == "origin/18.0"
+    assert lab.git(ws / "enterprise", "rev-parse", "--abbrev-ref", "@{u}") == "origin/18.0-feat"
+
+
+def test_add_base_dotdot_remote_branch_takes_the_branch_from_that_remote(lab):
+    """Q24: `repo@<base>..<remote>/<branch>` names the remote that holds the branch."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    remote = add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    fork = lab.remote("enterprise-dev", {"18.0": {"ent/__manifest__.py": "{}"}})
+    collab = lab.collaborator("fork-author", of=fork)
+    collab.git("checkout", "18.0")
+    collab.commit({"ent/fork.py": "fork = 1\n"}, message="fork work", branch="18.0-fork")
+    collab.push("18.0-fork")
+    lab.git(repos_dir() / "enterprise.git", "remote", "add", "dev", str(fork))
+    ws = lab.home / "remote-branch"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+    assert remote.exists()
+
+    res = lab.ow("add", "enterprise@18.0..dev/18.0-fork", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert (ws / "enterprise" / "ent" / "fork.py").read_text() == "fork = 1\n"
+    assert lab.git(ws / "enterprise", "rev-parse", "--abbrev-ref", "@{u}") == "dev/18.0-fork"
+    assert lab.git(repos_dir() / "enterprise.git", "config", "branch.18.0-fork.ow-base") == "origin/18.0"
+
+
+def test_add_at_base_dotdot_branch_puts_every_default_repo_on_the_branch(lab):
+    """Q24: `@<base>..<branch>` spans `odoo.default_repos`."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(lab, "upgrade", {"18.0": {"migrations/u.py": "u = 1\n"}})
+    ws = lab.home / "span-default-repos"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+    assert lab.ow("config", "set", "odoo.default_repos", "community", "upgrade", cwd=ws).exit_code == 0
+
+    res = lab.ow("add", "@18.0..18.0-span", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    for repo in ("community", "upgrade"):
+        assert lab.git(ws / repo, "branch", "--show-current") == "18.0-span"
+        assert lab.git(repos_dir() / f"{repo}.git", "config", "branch.18.0-span.ow-base") == "origin/18.0"
+
+
+def test_add_branch_without_a_known_base_warns_and_suggests_the_range_form(lab):
+    """Q21: `repo@<branch>` keeps inferring the base; a fall back to origin/HEAD is warned about."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    remote = add_repo(lab, "tools", {"main": {"tool.py": "t = 1\n"}}, base="main")
+    collab = lab.collaborator("tools-author", of=remote)
+    collab.git("checkout", "main")
+    collab.commit({"tool2.py": "t = 2\n"}, message="topic work", branch="topic")
+    collab.push("topic")
+    ws = lab.home / "no-base"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0", cwd=ws).exit_code == 0
+
+    res = lab.ow("add", "tools@topic", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert "tools@<base>..topic" in res.stderr
+
+
+def test_add_shows_the_whole_plan_including_the_clone_before_acting(lab):
+    """Q11: a repo that is not cloned yet is a step of the plan; `-n` clones nothing."""
+    extra = lab.remote("extra", {"main": {"README.md": "extra\n"}}, head="main")
+    plugin = (
+        "from ow.plugin_api import KnownRepo, hookimpl\n"
+        "OW_API_VERSION = 1\n"
+        'PLUGIN_NAME = "demo_known"\n'
+        "@hookimpl\n"
+        "def ow_known_repos():\n"
+        f'    return [KnownRepo(name="extra", url="{file_url(extra)}")]\n'
+    )
+    add_repo(
+        lab,
+        "demo",
+        {"main": {"pyproject.toml": '[tool.ow]\nplugin = "ow_plugin.py"\n', "ow_plugin.py": plugin}},
+        base="main",
+    )
+    ws = lab.home / "plan-first"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "demo@main", cwd=ws).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=ws).exit_code == 0
+
+    dry = lab.ow("add", "-n", "extra@main", cwd=ws)
+
+    assert dry.exit_code == 0, dry.stderr + dry.stdout
+    assert "# extra: clone bare repo from" in dry.stdout
+    assert "# extra: add worktree at" in dry.stdout
+    assert not (repos_dir() / "extra.git").exists()
+    assert not (ws / "extra").exists()
+
+    real = lab.ow("add", "extra@main", cwd=ws)
+
+    assert real.exit_code == 0, real.stderr + real.stdout
+    lines = real.stdout.splitlines()
+    clone = next(i for i, line in enumerate(lines) if line.startswith("# extra: clone bare repo"))
+    result = next(i for i, line in enumerate(lines) if line.startswith(("ready ", "updated ")))
+    assert clone < result
+    assert (ws / "extra" / "README.md").is_file()
+
+
+def test_add_base_dotdot_branch_attaches_to_a_detached_worktree_with_an_upstream(lab):
+    """Q20: attaching a new branch to an existing detached worktree pre-sets its upstream like a creation does."""
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    remote = add_repo(lab, "enterprise", {"18.0": {"ent/__manifest__.py": "{}"}})
+    ws = lab.home / "attach-branch"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0,enterprise@18.0", cwd=ws).exit_code == 0
+    assert lab.git(ws / "enterprise", "branch", "--show-current") == ""
+
+    res = lab.ow("add", "enterprise@18.0..18.0-attached", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    wt = ws / "enterprise"
+    bare = repos_dir() / "enterprise.git"
+    assert lab.git(wt, "branch", "--show-current") == "18.0-attached"
+    assert lab.git(bare, "config", "branch.18.0-attached.ow-base") == "origin/18.0"
+    assert lab.git(bare, "config", "branch.18.0-attached.remote") == "origin"
+    assert lab.git(bare, "config", "branch.18.0-attached.merge") == "refs/heads/18.0-attached"
+    assert not git_ok(wt, "pull")
+    assert git_ok(wt, "push")
+    assert git_ok(remote, "rev-parse", "--verify", "refs/heads/18.0-attached")
+
+
+def test_add_keeps_the_config_keys_of_plugins_that_are_not_loaded_and_of_in_repo_plugins(lab):
+    """Unknown keys survive the config rewrite of `ow add`, an in-repo plugin's among them."""
+    import tomllib
+
+    plugin = (
+        "from ow.plugin_api import Setting, hookimpl\n"
+        "OW_API_VERSION = 1\n"
+        'PLUGIN_NAME = "slot"\n'
+        "@hookimpl\n"
+        "def ow_settings():\n"
+        '    return [Setting(key="slot.name", type=str, default="shared", help="a slot")]\n'
+    )
+    add_repo(lab, "community", {"18.0": lab.odoo_files(series="18.0")})
+    add_repo(lab, "upgrade", {"18.0": {"migrations/u.py": "u = 1\n"}})
+    add_repo(
+        lab,
+        "slot",
+        {"main": {"pyproject.toml": '[tool.ow]\nplugin = "ow_plugin.py"\n', "ow_plugin.py": plugin}},
+        base="main",
+    )
+    ws = lab.home / "keeps-keys"
+    ws.mkdir(parents=True)
+    assert lab.ow("init", "community@18.0,slot@main", cwd=ws).exit_code == 0
+    assert lab.ow("trust", "-y", cwd=ws).exit_code == 0
+    assert lab.ow("config", "set", "slot.name", "mine", cwd=ws).exit_code == 0
+    config = ws / ".ow" / "config.toml"
+    config.write_text(config.read_text() + '\n[elsewhere]\nwho = "me"\n')
+
+    res = lab.ow("add", "upgrade", cwd=ws)
+
+    assert res.exit_code == 0, res.stderr + res.stdout
+    data = tomllib.loads(config.read_text())
+    assert data["slot"] == {"name": "mine"}
+    assert data["elsewhere"] == {"who": "me"}
+    assert "upgrade" in data["repos"]

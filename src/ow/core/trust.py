@@ -89,17 +89,27 @@ def discover_repo_plugins(
 
 
 def _read_trusted_set(registry: Path) -> set[str]:
+    """The trusted locations recorded in `registry`; empty when the file does not exist.
+
+    An unreadable or malformed file is an error, never an empty set: a rewrite from an
+    empty set would erase every other entry.
+    """
     if not registry.is_file():
         return set()
     try:
         with open(registry, "rb") as handle:
             data = tomllib.load(handle)
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        return set()
-    items = data.get("trusted")
-    if not isinstance(items, list):
-        return set()
-    return {str(item) for item in items if isinstance(item, str) and item}
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise UsageError(
+            f"cannot read the trust file {registry}: {exc}; fix or remove it (nothing was changed)"
+        ) from exc
+    items = data.get("trusted", [])
+    if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+        raise UsageError(
+            f"the trust file {registry} must hold `trusted = [...]` as a list of paths; "
+            "fix or remove it (nothing was changed)"
+        )
+    return {item for item in items if item}
 
 
 def _write_trusted_set(registry: Path, paths: set[str]) -> None:

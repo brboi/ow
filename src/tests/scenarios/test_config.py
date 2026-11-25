@@ -25,9 +25,9 @@ BASE = "18.0"
 # The bare listing of a workspace whose only repo is not an Odoo core: every
 # value is the built-in default, and `odoo.db_name` takes the workspace's name.
 LISTING = [
+    "python.version = (unset) (default) # Python version of the workspace virtualenv (e.g. '3.11', '3.12'); defaults to the newest the checkout supports",
+    "python.shared_venv = true (default) # Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
     "mise.enabled = true (default) # Enable or disable the mise plugin",
-    "mise.python = (unset) (default) # Python version for mise (e.g. '3.11', '3.12')",
-    "mise.shared_venv = true (default) # Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
     "odoo.enabled = true (default) # Enable or disable the odoo plugin",
     "odoo.http_port = 8069 (default) # HTTP port for Odoo",
     "odoo.gevent_port = 8072 (default) # Gevent/longpolling port for Odoo",
@@ -49,10 +49,10 @@ LISTING = [
     'postgres.user = "odoo" (default) # PostgreSQL role name for Odoo (NOSUPERUSER CREATEDB)',
     'postgres.password = "odoo" (default) # PostgreSQL role password for the Odoo role (not the superuser, whose password is random)',
     "postgres.pgweb = true (default) # Run pgweb alongside PostgreSQL",
-    'postgres.pgweb_image = "sosedoff/pgweb" (default) # pgweb container image',
+    'postgres.pgweb_image = "sosedoff/pgweb:0.17.0" (default) # pgweb container image',
     "postgres.pgweb_port = 8081 (default) # Host port for pgweb",
     "mailsink.enabled = true (default) # Enable or disable the mailsink plugin",
-    'mailsink.image = "axllent/mailpit" (default) # Mailpit container image',
+    'mailsink.image = "axllent/mailpit:v1.34.0" (default) # Mailpit container image',
     "mailsink.smtp_port = 1025 (default) # Host SMTP port for mailsink",
     "mailsink.web_port = 8025 (default) # Host Web UI port for mailsink",
     "github.enabled = true (default) # Enable or disable the github plugin",
@@ -74,9 +74,9 @@ LISTING = [
 # The same listing outside a workspace: no workspace, so no callable default
 # has anything to resolve against and every one of them is unset.
 LISTING_OUTSIDE = [
+    "python.version = (unset) (default) # Python version of the workspace virtualenv (e.g. '3.11', '3.12'); defaults to the newest the checkout supports",
+    "python.shared_venv = true (default) # Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
     "mise.enabled = true (default) # Enable or disable the mise plugin",
-    "mise.python = (unset) (default) # Python version for mise (e.g. '3.11', '3.12')",
-    "mise.shared_venv = true (default) # Share Python virtualenvs by version and series under $XDG_DATA_HOME/ow/venvs",
     "odoo.enabled = true (default) # Enable or disable the odoo plugin",
     "odoo.http_port = 8069 (default) # HTTP port for Odoo",
     "odoo.gevent_port = 8072 (default) # Gevent/longpolling port for Odoo",
@@ -98,10 +98,10 @@ LISTING_OUTSIDE = [
     'postgres.user = "odoo" (default) # PostgreSQL role name for Odoo (NOSUPERUSER CREATEDB)',
     'postgres.password = "odoo" (default) # PostgreSQL role password for the Odoo role (not the superuser, whose password is random)',
     "postgres.pgweb = true (default) # Run pgweb alongside PostgreSQL",
-    'postgres.pgweb_image = "sosedoff/pgweb" (default) # pgweb container image',
+    'postgres.pgweb_image = "sosedoff/pgweb:0.17.0" (default) # pgweb container image',
     "postgres.pgweb_port = 8081 (default) # Host port for pgweb",
     "mailsink.enabled = true (default) # Enable or disable the mailsink plugin",
-    'mailsink.image = "axllent/mailpit" (default) # Mailpit container image',
+    'mailsink.image = "axllent/mailpit:v1.34.0" (default) # Mailpit container image',
     "mailsink.smtp_port = 1025 (default) # Host SMTP port for mailsink",
     "mailsink.web_port = 8025 (default) # Host Web UI port for mailsink",
     "github.enabled = true (default) # Enable or disable the github plugin",
@@ -150,7 +150,7 @@ def test_config_get_value_and_unknown_key(lab):
     assert got.stderr == ""
 
     # An unset value prints nothing, and that is not an error.
-    unset = lab.ow("config", "get", "mise.python", cwd=root)
+    unset = lab.ow("config", "get", "python.version", cwd=root)
     assert unset.exit_code == 0
     assert unset.stdout == ""
 
@@ -215,37 +215,38 @@ def test_config_set_needs_a_workspace_without_global(lab):
 def test_config_set_global_refreshes_the_current_workspace(lab):
     root = workspace(lab, branches={BASE: lab.odoo_files()})
 
-    result = lab.ow("config", "set", "--global", "mise.python", "3.12", cwd=root)
+    result = lab.ow("config", "set", "--global", "python.version", "3.12", cwd=root)
     assert result.exit_code == 0
-    assert tomllib.loads(global_config().read_text()) == {"mise": {"python": "3.12"}}
+    assert tomllib.loads(global_config().read_text()) == {"python": {"version": "3.12"}}
 
     # The resolved workspace is refreshed even for a global write.
     fragment = root / "mise" / "conf.d" / "00-ow.toml"
     assert tomllib.loads(fragment.read_text())["tools"]["python"] == "3.12"
 
     listing = lab.ow("config", cwd=root)
-    assert listing.stdout.splitlines()[1] == (
-        "mise.python = \"3.12\" (global) # Python version for mise (e.g. '3.11', '3.12')"
+    assert listing.stdout.splitlines()[0] == (
+        "python.version = \"3.12\" (global) # Python version of the workspace virtualenv "
+        "(e.g. '3.11', '3.12'); defaults to the newest the checkout supports"
     )
 
     # `--global` shows the global layer alone: built-in defaults still fill the
     # keys it does not set, exactly as they do outside a workspace.
     expected = list(LISTING_OUTSIDE)
-    expected[1] = "mise.python = \"3.12\" (global) # Python version for mise (e.g. '3.11', '3.12')"
+    expected[0] = listing.stdout.splitlines()[0]
     global_listing = lab.ow("config", "--global", cwd=root)
     assert global_listing.stdout.splitlines() == expected
 
 
 def test_config_unset_global_key(lab):
     root = workspace(lab, branches={BASE: lab.odoo_files()})
-    assert lab.ow("config", "set", "--global", "mise.python", "3.12", cwd=root).exit_code == 0
+    assert lab.ow("config", "set", "--global", "python.version", "3.12", cwd=root).exit_code == 0
 
-    result = lab.ow("config", "unset", "--global", "mise.python", cwd=root)
+    result = lab.ow("config", "unset", "--global", "python.version", cwd=root)
     assert result.exit_code == 0
     assert "python" not in global_config().read_text()
 
     # Nothing is left to remove, so the second run is a no-op.
-    again = lab.ow("config", "unset", "--global", "mise.python", cwd=root)
+    again = lab.ow("config", "unset", "--global", "python.version", cwd=root)
     assert again.exit_code == 0
     assert again.stdout == ""
     assert again.stderr == ""
@@ -262,23 +263,103 @@ def test_config_unset_an_unknown_key(lab):
     assert tomllib.loads(config_path.read_text()) == {"repos": {REPO: f"origin/{BASE}"}}
 
 
-def test_config_unset_unknown_global_key_is_quiet_for_that_key(lab):
+def test_config_unset_unknown_global_key_removes_only_that_key(lab):
     root = workspace(lab, branches={BASE: {"README.md": "hi\n"}})
     global_config().parent.mkdir(parents=True, exist_ok=True)
-    global_config().write_text("[retarget]\nenabled = true\n")
+    global_config().write_text("[nosuchplugin]\nenabled = true\n")
 
-    result = lab.ow("config", "unset", "--global", "retarget.enabled", cwd=root)
+    result = lab.ow("config", "unset", "--global", "nosuchplugin.enabled", cwd=root)
     assert result.exit_code == 0
     assert result.stderr == ""
     assert tomllib.loads(global_config().read_text()) == {}
 
-    # Other unknown keys in the same file still get reported when dropped.
-    global_config().write_text("[retarget]\nenabled = true\n\n[future]\nx = 1\n")
-    result = lab.ow("config", "unset", "--global", "retarget.enabled", cwd=root)
+    # The other unknown keys of the file are kept: only `unset` removes a key.
+    global_config().write_text("[nosuchplugin]\nenabled = true\n\n[future]\nx = 1\n")
+    result = lab.ow("config", "unset", "--global", "nosuchplugin.enabled", cwd=root)
     assert result.exit_code == 0
-    assert "retarget.enabled" not in result.stderr
-    assert "warning: dropped future.x = 1" in result.stderr
-    assert tomllib.loads(global_config().read_text()) == {}
+    assert "nosuchplugin.enabled" not in result.stderr
+    assert "dropped" not in result.stderr
+    assert tomllib.loads(global_config().read_text()) == {"future": {"x": 1}}
+
+
+def test_config_set_global_outside_a_workspace_keeps_a_plugin_table_that_is_not_loaded(lab):
+    global_config().parent.mkdir(parents=True, exist_ok=True)
+    global_config().write_text('[hello]\ngreeting = "hi"\n')
+
+    result = lab.ow("config", "set", "--global", "odoo.http_port", "8070", cwd=lab.home)
+
+    assert result.exit_code == 0, result.stderr
+    assert "dropped" not in result.stderr
+    assert tomllib.loads(global_config().read_text()) == {
+        "hello": {"greeting": "hi"},
+        "odoo": {"http_port": 8070},
+    }
+
+
+def test_config_set_in_a_workspace_keeps_unknown_keys(lab):
+    root = workspace(lab, branches={BASE: {"README.md": "hi\n"}})
+    config_path = root / ".ow" / "config.toml"
+    config_path.write_text(config_path.read_text() + '[hello]\ngreeting = "hi"\n')
+
+    assert lab.ow("config", "set", "odoo.http_port", "8071", cwd=root).exit_code == 0
+
+    written = tomllib.loads(config_path.read_text())
+    assert written["hello"] == {"greeting": "hi"}
+    assert written["odoo"] == {"http_port": 8071}
+    assert written["repos"] == {REPO: f"origin/{BASE}"}
+
+
+def test_config_lists_unknown_keys_marked_as_such(lab):
+    root = workspace(lab, branches={BASE: {"README.md": "hi\n"}})
+    global_config().parent.mkdir(parents=True, exist_ok=True)
+    global_config().write_text('[hello]\ngreeting = "hi"\n')
+    config_path = root / ".ow" / "config.toml"
+    config_path.write_text(config_path.read_text() + "[theme]\ndark = true\n")
+
+    inside = lab.ow("config", cwd=root)
+    assert inside.exit_code == 0
+    tail = inside.stdout.splitlines()[len(LISTING):]
+    assert tail == [
+        'hello.greeting = "hi" (global) # unknown (plugin not loaded?)',
+        "theme.dark = true (workspace) # unknown (plugin not loaded?)",
+    ]
+
+    only_global = lab.ow("config", "--global", cwd=root)
+    assert only_global.stdout.splitlines()[len(LISTING_OUTSIDE):] == [
+        'hello.greeting = "hi" (global) # unknown (plugin not loaded?)',
+    ]
+
+
+def test_config_refuses_the_renamed_mise_python_keys_naming_the_new_ones(lab):
+    root = workspace(lab, branches={BASE: {"README.md": "hi\n"}})
+    global_config().parent.mkdir(parents=True, exist_ok=True)
+    global_config().write_text('[mise]\npython = "3.12"\n')
+
+    result = lab.ow("config", cwd=root)
+    assert result.exit_code == 2
+    assert "mise.python was renamed to python.version" in result.stderr
+
+    global_config().write_text("[mise]\nshared_venv = false\n")
+    result = lab.ow("config", cwd=root)
+    assert result.exit_code == 2
+    assert "mise.shared_venv was renamed to python.shared_venv" in result.stderr
+
+    global_config().unlink()
+    config_path = root / ".ow" / "config.toml"
+    config_path.write_text(config_path.read_text() + '[mise]\npython = "3.12"\n')
+    result = lab.ow("config", cwd=root)
+    assert result.exit_code == 2
+    assert "mise.python was renamed to python.version" in result.stderr
+
+
+def test_config_set_of_a_renamed_key_names_the_new_one(lab):
+    root = workspace(lab, branches={BASE: {"README.md": "hi\n"}})
+
+    result = lab.ow("config", "set", "mise.python", "3.12", cwd=root)
+
+    assert result.exit_code == 2
+    assert "mise.python was renamed to python.version" in result.stderr
+    assert lab.ow("config", cwd=root).stdout.count("mise.python") == 0
 
 
 def test_config_workspace_overrides_global(lab):
@@ -329,7 +410,7 @@ def test_config_set_drops_a_wrong_type_key(lab):
     config_path = root / ".ow" / "config.toml"
     config_path.write_text(config_path.read_text() + '[odoo]\nhttp_port = "not-an-int"\n')
 
-    result = lab.ow("config", "set", "mise.python", "3.12", cwd=root)
+    result = lab.ow("config", "set", "python.version", "3.12", cwd=root)
     assert result.exit_code == 0
     assert 'warning: dropped odoo.http_port = "not-an-int"' in result.stderr
     assert "http_port" not in tomllib.loads(config_path.read_text()).get("odoo", {})
@@ -340,7 +421,7 @@ def test_config_set_drops_a_rejected_repo_base(lab):
     config_path = root / ".ow" / "config.toml"
     config_path.write_text(config_path.read_text().replace(f"origin/{BASE}", "not a base"))
 
-    result = lab.ow("config", "set", "mise.python", "3.12", cwd=root)
+    result = lab.ow("config", "set", "python.version", "3.12", cwd=root)
     assert result.exit_code == 0
     assert f'warning: dropped repos.{REPO} = "not a base"' in result.stderr
     assert "repos" not in tomllib.loads(config_path.read_text())
@@ -371,11 +452,11 @@ def test_config_file_that_is_not_utf8_is_a_usage_error(lab):
 
 def test_config_write_waits_for_the_lock(tmp_path):
     path = tmp_path / "config.toml"
-    declared = {"mise.python": Setting(key="mise.python", type=str, default=None, help="")}
+    declared = {"python.version": Setting(key="python.version", type=str, default=None, help="")}
     written = threading.Event()
 
     def writer() -> None:
-        update_global(path, lambda current: current | {"mise.python": "3.12"}, declared=declared)
+        update_global(path, lambda current: current | {"python.version": "3.12"}, declared=declared)
         written.set()
 
     with open(tmp_path / ".config.toml.lock", "w") as held:
@@ -387,7 +468,7 @@ def test_config_write_waits_for_the_lock(tmp_path):
         assert not path.exists()
     thread.join(5)
     assert written.is_set()
-    assert tomllib.loads(path.read_text()) == {"mise": {"python": "3.12"}}
+    assert tomllib.loads(path.read_text()) == {"python": {"version": "3.12"}}
 
 
 def test_atomic_write_removes_its_temp_file_on_interrupt(tmp_path, monkeypatch):

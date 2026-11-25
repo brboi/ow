@@ -14,20 +14,22 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from ow import term
 from ow.core import bases, cache, config, git, stacks
 from ow.core.paths import repos_dir
-from ow.core.plugins import (
+from ow.plugin_api import (
     KnownRepo,
+    RepoFacts,
     ResolvedRepo,
     ResolvedSpec,
     Setting,
     StatusInfo,
+    UsageError,
+    Workspace,
     hookimpl,
 )
-from ow.errors import UsageError
 from ow.plugins._github import (
     BareCatalog,
     bare_gh_info,
@@ -45,10 +47,6 @@ from ow.plugins._odoo_repos import (
     odoo_clone_url,
     runbot_repo_name,
 )
-
-if TYPE_CHECKING:
-    from ow.core.facts import RepoFacts
-    from ow.core.workspace import Workspace
 
 _DEFAULT_RUNBOT_URL = "https://runbot.odoo.com"
 _RUNBOT_TIMEOUT_SECONDS = 8
